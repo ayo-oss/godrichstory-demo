@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>놓은 속도 그대로 벽에 튕기는 모멘텀 플링 드래그 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fl is-demo" id="fl">
+  <div class="fl__box" id="flBox">
+    <button type="button" class="fl__ball" id="flBall" aria-label="던지면 벽에 튕기며 서서히 멈추는 공. Enter 로 잡고 화살표로 방향에 힘을 줍니다"></button>
+  </div>
+  <p class="fl__caption" id="flCaption">빠르게 놓으면 그 속도로 날아가 벽에 튕겨요</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 드래그 중 마지막 몇 프레임의 이동량으로 놓는 순간의 속도(vx,vy)를 구하고,
+  // 놓으면 그 속도로 계속 이동시키며 매 프레임 FLING_DECAY_RATE 로 감쇠, 경계에
+  // 부딪히면 해당 축 속도의 부호를 반전(반사)시킨다.
+  var root = document.getElementById('fl');
+  var box = document.getElementById('flBox');
+  var ball = document.getElementById('flBall');
+  var caption = document.getElementById('flCaption');
+
+  var FLING_DECAY_RATE = 0.92;
+  var KEY_IMPULSE_PX_S = 260;
+
+  var pos = { x: 0, y: 0 };
+  var vel = { x: 0, y: 0 };
+  var pointerStart = null;
+  var startPos = null;
+  var lastSample = null;
+  var dragging = false;
+  var grabbed = false;
+  var raf = 0, lastTs = null;
+
+  function applyBall() {
+    ball.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + pos.y.toFixed(1) + 'px)';
+  }
+
+  function bounds() {
+    var br = box.getBoundingClientRect();
+    var brc = ball.getBoundingClientRect();
+    var halfW = brc.width / 2, halfH = brc.height / 2;
+    return { minX: br.left + halfW, maxX: br.right - halfW, minY: br.top + halfH, maxY: br.bottom - halfH };
+  }
+
+  function flingTick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.032);
+    lastTs = ts;
+    pos.x += vel.x * dt;
+    pos.y += vel.y * dt;
+    var b = bounds();
+    var origin = ballOrigin();
+    var cx = origin.x + pos.x, cy = origin.y + pos.y;
+    if (cx < b.minX) { pos.x += (b.minX - cx); vel.x = Math.abs(vel.x); root.classList.add('is-bounce'); }
+    else if (cx > b.maxX) { pos.x -= (cx - b.maxX); vel.x = -Math.abs(vel.x); root.classList.add('is-bounce'); }
+    if (cy < b.minY) { pos.y += (b.minY - cy); vel.y = Math.abs(vel.y); root.classList.add('is-bounce'); }
+    else if (cy > b.maxY) { pos.y -= (cy - b.maxY); vel.y = -Math.abs(vel.y); root.classList.add('is-bounce'); }
+    vel.x *= Math.pow(FLING_DECAY_RATE, dt * 60);
+    vel.y *= Math.pow(FLING_DECAY_RATE, dt * 60);
+    applyBall();
+    var speed = Math.hypot(vel.x, vel.y);
+    if (speed > 4) { raf = requestAnimationFrame(flingTick); return; }
+    vel.x = 0; vel.y = 0;
+    root.classList.remove('is-bounce');
+    lastTs = null;
+  }
+
+  var originCache = null;
+  function ballOrigin() {
+    if (originCache) return originCache;
+    var r = ball.getBoundingClientRect();
+    originCache = { x: r.left + r.width / 2 - pos.x, y: r.top + r.height / 2 - pos.y };
+    return originCache;
+  }
+
+  function beginDrag(clientX, clientY) {
+    cancelAnimationFrame(raf);
+    dragging = true;
+    vel.x = 0; vel.y = 0;
+    pointerStart = { x: clientX, y: clientY };
+    startPos = { x: pos.x, y: pos.y };
+    lastSample = { x: clientX, y: clientY, t: performance.now() };
+    root.classList.add('is-dragging');
+  }
+
+  function moveDrag(clientX, clientY) {
+    pos.x = startPos.x + (clientX - pointerStart.x);
+    pos.y = startPos.y + (clientY - pointerStart.y);
+    applyBall();
+    var now = performance.now();
+    var dt = Math.max((now - lastSample.t) / 1000, 0.001);
+    vel.x = (clientX - lastSample.x) / dt;
+    vel.y = (clientY - lastSample.y) / dt;
+    lastSample = { x: clientX, y: clientY, t: now };
+  }
+
+  function endDrag() {
+    dragging = false;
+    root.classList.remove('is-dragging');
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { vel.x = 0; vel.y = 0; }
+    else { lastTs = null; raf = requestAnimationFrame(flingTick); }
+  }
+
+  ball.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    ball.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    caption.textContent = '속도를 재고 있어요. 놓으면 그대로 날아가요';
+    e.preventDefault();
+  });
+  ball.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  ball.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    endDrag();
+    caption.textContent = '빠르게 놓으면 그 속도로 날아가 벽에 튕겨요';
+    e.preventDefault();
+  });
+
+  ball.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      grabbed = !grabbed;
+      ball.classList.toggle('is-grabbed', grabbed);
+      caption.textContent = grabbed ? '잡았어요. 화살표로 방향에 힘을 주세요' : '빠르게 놓으면 그 속도로 날아가 벽에 튕겨요';
+      return;
+    }
+    if (!grabbed) return;
+    var ix = 0, iy = 0;
+    if (e.key === 'ArrowLeft') ix = -KEY_IMPULSE_PX_S;
+    else if (e.key === 'ArrowRight') ix = KEY_IMPULSE_PX_S;
+    else if (e.key === 'ArrowUp') iy = -KEY_IMPULSE_PX_S;
+    else if (e.key === 'ArrowDown') iy = KEY_IMPULSE_PX_S;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      ball.classList.remove('is-grabbed');
+      caption.textContent = '빠르게 놓으면 그 속도로 날아가 벽에 튕겨요';
+      return;
+    } else { return; }
+    e.preventDefault();
+    vel.x += ix; vel.y += iy;
+    grabbed = false;
+    ball.classList.remove('is-grabbed');
+    lastTs = null;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(flingTick);
+  });
+
+  applyBall();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var ballRect0 = ball.getBoundingClientRect();
+    var ox0 = ballRect0.left + ballRect0.width / 2;
+    var oy0 = ballRect0.top + ballRect0.height / 2;
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 420) {
+        var p = (t - 200) / 220;
+        var cx = ox0 - 60 * p;
+        var cy = oy0 - 8 * p;
+        if (t < 220) beginDrag(ox0, oy0);
+        moveDrag(cx, cy);
+      } else if (t < 460) {
+        endDrag();
+      } else {
+        if (t > 1900) demoStart = ts - 60;
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

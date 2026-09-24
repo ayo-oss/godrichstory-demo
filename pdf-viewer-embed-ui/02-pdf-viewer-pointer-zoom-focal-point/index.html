@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>휠이나 핀치가 일어난 지점의 좌표를 페이지 기준 비율로 바꿔 계산하고, 확대된 화면이 그 지점을 그대로 화면 중심에 둔 채 커진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvz is-demo" id="pvzRoot" tabindex="0">
+  <div class="pvz__view" id="pvzView">
+    <div class="pvz__page" id="pvzPage"></div>
+    <div class="pvz__dot" id="pvzDot"></div>
+  </div>
+  <p class="pvz__label" id="pvzLabel">100%</p>
+</div>
+</main>
+<script>
+(function () {
+  // 변형 02: ZOOM_FOCAL_STEP_RATIO 1.2 → 2.4 (전값이 소스 초기값)
+  // 기법: 휠(또는 시연 스케줄)이 일어난 지점의 좌표를 페이지 폭·높이 기준 비율(0~1)로 바꿔
+  // transform-origin 으로 쓴다. 확대율은 그 비율의 거듭제곱(ZOOM_FOCAL_STEP_RATIO^n)으로
+  // 계산해, 값이 클수록 같은 조작에도 훨씬 크게 뛴다. 초점 표식(dot)의 반경은 1/scale 로
+  // 역보정해 확대돼도 항상 같은 크기로 보인다(계산 전파).
+  var root = document.getElementById('pvzRoot');
+  var view = document.getElementById('pvzView');
+  var page = document.getElementById('pvzPage');
+  var dot = document.getElementById('pvzDot');
+  var label = document.getElementById('pvzLabel');
+
+  var ZOOM_FOCAL_STEP_RATIO = 1.2;
+  var LOOP_MS = 2000;
+
+  function seedRand(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  var rnd = seedRand(430021);
+  var lineCount = 7;
+  var linesHTML = '<div class="pvz__title" style="width:52%"></div>';
+  for (var i = 0; i < lineCount; i += 1) linesHTML += '<div class="pvz__line" style="width:' + (40 + rnd() * 52) + '%"></div>';
+  linesHTML += '<div class="pvz__fig"></div>';
+  page.innerHTML = linesHTML;
+
+  var L1 = ZOOM_FOCAL_STEP_RATIO;
+  var L2 = ZOOM_FOCAL_STEP_RATIO * ZOOM_FOCAL_STEP_RATIO;
+  var KF = [
+    { t: 0, s: 1, x: .5, y: .5 },
+    { t: 300, s: L1, x: .28, y: .38 },
+    { t: 900, s: L2, x: .28, y: .38 },
+    { t: 1300, s: 1, x: .28, y: .38 },
+    { t: 1500, s: L1, x: .7, y: .64 },
+    { t: 2000, s: 1, x: .7, y: .64 }
+  ];
+
+  function easeInOut(t) { return t * t * (3 - 2 * t); }
+  function render(scale, ox, oy) {
+    page.style.transformOrigin = (ox * 100) + '% ' + (oy * 100) + '%';
+    page.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    var vr = view.getBoundingClientRect();
+    dot.style.left = (ox * vr.width) + 'px';
+    dot.style.top = (oy * vr.height) + 'px';
+    dot.style.transform = 'translate(-50%,-50%) scale(' + (1 / scale).toFixed(3) + ')';
+    label.textContent = Math.round(scale * 100) + '%';
+  }
+
+  function scheduled(elapsed) {
+    var phase = elapsed % LOOP_MS;
+    var i = 0;
+    while (i < KF.length - 1 && phase >= KF[i + 1].t) i += 1;
+    var a = KF[i], b = KF[Math.min(i + 1, KF.length - 1)];
+    var span = Math.max(1, b.t - a.t);
+    var t = easeInOut(Math.max(0, Math.min(1, (phase - a.t) / span)));
+    var s = a.s + (b.s - a.s) * t;
+    render(s, b.x, b.y);
+  }
+
+  var manual = { s: 1, x: .5, y: .5 };
+  function applyWheel(dir, ox, oy) {
+    manual.s = Math.max(1, Math.min(L2 * 1.4, manual.s * Math.pow(ZOOM_FOCAL_STEP_RATIO, dir * 0.6)));
+    manual.x = ox; manual.y = oy;
+    render(manual.s, manual.x, manual.y);
+  }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); manual.s = 1; render(1, .5, .5); } }
+
+  view.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    markActive();
+    var r = view.getBoundingClientRect();
+    var ox = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    var oy = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+    applyWheel(e.deltaY < 0 ? 1 : -1, ox, oy);
+  }, { passive: false });
+
+  root.addEventListener('keydown', function (e) {
+    if (e.key === '+' || e.key === '=' || e.key === '-' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      markActive();
+      var dir = (e.key === '+' || e.key === '=' || e.key === 'ArrowUp') ? 1 : -1;
+      applyWheel(dir, manual.x, manual.y);
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; render(1, .5, .5); }
+
+  var lastTs = null, elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!userActive) { elapsed += dt; scheduled(elapsed); }
+    requestAnimationFrame(tick);
+  }
+  render(1, .5, .5);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

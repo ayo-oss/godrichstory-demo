@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>境界を越えるとゴムのように押しつぶれるバウンダリーラバードラッグ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="br is-demo" id="br">
+  <div class="br__box" id="brBox">
+    <button type="button" class="br__icon" id="brIcon" aria-label="境界の内側だけを動くアイコン。境界を越えるとゴムのように伸びます。Enterで掴み、矢印キーで移動、Enterで離します"></button>
+  </div>
+  <p class="br__caption" id="brCaption">境界の外へ押すとゴムのように押しつぶれます</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 아이콘이 경계 상자 밖으로 나간 거리(overflow)를 축별로 계산해
+  // BOUNDARY_RUBBER_MAX_PX 로 클램프한 뒤, 그 비율만큼 scale·skew 를 섞어
+  // "눌린" 모양을 만들고, 손을 떼면 감쇠 스프링으로 경계 안쪽까지 되돌린다.
+  var root = document.getElementById('br');
+  var box = document.getElementById('brBox');
+  var icon = document.getElementById('brIcon');
+  var caption = document.getElementById('brCaption');
+
+  var BOUNDARY_RUBBER_MAX_PX = 40;
+  var BOUNDARY_SPRING_STIFFNESS = 200;
+  var BOUNDARY_SPRING_DAMPING = 20;
+  var KEY_STEP_PX = 16;
+
+  var pos = { x: 0, y: 0 };
+  var vel = { x: 0, y: 0 };
+  var grabbed = false;
+  var pointerStart = null;
+  var startPos = null;
+  var raf = 0, lastTs = null;
+
+  function bounds() {
+    var br = box.getBoundingClientRect();
+    var ir = icon.getBoundingClientRect();
+    var halfW = ir.width / 2, halfH = ir.height / 2;
+    return {
+      minX: br.left + halfW, maxX: br.right - halfW,
+      minY: br.top + halfH, maxY: br.bottom - halfH
+    };
+  }
+
+  function overflowOf(clientX, clientY) {
+    var b = bounds();
+    var ox = 0, oy = 0;
+    if (clientX < b.minX) ox = clientX - b.minX;
+    else if (clientX > b.maxX) ox = clientX - b.maxX;
+    if (clientY < b.minY) oy = clientY - b.minY;
+    else if (clientY > b.maxY) oy = clientY - b.maxY;
+    return { x: ox, y: oy };
+  }
+
+  function applyVisual(clampedX, clampedY, overflow) {
+    var ratioX = Math.min(1, Math.abs(overflow.x) / BOUNDARY_RUBBER_MAX_PX);
+    var ratioY = Math.min(1, Math.abs(overflow.y) / BOUNDARY_RUBBER_MAX_PX);
+    var ratio = Math.max(ratioX, ratioY);
+    var scaleStretch = 1 + ratio * 0.28;
+    var scaleSquash = 1 - ratio * 0.22;
+    var skewX = overflow.x !== 0 ? (overflow.x > 0 ? 1 : -1) * ratioX * 6 : 0;
+    var skewY = overflow.y !== 0 ? (overflow.y > 0 ? 1 : -1) * ratioY * 6 : 0;
+    var sx = ratioX >= ratioY ? scaleStretch : scaleSquash;
+    var sy = ratioY >= ratioX ? scaleStretch : scaleSquash;
+    icon.style.transform = 'translate(' + clampedX.toFixed(1) + 'px,' + clampedY.toFixed(1) + 'px) scale(' + sx.toFixed(3) + ',' + sy.toFixed(3) + ') skew(' + skewX.toFixed(2) + 'deg,' + skewY.toFixed(2) + 'deg)';
+    root.classList.toggle('is-stretch', ratio > 0.02);
+  }
+
+  function settleTick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.032);
+    lastTs = ts;
+    var fx = (0 - pos.x) * BOUNDARY_SPRING_STIFFNESS - vel.x * BOUNDARY_SPRING_DAMPING;
+    var fy = (0 - pos.y) * BOUNDARY_SPRING_STIFFNESS - vel.y * BOUNDARY_SPRING_DAMPING;
+    vel.x += fx * dt; vel.y += fy * dt;
+    pos.x += vel.x * dt; pos.y += vel.y * dt;
+    applyVisual(pos.x, pos.y, { x: 0, y: 0 });
+    var rest = Math.hypot(vel.x, vel.y) < 2 && Math.hypot(pos.x, pos.y) < 0.6;
+    if (!rest) { raf = requestAnimationFrame(settleTick); return; }
+    pos.x = 0; pos.y = 0; vel.x = 0; vel.y = 0;
+    applyVisual(0, 0, { x: 0, y: 0 });
+    lastTs = null;
+  }
+
+  function springHome() {
+    cancelAnimationFrame(raf);
+    lastTs = null;
+    raf = requestAnimationFrame(settleTick);
+  }
+
+  function beginDrag(clientX, clientY) {
+    cancelAnimationFrame(raf);
+    vel.x = 0; vel.y = 0;
+    pointerStart = { x: clientX, y: clientY };
+    startPos = { x: pos.x, y: pos.y };
+    root.classList.add('is-dragging');
+  }
+
+  function moveDrag(clientX, clientY) {
+    var rawX = startPos.x + (clientX - pointerStart.x);
+    var rawY = startPos.y + (clientY - pointerStart.y);
+    var iconRect = icon.getBoundingClientRect();
+    var curCx = iconRect.left + iconRect.width / 2;
+    var curCy = iconRect.top + iconRect.height / 2;
+    var moveX = clientX - pointerStart.x;
+    var moveY = clientY - pointerStart.y;
+    var wantCx = curCx - (pos.x - rawX);
+    var wantCy = curCy - (pos.y - rawY);
+    var overflow = overflowOf(wantCx, wantCy);
+    var clampedOverX = Math.max(-BOUNDARY_RUBBER_MAX_PX, Math.min(BOUNDARY_RUBBER_MAX_PX, overflow.x));
+    var clampedOverY = Math.max(-BOUNDARY_RUBBER_MAX_PX, Math.min(BOUNDARY_RUBBER_MAX_PX, overflow.y));
+    var clampX = rawX - (overflow.x - clampedOverX);
+    var clampY = rawY - (overflow.y - clampedOverY);
+    pos.x = clampX; pos.y = clampY;
+    applyVisual(pos.x, pos.y, { x: clampedOverX, y: clampedOverY });
+    if (Math.abs(clampedOverX) > 2 || Math.abs(clampedOverY) > 2) {
+      caption.textContent = 'さらに押すと伸びが大きくなります(上限あり)';
+    } else {
+      caption.textContent = '境界の外へ押すとゴムのように押しつぶれます';
+    }
+  }
+
+  function endDrag() {
+    root.classList.remove('is-dragging');
+    root.classList.remove('is-stretch');
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    caption.textContent = '境界の外へ押すとゴムのように押しつぶれます';
+    if (reduce) { pos.x = 0; pos.y = 0; applyVisual(0, 0, { x: 0, y: 0 }); }
+    else { springHome(); }
+  }
+
+  icon.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    icon.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointermove', function (e) {
+    if (!pointerStart) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointerup', function (e) {
+    if (!pointerStart) return;
+    pointerStart = null;
+    endDrag();
+    e.preventDefault();
+  });
+
+  icon.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!grabbed) {
+        grabbed = true;
+        cancelAnimationFrame(raf);
+        icon.classList.add('is-grabbed');
+        caption.textContent = '掴みました。矢印キーで押し、Enterで離してください';
+      } else {
+        grabbed = false;
+        icon.classList.remove('is-grabbed');
+        endDrag();
+      }
+      return;
+    }
+    if (!grabbed) return;
+    var dx = 0, dy = 0;
+    if (e.key === 'ArrowLeft') dx = -KEY_STEP_PX;
+    else if (e.key === 'ArrowRight') dx = KEY_STEP_PX;
+    else if (e.key === 'ArrowUp') dy = -KEY_STEP_PX;
+    else if (e.key === 'ArrowDown') dy = KEY_STEP_PX;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      icon.classList.remove('is-grabbed');
+      endDrag();
+      return;
+    } else { return; }
+    e.preventDefault();
+    var iconRect = icon.getBoundingClientRect();
+    var wantCx = iconRect.left + iconRect.width / 2 + dx;
+    var wantCy = iconRect.top + iconRect.height / 2 + dy;
+    var overflow = overflowOf(wantCx, wantCy);
+    var clampedOverX = Math.max(-BOUNDARY_RUBBER_MAX_PX, Math.min(BOUNDARY_RUBBER_MAX_PX, overflow.x));
+    var clampedOverY = Math.max(-BOUNDARY_RUBBER_MAX_PX, Math.min(BOUNDARY_RUBBER_MAX_PX, overflow.y));
+    pos.x += dx - (overflow.x - clampedOverX);
+    pos.y += dy - (overflow.y - clampedOverY);
+    applyVisual(pos.x, pos.y, { x: clampedOverX, y: clampedOverY });
+  });
+
+  applyVisual(0, 0, { x: 0, y: 0 });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var iconRect0 = icon.getBoundingClientRect();
+    var ox0 = iconRect0.left + iconRect0.width / 2;
+    var oy0 = iconRect0.top + iconRect0.height / 2;
+    var pushX = ox0 + 130, pushY = oy0;
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 900) {
+        var p = Math.min(1, (t - 200) / 700);
+        var ease = 1 - Math.pow(1 - p, 2);
+        var cx = ox0 + (pushX - ox0) * ease;
+        if (t < 220) beginDrag(ox0, oy0);
+        moveDrag(cx, pushY);
+      } else if (t < 1150) {
+        // 눌린 모양 관찰
+      } else if (t < 1180) {
+        endDrag();
+      } else {
+        if (t > 1900) demoStart = ts - 60;
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>다운로드 버튼을 누르면 지금까지 받은 바이트 수를 전체 크기로 나눠 원형 테두리의 채움 각도를 계산하고, 100%에 닿으면 링이 체크 아이콘으로 바뀐다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvg is-demo" id="pvgRoot" tabindex="0">
+  <svg class="pvg__ring" viewBox="0 0 92 92" width="92" height="92" aria-hidden="true">
+    <circle class="pvg__track" cx="46" cy="46" r="36"></circle>
+    <circle class="pvg__fill" id="pvgFill" cx="46" cy="46" r="36" transform="rotate(-90 46 46)"></circle>
+    <line class="pvg__check" id="pvgCheckA" x1="28" y1="52" x2="40" y2="64"></line>
+    <line class="pvg__check" id="pvgCheckB" x1="28" y1="52" x2="64" y2="30"></line>
+  </svg>
+  <p class="pvg__pct" id="pvgPct">0%</p>
+  <button class="pvg__btn" id="pvgBtn" type="button">다운로드</button>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 받은 바이트 / 전체 바이트로 링의 채움 비율을 계산해 stroke-dashoffset 으로
+  // 옮긴다. 100%에 닿으면 링을 지우고 같은 시작점(28,52)에서 뻗어 나온 두 선분의
+  // stroke-dashoffset 을 0 으로 당겨 체크 아이콘을 그린다.
+  var root = document.getElementById('pvgRoot');
+  var fill = document.getElementById('pvgFill');
+  var pctEl = document.getElementById('pvgPct');
+  var btn = document.getElementById('pvgBtn');
+  var checkA = document.getElementById('pvgCheckA');
+  var checkB = document.getElementById('pvgCheckB');
+
+  var R = 36, CIRC = 2 * Math.PI * R;
+  fill.style.strokeDasharray = CIRC.toFixed(2);
+  function lineLen(el) {
+    var x1 = +el.getAttribute('x1'), y1 = +el.getAttribute('y1'), x2 = +el.getAttribute('x2'), y2 = +el.getAttribute('y2');
+    return Math.hypot(x2 - x1, y2 - y1);
+  }
+  var lenA = lineLen(checkA), lenB = lineLen(checkB);
+  checkA.style.strokeDasharray = lenA.toFixed(2);
+  checkB.style.strokeDasharray = lenB.toFixed(2);
+  checkA.style.strokeDashoffset = lenA.toFixed(2);
+  checkB.style.strokeDashoffset = lenB.toFixed(2);
+
+  var TOTAL_BYTES = 260000;
+  var SPEED = 230000;
+  var LOOP_MS = 2000;
+
+  var phase = 'idle', received = 0, doneAt = 0, checkAnim = null;
+
+  function render(ratio) {
+    fill.style.strokeDashoffset = (CIRC * (1 - ratio)).toFixed(2);
+    pctEl.textContent = Math.round(ratio * 100) + '%';
+  }
+  function startDownload(nowT) {
+    if (phase === 'loading') return;
+    phase = 'loading'; received = 0;
+    root.classList.remove('pvg--done');
+    checkA.style.strokeDashoffset = lenA.toFixed(2);
+    checkB.style.strokeDashoffset = lenB.toFixed(2);
+    btn.textContent = '받는 중';
+    render(0);
+  }
+  function finish(nowT) {
+    phase = 'done'; doneAt = nowT;
+    root.classList.add('pvg--done');
+    btn.textContent = '완료';
+    checkAnim = { start: nowT };
+  }
+  function resetIdle() {
+    phase = 'idle'; received = 0;
+    root.classList.remove('pvg--done');
+    btn.textContent = '다운로드';
+    render(0);
+  }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); } }
+  btn.addEventListener('click', function (e) { markActive(); if (phase !== 'loading') { resetIdle(); startDownload(lastTs || 0); } });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault(); markActive();
+      if (phase !== 'loading') { resetIdle(); startDownload(lastTs || 0); }
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); markActive(); resetIdle();
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; render(0.5); }
+
+  var fired = {};
+  var SCHEDULE = [
+    { t: 100, run: function (t) { if (phase === 'idle') startDownload(t); } }
+  ];
+
+  var lastTs = null, originTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!userActive) {
+      if (originTs === null) originTs = ts;
+      var elapsed = ts - originTs;
+      var loopIdx = Math.floor(elapsed / LOOP_MS);
+      var phaseT = elapsed % LOOP_MS;
+      SCHEDULE.forEach(function (a, i) {
+        var key = loopIdx + ':' + i;
+        if (phaseT >= a.t && !fired[key]) { fired[key] = true; a.run(ts); }
+      });
+    }
+    if (phase === 'loading') {
+      received = Math.min(TOTAL_BYTES, received + SPEED * (dt / 1000));
+      var ratio = received / TOTAL_BYTES;
+      render(ratio);
+      if (ratio >= 1) finish(ts);
+    } else if (phase === 'done') {
+      if (checkAnim) {
+        var pA = Math.max(0, Math.min(1, (ts - checkAnim.start) / 180));
+        var pB = Math.max(0, Math.min(1, (ts - checkAnim.start - 110) / 220));
+        checkA.style.strokeDashoffset = (lenA * (1 - pA)).toFixed(2);
+        checkB.style.strokeDashoffset = (lenB * (1 - pB)).toFixed(2);
+        if (pB >= 1) checkAnim = null;
+      }
+      if (ts - doneAt > 620 && !userActive) resetIdle();
+    }
+    requestAnimationFrame(tick);
+  }
+  render(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

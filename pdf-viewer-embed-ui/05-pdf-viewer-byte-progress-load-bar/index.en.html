@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>It divides the bytes received so far by the total file size to calculate progress at every moment; the bar fills by that ratio while the remaining page count drops along with it — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvb is-demo" id="pvbRoot" tabindex="0" aria-label="Download progress bar — Space to pause, arrow keys to adjust speed">
+  <p class="pvb__title">Document.pdf</p>
+  <div class="pvb__track" id="pvbTrack">
+    <div class="pvb__fill" id="pvbFill"></div>
+  </div>
+  <div class="pvb__row">
+    <span class="pvb__pct" id="pvbPct">0%</span>
+    <span class="pvb__bytes" id="pvbBytes">0 / 0 KB</span>
+  </div>
+  <p class="pvb__pages" id="pvbPages">Remaining pages 12</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 초당 전송 속도를 사인 합성 곡선(결정적, 시드 없이도 매 실행 동일)으로 만들어
+  // 프레임마다 받은 바이트 수에 더한다. 받은 바이트 / 전체 바이트로 진행률을 매 순간
+  // 다시 계산해 막대 너비와 Remaining pages 수(전체 Page 중 아직 못 받은 비율)를 함께 갱신한다.
+  var root = document.getElementById('pvbRoot');
+  var fill = document.getElementById('pvbFill');
+  var pctEl = document.getElementById('pvbPct');
+  var bytesEl = document.getElementById('pvbBytes');
+  var pagesEl = document.getElementById('pvbPages');
+
+  var TOTAL_BYTES = 480000;
+  var TOTAL_PAGES = 12;
+  var HOLD_MS = 260;
+
+  function speedCurve(tSec) {
+    // 결정적 의사 지터: 세 개의 사인을 더해 "빨라졌다 느려졌다" 하는 네트워크 느낌
+    var base = 210000;
+    var v = base
+      + 90000 * Math.sin(tSec * 2.3)
+      + 40000 * Math.sin(tSec * 5.1 + 1.4)
+      + 20000 * Math.sin(tSec * 9.7 + 0.6);
+    return Math.max(30000, v);
+  }
+
+  var received = 0, speedMul = 1, paused = false, holdT = 0;
+
+  function render() {
+    var ratio = Math.max(0, Math.min(1, received / TOTAL_BYTES));
+    fill.style.width = (ratio * 100).toFixed(1) + '%';
+    pctEl.textContent = Math.round(ratio * 100) + '%';
+    bytesEl.textContent = Math.round(received / 1000) + ' / ' + Math.round(TOTAL_BYTES / 1000) + ' KB';
+    var remain = Math.ceil((1 - ratio) * TOTAL_PAGES);
+    pagesEl.textContent = ratio >= 1 ? 'All pages ready' : ('Remaining pages ' + remain);
+  }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); } }
+
+  root.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); markActive(); paused = !paused; }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); markActive(); speedMul = Math.min(4, speedMul * 1.5); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); markActive(); speedMul = Math.max(0.25, speedMul / 1.5); }
+  });
+  root.addEventListener('click', function () { markActive(); paused = !paused; });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; received = TOTAL_BYTES * 0.5; render(); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!paused) {
+      if (received >= TOTAL_BYTES) {
+        holdT += dt;
+        if (holdT >= HOLD_MS) { received = 0; holdT = 0; }
+      } else {
+        var sec = ts / 1000;
+        received = Math.min(TOTAL_BYTES, received + speedCurve(sec) * speedMul * (dt / 1000));
+      }
+      render();
+    }
+    requestAnimationFrame(tick);
+  }
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

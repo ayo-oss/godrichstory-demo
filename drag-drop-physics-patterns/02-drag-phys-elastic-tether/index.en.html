@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elastic-tether drag: stretches as if tied to the origin by a line — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="et is-demo" id="et">
+  <div class="et__origin" id="etOrigin"></div>
+  <div class="et__line" id="etLine"></div>
+  <button type="button" class="et__icon" id="etIcon" aria-label="An icon pulled by an elastic tether. Press Enter to grab, arrow keys to stretch, Enter to release and spring back"></button>
+  <p class="et__caption" id="etCaption">Drag it far and the tether stretches. Release and it snaps back</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 아이콘이 원점(origin)에서 멀어진 거리로 테더 선의 길이·각도·굵기를 매 프레임
+  // 계산해 그리고, 손을 떼면 감쇠 스프링(오버슛 포함)으로 원점까지 되돌아가며 그동안도
+  // 같은 계산으로 선이 실시간으로 짧아진다.
+  var root = document.getElementById('et');
+  var origin = document.getElementById('etOrigin');
+  var line = document.getElementById('etLine');
+  var icon = document.getElementById('etIcon');
+  var caption = document.getElementById('etCaption');
+
+  var TETHER_SPRING_STIFFNESS = 140;
+  var TETHER_SPRING_DAMPING = 12;
+  var TETHER_THICKNESS_BASE_PX = 5;
+  var KEY_STEP_PX = 18;
+
+  var pos = { x: 0, y: 0 };
+  var vel = { x: 0, y: 0 };
+  var grabbed = false;
+  var pointerStart = null;
+  var startPos = null;
+  var raf = 0, lastTs = null;
+  var springing = false;
+
+  function applyIcon() {
+    icon.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + pos.y.toFixed(1) + 'px)';
+  }
+
+  function drawTether() {
+    var or = origin.getBoundingClientRect();
+    var ir = icon.getBoundingClientRect();
+    var ox = or.left + or.width / 2, oy = or.top + or.height / 2;
+    var ix = ir.left + ir.width / 2, iy = ir.top + ir.height / 2;
+    var dx = ix - ox, dy = iy - oy;
+    var length = Math.hypot(dx, dy);
+    var angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    var thickness = Math.max(1.5, TETHER_THICKNESS_BASE_PX - length * 0.012);
+    var boardRect = root.getBoundingClientRect();
+    line.style.left = (ox - boardRect.left) + 'px';
+    line.style.top = (oy - boardRect.top) + 'px';
+    line.style.width = length + 'px';
+    line.style.height = thickness + 'px';
+    line.style.transform = 'rotate(' + angle + 'deg)';
+    line.style.opacity = length < 2 ? '0' : '1';
+  }
+
+  function settleTick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.032);
+    lastTs = ts;
+    var fx = (0 - pos.x) * TETHER_SPRING_STIFFNESS - vel.x * TETHER_SPRING_DAMPING;
+    var fy = (0 - pos.y) * TETHER_SPRING_STIFFNESS - vel.y * TETHER_SPRING_DAMPING;
+    vel.x += fx * dt; vel.y += fy * dt;
+    pos.x += vel.x * dt; pos.y += vel.y * dt;
+    applyIcon();
+    drawTether();
+    var rest = Math.hypot(vel.x, vel.y) < 2 && Math.hypot(pos.x, pos.y) < 0.6;
+    if (!rest) { raf = requestAnimationFrame(settleTick); return; }
+    pos.x = 0; pos.y = 0; vel.x = 0; vel.y = 0;
+    applyIcon(); drawTether();
+    springing = false;
+    lastTs = null;
+  }
+
+  function springHome() {
+    cancelAnimationFrame(raf);
+    springing = true;
+    lastTs = null;
+    raf = requestAnimationFrame(settleTick);
+  }
+
+  function beginDrag(clientX, clientY) {
+    cancelAnimationFrame(raf);
+    springing = false;
+    vel.x = 0; vel.y = 0;
+    pointerStart = { x: clientX, y: clientY };
+    startPos = { x: pos.x, y: pos.y };
+    root.classList.add('is-dragging');
+    caption.textContent = 'The stretching line\'s length and thickness are calculated in real time';
+  }
+
+  function moveDrag(clientX, clientY) {
+    pos.x = startPos.x + (clientX - pointerStart.x);
+    pos.y = startPos.y + (clientY - pointerStart.y);
+    applyIcon();
+    drawTether();
+  }
+
+  function endDrag() {
+    root.classList.remove('is-dragging');
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    caption.textContent = 'Drag it far and the tether stretches. Release and it snaps back';
+    if (reduce) { pos.x = 0; pos.y = 0; applyIcon(); drawTether(); }
+    else { springHome(); }
+  }
+
+  icon.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    icon.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointermove', function (e) {
+    if (!pointerStart) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointerup', function (e) {
+    if (!pointerStart) return;
+    pointerStart = null;
+    endDrag();
+    e.preventDefault();
+  });
+
+  icon.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!grabbed) {
+        grabbed = true;
+        cancelAnimationFrame(raf);
+        icon.classList.add('is-grabbed');
+        caption.textContent = 'Grabbed. Stretch with arrow keys, press Enter to release';
+      } else {
+        grabbed = false;
+        icon.classList.remove('is-grabbed');
+        endDrag();
+      }
+      return;
+    }
+    if (!grabbed) return;
+    var dx = 0, dy = 0;
+    if (e.key === 'ArrowLeft') dx = -KEY_STEP_PX;
+    else if (e.key === 'ArrowRight') dx = KEY_STEP_PX;
+    else if (e.key === 'ArrowUp') dy = -KEY_STEP_PX;
+    else if (e.key === 'ArrowDown') dy = KEY_STEP_PX;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      icon.classList.remove('is-grabbed');
+      endDrag();
+      return;
+    } else { return; }
+    e.preventDefault();
+    pos.x += dx; pos.y += dy;
+    applyIcon();
+    drawTether();
+  });
+
+  drawTether();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var originRect0 = origin.getBoundingClientRect();
+    var ox0 = originRect0.left + originRect0.width / 2;
+    var oy0 = originRect0.top + originRect0.height / 2;
+    var farX = ox0 + 92, farY = oy0 - 46;
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 950) {
+        var p = Math.min(1, (t - 200) / 750);
+        var ease = 1 - Math.pow(1 - p, 2);
+        var cx = ox0 + (farX - ox0) * ease;
+        var cy = oy0 + (farY - oy0) * ease;
+        if (t < 220) beginDrag(ox0, oy0);
+        moveDrag(cx, cy);
+      } else if (t < 1150) {
+        // 최대 늘어남 유지
+      } else if (t < 1180) {
+        endDrag();
+      } else {
+        // 스프링 복귀 관찰, 루프
+        if (t > 1900) demoStart = ts - 60;
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>일정 간격으로 공을 위에서 계속 떨어뜨리고, 겹친 두 공은 서로 밀어내는 계산으로 떼어놓아 바닥에 쌓인다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">일정 간격으로 공을 위에서 계속 떨어뜨리고, 겹친 두 공은 서로 밀어내는 계산으로 떼어놓아 바닥에 쌓인다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: SPAWN_INTERVAL_MS 마다 새 공을 위에서 떨어뜨린다. 중력으로 낙하하다 바닥이나
+  // 다른 공과 겹치면 두 원의 중심 거리와 반지름 합을 비교해 겹친 만큼을 질량 비로
+  // 나눠 밀어내는 위치 보정을 매 프레임 반복한다(단순 충돌 한 번이 아니라 여러 쌍을
+  // 계속 풀어 쌓임을 만든다). 개수가 MAX_BALLS 에 닿으면 잠시 멈췄다가 전부 지우고
+  // 다시 쌓기 시작한다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var GRAVITY = 640;
+  var FLOOR_RESTITUTION = 0.28;
+  var SPAWN_INTERVAL_MS = 190;
+  var MAX_BALLS = 13;
+  var HOLD_MS = 480;
+  var SEPARATE_ITERS = 4;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427081);
+
+  var COLORS = ['#6ec8ff', '#4cd4a6', '#b9a0ff', '#ff9ebb', '#ffcf7a', '#8fd7ff'];
+  var balls = [];
+  var lastSpawn = -SPAWN_INTERVAL_MS;
+  var holdSince = null;
+
+  function spawn(nowMs) {
+    var r = 9 + rand() * 8;
+    balls.push({
+      x: r + rand() * (CALC_W - r * 2),
+      y: -r - rand() * 20,
+      vy: 40,
+      vx: (rand() - 0.5) * 20,
+      r: r,
+      color: COLORS[balls.length % COLORS.length],
+      squash: 0
+    });
+  }
+
+  function resetAll() {
+    balls = [];
+    lastSpawn = -SPAWN_INTERVAL_MS;
+    holdSince = null;
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    if (balls.length < MAX_BALLS && holdSince === null && nowMs - lastSpawn >= SPAWN_INTERVAL_MS) {
+      spawn(nowMs);
+      lastSpawn = nowMs;
+    }
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      b.vy += GRAVITY * dtS;
+      b.x += b.vx * dtS;
+      b.y += b.vy * dtS;
+      b.vx -= b.vx * 0.6 * dtS;
+      if (b.x - b.r < 0) { b.x = b.r; b.vx = -b.vx * 0.5; }
+      if (b.x + b.r > CALC_W) { b.x = CALC_W - b.r; b.vx = -b.vx * 0.5; }
+      var floor = CALC_H - b.r;
+      if (b.y > floor) {
+        b.y = floor;
+        if (Math.abs(b.vy) > 30) b.squash = Math.min(0.8, Math.abs(b.vy) / 320);
+        b.vy = -b.vy * FLOOR_RESTITUTION;
+        if (Math.abs(b.vy) < 22) b.vy = 0;
+      }
+      b.squash = Math.max(0, b.squash - dtS * 3);
+    }
+    for (var iter = 0; iter < SEPARATE_ITERS; iter += 1) {
+      for (var a = 0; a < balls.length; a += 1) {
+        for (var c = a + 1; c < balls.length; c += 1) {
+          var ba = balls[a], bc = balls[c];
+          var dx = bc.x - ba.x, dy = bc.y - ba.y;
+          var dist = Math.hypot(dx, dy) || 0.001;
+          var minDist = ba.r + bc.r;
+          if (dist < minDist) {
+            var overlap = (minDist - dist) / 2;
+            var nx = dx / dist, ny = dy / dist;
+            ba.x -= nx * overlap; ba.y -= ny * overlap;
+            bc.x += nx * overlap; bc.y += ny * overlap;
+            if (ba.y + ba.r > CALC_H) ba.y = CALC_H - ba.r;
+            if (bc.y + bc.r > CALC_H) bc.y = CALC_H - bc.r;
+          }
+        }
+      }
+    }
+    if (balls.length >= MAX_BALLS) {
+      if (holdSince === null) holdSince = nowMs;
+      else if (nowMs - holdSince > HOLD_MS) { resetAll(); }
+    }
+  }
+
+  function draw() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      var px = b.x * sx, py = b.y * sy, pr = b.r * ((sx + sy) / 2);
+      var sqY = 1 - b.squash * 0.4, sqX = 1 + b.squash * 0.55;
+      ctx.save();
+      ctx.translate(px, py + pr * b.squash * 0.4);
+      ctx.scale(sqX, sqY);
+      ctx.beginPath();
+      ctx.arc(0, 0, pr, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.fillStyle = 'rgba(23,20,26,0.5)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(balls.length + ' / ' + MAX_BALLS, 8, ch - 8);
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  resetAll();
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        stepSim(FIXED_DT, elapsed);
+        acc -= FIXED_DT;
+      }
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

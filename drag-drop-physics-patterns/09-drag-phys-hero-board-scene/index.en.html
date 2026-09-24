@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drag-physics showcase: magnet, rubber boundary, and inertia throw combined on one board — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hb is-demo" id="hb">
+  <div class="hb__board" id="hbBoard">
+    <div class="hb__cell" id="hbCellA" style="left:10%;top:12%;"></div>
+    <div class="hb__cell" id="hbCellB" style="right:10%;bottom:12%;"></div>
+    <button type="button" class="hb__icon" id="hbIcon" aria-label="An icon that snaps to a magnet cell, squishes at the boundary, or flies off bouncing when thrown. Press Enter to grab, arrow keys to move, Enter to drop"></button>
+  </div>
+  <p class="hb__caption" id="hbCaption">Try the magnet cell, rubber boundary, and throw inertia all on one board</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 01(격자 자석)·03(경계 고무)·06(관성 플링)의 계산을 한 아이콘에 합쳐,
+  // 자석 칸 근처면 스냅, 보드 경계 밖이면 클램프+스퀴시, 그 외에는 마지막 속도로
+  // 관성 플링+벽 반사를 적용한다. 우선순위: 자석 > 경계 > 플링.
+  var root = document.getElementById('hb');
+  var board = document.getElementById('hbBoard');
+  var icon = document.getElementById('hbIcon');
+  var caption = document.getElementById('hbCaption');
+  var cells = [document.getElementById('hbCellA'), document.getElementById('hbCellB')];
+
+  var HERO_GRID_MAGNET_SNAP_PX = 26;
+  var HERO_BOUNDARY_RUBBER_MAX_PX = 36;
+  var HERO_FLING_DECAY_RATE = 0.93;
+  var HERO_SPRING_STIFFNESS = 190;
+  var HERO_SPRING_DAMPING = 19;
+  var KEY_STEP_PX = 16;
+
+  var pos = { x: 0, y: 0 };
+  var vel = { x: 0, y: 0 };
+  var origin = null;
+  var pointerStart = null;
+  var startPos = null;
+  var lastSample = null;
+  var dragging = false;
+  var grabbed = false;
+  var mode = 'idle';
+  var raf = 0, lastTs = null;
+
+  function iconOrigin() {
+    if (origin) return origin;
+    var r = icon.getBoundingClientRect();
+    origin = { x: r.left + r.width / 2 - pos.x, y: r.top + r.height / 2 - pos.y };
+    return origin;
+  }
+
+  function boardBounds() {
+    var br = board.getBoundingClientRect();
+    var ir = icon.getBoundingClientRect();
+    var halfW = ir.width / 2, halfH = ir.height / 2;
+    return { minX: br.left + halfW, maxX: br.right - halfW, minY: br.top + halfH, maxY: br.bottom - halfH };
+  }
+
+  function nearestCell(cx, cy) {
+    var best = null, bestD = Infinity;
+    cells.forEach(function (cell) {
+      var cr = cell.getBoundingClientRect();
+      var ccx = cr.left + cr.width / 2, ccy = cr.top + cr.height / 2;
+      var d = Math.hypot(cx - ccx, cy - ccy);
+      if (d < bestD) { bestD = d; best = { cell: cell, x: ccx, y: ccy, dist: d }; }
+    });
+    return best;
+  }
+
+  function applyIcon(scaleX, scaleY) {
+    var sx = scaleX === undefined ? 1 : scaleX;
+    var sy = scaleY === undefined ? 1 : scaleY;
+    icon.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + pos.y.toFixed(1) + 'px) scale(' + sx.toFixed(3) + ',' + sy.toFixed(3) + ')';
+  }
+
+  function beginDrag(clientX, clientY) {
+    cancelAnimationFrame(raf);
+    dragging = true;
+    vel.x = 0; vel.y = 0;
+    pointerStart = { x: clientX, y: clientY };
+    startPos = { x: pos.x, y: pos.y };
+    lastSample = { x: clientX, y: clientY, t: performance.now() };
+    root.classList.add('is-dragging');
+    cells.forEach(function (c) { c.classList.remove('is-target'); });
+  }
+
+  function moveDrag(clientX, clientY) {
+    var rawX = startPos.x + (clientX - pointerStart.x);
+    var rawY = startPos.y + (clientY - pointerStart.y);
+    var o = iconOrigin();
+    var cx = o.x + rawX, cy = o.y + rawY;
+
+    var near = nearestCell(cx, cy);
+    cells.forEach(function (c) { c.classList.remove('is-target'); });
+
+    if (near && near.dist < HERO_GRID_MAGNET_SNAP_PX) {
+      near.cell.classList.add('is-target');
+      var pull = Math.max(0, 1 - near.dist / HERO_GRID_MAGNET_SNAP_PX) * 0.6;
+      pos.x = rawX + ((near.x - o.x) - rawX) * pull;
+      pos.y = rawY + ((near.y - o.y) - rawY) * pull;
+      applyIcon(1, 1);
+      caption.textContent = 'Snapping to the magnet cell';
+    } else {
+      var b = boardBounds();
+      var overX = 0, overY = 0;
+      if (cx < b.minX) overX = cx - b.minX; else if (cx > b.maxX) overX = cx - b.maxX;
+      if (cy < b.minY) overY = cy - b.minY; else if (cy > b.maxY) overY = cy - b.maxY;
+      if (overX !== 0 || overY !== 0) {
+        var clampedX = Math.max(-HERO_BOUNDARY_RUBBER_MAX_PX, Math.min(HERO_BOUNDARY_RUBBER_MAX_PX, overX));
+        var clampedY = Math.max(-HERO_BOUNDARY_RUBBER_MAX_PX, Math.min(HERO_BOUNDARY_RUBBER_MAX_PX, overY));
+        pos.x = rawX - (overX - clampedX);
+        pos.y = rawY - (overY - clampedY);
+        var ratio = Math.max(Math.abs(clampedX), Math.abs(clampedY)) / HERO_BOUNDARY_RUBBER_MAX_PX;
+        applyIcon(1 + ratio * 0.22, 1 - ratio * 0.18);
+        caption.textContent = 'Squishing like rubber at the boundary';
+      } else {
+        pos.x = rawX; pos.y = rawY;
+        applyIcon(1, 1);
+        caption.textContent = 'Release it and it flies off at that speed';
+      }
+    }
+    var now = performance.now();
+    var dt = Math.max((now - lastSample.t) / 1000, 0.001);
+    vel.x = (clientX - lastSample.x) / dt;
+    vel.y = (clientY - lastSample.y) / dt;
+    lastSample = { x: clientX, y: clientY, t: now };
+  }
+
+  function settleSpring(target) {
+    mode = 'spring';
+    lastTs = null;
+    function tick(ts) {
+      if (lastTs === null) lastTs = ts;
+      var dt = Math.min((ts - lastTs) / 1000, 0.032);
+      lastTs = ts;
+      var fx = (target.x - pos.x) * HERO_SPRING_STIFFNESS - vel.x * HERO_SPRING_DAMPING;
+      var fy = (target.y - pos.y) * HERO_SPRING_STIFFNESS - vel.y * HERO_SPRING_DAMPING;
+      vel.x += fx * dt; vel.y += fy * dt;
+      pos.x += vel.x * dt; pos.y += vel.y * dt;
+      applyIcon(1, 1);
+      var rest = Math.hypot(vel.x, vel.y) < 2 && Math.hypot(target.x - pos.x, target.y - pos.y) < 0.6;
+      if (!rest) { raf = requestAnimationFrame(tick); return; }
+      pos.x = target.x; pos.y = target.y; vel.x = 0; vel.y = 0;
+      applyIcon(1, 1);
+      mode = 'idle';
+    }
+    raf = requestAnimationFrame(tick);
+  }
+
+  function flingSettle() {
+    mode = 'fling';
+    lastTs = null;
+    function tick(ts) {
+      if (lastTs === null) lastTs = ts;
+      var dt = Math.min((ts - lastTs) / 1000, 0.032);
+      lastTs = ts;
+      pos.x += vel.x * dt; pos.y += vel.y * dt;
+      var o = iconOrigin();
+      var b = boardBounds();
+      var cx = o.x + pos.x, cy = o.y + pos.y;
+      if (cx < b.minX) { pos.x += b.minX - cx; vel.x = Math.abs(vel.x); }
+      else if (cx > b.maxX) { pos.x -= cx - b.maxX; vel.x = -Math.abs(vel.x); }
+      if (cy < b.minY) { pos.y += b.minY - cy; vel.y = Math.abs(vel.y); }
+      else if (cy > b.maxY) { pos.y -= cy - b.maxY; vel.y = -Math.abs(vel.y); }
+      vel.x *= Math.pow(HERO_FLING_DECAY_RATE, dt * 60);
+      vel.y *= Math.pow(HERO_FLING_DECAY_RATE, dt * 60);
+      applyIcon(1, 1);
+      var speed = Math.hypot(vel.x, vel.y);
+      if (speed > 4) { raf = requestAnimationFrame(tick); return; }
+      vel.x = 0; vel.y = 0;
+      mode = 'idle';
+    }
+    raf = requestAnimationFrame(tick);
+  }
+
+  function endDrag() {
+    dragging = false;
+    root.classList.remove('is-dragging');
+    var o = iconOrigin();
+    var cx = o.x + pos.x, cy = o.y + pos.y;
+    var near = nearestCell(cx, cy);
+    cells.forEach(function (c) { c.classList.remove('is-target'); });
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (near && near.dist < HERO_GRID_MAGNET_SNAP_PX) {
+      caption.textContent = 'Snapped to the magnet cell';
+      var target = { x: near.x - o.x, y: near.y - o.y };
+      if (reduce) { pos.x = target.x; pos.y = target.y; applyIcon(1, 1); }
+      else { cancelAnimationFrame(raf); settleSpring(target); }
+      return;
+    }
+    var b = boardBounds();
+    var overX = 0, overY = 0;
+    if (cx < b.minX) overX = cx - b.minX; else if (cx > b.maxX) overX = cx - b.maxX;
+    if (cy < b.minY) overY = cy - b.minY; else if (cy > b.maxY) overY = cy - b.maxY;
+    if (overX !== 0 || overY !== 0) {
+      caption.textContent = 'It\'s outside the boundary, so it springs back in';
+      var clampX = Math.max(b.minX, Math.min(b.maxX, cx)) - o.x;
+      var clampY = Math.max(b.minY, Math.min(b.maxY, cy)) - o.y;
+      if (reduce) { pos.x = clampX; pos.y = clampY; applyIcon(1, 1); }
+      else { cancelAnimationFrame(raf); settleSpring({ x: clampX, y: clampY }); }
+      return;
+    }
+    caption.textContent = 'Try the magnet cell, rubber boundary, and throw inertia all on one board';
+    if (reduce || Math.hypot(vel.x, vel.y) < 30) { vel.x = 0; vel.y = 0; }
+    else { cancelAnimationFrame(raf); flingSettle(); }
+  }
+
+  icon.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    icon.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    endDrag();
+    e.preventDefault();
+  });
+
+  icon.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!grabbed) {
+        grabbed = true;
+        cancelAnimationFrame(raf);
+        icon.classList.add('is-grabbed');
+        caption.textContent = 'Grabbed. Move with arrow keys, press Enter to drop';
+      } else {
+        grabbed = false;
+        icon.classList.remove('is-grabbed');
+        endDrag();
+      }
+      return;
+    }
+    if (!grabbed) return;
+    var dx = 0, dy = 0;
+    if (e.key === 'ArrowLeft') dx = -KEY_STEP_PX;
+    else if (e.key === 'ArrowRight') dx = KEY_STEP_PX;
+    else if (e.key === 'ArrowUp') dy = -KEY_STEP_PX;
+    else if (e.key === 'ArrowDown') dy = KEY_STEP_PX;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      icon.classList.remove('is-grabbed');
+      endDrag();
+      return;
+    } else { return; }
+    e.preventDefault();
+    pos.x += dx; pos.y += dy;
+    applyIcon(1, 1);
+  });
+
+  applyIcon(1, 1);
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var iconRect0 = icon.getBoundingClientRect();
+    var ox0 = iconRect0.left + iconRect0.width / 2;
+    var oy0 = iconRect0.top + iconRect0.height / 2;
+    var cellRect0 = cells[0].getBoundingClientRect();
+    var gx0 = cellRect0.left + cellRect0.width / 2;
+    var gy0 = cellRect0.top + cellRect0.height / 2;
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 800) {
+        var p = Math.min(1, (t - 200) / 600);
+        var ease = 1 - Math.pow(1 - p, 2);
+        var cx = ox0 + (gx0 - ox0) * ease;
+        var cy = oy0 + (gy0 - oy0) * ease;
+        if (t < 220) beginDrag(ox0, oy0);
+        moveDrag(cx, cy);
+      } else if (t < 950) {
+        // 대기 (자석 확인)
+      } else if (t < 980) {
+        endDrag();
+      } else if (t < 1400) {
+        // 정착 관찰
+      } else if (t < 1420) {
+        beginDrag(gx0, gy0);
+      } else if (t < 1650) {
+        var p2 = (t - 1420) / 230;
+        moveDrag(gx0 + p2 * 70, gy0 - p2 * 20);
+      } else if (t < 1680) {
+        endDrag();
+      } else {
+        if (t > 2200) demoStart = ts - 60;
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Each shape's depth value is converted into a blur radius and re-applied through filter blur in real time, so the farther a shape sits from the focal plane the more its edges spread — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">Each shape's depth value is converted into a blur radius and re-applied through filter blur in real time, so the farther a shape sits from the focal plane the more its edges spread</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 원마다 가상 거리값(distancePx)을 갖고, 매 프레임 focalDepth(초점면 거리, 시간에 따라
+  // 오간다)와의 차이를 blurForDepth 로 흐림 반경(px)으로 바꿔 ctx.filter = blur(...) 를 다시
+  // 세팅한 뒤 그린다 — 초점면에 가까운 원은 선명하게, 멀어질수록 DEPTH_BLUR_MAX_PX 까지 크게 번진다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var DEPTH_BLUR_MAX_PX = 14;
+  var FOCAL_CYCLE_MS = 4200;
+  var FOCAL_RANGE_NEAR = 30, FOCAL_RANGE_FAR = 160;
+  var BOKEH_COUNT = 14;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429021);
+  var palette = ['#ffe6b3', '#ffd23f', '#ff9ebb', '#6ec8ff', '#4cd4a6'];
+
+  var circles = [];
+  for (var i = 0; i < BOKEH_COUNT; i += 1) {
+    circles.push({
+      distancePx: 20 + rnd() * 150,
+      baseX: 14 + rnd() * (CALC_W - 28),
+      baseY: 12 + rnd() * (CALC_H - 24),
+      size: 5 + rnd() * 11,
+      phase: rnd() * Math.PI * 2,
+      driftAmp: 3 + rnd() * 5,
+      color: palette[i % palette.length]
+    });
+  }
+
+  function focalDepthAt(t) {
+    var f = (Math.sin(t / FOCAL_CYCLE_MS * Math.PI * 2) + 1) / 2;
+    return FOCAL_RANGE_NEAR + f * (FOCAL_RANGE_FAR - FOCAL_RANGE_NEAR);
+  }
+
+  function blurForDepth(distancePx, focalDepth) {
+    var diff = Math.abs(distancePx - focalDepth);
+    return Math.max(0, Math.min(DEPTH_BLUR_MAX_PX, diff / 9));
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var savg = (sx + sy) / 2;
+    var focalDepth = focalDepthAt(nowMs);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.globalCompositeOperation = 'lighter';
+    var order = circles.slice().sort(function (a, b) { return b.distancePx - a.distancePx; });
+    for (var i = 0; i < order.length; i += 1) {
+      var c = order[i];
+      var blurPx = blurForDepth(c.distancePx, focalDepth);
+      var alpha = Math.max(0.3, Math.min(0.95, 1 - c.distancePx / 210));
+      var driftX = Math.sin(nowMs * 0.0006 + c.phase) * c.driftAmp;
+      var driftY = Math.cos(nowMs * 0.0005 + c.phase) * c.driftAmp * 0.6;
+      var dx = (c.baseX + driftX) * sx, dy = (c.baseY + driftY) * sy;
+      var dr = c.size * savg;
+      ctx.filter = blurPx > 0.15 ? 'blur(' + (blurPx * savg).toFixed(1) + 'px)' : 'none';
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, c.color);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.filter = 'none';
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var focalNudge = 0;
+  wrap.addEventListener('pointermove', function (e) {
+    var r = wrap.getBoundingClientRect();
+    focalNudge = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    if (reduce) drawScene(elapsed + focalNudge * FOCAL_CYCLE_MS * 0.25);
+  });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') focalNudge = Math.max(-1, focalNudge - 0.12);
+    else if (e.key === 'ArrowRight') focalNudge = Math.min(1, focalNudge + 0.12);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      if (reduce) drawScene(elapsed + focalNudge * FOCAL_CYCLE_MS * 0.25);
+    }
+  });
+
+  var warmSteps = reduce ? 160 : 120;
+  for (var w = 0; w < warmSteps; w += 1) elapsed += 20;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      drawScene(elapsed + focalNudge * FOCAL_CYCLE_MS * 0.25);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

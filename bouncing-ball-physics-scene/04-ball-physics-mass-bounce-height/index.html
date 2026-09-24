@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>공마다 다른 크기를 질량값으로 써서 떨어질 때 힘을 계산해, 같은 높이에서 떨어져도 가벼운 공은 높이 튀어 오르고 무거운 공은 낮게 튄다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">공마다 다른 크기를 질량값으로 써서 떨어질 때 힘을 계산해, 같은 높이에서 떨어져도 가벼운 공은 높이 튀어 오르고 무거운 공은 낮게 튄다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 공의 반지름을 그대로 질량으로 쓰고, 바닥에 닿을 때 되튀는 반발계수를
+  // BASE_MASS_REST * BALL_MASS_BOUNCE_FACTOR / mass 로 계산한다 — 질량이 작을수록
+  // 나눗셈 결과가 커져 반발계수가 크고, 질량이 클수록 작아 낮게 튄다. 네 공이 같은
+  // 높이·같은 시각에 떨어지므로 튀는 높이 차이가 질량 하나로만 갈린다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var GRAVITY = 900;
+  var BALL_MASS_BOUNCE_FACTOR = 1.4;
+  var BASE_MASS_REST = 6;
+  var SLEEP_THRESHOLD = 24;
+  var SLEEP_HOLD_MS = 300;
+  var STAGE_BG = '255,255,255';
+
+  var MASSES = [10, 16, 22, 30];
+  var COLORS = ['#6ec8ff', '#4cd4a6', '#b9a0ff', '#ff9ebb'];
+  var XPOS = [0.16, 0.4, 0.64, 0.86];
+
+  function restitutionFor(mass) {
+    return Math.max(0.22, Math.min(0.95, BASE_MASS_REST * BALL_MASS_BOUNCE_FACTOR / mass));
+  }
+
+  var balls = [];
+  function reset() {
+    balls = [];
+    for (var i = 0; i < MASSES.length; i += 1) {
+      balls.push({
+        x: CALC_W * XPOS[i],
+        y: 26,
+        vy: 0,
+        mass: MASSES[i],
+        r: MASSES[i] * 0.5,
+        color: COLORS[i],
+        rest: restitutionFor(MASSES[i]),
+        squash: 0,
+        settled: false
+      });
+    }
+    impacts = [];
+  }
+  var impacts = [];
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      if (b.settled) { b.squash = Math.max(0, b.squash - dtS * 6); continue; }
+      b.vy += GRAVITY * dtS;
+      b.y += b.vy * dtS;
+      var floor = CALC_H - b.r;
+      if (b.y >= floor) {
+        b.y = floor;
+        if (Math.abs(b.vy) < SLEEP_THRESHOLD) {
+          b.vy = 0; b.settled = true; b.squash = 0.5;
+        } else {
+          impacts.push({ x: b.x, y: floor, born: nowMs, strength: Math.min(1, Math.abs(b.vy) / 320) });
+          b.squash = Math.max(b.squash, Math.min(0.85, Math.abs(b.vy) / 300));
+          b.vy = -b.vy * b.rest;
+        }
+      }
+      b.squash = Math.max(0, b.squash - dtS * 3.5);
+    }
+    var live = [];
+    for (var k = 0; k < impacts.length; k += 1) { if (nowMs - impacts[k].born < 260) live.push(impacts[k]); }
+    impacts = live;
+  }
+
+  function allSettled() {
+    for (var i = 0; i < balls.length; i += 1) { if (!balls[i].settled) return false; }
+    return true;
+  }
+
+  function draw(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.strokeStyle = 'rgba(23,20,26,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, (CALC_H - 2) * sy);
+    ctx.lineTo(cw, (CALC_H - 2) * sy);
+    ctx.stroke();
+    for (var j = 0; j < balls.length; j += 1) {
+      var b = balls[j];
+      var px = b.x * sx, py = b.y * sy, pr = b.r * ((sx + sy) / 2);
+      var shf = Math.max(0, 1 - (CALC_H - b.r - b.y) / 130);
+      var shw = pr * (0.9 + shf * 0.4);
+      ctx.beginPath();
+      ctx.ellipse(px, (CALC_H - 3) * sy, shw, shw * 0.24, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(23,20,26,' + (0.08 + shf * 0.14) + ')';
+      ctx.fill();
+      var sqX = 1 + b.squash * 0.5, sqY = 1 - b.squash * 0.35;
+      ctx.save();
+      ctx.translate(px, py + pr * b.squash * 0.35);
+      ctx.scale(sqX, sqY);
+      ctx.beginPath();
+      ctx.arc(0, 0, pr, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  reset();
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  var settledAt = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        stepSim(FIXED_DT, elapsed);
+        if (allSettled()) {
+          if (settledAt === null) settledAt = elapsed;
+          else if (elapsed - settledAt > SLEEP_HOLD_MS) { settledAt = null; elapsed = 0; reset(); }
+        }
+        acc -= FIXED_DT;
+      }
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

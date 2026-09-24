@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>粒子ごとのz値を時間とともに少しずつ変化させ、その値を毎フレーム画面上のサイズに換算し直すことで、近づく粒子は徐々に大きく、遠ざかる粒子は徐々に小さくなる — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">粒子ごとのz値を時間とともに少しずつ変化させ、その値を毎フレーム画面上のサイズに換算し直すことで、近づく粒子は徐々に大きく、遠ざかる粒子は徐々に小さくなる</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 입자마다 zAdvanceSpeed 로 z값이 PARTICLE_Z_MAX 에서 0 쪽으로 시간에 따라 줄어들다가
+  // 나머지 연산으로 다시 멀리 순환하고, sizeForDepth 가 그 z값을 매 프레임 화면 크기·화면 좌표로
+  // 다시 환산한다 — 가까워질수록(z 작을수록) 입자가 커지고 화면 중심에서 바깥으로 퍼진다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var CX = CALC_W * 0.5, CY = CALC_H * 0.5;
+  var PARTICLE_Z_MAX = 120;
+  var PARTICLE_COUNT = 34;
+  var FOCAL = 60;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429081);
+
+  var particles = [];
+  for (var i = 0; i < PARTICLE_COUNT; i += 1) {
+    particles.push({
+      worldX: (rnd() - 0.5) * 140,
+      worldY: (rnd() - 0.5) * 90,
+      zOffset: rnd() * PARTICLE_Z_MAX,
+      speedScale: 0.6 + rnd() * 0.8,
+      color: i % 3 === 0 ? '#6ec8ff' : (i % 3 === 1 ? '#b9a0ff' : '#4cd4a6')
+    });
+  }
+
+  function zAdvanceSpeed(p) {
+    return 0.012 * p.speedScale;
+  }
+
+  function zAt(p, t) {
+    var raw = (p.zOffset - t * zAdvanceSpeed(p)) % PARTICLE_Z_MAX;
+    if (raw < 0) raw += PARTICLE_Z_MAX;
+    return raw + 1;
+  }
+
+  function sizeForDepth(z) {
+    var v = (FOCAL / z) * 3.4;
+    return Math.max(0.8, Math.min(7, v));
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(t) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var z = zAt(p, t);
+      var scale = FOCAL / z;
+      var sizePx = sizeForDepth(z);
+      var alpha = Math.max(0.18, Math.min(1, scale * 0.55));
+      var dx = (CX + p.worldX * scale * 0.34) * sx;
+      var dy = (CY + p.worldY * scale * 0.34) * sy;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(dx, dy, sizePx * sx, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var warmSteps = reduce ? 0 : 130;
+  for (var w = 0; w < warmSteps; w += 1) elapsed += 20;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      drawScene(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallax, blur, perspective grid, orbit, shadow, and scale are all calculated together on the same background, so every layer responds as one when the pointer moves — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">Parallax, blur, perspective grid, orbit, shadow, and scale are all calculated together on the same background, so every layer responds as one when the pointer moves</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 01(시차)·02(흐림)·04(원근 격자)·05(궤도 z정렬)·07(높이→그림자)·08(z→크기 환산) 의 계산을
+  // 한 좌표계 위에서 같은 포인터 입력(nx, ny)으로 동시에 구동한다. 격자는 HERO_PARALLAX_REF_DISTANCE_PX
+  // 로 시차 배수를, 도형은 HERO_BLUR_MAX_PX 로 흐림을, 궤도는 HERO_ORBIT_TILT_MAX_DEG 로 기울기를 받는다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var HORIZON_Y = CALC_H * 0.36;
+  var HERO_PARALLAX_REF_DISTANCE_PX = 200;
+  var HERO_BLUR_MAX_PX = 10;
+  var HERO_ORBIT_TILT_MAX_DEG = 16;
+  var camHeight = 40;
+  var GRID_PERSPECTIVE_PX = 760;
+  var ROW_SPACING = 16, ROW_COUNT = 7, COL_SPACING = 15, COL_COUNT = 9;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429091);
+
+  var RING_RADIUS = 26, SAT_COUNT = 6, ANGULAR_SPEED = 0.00058;
+  var satellites = [];
+  for (var i = 0; i < SAT_COUNT; i += 1) {
+    satellites.push({
+      baseAngle: (Math.PI * 2 / SAT_COUNT) * i + rnd() * 0.3,
+      radiusScale: 0.75 + rnd() * 0.28,
+      size: 2.6 + rnd() * 2.2,
+      color: ['#6ec8ff', '#b9a0ff', '#ff9ebb', '#4cd4a6'][i % 4]
+    });
+  }
+
+  var SHAPE_COUNT = 6;
+  var shapes = [];
+  for (var j = 0; j < SHAPE_COUNT; j += 1) {
+    shapes.push({
+      baseX: 22 + (CALC_W - 44) * (j / (SHAPE_COUNT - 1)),
+      baseY: CALC_H * 0.68 + (rnd() - 0.5) * 14,
+      depthNorm: (j % 3) / 2,
+      size: 6 + rnd() * 4,
+      bobSpeed: 0.001 + rnd() * 0.0007,
+      bobPhase: rnd() * Math.PI * 2,
+      zSpeed: 0.0012 + rnd() * 0.0008,
+      zPhase: rnd() * Math.PI * 2,
+      color: ['#ffd23f', '#ff9ebb', '#6ec8ff', '#4cd4a6', '#b9a0ff', '#ffffff'][j]
+    });
+  }
+
+  var nx = 0, ny = 0;
+  var offsetCur = 0, offsetCurY = 0;
+  var INERTIA_LERP_RATE = 5;
+
+  function distanceMultiplier(distancePx) {
+    var m = HERO_PARALLAX_REF_DISTANCE_PX / Math.max(20, distancePx);
+    return Math.max(0.2, Math.min(2.6, m));
+  }
+
+  function projectGridPoint(xWorld, zWorld, viewOffsetX) {
+    var z = Math.max(4, zWorld);
+    var scale = GRID_PERSPECTIVE_PX / (z * 40);
+    return { x: CALC_W * 0.5 + (xWorld - viewOffsetX) * scale, y: HORIZON_Y + camHeight * scale };
+  }
+
+  var elapsed = 0, scrollZ = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(t, dtS) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var viewOffsetX = nx * 42;
+    var tiltDeg = ny * HERO_ORBIT_TILT_MAX_DEG;
+    var azimuthOffset = nx * 0.7;
+
+    var targetOffsetX = nx * 14, targetOffsetY = ny * 9;
+    var rate = Math.min(1, INERTIA_LERP_RATE * dtS);
+    offsetCur += (targetOffsetX - offsetCur) * rate;
+    offsetCurY += (targetOffsetY - offsetCurY) * rate;
+    var pointerDistancePx = Math.max(20, Math.hypot(offsetCur, offsetCurY) * 6 + 60);
+    var mult = distanceMultiplier(pointerDistancePx);
+
+    ctx.clearRect(0, 0, cw, ch);
+
+    ctx.strokeStyle = 'rgba(140,150,230,.5)';
+    ctx.lineWidth = 1;
+    for (var r = 1; r <= ROW_COUNT; r += 1) {
+      var z = r * ROW_SPACING - scrollZ;
+      if (z <= 2) continue;
+      var pL = projectGridPoint(-COL_COUNT * COL_SPACING * 0.5, z, viewOffsetX);
+      var pR = projectGridPoint(COL_COUNT * COL_SPACING * 0.5, z, viewOffsetX);
+      ctx.beginPath();
+      ctx.moveTo(pL.x * sx, pL.y * sy);
+      ctx.lineTo(pR.x * sx, pR.y * sy);
+      ctx.stroke();
+    }
+
+    var withZ = satellites.map(function (sat) {
+      var ang = sat.baseAngle + t * ANGULAR_SPEED + azimuthOffset;
+      var rr = RING_RADIUS * sat.radiusScale;
+      var lx = Math.cos(ang) * rr, lz = Math.sin(ang) * rr;
+      var tiltRad = tiltDeg * Math.PI / 180;
+      var ry = -lz * Math.sin(tiltRad), rz = lz * Math.cos(tiltRad);
+      return { sat: sat, x: lx, y: ry, z: rz };
+    });
+    withZ.sort(function (a, b) { return a.z - b.z; });
+    for (var k = 0; k < withZ.length; k += 1) {
+      var p = withZ[k];
+      var perspScale = Math.max(0.55, Math.min(1.5, 1 + p.z / RING_RADIUS * 0.45));
+      var alpha = Math.max(0.4, Math.min(1, 0.6 + p.z / RING_RADIUS * 0.4));
+      var cx2 = (CALC_W * 0.5 + p.x) * sx, cy2 = (CALC_H * 0.42 + p.y) * sy;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.sat.color;
+      ctx.beginPath();
+      ctx.arc(cx2, cy2, p.sat.size * perspScale * sx, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (var m2 = 0; m2 < shapes.length; m2 += 1) {
+      var shape = shapes[m2];
+      var blurPx = HERO_BLUR_MAX_PX * shape.depthNorm;
+      var bobH = (Math.sin(t * shape.bobSpeed + shape.bobPhase) * 0.5 + 0.5) * 16;
+      var zVar = 1 + Math.sin(t * shape.zSpeed + shape.zPhase) * 0.22;
+      var shX = (shape.baseX + offsetCur * (1 - shape.depthNorm) * mult) * sx;
+      var shY = (shape.baseY - bobH + offsetCurY * (1 - shape.depthNorm) * mult) * sy;
+
+      ctx.save();
+      ctx.filter = 'blur(' + (2 * sx) + 'px)';
+      ctx.fillStyle = 'rgba(20,16,24,' + (0.32 - shape.depthNorm * 0.12) + ')';
+      ctx.beginPath();
+      ctx.ellipse(shX, (shape.baseY + 10) * sy, shape.size * 0.7 * sx, shape.size * 0.22 * sy, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.filter = 'blur(' + (blurPx * sx) + 'px)';
+      ctx.fillStyle = shape.color;
+      ctx.beginPath();
+      ctx.arc(shX, shY, shape.size * zVar * sx, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed, 0.016);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var pointerActive = false;
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    var r = wrap.getBoundingClientRect();
+    nx = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    ny = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    if (reduce) drawScene(elapsed, 0.016);
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') nx = Math.max(-1, nx - 0.12);
+    else if (e.key === 'ArrowRight') nx = Math.min(1, nx + 0.12);
+    else if (e.key === 'ArrowUp') ny = Math.max(-1, ny - 0.12);
+    else if (e.key === 'ArrowDown') ny = Math.min(1, ny + 0.12);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      if (reduce) drawScene(elapsed, 0.016);
+    }
+  });
+
+  function virtualPointerAt(t) {
+    return { nx: Math.sin(t * 0.00046) * 0.85, ny: Math.cos(t * 0.00033) * 0.7 };
+  }
+
+  var warmSteps = reduce ? 0 : 110;
+  for (var w = 0; w < warmSteps; w += 1) {
+    elapsed += 20;
+    scrollZ = (scrollZ + 18 * 0.02) % ROW_SPACING;
+    if (!pointerActive) { var vp = virtualPointerAt(elapsed); nx = vp.nx; ny = vp.ny; }
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      scrollZ = (scrollZ + 18 * (dt / 1000)) % ROW_SPACING;
+      if (!pointerActive) { var vp = virtualPointerAt(elapsed); nx = vp.nx; ny = vp.ny; }
+      drawScene(elapsed, dt / 1000);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed, 0.016);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

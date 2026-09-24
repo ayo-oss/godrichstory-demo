@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>It calculates a target angle from how many times the button was pressed and rotates by the gap from the current angle; once a page passes 90 degrees it is redrawn with its width-height ratio swapped too — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvr is-demo" id="pvrRoot">
+  <div class="pvr__frame" id="pvrFrame">
+    <div class="pvr__page" id="pvrPage"></div>
+  </div>
+  <div class="pvr__controls">
+    <button class="pvr__btn" id="pvrLeft" type="button" aria-label="Rotate left">↺</button>
+    <span class="pvr__deg" id="pvrDeg">0°</span>
+    <button class="pvr__btn" id="pvrRight" type="button" aria-label="Rotate right">↻</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 버튼을 누른 횟수 × ROTATE_SNAP_DEG 로 목표 각도를 계산하고, 현재 각도를 매 프레임
+  // 그 목표로 보간(lerp)한다. 회전 중인 각도로 "회전된 사각형의 바운딩박스" 폭·높이를
+  // 매 프레임 다시 계산해 프레임 자체 크기를 바꿔가며 다시 그린다 — 90도를 넘길 때
+  // 가로세로가 뚝 끊겨 바뀌는 게 아니라 각도에 비례해 연속적으로 바뀐다.
+  var root = document.getElementById('pvrRoot');
+  var frame = document.getElementById('pvrFrame');
+  var page = document.getElementById('pvrPage');
+  var degEl = document.getElementById('pvrDeg');
+  var btnL = document.getElementById('pvrLeft');
+  var btnR = document.getElementById('pvrRight');
+
+  // 변형 06: ROTATE_SNAP_DEG 90 → 45 (전값이 소스 초기값)
+  var ROTATE_SNAP_DEG = 90;
+  var LOOP_MS = 2000;
+  var PAGE_W = 88, PAGE_H = 70;
+
+  function seedRand(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  (function paint() {
+    var rnd = seedRand(430061);
+    var html = '<div class="pvr__title" style="width:' + (46 + rnd() * 14) + '%"></div>';
+    for (var i = 0; i < 5; i += 1) html += '<div class="pvr__line" style="width:' + (38 + rnd() * 54) + '%"></div>';
+    html += '<div class="pvr__fig"></div>';
+    page.innerHTML = html;
+  })();
+
+  function boxSize(angleDeg, w, h) {
+    var r = angleDeg * Math.PI / 180;
+    var c = Math.abs(Math.cos(r)), s = Math.abs(Math.sin(r));
+    return { w: w * c + h * s, h: w * s + h * c };
+  }
+
+  var target = 0, current = 0;
+  function render() {
+    var box = boxSize(current, PAGE_W, PAGE_H);
+    frame.style.width = box.w + 'px';
+    frame.style.height = box.h + 'px';
+    page.style.width = PAGE_W + 'px';
+    page.style.height = PAGE_H + 'px';
+    page.style.transform = 'translate(-50%,-50%) rotate(' + current.toFixed(1) + 'deg)';
+    degEl.textContent = Math.round(((current % 360) + 360) % 360) + '°';
+  }
+
+  function rotateBy(dir) { target += dir * ROTATE_SNAP_DEG; }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); } }
+  btnL.addEventListener('click', function () { markActive(); rotateBy(-1); });
+  btnR.addEventListener('click', function () { markActive(); rotateBy(1); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === '[') { e.preventDefault(); markActive(); rotateBy(-1); }
+    else if (e.key === 'ArrowRight' || e.key === ']') { e.preventDefault(); markActive(); rotateBy(1); }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; current = target = 0; render(); }
+
+  var fired = {};
+  var SCHEDULE = [
+    { t: 150, run: function () { rotateBy(1); } },
+    { t: 700, run: function () { rotateBy(1); } },
+    { t: 1250, run: function () { rotateBy(-1); } },
+    { t: 1650, run: function () { rotateBy(-1); } }
+  ];
+
+  var lastTs = null, originTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    lastTs = ts;
+    if (!userActive) {
+      if (originTs === null) originTs = ts;
+      var elapsed = ts - originTs;
+      var loopIdx = Math.floor(elapsed / LOOP_MS);
+      var phase = elapsed % LOOP_MS;
+      SCHEDULE.forEach(function (a, i) {
+        var key = loopIdx + ':' + i;
+        if (phase >= a.t && !fired[key]) { fired[key] = true; a.run(); }
+      });
+    }
+    current += (target - current) * 0.18;
+    render();
+    requestAnimationFrame(tick);
+  }
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

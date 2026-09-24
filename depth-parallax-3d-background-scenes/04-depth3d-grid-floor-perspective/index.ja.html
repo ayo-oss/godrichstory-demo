@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>グリッド線の座標を透視投影の式で計算して地平線に近いほど線の間隔を狭め、ポインターが動くたびに視点の位置も再計算する — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">グリッド線の座標を透視投影の式で計算して地平線に近いほど線の間隔を狭め、ポインターが動くたびに視点の位置も再計算する</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 바닥의 각 격자 교차점을 projectGridPoint 로 원근 투영해(카메라 높이 ÷ 거리 z 에
+  // GRID_PERSPECTIVE_PX 를 곱하는 표준 투영식) 화면 좌표를 얻는다. 지평선에 가까운(= z 가 큰)
+  // 줄일수록 화면 간격이 좁아지고, 포인터가 좌우로 움직이면 viewOffsetX 가 바뀌어 시점이
+  // 옆으로 패닝하듯 다시 계산된다. z 는 시간에 따라 계속 흘러 바닥이 앞으로 흘러오는 것처럼 보인다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var HORIZON_Y = CALC_H * 0.4;
+  var camHeight = 46;
+  var GRID_PERSPECTIVE_PX = 800;
+  var ROW_SPACING = 16;
+  var ROW_COUNT = 9;
+  var COL_SPACING = 14;
+  var COL_COUNT = 11;
+  var SCROLL_SPEED = 18;
+
+  var viewOffsetX = 0;
+
+  function projectGridPoint(xWorld, zWorld) {
+    var z = Math.max(4, zWorld);
+    var scale = GRID_PERSPECTIVE_PX / (z * 40);
+    return {
+      x: CALC_W * 0.5 + (xWorld - viewOffsetX) * scale,
+      y: HORIZON_Y + camHeight * scale
+    };
+  }
+
+  var elapsed = 0;
+  var scrollZ = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+
+    ctx.fillStyle = 'rgba(255,140,40,.16)';
+    var sunR = 30 + Math.sin(elapsed * 0.0009) * 4;
+    ctx.beginPath();
+    ctx.arc(CALC_W * 0.5 * sx, HORIZON_Y * sy, sunR * sx, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(120,90,200,.7)';
+    ctx.lineWidth = 1.2;
+    for (var r = 1; r <= ROW_COUNT; r += 1) {
+      var z = r * ROW_SPACING - scrollZ;
+      if (z <= 2) continue;
+      var pL = projectGridPoint(-COL_COUNT * COL_SPACING * 0.5, z);
+      var pR = projectGridPoint(COL_COUNT * COL_SPACING * 0.5, z);
+      ctx.beginPath();
+      ctx.moveTo(pL.x * sx, pL.y * sy);
+      ctx.lineTo(pR.x * sx, pR.y * sy);
+      ctx.stroke();
+    }
+    var zNear = ROW_SPACING - scrollZ % ROW_SPACING + 2;
+    var zFar = ROW_COUNT * ROW_SPACING;
+    for (var c = 0; c <= COL_COUNT; c += 1) {
+      var xw = -COL_COUNT * COL_SPACING * 0.5 + c * COL_SPACING;
+      var pn = projectGridPoint(xw, zNear);
+      var pf = projectGridPoint(xw, zFar);
+      ctx.beginPath();
+      ctx.moveTo(pn.x * sx, pn.y * sy);
+      ctx.lineTo(pf.x * sx, pf.y * sy);
+      ctx.stroke();
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var pointerActive = false;
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    var r = wrap.getBoundingClientRect();
+    var norm = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    viewOffsetX = norm * 46;
+    if (reduce) drawScene();
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') viewOffsetX = Math.max(-46, viewOffsetX - 6);
+    else if (e.key === 'ArrowRight') viewOffsetX = Math.min(46, viewOffsetX + 6);
+    else if (e.key === 'ArrowUp') nudgeCamHeight(6);
+    else if (e.key === 'ArrowDown') nudgeCamHeight(-6);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      if (reduce) drawScene();
+    }
+  });
+  var camHeightBoost = 0;
+  function nudgeCamHeight(d) {
+    camHeightBoost = Math.max(-18, Math.min(18, camHeightBoost + d));
+    camHeight = 46 + camHeightBoost;
+  }
+
+  function virtualViewOffsetAt(t) {
+    return Math.sin(t * 0.00048) * 40;
+  }
+
+  var warmSteps = reduce ? 40 : 100;
+  for (var w = 0; w < warmSteps; w += 1) {
+    elapsed += 20;
+    scrollZ = (scrollZ + SCROLL_SPEED * 0.02) % ROW_SPACING;
+    if (!pointerActive) viewOffsetX = virtualViewOffsetAt(elapsed);
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      scrollZ = (scrollZ + SCROLL_SPEED * (dt / 1000)) % ROW_SPACING;
+      if (!pointerActive) viewOffsetX = virtualViewOffsetAt(elapsed);
+      drawScene();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

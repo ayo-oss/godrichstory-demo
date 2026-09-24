@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>It calculates the page number and vertical position of every match for the typed search term and gathers them into a list; picking one scrolls to that spot and lights up the text's background — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvs is-demo" id="pvsRoot">
+  <div class="pvs__bar">
+    <input class="pvs__input" id="pvsInput" type="text" placeholder="Search" aria-label="Search in document" autocomplete="off">
+    <span class="pvs__count" id="pvsCount">0 matches</span>
+  </div>
+  <div class="pvs__body">
+    <div class="pvs__doc" id="pvsDoc"></div>
+    <div class="pvs__results" id="pvsResults"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 실제 텍스트 span 을 문서에 심어 두고, 검색어와 일치하는 span 을 순회로 찾아
+  // Page 번호(data-page)와 세로 위치(offsetTop)를 계산해 목록으로 모은다. 목록에서 하나를
+  // 고르면 그 위치까지 남은 거리를 이지(ease-out)로 나눠 스크롤하고, 도착 뒤 배경색을
+  // transition 으로 밝혔다 되돌린다.
+  var root = document.getElementById('pvsRoot');
+  var input = document.getElementById('pvsInput');
+  var count = document.getElementById('pvsCount');
+  var doc = document.getElementById('pvsDoc');
+  var resultsBox = document.getElementById('pvsResults');
+
+  var LOOP_MS = 2000;
+  var VOCAB = ['alpha', 'beta', 'gamma', 'delta', 'omega', 'sigma', 'kappa', 'lambda', 'theta', 'zeta'];
+
+  function seedRand(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  function buildPages() {
+    var rnd = seedRand(430031), pages = [];
+    for (var p = 0; p < 4; p += 1) {
+      var lines = [];
+      for (var l = 0; l < 5; l += 1) {
+        var words = [];
+        for (var w = 0; w < 5; w += 1) words.push(VOCAB[Math.floor(rnd() * VOCAB.length)]);
+        lines.push(words);
+      }
+      pages.push(lines);
+    }
+    pages[1][2][0] = 'alpha';
+    pages[3][1][2] = 'alpha';
+    pages[0][4][3] = 'theta';
+    pages[2][0][1] = 'theta';
+    return pages;
+  }
+  var pages = buildPages();
+
+  pages.forEach(function (lines, pIdx) {
+    var page = document.createElement('div');
+    page.className = 'doc__page';
+    var title = document.createElement('div');
+    title.className = 'doc__title';
+    title.style.width = (46 + (pIdx % 3) * 10) + '%';
+    page.appendChild(title);
+    lines.forEach(function (words) {
+      var lineEl = document.createElement('p');
+      lineEl.className = 'pvs__lineText';
+      words.forEach(function (word, wi) {
+        var span = document.createElement('span');
+        span.className = 'pvs__w';
+        span.textContent = word;
+        lineEl.appendChild(span);
+        if (wi < words.length - 1) lineEl.appendChild(document.createTextNode(' '));
+      });
+      page.appendChild(lineEl);
+    });
+    doc.appendChild(page);
+  });
+  var words = Array.prototype.slice.call(doc.querySelectorAll('.pvs__w'));
+  function pageOf(el) {
+    var i = 1, node = el;
+    while (node && !node.classList.contains('doc__page')) node = node.parentElement;
+    var all = Array.prototype.slice.call(doc.children);
+    return all.indexOf(node) + 1;
+  }
+
+  function find(q) {
+    q = q.toLowerCase();
+    if (!q) return [];
+    return words.filter(function (w) { return w.textContent.toLowerCase().indexOf(q) === 0; });
+  }
+
+  var scrollAnim = null;
+  function startScroll(to, dur, nowMs) {
+    scrollAnim = { from: doc.scrollTop, to: to, start: nowMs, dur: dur };
+  }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  var lastHit = null;
+  function jumpTo(el, nowMs) {
+    var target = Math.max(0, el.offsetTop - doc.clientHeight * 0.35);
+    startScroll(target, 460, nowMs);
+    if (lastHit) lastHit.classList.remove('pvs__w--hit');
+    lastHit = el;
+  }
+  function ignite(el) { el.classList.add('pvs__w--hit'); }
+  function extinguish(el) { el.classList.remove('pvs__w--hit'); }
+
+  function renderList(matches) {
+    count.textContent = matches.length + ' matches';
+    resultsBox.innerHTML = '';
+    matches.slice(0, 5).forEach(function (el) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pvs__result';
+      b.textContent = 'Page ' + pageOf(el);
+      b.addEventListener('click', function () { userActive = true; root.classList.remove('is-demo'); jumpTo(el, lastTs || 0); ignite(el); });
+      resultsBox.appendChild(b);
+    });
+  }
+
+  var userActive = false;
+  function onInput() {
+    userActive = true; root.classList.remove('is-demo');
+    var matches = find(input.value);
+    renderList(matches);
+  }
+  input.addEventListener('input', onInput);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var matches = find(input.value);
+      if (matches.length) { userActive = true; root.classList.remove('is-demo'); jumpTo(matches[0], lastTs || 0); ignite(matches[0]); }
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; }
+
+  var fired = {};
+  var SCHEDULE = [
+    { t: 0, run: function () { input.value = ''; renderList([]); startScroll(0, 260, elapsedNow); if (lastHit) { extinguish(lastHit); lastHit = null; } } },
+    { t: 150, run: function () { input.value = 'al'; var m = find('al'); renderList(m); if (m[0]) jumpTo(m[0], elapsedNow); } },
+    { t: 650, run: function () { if (lastHit) ignite(lastHit); } },
+    { t: 980, run: function () { if (lastHit) extinguish(lastHit); } },
+    { t: 1150, run: function () { input.value = ''; renderList([]); } },
+    { t: 1300, run: function () { input.value = 'th'; var m = find('th'); renderList(m); var pick = m[1] || m[0]; if (pick) jumpTo(pick, elapsedNow); } },
+    { t: 1780, run: function () { if (lastHit) ignite(lastHit); } }
+  ];
+
+  var lastTs = null, elapsed = 0, elapsedNow = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!userActive) {
+      elapsed += dt;
+      elapsedNow = elapsed;
+      var loopIdx = Math.floor(elapsed / LOOP_MS);
+      var phase = elapsed % LOOP_MS;
+      SCHEDULE.forEach(function (a, i) {
+        var key = loopIdx + ':' + i;
+        if (phase >= a.t && !fired[key]) { fired[key] = true; a.run(); }
+      });
+    }
+    if (scrollAnim) {
+      var p = Math.max(0, Math.min(1, (elapsedNow - scrollAnim.start) / scrollAnim.dur));
+      doc.scrollTop = scrollAnim.from + (scrollAnim.to - scrollAnim.from) * easeOutCubic(p);
+      if (p >= 1) scrollAnim = null;
+    }
+    requestAnimationFrame(tick);
+  }
+  renderList([]);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

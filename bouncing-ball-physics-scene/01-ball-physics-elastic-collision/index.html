@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>공과 공이 부딪히는 순간 두 공의 질량과 속도를 계산해 그 값을 서로 맞바꿔, 무거운 공은 적게 밀리고 가벼운 공은 크게 튕겨 나간다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">공과 공이 부딪히는 순간 두 공의 질량과 속도를 계산해 그 값을 서로 맞바꿔, 무거운 공은 적게 밀리고 가벼운 공은 크게 튕겨 나간다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 두 공이 겹치는 순간 접촉면 법선(n)을 구해 각 공의 속도를 법선·접선 성분으로
+  // 나눈다. 접선 성분은 그대로 두고 법선 성분에만 반발계수(BALL_RESTITUTION)를 적용한
+  // 충격량 공식을 풀어 질량이 다른 두 공이 속도를 주고받게 한다 — 질량이 큰 쪽은
+  // 적게 밀리고 작은 쪽은 크게 튕긴다. 벽은 에너지를 보존해(WALL_RESTITUTION = 1) 장면이
+  // 계속 살아 있게 한다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var BALL_RESTITUTION = 0.82;
+  var WALL_RESTITUTION = 1.0;
+  var STAGE_BG = '23,20,26';
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427011);
+
+  var COLORS = ['#ff9ebb', '#4cd4a6', '#b9a0ff', '#6ec8ff'];
+  var balls = [];
+  function makeBalls() {
+    var radii = [12, 16, 20, 24];
+    balls = [];
+    for (var i = 0; i < radii.length; i += 1) {
+      var r = radii[i];
+      var ang = rand() * Math.PI * 2;
+      var spd = 90 + rand() * 90;
+      balls.push({
+        x: r + rand() * (CALC_W - r * 2),
+        y: r + rand() * (CALC_H - r * 2),
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd,
+        r: r,
+        mass: r,
+        color: COLORS[i % COLORS.length],
+        squash: 0
+      });
+    }
+  }
+  makeBalls();
+
+  var impacts = [];
+
+  function resolveWalls(b) {
+    var hit = 0;
+    if (b.x - b.r < 0) { b.x = b.r; b.vx = -b.vx * WALL_RESTITUTION; hit = Math.max(hit, Math.abs(b.vx)); }
+    if (b.x + b.r > CALC_W) { b.x = CALC_W - b.r; b.vx = -b.vx * WALL_RESTITUTION; hit = Math.max(hit, Math.abs(b.vx)); }
+    if (b.y - b.r < 0) { b.y = b.r; b.vy = -b.vy * WALL_RESTITUTION; hit = Math.max(hit, Math.abs(b.vy)); }
+    if (b.y + b.r > CALC_H) { b.y = CALC_H - b.r; b.vy = -b.vy * WALL_RESTITUTION; hit = Math.max(hit, Math.abs(b.vy)); }
+    if (hit > 0) b.squash = Math.max(b.squash, Math.min(1, hit / 260));
+  }
+
+  function resolvePair(a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var dist = Math.hypot(dx, dy);
+    var minDist = a.r + b.r;
+    if (dist <= 0 || dist >= minDist) return;
+    var nx = dx / dist, ny = dy / dist;
+    var overlap = minDist - dist;
+    var totalMass = a.mass + b.mass;
+    a.x -= nx * overlap * (b.mass / totalMass);
+    a.y -= ny * overlap * (b.mass / totalMass);
+    b.x += nx * overlap * (a.mass / totalMass);
+    b.y += ny * overlap * (a.mass / totalMass);
+
+    var rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+    var vn = rvx * nx + rvy * ny;
+    if (vn >= 0) return;
+    var j = -(1 + BALL_RESTITUTION) * vn / (1 / a.mass + 1 / b.mass);
+    var ix = j * nx, iy = j * ny;
+    a.vx -= ix / a.mass; a.vy -= iy / a.mass;
+    b.vx += ix / b.mass; b.vy += iy / b.mass;
+    var strength = Math.min(1, Math.abs(vn) / 220);
+    a.squash = Math.max(a.squash, strength);
+    b.squash = Math.max(b.squash, strength);
+    impacts.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, born: elapsed, strength: strength });
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      b.x += b.vx * dtS;
+      b.y += b.vy * dtS;
+      resolveWalls(b);
+      b.squash = Math.max(0, b.squash - dtS * 3.2);
+    }
+    for (var p = 0; p < balls.length; p += 1) {
+      for (var q = p + 1; q < balls.length; q += 1) resolvePair(balls[p], balls[q]);
+    }
+    var live = [];
+    for (var k = 0; k < impacts.length; k += 1) {
+      if (nowMs - impacts[k].born < 340) live.push(impacts[k]);
+    }
+    impacts = live;
+  }
+
+  function drawBall(sx, sy, b) {
+    var px = b.x * sx, py = b.y * sy, pr = b.r * ((sx + sy) / 2);
+    var stretchX = 1 + b.squash * 0.5;
+    var stretchY = 1 - b.squash * 0.35;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.scale(stretchX, stretchY);
+    ctx.beginPath();
+    ctx.arc(0, 0, pr, 0, Math.PI * 2);
+    ctx.fillStyle = b.color;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.fillStyle = 'rgba(' + STAGE_BG + ',0.22)';
+    ctx.fillRect(0, 0, cw, ch);
+    for (var i = 0; i < impacts.length; i += 1) {
+      var im = impacts[i];
+      var f = (nowMs - im.born) / 340;
+      var px = im.x * sx, py = im.y * sy;
+      var pr = (10 + f * 26) * ((sx + sy) / 2);
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (im.strength * (1 - f) * 0.6) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    for (var j = 0; j < balls.length; j += 1) drawBall(sx, sy, balls[j]);
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    ctx.fillStyle = 'rgb(' + STAGE_BG + ')';
+    ctx.fillRect(0, 0, cw, ch);
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 70 : 60;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 16; stepSim(16, elapsed); }
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) { elapsed += FIXED_DT; stepSim(FIXED_DT, elapsed); acc -= FIXED_DT; }
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

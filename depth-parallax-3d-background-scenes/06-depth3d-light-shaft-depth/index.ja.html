@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>光の筋を複数枚描き、各層の不透明度を距離値に指数関数を掛けて下げることで、近い層はくっきり見え遠い層は背景にほぼ溶け込む — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">光の筋を複数枚描き、各層の不透明度を距離値に指数関数を掛けて下げることで、近い層はくっきり見え遠い層は背景にほぼ溶け込む</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 겹마다 깊이값(거리값)이 시간에 따라 완만히 흔들리고, shaftOpacityForDepth 가 그 깊이값에
+  // LIGHT_SHAFT_DECAY 를 지수(exp)로 곱해 불투명도를 구한다 — 거리가 커질수록 불투명도가 기하급수로
+  // 줄어 먼 겹은 배경에 거의 스며들고 가까운 겹만 선명하게 남는다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SOURCE_X = CALC_W * 0.5, SOURCE_Y = -6;
+  var SHAFT_LAYER_COUNT = 7;
+  var LIGHT_SHAFT_DECAY = 0.42;
+  var MAX_OPACITY = 0.62;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429061);
+
+  var shafts = [];
+  for (var i = 0; i < SHAFT_LAYER_COUNT; i += 1) {
+    shafts.push({
+      angleBase: -0.62 + (1.24 / (SHAFT_LAYER_COUNT - 1)) * i,
+      distanceBase: 1.1 + i * 0.62,
+      swayRange: 0.6 + rnd() * 0.6,
+      swaySpeed: 0.0013 + rnd() * 0.0011,
+      phase: rnd() * Math.PI * 2,
+      width: 8 + rnd() * 6,
+      hue: i % 2 === 0 ? '90,60,170' : '40,30,110'
+    });
+  }
+
+  function depthFor(shaft, t) {
+    return shaft.distanceBase + Math.sin(t * shaft.swaySpeed + shaft.phase) * shaft.swayRange;
+  }
+
+  function shaftOpacityForDepth(depth) {
+    var v = Math.exp(-LIGHT_SHAFT_DECAY * depth) * MAX_OPACITY;
+    return Math.max(0, Math.min(MAX_OPACITY, v));
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(t) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+
+    ctx.fillStyle = 'rgba(60,40,120,.55)';
+    ctx.beginPath();
+    ctx.arc(SOURCE_X * sx, SOURCE_Y * sy, 10 * sx, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < shafts.length; i += 1) {
+      var shaft = shafts[i];
+      var depth = depthFor(shaft, t);
+      var op = shaftOpacityForDepth(depth);
+      var angle = shaft.angleBase + Math.sin(t * shaft.swaySpeed * 0.7 + shaft.phase) * 0.13;
+      var length = 118 + depth * 6;
+      var endX = SOURCE_X + Math.sin(angle) * length;
+      var endY = SOURCE_Y + Math.cos(angle) * length;
+
+      var grad = ctx.createLinearGradient(SOURCE_X * sx, SOURCE_Y * sy, endX * sx, endY * sy);
+      grad.addColorStop(0, 'rgba(' + shaft.hue + ',' + op + ')');
+      grad.addColorStop(1, 'rgba(' + shaft.hue + ',0)');
+
+      var perpX = Math.cos(angle) * shaft.width;
+      var perpY = -Math.sin(angle) * shaft.width;
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo((SOURCE_X - perpX * 0.15) * sx, (SOURCE_Y - perpY * 0.15) * sy);
+      ctx.lineTo((SOURCE_X + perpX * 0.15) * sx, (SOURCE_Y + perpY * 0.15) * sy);
+      ctx.lineTo((endX + perpX) * sx, (endY + perpY) * sy);
+      ctx.lineTo((endX - perpX) * sx, (endY - perpY) * sy);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var warmSteps = reduce ? 0 : 120;
+  for (var w = 0; w < warmSteps; w += 1) elapsed += 20;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      drawScene(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

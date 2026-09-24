@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>중력·바닥 반발·공끼리 탄성 충돌·포인터 밀어내기를 한 장면에 합쳐, 공들이 떨어지고 튕기고 부딪히고 흩어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot" tabindex="0">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">중력·바닥 반발·공끼리 탄성 충돌·포인터 밀어내기를 한 장면에 합쳐, 공들이 떨어지고 튕기고 부딪히고 흩어진다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 앞선 세 항목의 계산을 한 장면에 합성한다 — ①매 스텝 HERO_GRAVITY 로 속도
+  // 적분(항목 02) ②포인터 반경 안이면 거리 반비례 힘으로 밀어냄(항목 05) ③위치 적분
+  // 뒤 벽·바닥에서 HERO_WALL_RESTITUTION 으로 반사, 공끼리는 질량비 임펄스로 탄성
+  // 충돌(항목 01) 한다. 상수 이름을 HERO_ 접두사로 통일해 세 계산이 한 루프 안에서
+  // 섞여도 출처를 구분할 수 있게 했다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var HERO_GRAVITY = 620;
+  var HERO_RESTITUTION = 0.78;
+  var HERO_WALL_RESTITUTION = 0.6;
+  var HERO_POINTER_REPEL_RADIUS = 78;
+  var HERO_POINTER_FORCE = 3600;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427091);
+
+  var COLORS = ['#6ec8ff', '#4cd4a6', '#b9a0ff', '#ff9ebb', '#ffcf7a'];
+  var RADII = [12, 15, 18, 13, 16];
+  var balls = [];
+  function initBalls() {
+    balls = [];
+    for (var i = 0; i < RADII.length; i += 1) {
+      var r = RADII[i];
+      balls.push({
+        x: 40 + i * ((CALC_W - 80) / (RADII.length - 1)),
+        y: 20 + rand() * 40,
+        vx: (rand() - 0.5) * 60,
+        vy: 0,
+        r: r, mass: r,
+        color: COLORS[i],
+        squash: 0
+      });
+    }
+  }
+  initBalls();
+
+  var pointer = { x: CALC_W * 0.5, y: CALC_H * 0.35 };
+  var pointerActive = false;
+  var impacts = [];
+
+  function demoPointerPos(t) {
+    var tt = t / 1000;
+    return {
+      x: CALC_W * 0.5 + Math.cos(tt * 0.9) * (CALC_W * 0.32),
+      y: CALC_H * 0.38 + Math.sin(tt * 1.3) * (CALC_H * 0.2)
+    };
+  }
+
+  function resolvePair(a, b, nowMs) {
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var dist = Math.hypot(dx, dy);
+    var minDist = a.r + b.r;
+    if (dist === 0 || dist >= minDist) return;
+    var nx = dx / dist, ny = dy / dist;
+    var overlap = minDist - dist;
+    var totalMass = a.mass + b.mass;
+    a.x -= nx * overlap * (b.mass / totalMass);
+    a.y -= ny * overlap * (b.mass / totalMass);
+    b.x += nx * overlap * (a.mass / totalMass);
+    b.y += ny * overlap * (a.mass / totalMass);
+    var rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+    var velAlongNormal = rvx * nx + rvy * ny;
+    if (velAlongNormal > 0) return;
+    var j = -(1 + HERO_RESTITUTION) * velAlongNormal / (1 / a.mass + 1 / b.mass);
+    var ix = j * nx, iy = j * ny;
+    a.vx -= ix / a.mass; a.vy -= iy / a.mass;
+    b.vx += ix / b.mass; b.vy += iy / b.mass;
+    var strength = Math.min(1, Math.abs(velAlongNormal) / 300);
+    a.squash = Math.max(a.squash, strength);
+    b.squash = Math.max(b.squash, strength);
+    impacts.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, born: nowMs, strength: strength });
+  }
+
+  function stepSim(dtMs, nowMs, px, py) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      b.vy += HERO_GRAVITY * dtS;
+      var dx = b.x - px, dy = b.y - py;
+      var dist = Math.hypot(dx, dy) || 0.001;
+      if (dist < HERO_POINTER_REPEL_RADIUS) {
+        var force = HERO_POINTER_FORCE * (1 - dist / HERO_POINTER_REPEL_RADIUS) / dist;
+        b.vx += dx * force * dtS;
+        b.vy += dy * force * dtS;
+      }
+      b.x += b.vx * dtS;
+      b.y += b.vy * dtS;
+      var hit = false;
+      if (b.x - b.r < 0) { b.x = b.r; b.vx = -b.vx * HERO_WALL_RESTITUTION; hit = true; }
+      if (b.x + b.r > CALC_W) { b.x = CALC_W - b.r; b.vx = -b.vx * HERO_WALL_RESTITUTION; hit = true; }
+      if (b.y - b.r < 0) { b.y = b.r; b.vy = -b.vy * HERO_WALL_RESTITUTION; hit = true; }
+      if (b.y + b.r > CALC_H) {
+        b.y = CALC_H - b.r;
+        b.vy = -b.vy * HERO_WALL_RESTITUTION;
+        if (Math.abs(b.vy) < 24) b.vy = 0;
+        hit = true;
+      }
+      if (hit) b.squash = Math.max(b.squash, Math.min(0.75, Math.hypot(b.vx, b.vy) / 300));
+      b.squash = Math.max(0, b.squash - dtS * 3.2);
+    }
+    for (var a = 0; a < balls.length; a += 1) {
+      for (var c = a + 1; c < balls.length; c += 1) resolvePair(balls[a], balls[c], nowMs);
+    }
+    var live = [];
+    for (var k = 0; k < impacts.length; k += 1) { if (nowMs - impacts[k].born < 240) live.push(impacts[k]); }
+    impacts = live;
+  }
+
+  function draw(px, py) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.fillStyle = 'rgba(23,20,26,0.22)';
+    ctx.fillRect(0, 0, cw, ch);
+    for (var i = 0; i < impacts.length; i += 1) {
+      var im = impacts[i];
+      ctx.beginPath();
+      ctx.arc(im.x * sx, im.y * sy, (6 + im.strength * 14) * ((sx + sy) / 2), 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (im.strength * 0.4) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    for (var j = 0; j < balls.length; j += 1) {
+      var b = balls[j];
+      var ppx = b.x * sx, ppy = b.y * sy, pr = b.r * ((sx + sy) / 2);
+      var shf = Math.max(0, 1 - (CALC_H - b.r - b.y) / 110);
+      ctx.beginPath();
+      ctx.ellipse(ppx, (CALC_H - 3) * sy, pr * (0.9 + shf * 0.3), pr * 0.22, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,' + (0.1 + shf * 0.14) + ')';
+      ctx.fill();
+      var sqX = 1 + b.squash * 0.45, sqY = 1 - b.squash * 0.32;
+      ctx.save();
+      ctx.translate(ppx, ppy);
+      ctx.scale(sqX, sqY);
+      ctx.beginPath();
+      ctx.arc(0, 0, pr, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.beginPath();
+    ctx.arc(px * sx, py * sy, 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fill();
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(pointer.x, pointer.y);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  function toCalc(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var nx = (clientX - rect.left) / rect.width;
+    var ny = (clientY - rect.top) / rect.height;
+    return { x: Math.max(0, Math.min(CALC_W, nx * CALC_W)), y: Math.max(0, Math.min(CALC_H, ny * CALC_H)) };
+  }
+
+  function onRealPointer(cx, cy) {
+    pointerActive = true;
+    root.classList.remove('is-demo');
+    var p = toCalc(cx, cy);
+    pointer.x = p.x; pointer.y = p.y;
+    if (reduce) { stepSim(16, elapsed, pointer.x, pointer.y); draw(pointer.x, pointer.y); }
+  }
+  canvas.addEventListener('mousemove', function (e) { onRealPointer(e.clientX, e.clientY); });
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches && e.touches[0]) onRealPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+
+  root.addEventListener('keydown', function (e) {
+    var step = 14;
+    var moved = true;
+    if (e.key === 'ArrowLeft') pointer.x -= step;
+    else if (e.key === 'ArrowRight') pointer.x += step;
+    else if (e.key === 'ArrowUp') pointer.y -= step;
+    else if (e.key === 'ArrowDown') pointer.y += step;
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      root.classList.remove('is-demo');
+      pointer.x = Math.max(0, Math.min(CALC_W, pointer.x));
+      pointer.y = Math.max(0, Math.min(CALC_H, pointer.y));
+      if (reduce) { stepSim(16, elapsed, pointer.x, pointer.y); draw(pointer.x, pointer.y); }
+    }
+  });
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  var cycleStart = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        var pp = pointerActive ? pointer : demoPointerPos(elapsed);
+        if (!pointerActive) { pointer.x = pp.x; pointer.y = pp.y; }
+        stepSim(FIXED_DT, elapsed, pointer.x, pointer.y);
+        if (elapsed - cycleStart > 2600) { cycleStart = elapsed; initBalls(); }
+        acc -= FIXED_DT;
+      }
+      draw(pointer.x, pointer.y);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(pointer.x, pointer.y);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grid-magnet drag: the cell pulls it in once it's within range — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gm is-demo" id="gm">
+  <div class="gm__grid" id="gmGrid">
+    <div class="gm__cell"></div>
+    <div class="gm__cell"></div>
+    <div class="gm__cell"></div>
+    <div class="gm__cell"></div>
+    <div class="gm__cell"></div>
+    <div class="gm__cell"></div>
+  </div>
+  <div class="gm__tray">
+    <button type="button" class="gm__icon" id="gmIcon" aria-label="An icon you drag onto a grid cell. Press Enter to grab, arrow keys to move, Enter again to drop"></button>
+  </div>
+  <p class="gm__caption" id="gmCaption">Drop it near a cell and it snaps in like a magnet</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 드래그 중인 아이콘 중심과 각 격자 칸 중심 사이의 거리를 매 프레임 계산해
+  // GRID_MAGNET_SNAP_PX 안으로 들어오면 목표 위치를 칸 중심으로 섞어(당김) 자석처럼
+  // 붙이고, 손을 떼는 순간엔 감쇠 스프링으로 정확히 칸 중심(또는 원래 자리)에 정착시킨다.
+  var root = document.getElementById('gm');
+  var grid = document.getElementById('gmGrid');
+  var icon = document.getElementById('gmIcon');
+  var caption = document.getElementById('gmCaption');
+  var cells = Array.prototype.slice.call(grid.querySelectorAll('.gm__cell'));
+
+  var GRID_MAGNET_SNAP_PX = 24;
+  var KEY_STEP_PX = 16;
+  var SPRING_STIFFNESS = 180;
+  var SPRING_DAMPING = 18;
+
+  var pos = { x: 0, y: 0 };
+  var vel = { x: 0, y: 0 };
+  var settleTarget = null;
+  var settling = false;
+  var grabbed = false;
+  var pointerStart = null;
+  var startPos = null;
+  var targetCell = null;
+
+  function applyPos() {
+    icon.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + pos.y.toFixed(1) + 'px)';
+  }
+
+  function nearestCell() {
+    var r = icon.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    var best = null, bestD = Infinity, bestOffset = null;
+    cells.forEach(function (cell) {
+      var cr = cell.getBoundingClientRect();
+      var ccx = cr.left + cr.width / 2, ccy = cr.top + cr.height / 2;
+      var d = Math.hypot(cx - ccx, cy - ccy);
+      if (d < bestD) {
+        bestD = d; best = cell;
+        bestOffset = { x: pos.x + (ccx - cx), y: pos.y + (ccy - cy) };
+      }
+    });
+    return { cell: best, dist: bestD, offset: bestOffset };
+  }
+
+  function updateMagnetHighlight(rawX, rawY) {
+    var near = nearestCell();
+    cells.forEach(function (c) { c.classList.remove('is-target'); });
+    if (near.dist < GRID_MAGNET_SNAP_PX) {
+      near.cell.classList.add('is-target');
+      targetCell = near;
+      var pull = Math.max(0, 1 - near.dist / GRID_MAGNET_SNAP_PX) * 0.55;
+      pos.x = rawX + (near.offset.x - rawX) * pull;
+      pos.y = rawY + (near.offset.y - rawY) * pull;
+    } else {
+      targetCell = null;
+      pos.x = rawX; pos.y = rawY;
+    }
+    applyPos();
+  }
+
+  var raf = 0, lastTs = null;
+  function settleTick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.032);
+    lastTs = ts;
+    var fx = (settleTarget.x - pos.x) * SPRING_STIFFNESS - vel.x * SPRING_DAMPING;
+    var fy = (settleTarget.y - pos.y) * SPRING_STIFFNESS - vel.y * SPRING_DAMPING;
+    vel.x += fx * dt; vel.y += fy * dt;
+    pos.x += vel.x * dt; pos.y += vel.y * dt;
+    applyPos();
+    var rest = Math.hypot(vel.x, vel.y) < 2 && Math.hypot(settleTarget.x - pos.x, settleTarget.y - pos.y) < 0.6;
+    if (!rest) { raf = requestAnimationFrame(settleTick); return; }
+    pos.x = settleTarget.x; pos.y = settleTarget.y; vel.x = 0; vel.y = 0;
+    applyPos();
+    settling = false;
+    lastTs = null;
+  }
+
+  function springTo(target) {
+    cancelAnimationFrame(raf);
+    settleTarget = target;
+    settling = true;
+    lastTs = null;
+    raf = requestAnimationFrame(settleTick);
+  }
+
+  function releaseDrag() {
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var near = nearestCell();
+    cells.forEach(function (c) { c.classList.remove('is-target'); });
+    var goal = (near.dist < GRID_MAGNET_SNAP_PX) ? near.offset : { x: 0, y: 0 };
+    if (near.dist < GRID_MAGNET_SNAP_PX) {
+      caption.textContent = 'Snapped into the cell';
+      root.classList.add('is-snapped');
+    } else {
+      caption.textContent = 'Drop it near a cell and it snaps in like a magnet';
+      root.classList.remove('is-snapped');
+    }
+    if (reduce) {
+      pos.x = goal.x; pos.y = goal.y; applyPos();
+    } else {
+      springTo(goal);
+    }
+  }
+
+  function beginDrag(clientX, clientY) {
+    cancelAnimationFrame(raf);
+    settling = false;
+    pointerStart = { x: clientX, y: clientY };
+    startPos = { x: pos.x, y: pos.y };
+    root.classList.add('is-dragging');
+  }
+
+  function moveDrag(clientX, clientY) {
+    var rawX = startPos.x + (clientX - pointerStart.x);
+    var rawY = startPos.y + (clientY - pointerStart.y);
+    updateMagnetHighlight(rawX, rawY);
+  }
+
+  function endDrag() {
+    root.classList.remove('is-dragging');
+    releaseDrag();
+  }
+
+  icon.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    icon.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointermove', function (e) {
+    if (!pointerStart) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointerup', function (e) {
+    if (!pointerStart) return;
+    pointerStart = null;
+    endDrag();
+    e.preventDefault();
+  });
+
+  icon.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!grabbed) {
+        grabbed = true;
+        cancelAnimationFrame(raf);
+        settling = false;
+        icon.classList.add('is-grabbed');
+        caption.textContent = 'Grabbed. Move with arrow keys, press Enter to drop';
+      } else {
+        grabbed = false;
+        icon.classList.remove('is-grabbed');
+        releaseDrag();
+      }
+      return;
+    }
+    if (!grabbed) return;
+    var dx = 0, dy = 0;
+    if (e.key === 'ArrowLeft') dx = -KEY_STEP_PX;
+    else if (e.key === 'ArrowRight') dx = KEY_STEP_PX;
+    else if (e.key === 'ArrowUp') dy = -KEY_STEP_PX;
+    else if (e.key === 'ArrowDown') dy = KEY_STEP_PX;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      icon.classList.remove('is-grabbed');
+      springTo({ x: 0, y: 0 });
+      caption.textContent = 'Drop it near a cell and it snaps in like a magnet';
+      return;
+    } else { return; }
+    e.preventDefault();
+    updateMagnetHighlight(pos.x + dx, pos.y + dy);
+  });
+
+  // is-demo 자동 시연 — 실제 드래그와 같은 begin/move/end 함수를 가상 좌표로 호출한다
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var iconRect0 = icon.getBoundingClientRect();
+    var originX = iconRect0.left + iconRect0.width / 2;
+    var originY = iconRect0.top + iconRect0.height / 2;
+    var cellRect0 = cells[1].getBoundingClientRect();
+    var goalX = cellRect0.left + cellRect0.width / 2;
+    var goalY = cellRect0.top + cellRect0.height / 2;
+
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 900) {
+        var p = Math.min(1, (t - 200) / 700);
+        var ease = 1 - Math.pow(1 - p, 3);
+        var cx = originX + (goalX - originX) * ease;
+        var cy = originY + (goalY - originY) * ease;
+        if (t < 220) beginDrag(originX, originY);
+        moveDrag(cx, cy);
+      } else if (t < 950) {
+        // 짧게 머물러 자석 당김을 보여준다
+      } else if (t < 970) {
+        endDrag();
+      } else if (t < 1500) {
+        // 정착 스프링 관찰
+      } else if (t < 2200) {
+        var p2 = Math.min(1, (t - 1500) / 600);
+        var ease2 = 1 - Math.pow(1 - p2, 3);
+        var cx2 = goalX + (originX - goalX) * ease2 * 0.7;
+        var cy2 = goalY + (originY - goalY) * ease2 * 0.7;
+        if (t < 1520) beginDrag(goalX, goalY);
+        moveDrag(cx2, cy2);
+      } else if (t < 2260) {
+        endDrag();
+      } else {
+        demoStart = ts - 60; // 루프
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

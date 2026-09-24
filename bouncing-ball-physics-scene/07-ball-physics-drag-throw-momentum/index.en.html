@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Velocity is computed from how far the ball moved over the last few frames while held, so releasing it throws it at that exact speed, and it reflects off any wall it hits. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot" tabindex="0">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">Velocity is computed from how far the ball moved over the last few frames while held, so releasing it throws it at that exact speed, and it reflects off any wall it hits.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 드래그 중 포인터 위치·시각을 최근 몇 개만 버퍼에 담아 두고, 놓는 순간 버퍼의
+  // 처음-마지막 샘플로 속도(이동거리/경과시간)를 계산해 그 속도로 공을 던진다(스냅샷
+  // 한 프레임 차분이 아니라 최근 구간 평균이라 손떨림에 덜 흔들린다). 던져진 공은
+  // 공기 저항으로 서서히 느려지며 벽에 부딪힐 때마다 WALL_BOUNCE 만큼 반사·감쇠한다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var WALL_BOUNCE = 0.72;
+  var AIR_DRAG = 0.55;
+  var SAMPLE_WINDOW_MS = 140;
+  var KEY_IMPULSE = 130;
+  var THROW_IMPULSE = 260;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427071);
+
+  var ball = { x: CALC_W * 0.5, y: CALC_H * 0.5, vx: 90, vy: -60, r: 18, color: '#ffcf7a', squash: 0, heading: -0.9 };
+  var dragging = false;
+  var samples = [];
+
+  function recordSample(x, y, t) {
+    samples.push({ x: x, y: y, t: t });
+    while (samples.length && t - samples[0].t > SAMPLE_WINDOW_MS) samples.shift();
+  }
+
+  function releaseVelocity(nowT) {
+    if (samples.length < 2) return { vx: 0, vy: 0 };
+    var a = samples[0], b = samples[samples.length - 1];
+    var dt = Math.max(16, b.t - a.t) / 1000;
+    return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt };
+  }
+
+  function throwBall(vx, vy) {
+    ball.vx = vx; ball.vy = vy;
+    if (Math.hypot(vx, vy) > 1) ball.heading = Math.atan2(vy, vx);
+  }
+
+  function stepSim(dtMs) {
+    var dtS = dtMs / 1000;
+    if (dragging) return;
+    ball.vx -= ball.vx * AIR_DRAG * dtS;
+    ball.vy -= ball.vy * AIR_DRAG * dtS;
+    ball.x += ball.vx * dtS;
+    ball.y += ball.vy * dtS;
+    var hit = false;
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx = -ball.vx * WALL_BOUNCE; hit = true; }
+    if (ball.x + ball.r > CALC_W) { ball.x = CALC_W - ball.r; ball.vx = -ball.vx * WALL_BOUNCE; hit = true; }
+    if (ball.y - ball.r < 0) { ball.y = ball.r; ball.vy = -ball.vy * WALL_BOUNCE; hit = true; }
+    if (ball.y + ball.r > CALC_H) { ball.y = CALC_H - ball.r; ball.vy = -ball.vy * WALL_BOUNCE; hit = true; }
+    if (hit) ball.squash = Math.min(1, Math.hypot(ball.vx, ball.vy) / 260 + 0.2);
+    ball.squash = Math.max(0, ball.squash - dtS * 3.4);
+  }
+
+  function draw() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.fillStyle = 'rgba(255,110,46,0.24)';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(2, 2, cw - 4, ch - 4);
+    var px = ball.x * sx, py = ball.y * sy, pr = ball.r * ((sx + sy) / 2);
+    var speed = Math.hypot(ball.vx, ball.vy);
+    var stretch = dragging ? 1.08 : 1 + Math.min(0.4, speed / 600);
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(ball.heading);
+    ctx.scale(stretch, (1 - ball.squash * 0.3) / stretch);
+    ctx.beginPath();
+    ctx.arc(0, 0, pr, 0, Math.PI * 2);
+    ctx.fillStyle = ball.color;
+    ctx.fill();
+    ctx.restore();
+    if (dragging) {
+      ctx.beginPath();
+      ctx.arc(px, py, pr + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  function toCalc(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var nx = (clientX - rect.left) / rect.width;
+    var ny = (clientY - rect.top) / rect.height;
+    return { x: nx * CALC_W, y: ny * CALC_H };
+  }
+
+  function startDrag(cx, cy) {
+    root.classList.remove('is-demo');
+    var p = toCalc(cx, cy);
+    if (Math.hypot(p.x - ball.x, p.y - ball.y) > ball.r * 2.2) return;
+    dragging = true;
+    samples = [];
+    recordSample(p.x, p.y, performance.now());
+  }
+  function moveDrag(cx, cy) {
+    if (!dragging) return;
+    var p = toCalc(cx, cy);
+    ball.x = Math.max(ball.r, Math.min(CALC_W - ball.r, p.x));
+    ball.y = Math.max(ball.r, Math.min(CALC_H - ball.r, p.y));
+    recordSample(ball.x, ball.y, performance.now());
+    if (reduce) draw();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    var v = releaseVelocity(performance.now());
+    var mag = Math.hypot(v.vx, v.vy);
+    var maxSpeed = 420;
+    if (mag > maxSpeed) { v.vx = v.vx / mag * maxSpeed; v.vy = v.vy / mag * maxSpeed; }
+    throwBall(v.vx, v.vy);
+    if (reduce) { stepSim(16); draw(); }
+  }
+
+  canvas.addEventListener('mousedown', function (e) { startDrag(e.clientX, e.clientY); });
+  window.addEventListener('mousemove', function (e) { moveDrag(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', endDrag);
+  canvas.addEventListener('touchstart', function (e) {
+    if (e.touches && e.touches[0]) startDrag(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches && e.touches[0]) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  canvas.addEventListener('touchend', endDrag);
+
+  root.addEventListener('keydown', function (e) {
+    var handled = true;
+    if (e.key === 'ArrowLeft') throwBall(ball.vx - KEY_IMPULSE, ball.vy);
+    else if (e.key === 'ArrowRight') throwBall(ball.vx + KEY_IMPULSE, ball.vy);
+    else if (e.key === 'ArrowUp') throwBall(ball.vx, ball.vy - KEY_IMPULSE);
+    else if (e.key === 'ArrowDown') throwBall(ball.vx, ball.vy + KEY_IMPULSE);
+    else if (e.key === ' ' || e.code === 'Space') {
+      var ang = ball.heading;
+      throwBall(Math.cos(ang) * THROW_IMPULSE, Math.sin(ang) * THROW_IMPULSE);
+    } else handled = false;
+    if (handled) {
+      e.preventDefault();
+      root.classList.remove('is-demo');
+      if (reduce) { stepSim(16); draw(); }
+    }
+  });
+
+  // 자동재생: 가상 드래그 경로를 샘플로 기록한 뒤 같은 releaseVelocity/throwBall 을
+  // 호출한다 — 실제 입력과 동일한 함수 경로다.
+  var demoState = 'idle';
+  var demoT0 = 0;
+  function demoDrive(nowMs) {
+    var cyc = nowMs % 1600;
+    if (cyc < 480) {
+      if (demoState !== 'drag') { demoState = 'drag'; dragging = true; samples = []; demoT0 = nowMs; }
+      var f = cyc / 480;
+      var sx0 = CALC_W * 0.28, sy0 = CALC_H * 0.7;
+      var ex0 = CALC_W * 0.62, ey0 = CALC_H * 0.32;
+      ball.x = sx0 + (ex0 - sx0) * f;
+      ball.y = sy0 + (ey0 - sy0) * f;
+      recordSample(ball.x, ball.y, nowMs);
+    } else if (demoState !== 'thrown') {
+      demoState = 'thrown';
+      dragging = false;
+      var v = releaseVelocity(nowMs);
+      var mag = Math.hypot(v.vx, v.vy) || 1;
+      var target = 300;
+      throwBall(v.vx / mag * target, v.vy / mag * target);
+    }
+  }
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        if (root.classList.contains('is-demo')) demoDrive(elapsed);
+        stepSim(FIXED_DT);
+        acc -= FIXED_DT;
+      }
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

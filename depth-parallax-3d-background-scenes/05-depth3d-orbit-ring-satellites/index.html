@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>작은 도형들의 위치를 구면 좌표식으로 매 프레임 계산하고 z값 순서로 다시 그려, 포인터 위치에 따라 고리 전체가 기울면서도 앞뒤 가림이 맞는다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">작은 도형들의 위치를 구면 좌표식으로 매 프레임 계산하고 z값 순서로 다시 그려, 포인터 위치에 따라 고리 전체가 기울면서도 앞뒤 가림이 맞는다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 위성마다 satelliteAngleAt 로 궤도각을 구해 고리 평면(XZ) 위 좌표를 얻은 뒤, 포인터로
+  // 정해지는 tiltDeg(최대 ORBIT_TILT_MAX_DEG) 만큼 X축 회전을 적용해 y·z 를 다시 계산한다.
+  // 회전 뒤 z값(깊이) 기준으로 zSortSatellites 가 매 프레임 다시 정렬해 뒤에서 앞 순서로 그려야
+  // 고리가 기울어도 앞뒤 가림이 맞는다(화가 알고리즘).
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var CX = CALC_W * 0.5, CY = CALC_H * 0.52;
+  var RING_RADIUS = 40;
+  var ORBIT_TILT_MAX_DEG = 18;
+  var SAT_COUNT = 9;
+  var ANGULAR_SPEED = 0.00062;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429051);
+  var palette = ['#6ec8ff', '#b9a0ff', '#ff9ebb', '#4cd4a6', '#ffd23f'];
+
+  var satellites = [];
+  for (var i = 0; i < SAT_COUNT; i += 1) {
+    satellites.push({
+      baseAngle: (Math.PI * 2 / SAT_COUNT) * i + rnd() * 0.3,
+      radiusScale: 0.72 + rnd() * 0.32,
+      size: 3.2 + rnd() * 3.4,
+      color: palette[i % palette.length]
+    });
+  }
+
+  function satelliteAngleAt(sat, t) {
+    return sat.baseAngle + t * ANGULAR_SPEED;
+  }
+
+  var tiltDeg = 0, azimuthOffset = 0;
+  var pointerActive = false;
+
+  function computeTransformed(sat, t) {
+    var ang = satelliteAngleAt(sat, t) + azimuthOffset;
+    var r = RING_RADIUS * sat.radiusScale;
+    var lx = Math.cos(ang) * r;
+    var lz = Math.sin(ang) * r;
+    var tiltRad = tiltDeg * Math.PI / 180;
+    var ry = -lz * Math.sin(tiltRad);
+    var rz = lz * Math.cos(tiltRad);
+    return { x: lx, y: ry, z: rz };
+  }
+
+  function zSortSatellites(list, t) {
+    var withZ = list.map(function (sat) {
+      var p = computeTransformed(sat, t);
+      return { sat: sat, p: p };
+    });
+    withZ.sort(function (a, b) { return a.p.z - b.p.z; });
+    return withZ;
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var savg = (sx + sy) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+
+    ctx.fillStyle = 'rgba(150,170,255,.14)';
+    ctx.beginPath();
+    ctx.arc(CX * sx, CY * sy, RING_RADIUS * 0.5 * savg, 0, Math.PI * 2);
+    ctx.fill();
+
+    var ordered = zSortSatellites(satellites, nowMs);
+    for (var i = 0; i < ordered.length; i += 1) {
+      var p = ordered[i].p;
+      var sat = ordered[i].sat;
+      var perspScale = Math.max(0.55, Math.min(1.5, 1 + p.z / RING_RADIUS * 0.45));
+      var alpha = Math.max(0.4, Math.min(1, 0.62 + p.z / RING_RADIUS * 0.4));
+      var dx = (CX + p.x) * sx, dy = (CY + p.y) * sy;
+      var dr = sat.size * perspScale * savg;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = sat.color;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    var r = wrap.getBoundingClientRect();
+    var ny = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    var nx = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    tiltDeg = Math.max(-ORBIT_TILT_MAX_DEG, Math.min(ORBIT_TILT_MAX_DEG, ny * ORBIT_TILT_MAX_DEG));
+    azimuthOffset = nx * 0.9;
+    if (reduce) drawScene(elapsed);
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowUp') tiltDeg = Math.max(-ORBIT_TILT_MAX_DEG, tiltDeg - 3);
+    else if (e.key === 'ArrowDown') tiltDeg = Math.min(ORBIT_TILT_MAX_DEG, tiltDeg + 3);
+    else if (e.key === 'ArrowLeft') azimuthOffset -= 0.16;
+    else if (e.key === 'ArrowRight') azimuthOffset += 0.16;
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      if (reduce) drawScene(elapsed);
+    }
+  });
+
+  function virtualTiltAt(t) {
+    return Math.sin(t * 0.00058) * ORBIT_TILT_MAX_DEG;
+  }
+
+  var warmSteps = reduce ? 0 : 100;
+  for (var w = 0; w < warmSteps; w += 1) {
+    elapsed += 20;
+    if (!pointerActive) tiltDeg = virtualTiltAt(elapsed);
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      if (!pointerActive) tiltDeg = virtualTiltAt(elapsed);
+      drawScene(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

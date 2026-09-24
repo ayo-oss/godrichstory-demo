@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>여러 겹의 흐린 그라데이션 덩어리에 서로 다른 이동 주기를 줘 겹쳐 그리고, 가까운 층일수록 더 크고 빠르게, 먼 층일수록 작고 느리게 흐른다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">여러 겹의 흐린 그라데이션 덩어리에 서로 다른 이동 주기를 줘 겹쳐 그리고, 가까운 층일수록 더 크고 빠르게, 먼 층일수록 작고 느리게 흐른다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: meshLayers 배열의 층마다 이동 주기(period)·반경·이동 폭을 다르게 줘 Lissajous 곡선으로
+  // 흐르게 한다 — 가까운 층(인덱스 0)은 MESH_DRIFT_PERIOD_BASE_MS 그대로 짧게·크게·빠르게, 먼 층일수록
+  // 주기를 늘리고 반경·이동 폭을 줄여 작고 느리게 흐르는 것처럼 보이게 한다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var MESH_DRIFT_PERIOD_BASE_MS = 3200;
+  var MESH_LAYER_COUNT = 5;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429031);
+  var palette = ['#ff9ebb', '#ffb37a', '#ffd23f', '#ff8a5c', '#ffcf99'];
+
+  var meshLayers = [];
+  for (var i = 0; i < MESH_LAYER_COUNT; i += 1) {
+    var depthIndex = i;
+    meshLayers.push({
+      depthIndex: depthIndex,
+      period: MESH_DRIFT_PERIOD_BASE_MS * (1 + depthIndex * 0.62),
+      centerX: 20 + rnd() * (CALC_W - 40),
+      centerY: 18 + rnd() * (CALC_H - 36),
+      reachPx: Math.max(10, 42 - depthIndex * 6),
+      radius: Math.max(14, 46 - depthIndex * 7),
+      phaseX: rnd() * Math.PI * 2,
+      phaseY: rnd() * Math.PI * 2,
+      color: palette[i % palette.length]
+    });
+  }
+  meshLayers.sort(function (a, b) { return b.depthIndex - a.depthIndex; });
+
+  function blobPositionAt(layer, t) {
+    var ax = Math.sin(t / layer.period * Math.PI * 2 + layer.phaseX) * layer.reachPx;
+    var ay = Math.cos(t / layer.period * Math.PI * 2.3 + layer.phaseY) * layer.reachPx * 0.7;
+    return { x: layer.centerX + ax, y: layer.centerY + ay };
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var savg = (sx + sy) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < meshLayers.length; i += 1) {
+      var layer = meshLayers[i];
+      var pos = blobPositionAt(layer, nowMs);
+      var alpha = Math.max(0.3, 0.72 - layer.depthIndex * 0.1);
+      var dx = pos.x * sx, dy = pos.y * sy, dr = layer.radius * savg;
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, layer.color);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var warmSteps = reduce ? 0 : 90;
+  for (var w = 0; w < warmSteps; w += 1) elapsed += 20;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      drawScene(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

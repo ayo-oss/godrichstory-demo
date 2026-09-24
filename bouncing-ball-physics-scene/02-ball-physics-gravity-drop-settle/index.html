@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>매 프레임 아래 방향으로 속도를 더해 공을 떨어뜨리고, 바닥에 닿을 때마다 속도를 줄여 나가 결국 공이 멈춰 눕는다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">매 프레임 아래 방향으로 속도를 더해 공을 떨어뜨리고, 바닥에 닿을 때마다 속도를 줄여 나가 결국 공이 멈춰 눕는다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 반고정 시간 스텝마다 속도에 GRAVITY * dt 를 더해 적분한다(오일러). 바닥에
+  // 닿으면 속도를 FLOOR_RESTITUTION 배로 줄여 되튕기고, 절대값이 SLEEP_THRESHOLD 보다
+  // 작아지면 움직임을 0으로 잠가 공이 멈춰 눕는다. 완전히 멈춘 뒤엔 일정 시간 뒤 같은
+  // 시퀀스를 처음부터 다시 시작해 2초 캡처창 안에 낙하-안정 사이클이 2회 들어온다.
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var GRAVITY = 900;
+  var FLOOR_RESTITUTION = 0.55;
+  var SLEEP_THRESHOLD = 26;
+  var SLEEP_HOLD_MS = 320;
+  var STAGE_BG = '255,247,230';
+  var REST_MS = 620;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427021);
+
+  var DROPS = [
+    { x: 0.22, r: 13, color: '#ff9ebb', delay: 0 },
+    { x: 0.5, r: 17, color: '#4cd4a6', delay: 200 },
+    { x: 0.78, r: 11, color: '#b9a0ff', delay: 420 }
+  ];
+
+  var balls = [];
+  function reset() {
+    balls = [];
+    for (var i = 0; i < DROPS.length; i += 1) {
+      var d = DROPS[i];
+      balls.push({
+        x0: CALC_W * d.x,
+        x: CALC_W * d.x,
+        y: 30,
+        vy: 0,
+        r: d.r,
+        color: d.color,
+        startAt: d.delay,
+        born: 0,
+        squash: 0,
+        settled: false
+      });
+    }
+    impacts = [];
+  }
+  var impacts = [];
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      if (nowMs < b.startAt) continue;
+      if (b.settled) {
+        b.squash = Math.max(0, b.squash - dtS * 6);
+        continue;
+      }
+      b.vy += GRAVITY * dtS;
+      b.y += b.vy * dtS;
+      var floor = CALC_H - b.r;
+      if (b.y >= floor) {
+        b.y = floor;
+        if (Math.abs(b.vy) < SLEEP_THRESHOLD) {
+          b.vy = 0;
+          b.settled = true;
+          b.squash = 0.5;
+          impacts.push({ x: b.x, y: floor, born: nowMs, strength: 0.35 });
+        } else {
+          impacts.push({ x: b.x, y: floor, born: nowMs, strength: Math.min(1, Math.abs(b.vy) / 320) });
+          b.squash = Math.max(b.squash, Math.min(0.85, Math.abs(b.vy) / 300));
+          b.vy = -b.vy * FLOOR_RESTITUTION;
+        }
+      }
+      b.squash = Math.max(0, b.squash - dtS * 3.5);
+    }
+    var live = [];
+    for (var k = 0; k < impacts.length; k += 1) {
+      if (nowMs - impacts[k].born < 300) live.push(impacts[k]);
+    }
+    impacts = live;
+  }
+
+  function allSettled() {
+    for (var i = 0; i < balls.length; i += 1) {
+      if (!balls[i].settled) return false;
+    }
+    return true;
+  }
+
+  function draw(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.strokeStyle = 'rgba(23,20,26,0.08)';
+    ctx.lineWidth = 1;
+    for (var gy = 0; gy < CALC_H; gy += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, gy * sy);
+      ctx.lineTo(cw, gy * sy);
+      ctx.stroke();
+    }
+    for (var i = 0; i < impacts.length; i += 1) {
+      var im = impacts[i];
+      var f = (nowMs - im.born) / 300;
+      var px = im.x * sx, py = im.y * sy;
+      var pr = (8 + f * 22) * ((sx + sy) / 2);
+      ctx.beginPath();
+      ctx.ellipse(px, py, pr, pr * 0.32, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(23,20,26,' + (im.strength * (1 - f) * 0.3) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    for (var j = 0; j < balls.length; j += 1) {
+      var b = balls[j];
+      if (nowMs < b.startAt) continue;
+      var px = b.x * sx, py = b.y * sy, pr = b.r * ((sx + sy) / 2);
+      var shf = Math.max(0, 1 - (CALC_H - b.r - b.y) / 120);
+      var shw = pr * (0.9 + shf * 0.4);
+      ctx.beginPath();
+      ctx.ellipse(px, (CALC_H - 4) * sy, shw, shw * 0.26, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(23,20,26,' + (0.10 + shf * 0.16) + ')';
+      ctx.fill();
+      var sqX = 1 + b.squash * 0.55;
+      var sqY = 1 - b.squash * 0.38;
+      ctx.save();
+      ctx.translate(px, py + pr * b.squash * 0.38);
+      ctx.scale(sqX, sqY);
+      ctx.beginPath();
+      ctx.arc(0, 0, pr, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      var hg = ctx.createRadialGradient(-pr * 0.3, -pr * 0.35, pr * 0.1, -pr * 0.3, -pr * 0.35, pr * 0.75);
+      hg.addColorStop(0, 'rgba(255,255,255,0.5)');
+      hg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = hg;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  reset();
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  var settledAt = null;
+  var cycle = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        stepSim(FIXED_DT, elapsed);
+        if (allSettled()) {
+          if (settledAt === null) settledAt = elapsed;
+          else if (elapsed - settledAt > REST_MS) {
+            settledAt = null;
+            cycle += 1;
+            elapsed = 0;
+            reset();
+          }
+        }
+        acc -= FIXED_DT;
+      }
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

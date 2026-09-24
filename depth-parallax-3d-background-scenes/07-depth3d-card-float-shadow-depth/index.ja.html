@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カードごとの浮遊高さの値を影のぼかし半径と薄さに変換し、高く浮くカードほど影は大きく薄く、低く浮くカードは影が濃く小さくなる — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">カードごとの浮遊高さの値を影のぼかし半径と薄さに変換し、高く浮くカードほど影は大きく薄く、低く浮くカードは影が濃く小さくなる</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: cardBobAt 이 카드마다 CARD_FLOAT_AMPLITUDE_PX 범위에서 뜬 높이값을 매 프레임 계산하고,
+  // shadowForHeight 가 그 높이값을 그림자의 흐림 반경·불투명도로 변환한다 — 높이 뜬 카드는 그림자
+  // 반경이 커지고 옅어지며, 낮게 뜬 카드는 반경이 작고 진해진다(속성 트윈이 아니라 매핑 계산).
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var CARD_FLOAT_AMPLITUDE_PX = 22;
+  var CARD_COUNT = 6;
+  var BASELINE_Y = CALC_H * 0.72;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429071);
+  var palette = ['#6ec8ff', '#b9a0ff', '#ff9ebb', '#4cd4a6', '#ffd23f', '#ffffff'];
+
+  var cards = [];
+  for (var i = 0; i < CARD_COUNT; i += 1) {
+    cards.push({
+      x: 18 + (CALC_W - 36) * (i / (CARD_COUNT - 1)),
+      w: 16, h: 22,
+      bobSpeed: 0.0011 + rnd() * 0.0009,
+      phase: rnd() * Math.PI * 2,
+      color: palette[i % palette.length]
+    });
+  }
+
+  function cardBobAt(card, t) {
+    return (Math.sin(t * card.bobSpeed + card.phase) * 0.5 + 0.5) * CARD_FLOAT_AMPLITUDE_PX;
+  }
+
+  function shadowForHeight(h) {
+    var norm = h / CARD_FLOAT_AMPLITUDE_PX;
+    return {
+      blur: 3 + norm * 13,
+      alpha: 0.4 - norm * 0.26,
+      scaleX: 1 + norm * 0.35
+    };
+  }
+
+  var elapsed = 0;
+  var cw = 480, ch = 300;
+
+  function drawScene(t) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+
+    for (var i = 0; i < cards.length; i += 1) {
+      var card = cards[i];
+      var h = cardBobAt(card, t);
+      var sh = shadowForHeight(h);
+
+      ctx.save();
+      ctx.filter = 'blur(' + (sh.blur * sx) + 'px)';
+      ctx.fillStyle = 'rgba(20,16,24,' + sh.alpha + ')';
+      ctx.beginPath();
+      ctx.ellipse(card.x * sx, BASELINE_Y * sy, card.w * sh.scaleX * 0.5 * sx, card.h * 0.16 * sy, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      var cardY = BASELINE_Y - card.h * 0.5 - h;
+      ctx.fillStyle = card.color;
+      var rx = card.x * sx - (card.w * 0.5) * sx;
+      var ry = cardY * sy - (card.h * 0.5) * sy;
+      var rw = card.w * sx, rh = card.h * sy;
+      var rad = 4 * sx;
+      ctx.beginPath();
+      ctx.moveTo(rx + rad, ry);
+      ctx.arcTo(rx + rw, ry, rx + rw, ry + rh, rad);
+      ctx.arcTo(rx + rw, ry + rh, rx, ry + rh, rad);
+      ctx.arcTo(rx, ry + rh, rx, ry, rad);
+      ctx.arcTo(rx, ry, rx + rw, ry, rad);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var warmSteps = reduce ? 0 : 90;
+  for (var w = 0; w < warmSteps; w += 1) elapsed += 20;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      drawScene(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

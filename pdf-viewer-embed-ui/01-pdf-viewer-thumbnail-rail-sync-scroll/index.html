@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>본문 영역이 뷰포트와 겹치는 비율을 매 프레임 계산해 가장 많이 보이는 페이지를 찾고, 썸네일 레일에서 그 페이지 칸이 자동으로 강조되며 가운데로 스크롤된다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvt is-demo" id="pvtRoot" tabindex="0">
+  <div class="pvt__rail" id="pvtRail"><div class="pvt__track" id="pvtTrack"></div></div>
+  <div class="pvt__doc" id="pvtDoc"></div>
+  <p class="pvt__badge" id="pvtBadge">1 / 6</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 각 페이지 요소가 문서 뷰포트와 겹치는 비율을 매 프레임 getBoundingClientRect 로 계산해
+  // 가장 많이 보이는 페이지를 찾는다(IntersectionObserver 대신 직접 계산). 그 페이지의 썸네일
+  // 위치를 레일 가운데로 lerp(관성 보간)로 이동시켜, 활성 칸이 부드럽게 따라온다.
+  var root = document.getElementById('pvtRoot');
+  var rail = document.getElementById('pvtRail');
+  var track = document.getElementById('pvtTrack');
+  var doc = document.getElementById('pvtDoc');
+  var badge = document.getElementById('pvtBadge');
+
+  var PAGE_COUNT = 6;
+  var RAIL_LERP = 0.18;
+  var LOOP_MS = 2000;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function makePages(seed, n) {
+    var rnd = seedRand(seed), pages = [];
+    for (var i = 0; i < n; i += 1) {
+      var lineCount = 4 + Math.floor(rnd() * 3), lines = [];
+      for (var j = 0; j < lineCount; j += 1) lines.push(46 + rnd() * 44);
+      pages.push({ n: i + 1, titleW: 34 + rnd() * 26, lines: lines, hasFig: rnd() < 0.4 });
+    }
+    return pages;
+  }
+  var pages = makePages(430011, PAGE_COUNT);
+
+  function pageHTML(p, mini) {
+    var tcls = mini ? 'pvt__miniTitle' : 'doc__title';
+    var lcls = mini ? 'pvt__miniLine' : 'doc__line';
+    var html = '<div class="' + tcls + '" style="width:' + p.titleW + '%"></div>';
+    var lines = mini ? p.lines.slice(0, 2) : p.lines;
+    for (var i = 0; i < lines.length; i += 1) html += '<div class="' + lcls + '" style="width:' + lines[i] + '%"></div>';
+    if (!mini && p.hasFig) html += '<div class="doc__fig"></div>';
+    return html;
+  }
+
+  var docEls = [], thumbEls = [];
+  for (var i = 0; i < pages.length; i += 1) {
+    var page = document.createElement('div');
+    page.className = 'doc__page';
+    page.innerHTML = pageHTML(pages[i], false);
+    doc.appendChild(page);
+    docEls.push(page);
+
+    var thumb = document.createElement('button');
+    thumb.type = 'button';
+    thumb.className = 'pvt__thumb';
+    thumb.setAttribute('aria-label', '페이지 ' + pages[i].n + '로 이동');
+    thumb.innerHTML = pageHTML(pages[i], true);
+    thumb.addEventListener('click', (function (idx) {
+      return function () { userActive = true; root.classList.remove('is-demo'); doc.scrollTop = docEls[idx].offsetTop - 6; };
+    })(i));
+    track.appendChild(thumb);
+    thumbEls.push(thumb);
+  }
+
+  var current = 0;
+  function visibleRatio(el, viewTop, viewH) {
+    var top = el.offsetTop, h = el.offsetHeight;
+    var lo = Math.max(top, viewTop), hi = Math.min(top + h, viewTop + viewH);
+    return Math.max(0, hi - lo) / h;
+  }
+  function computeCurrent() {
+    var viewTop = doc.scrollTop, viewH = doc.clientHeight, best = 0, bestR = -1;
+    for (var i = 0; i < docEls.length; i += 1) {
+      var r = visibleRatio(docEls[i], viewTop, viewH);
+      if (r > bestR) { bestR = r; best = i; }
+    }
+    if (best !== current) {
+      current = best;
+      for (var j = 0; j < thumbEls.length; j += 1) thumbEls[j].classList.toggle('pvt__thumb--active', j === current);
+      badge.textContent = (current + 1) + ' / ' + pages.length;
+    }
+  }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); } }
+  doc.addEventListener('scroll', computeCurrent);
+  doc.addEventListener('wheel', function () { markActive(); }, { passive: true });
+  doc.addEventListener('pointerdown', function () { markActive(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'PageDown' || e.key === 'PageUp') {
+      e.preventDefault(); markActive();
+      var next = e.key === 'ArrowDown' || e.key === 'PageDown' ? Math.min(current + 1, docEls.length - 1) : Math.max(current - 1, 0);
+      doc.scrollTop = docEls[next].offsetTop - 6;
+      computeCurrent();
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; }
+
+  function railTarget() {
+    var t = thumbEls[current];
+    return (rail.clientWidth / 2) - (t.offsetLeft + t.offsetWidth / 2);
+  }
+  function clampRail(v) {
+    var min = Math.min(0, rail.clientWidth - track.scrollWidth);
+    return Math.min(0, Math.max(min, v));
+  }
+  function autoScroll(elapsed) {
+    var max = doc.scrollHeight - doc.clientHeight;
+    var phase = (elapsed % LOOP_MS) / LOOP_MS;
+    var wave = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+    var eased = wave * wave * (3 - 2 * wave);
+    doc.scrollTop = max * eased;
+    computeCurrent();
+  }
+
+  var railOffset = 0, lastTs = null, elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!userActive) { elapsed += dt; autoScroll(elapsed); }
+    var target = clampRail(railTarget());
+    railOffset += (target - railOffset) * (userActive ? 1 : RAIL_LERP);
+    track.style.transform = 'translateX(' + railOffset.toFixed(1) + 'px)';
+    requestAnimationFrame(tick);
+  }
+  computeCurrent();
+  thumbEls[0].classList.add('pvt__thumb--active');
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

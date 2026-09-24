@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>図形ごとに仮の距離値を持たせ、ポインターの移動量にその距離に反比例する倍率を掛けることで、近い図形は大きくずれ遠い図形はわずかしかずれない — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="d3 is-demo" id="d3Root" tabindex="0">
+  <canvas class="d3__canvas" id="d3Canvas" width="480" height="300"></canvas>
+  <p class="d3__caption">図形ごとに仮の距離値を持たせ、ポインターの移動量にその距離に反比例する倍率を掛けることで、近い図形は大きくずれ遠い図形はわずかしかずれない</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 도형마다 가상 거리값(distancePx)을 갖고, 포인터 오프셋에 distanceMultiplier(거리에
+  // 반비례하는 배수)를 곱해 목표 위치를 정한다. 목표 위치는 순간 이동하지 않고 매 프레임
+  // INERTIA_LERP_RATE 비율로 관성 보간(lerp)해 따라간다 — 가까운 도형은 크게, 먼 도형은
+  // 조금만 밀리며 부드럽게 뒤쫓는다.
+  var root = document.getElementById('d3Root');
+  var canvas = document.getElementById('d3Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var CX = CALC_W * 0.5, CY = CALC_H * 0.5;
+  var PARALLAX_REF_DISTANCE_PX = 70;
+  var PARALLAX_MAX_OFFSET_PX = 26;
+  var INERTIA_LERP_RATE = 5.2;
+  var SHAPE_COUNT = 16;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rnd = seedRand(429011);
+  var palette = ['#2f6df6', '#ff9ebb', '#4cd4a6', '#b9a0ff', '#6ec8ff'];
+
+  function distanceMultiplier(distancePx) {
+    var m = PARALLAX_REF_DISTANCE_PX / distancePx;
+    return Math.max(0.18, Math.min(3.1, m));
+  }
+
+  var shapes = [];
+  for (var i = 0; i < SHAPE_COUNT; i += 1) {
+    var distancePx = 26 + rnd() * 150;
+    var ang = rnd() * Math.PI * 2;
+    var rad = 14 + rnd() * 62;
+    shapes.push({
+      distancePx: distancePx,
+      baseX: CX + Math.cos(ang) * rad,
+      baseY: CY + Math.sin(ang) * rad * 0.72,
+      size: Math.max(3.2, Math.min(15, 620 / distancePx)),
+      round: rnd() < 0.55,
+      color: palette[i % palette.length],
+      curX: 0, curY: 0
+    });
+  }
+  shapes.sort(function (a, b) { return b.distancePx - a.distancePx; });
+
+  var pointerNormX = 0, pointerNormY = 0;
+  var pointerActive = false;
+
+  function stepSim(dtMs) {
+    var dtS = dtMs / 1000;
+    var rate = Math.min(1, INERTIA_LERP_RATE * dtS);
+    for (var i = 0; i < shapes.length; i += 1) {
+      var s = shapes[i];
+      var mult = distanceMultiplier(s.distancePx);
+      var tx = pointerNormX * PARALLAX_MAX_OFFSET_PX * mult;
+      var ty = pointerNormY * PARALLAX_MAX_OFFSET_PX * mult * 0.6;
+      s.curX += (tx - s.curX) * rate;
+      s.curY += (ty - s.curY) * rate;
+    }
+  }
+
+  function drawScene() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < shapes.length; i += 1) {
+      var s = shapes[i];
+      var alpha = Math.max(0.35, Math.min(1, 1 - s.distancePx / 190));
+      var dx = (s.baseX + s.curX) * sx, dy = (s.baseY + s.curY) * sy;
+      var dr = s.size * ((sx + sy) / 2);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      if (s.round) {
+        ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      } else {
+        ctx.save();
+        ctx.translate(dx, dy);
+        ctx.rotate(s.distancePx * 0.01);
+        ctx.fillRect(-dr, -dr * 0.7, dr * 2, dr * 1.4);
+        ctx.restore();
+        ctx.beginPath();
+      }
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawScene();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function toNorm(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return {
+      x: Math.max(-1, Math.min(1, ((t0.clientX - r.left) / r.width - 0.5) * 2)),
+      y: Math.max(-1, Math.min(1, ((t0.clientY - r.top) / r.height - 0.5) * 2))
+    };
+  }
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    var n = toNorm(e);
+    pointerNormX = n.x; pointerNormY = n.y;
+    if (reduce) { stepSim(16); drawScene(); }
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') pointerNormX = Math.max(-1, pointerNormX - 0.14);
+    else if (e.key === 'ArrowRight') pointerNormX = Math.min(1, pointerNormX + 0.14);
+    else if (e.key === 'ArrowUp') pointerNormY = Math.max(-1, pointerNormY - 0.14);
+    else if (e.key === 'ArrowDown') pointerNormY = Math.min(1, pointerNormY + 0.14);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      if (reduce) { stepSim(16); drawScene(); }
+    }
+  });
+
+  function virtualPointerPath(t) {
+    return {
+      x: Math.sin(t * 0.00072) * 0.85,
+      y: Math.cos(t * 0.00104) * 0.6
+    };
+  }
+
+  var elapsed = 0;
+  var warmSteps = reduce ? 160 : 120;
+  for (var w = 0; w < warmSteps; w += 1) {
+    elapsed += 20;
+    if (!pointerActive) { var v0 = virtualPointerPath(elapsed); pointerNormX = v0.x; pointerNormY = v0.y; }
+    stepSim(20);
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      if (!pointerActive) {
+        var v = virtualPointerPath(elapsed);
+        pointerNormX = v.x; pointerNormY = v.y;
+      }
+      stepSim(dt);
+      drawScene();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawScene();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

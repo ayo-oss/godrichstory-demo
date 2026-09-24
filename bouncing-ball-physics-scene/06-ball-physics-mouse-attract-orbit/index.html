@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터를 향해 당기는 인력에 처음부터 접선 방향 속도를 얹어 공이 빨려들지 않고 궤도를 그리며 돈다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot" tabindex="0">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">포인터를 향해 당기는 인력에 처음부터 접선 방향 속도를 얹어 공이 빨려들지 않고 궤도를 그리며 돈다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 포인터 방향으로 거리에 반비례하는 인력(가속도 = ATTRACT_K / 거리)을 매 스텝
+  // 적용한다. 인력만 있으면 공이 포인터로 빨려들지만, 각 공에 반지름과 인력 세기로부터
+  // 계산한 원 궤도 속도(sqrt(ATTRACT_K))를 접선 방향 초기 속도로 얹어 두면 인력과
+  // 원심 방향 관성이 균형을 이뤄 공전 궤도가 만들어진다(오일러 적분이라 서서히
+  // 늘어나거나 줄어드는 궤도 — 완전한 원은 아니고 그래서 더 생동감 있다).
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 320, CALC_H = 200;
+  var ATTRACT_K = 5200;
+  var DAMPING = 0.12;
+  var MIN_DIST = 14;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(427061);
+
+  var COLORS = ['#6ec8ff', '#4cd4a6', '#b9a0ff', '#ff9ebb', '#ffcf7a'];
+  var orbitSpeed = Math.sqrt(ATTRACT_K);
+
+  var pointer = { x: CALC_W * 0.5, y: CALC_H * 0.5 };
+  var pointerActive = false;
+
+  var balls = [];
+  function initBalls() {
+    balls = [];
+    for (var i = 0; i < 5; i += 1) {
+      var r0 = 46 + rand() * 74;
+      var th0 = rand() * Math.PI * 2;
+      var px = pointer.x + Math.cos(th0) * r0;
+      var py = pointer.y + Math.sin(th0) * r0;
+      var dirx = -Math.sin(th0), diry = Math.cos(th0);
+      var speed = orbitSpeed * (0.85 + rand() * 0.3);
+      balls.push({
+        x: px, y: py,
+        vx: dirx * speed, vy: diry * speed,
+        r: 8 + rand() * 6,
+        color: COLORS[i % COLORS.length],
+        squash: 0
+      });
+    }
+  }
+
+  function demoPointerPos(t) {
+    var tt = t / 1000;
+    return {
+      x: CALC_W * 0.5 + Math.cos(tt * 0.5) * (CALC_W * 0.14),
+      y: CALC_H * 0.5 + Math.sin(tt * 0.7) * (CALC_H * 0.14)
+    };
+  }
+
+  function stepSim(dtMs, px, py) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      var dx = px - b.x, dy = py - b.y;
+      var dist = Math.max(MIN_DIST, Math.hypot(dx, dy));
+      var accel = ATTRACT_K / dist;
+      var ax = (dx / dist) * accel, ay = (dy / dist) * accel;
+      b.vx += ax * dtS;
+      b.vy += ay * dtS;
+      b.vx -= b.vx * DAMPING * dtS;
+      b.vy -= b.vy * DAMPING * dtS;
+      b.x += b.vx * dtS;
+      b.y += b.vy * dtS;
+      var speed = Math.hypot(b.vx, b.vy);
+      b.squash = Math.min(0.5, speed / 900);
+    }
+  }
+
+  function draw(px, py, nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.fillStyle = 'rgba(255,247,224,0.26)';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.beginPath();
+    ctx.arc(px * sx, py * sy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(23,20,26,0.55)';
+    ctx.fill();
+    for (var i = 0; i < balls.length; i += 1) {
+      var b = balls[i];
+      var ppx = b.x * sx, ppy = b.y * sy, pr = b.r * ((sx + sy) / 2);
+      var ang = Math.atan2(b.vy, b.vx);
+      var stretch = 1 + b.squash;
+      ctx.save();
+      ctx.translate(ppx, ppy);
+      ctx.rotate(ang);
+      ctx.scale(stretch, 1 / stretch);
+      ctx.beginPath();
+      ctx.arc(0, 0, pr, 0, Math.PI * 2);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    ctx.fillStyle = '#fff7e0';
+    ctx.fillRect(0, 0, cw, ch);
+    draw(pointer.x, pointer.y, elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  initBalls();
+
+  function toCalc(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var nx = (clientX - rect.left) / rect.width;
+    var ny = (clientY - rect.top) / rect.height;
+    return { x: Math.max(0, Math.min(CALC_W, nx * CALC_W)), y: Math.max(0, Math.min(CALC_H, ny * CALC_H)) };
+  }
+
+  function onRealPointer(cx, cy) {
+    pointerActive = true;
+    root.classList.remove('is-demo');
+    var p = toCalc(cx, cy);
+    pointer.x = p.x; pointer.y = p.y;
+    if (reduce) {
+      stepSim(16, pointer.x, pointer.y);
+      draw(pointer.x, pointer.y, elapsed);
+    }
+  }
+
+  canvas.addEventListener('mousemove', function (e) { onRealPointer(e.clientX, e.clientY); });
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches && e.touches[0]) onRealPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+
+  root.addEventListener('keydown', function (e) {
+    var step = 14;
+    var moved = true;
+    if (e.key === 'ArrowLeft') pointer.x -= step;
+    else if (e.key === 'ArrowRight') pointer.x += step;
+    else if (e.key === 'ArrowUp') pointer.y -= step;
+    else if (e.key === 'ArrowDown') pointer.y += step;
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      root.classList.remove('is-demo');
+      pointer.x = Math.max(0, Math.min(CALC_W, pointer.x));
+      pointer.y = Math.max(0, Math.min(CALC_H, pointer.y));
+      if (reduce) {
+        stepSim(16, pointer.x, pointer.y);
+        draw(pointer.x, pointer.y, elapsed);
+      }
+    }
+  });
+
+  var lastTs = null;
+  var acc = 0;
+  var FIXED_DT = 16;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      acc += frameDt;
+      while (acc >= FIXED_DT) {
+        elapsed += FIXED_DT;
+        var pp = pointerActive ? pointer : demoPointerPos(elapsed);
+        if (!pointerActive) { pointer.x = pp.x; pointer.y = pp.y; }
+        stepSim(FIXED_DT, pointer.x, pointer.y);
+        acc -= FIXED_DT;
+      }
+      draw(pointer.x, pointer.y, elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(pointer.x, pointer.y, elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

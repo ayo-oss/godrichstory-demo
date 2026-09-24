@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trash-shake drag-delete: shakes and disappears after lingering over the trash — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ts is-demo" id="ts">
+  <div class="ts__trash" id="tsTrash" aria-hidden="true"></div>
+  <button type="button" class="ts__icon" id="tsIcon" aria-label="A card that shakes and disappears when left over the trash. Press Enter to grab, arrow keys to move it, Enter to drop and delete"></button>
+  <p class="ts__caption" id="tsCaption">Stay over the trash too long and it shakes, then disappears</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 드래그 중인 카드 중심이 휴지통 영역과 겹치는 동안 머문 시간(dwell)을 매
+  // 프레임 누적하고, 그 시간에 비례해 흔들림 진폭을 사인 파형으로 키운다. 머문
+  // 시간이 TRASH_DELETE_DWELL_MS 를 넘긴 채 놓으면 scale 을 0 으로 줄이며 삭제한다.
+  var root = document.getElementById('ts');
+  var trash = document.getElementById('tsTrash');
+  var icon = document.getElementById('tsIcon');
+  var caption = document.getElementById('tsCaption');
+
+  var TRASH_DWELL_SHAKE_MS = 700;
+  var TRASH_SHAKE_MAX_PX = 5;
+  var TRASH_DELETE_DWELL_MS = 550;
+  var KEY_STEP_PX = 16;
+
+  var pos = { x: 0, y: 0 };
+  var basePos = { x: 0, y: 0 };
+  var dragging = false;
+  var grabbed = false;
+  var dwellStart = null;
+  var overTrash = false;
+  var raf = 0;
+  var deleted = false;
+
+  function overlapsTrash() {
+    var ir = icon.getBoundingClientRect();
+    var tr = trash.getBoundingClientRect();
+    var icx = ir.left + ir.width / 2, icy = ir.top + ir.height / 2;
+    return icx > tr.left && icx < tr.right && icy > tr.top && icy < tr.bottom;
+  }
+
+  function applyIcon(shakeX, shakeY, scale) {
+    icon.style.transform = 'translate(' + (pos.x + shakeX).toFixed(1) + 'px,' + (pos.y + shakeY).toFixed(1) + 'px) scale(' + scale.toFixed(3) + ')';
+  }
+
+  function shakeTick(ts) {
+    if (deleted) return;
+    var isOver = overlapsTrash();
+    if (isOver && !overTrash) { dwellStart = ts; }
+    overTrash = isOver;
+    trash.classList.toggle('is-armed', overTrash);
+    var shakeX = 0, shakeY = 0;
+    var dwellMs = 0;
+    if (overTrash && dwellStart !== null) {
+      dwellMs = ts - dwellStart;
+      var amp = Math.min(1, dwellMs / TRASH_DWELL_SHAKE_MS) * TRASH_SHAKE_MAX_PX;
+      shakeX = Math.sin(ts / 40) * amp;
+      shakeY = Math.cos(ts / 55) * amp * 0.6;
+      if (dwellMs > TRASH_DELETE_DWELL_MS) {
+        caption.textContent = 'Release now and it deletes';
+        root.classList.add('is-armed');
+      } else {
+        caption.textContent = 'Stay longer and it gets ready to delete';
+        root.classList.remove('is-armed');
+      }
+    } else {
+      caption.textContent = dragging ? 'Try moving it over the trash' : 'Stay over the trash too long and it shakes, then disappears';
+      root.classList.remove('is-armed');
+    }
+    applyIcon(shakeX, shakeY, 1);
+    if (dragging) raf = requestAnimationFrame(shakeTick);
+  }
+
+  function respawn() {
+    deleted = false;
+    pos.x = 0; pos.y = 0;
+    icon.style.opacity = '1';
+    applyIcon(0, 0, 1);
+    caption.textContent = 'Stay over the trash too long and it shakes, then disappears';
+  }
+
+  function deleteIcon() {
+    deleted = true;
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    caption.textContent = 'Deleted';
+    if (reduce) {
+      icon.style.opacity = '0';
+      requestAnimationFrame(function waitReduce(ts) {
+        if (waitReduce.start === undefined) waitReduce.start = ts;
+        if (ts - waitReduce.start < 260) { requestAnimationFrame(waitReduce); } else { respawn(); }
+      });
+      return;
+    }
+    var start = null;
+    function shrink(ts) {
+      if (start === null) start = ts;
+      var p = Math.min(1, (ts - start) / 260);
+      applyIcon(0, 0, 1 - p);
+      icon.style.opacity = String(1 - p);
+      if (p < 1) { requestAnimationFrame(shrink); return; }
+      requestAnimationFrame(function waitRespawn(ts2) {
+        if (waitRespawn.start === undefined) waitRespawn.start = ts2;
+        if (ts2 - waitRespawn.start < 260) { requestAnimationFrame(waitRespawn); } else { respawn(); }
+      });
+    }
+    requestAnimationFrame(shrink);
+  }
+
+  function beginDrag(clientX, clientY) {
+    if (deleted) return;
+    dragging = true;
+    overTrash = false;
+    dwellStart = null;
+    basePos = { x: clientX - pos.x, y: clientY - pos.y };
+    root.classList.add('is-dragging');
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(shakeTick);
+  }
+
+  function moveDrag(clientX, clientY) {
+    pos.x = clientX - basePos.x;
+    pos.y = clientY - basePos.y;
+  }
+
+  function endDrag() {
+    dragging = false;
+    root.classList.remove('is-dragging');
+    var isOver = overlapsTrash();
+    var dwellMs = (isOver && dwellStart !== null) ? performance.now() - dwellStart : 0;
+    if (isOver && dwellMs > TRASH_DELETE_DWELL_MS) {
+      deleteIcon();
+    } else {
+      caption.textContent = 'Stay over the trash too long and it shakes, then disappears';
+      root.classList.remove('is-armed');
+      trash.classList.remove('is-armed');
+      applyIcon(0, 0, 1);
+    }
+  }
+
+  icon.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    icon.setPointerCapture(e.pointerId);
+    beginDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    moveDrag(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  icon.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    endDrag();
+    e.preventDefault();
+  });
+
+  icon.addEventListener('keydown', function (e) {
+    root.classList.remove('is-demo');
+    if (deleted) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!grabbed) {
+        grabbed = true;
+        icon.classList.add('is-grabbed');
+        var r = icon.getBoundingClientRect();
+        beginDrag(r.left + r.width / 2, r.top + r.height / 2);
+        caption.textContent = 'Grabbed. Move it over the trash with arrow keys';
+      } else {
+        grabbed = false;
+        icon.classList.remove('is-grabbed');
+        dragging = false;
+        endDrag();
+      }
+      return;
+    }
+    if (!grabbed) return;
+    var dx = 0, dy = 0;
+    if (e.key === 'ArrowLeft') dx = -KEY_STEP_PX;
+    else if (e.key === 'ArrowRight') dx = KEY_STEP_PX;
+    else if (e.key === 'ArrowUp') dy = -KEY_STEP_PX;
+    else if (e.key === 'ArrowDown') dy = KEY_STEP_PX;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      grabbed = false;
+      icon.classList.remove('is-grabbed');
+      dragging = false;
+      root.classList.remove('is-dragging', 'is-armed');
+      trash.classList.remove('is-armed');
+      applyIcon(0, 0, 1);
+      caption.textContent = 'Stay over the trash too long and it shakes, then disappears';
+      return;
+    } else { return; }
+    e.preventDefault();
+    pos.x += dx; pos.y += dy;
+  });
+
+  applyIcon(0, 0, 1);
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    var iconRect0 = icon.getBoundingClientRect();
+    var ox0 = iconRect0.left + iconRect0.width / 2;
+    var oy0 = iconRect0.top + iconRect0.height / 2;
+    var trashRect0 = trash.getBoundingClientRect();
+    var tx0 = trashRect0.left + trashRect0.width / 2;
+    var ty0 = trashRect0.top + trashRect0.height / 2;
+    var demoStart = null;
+    function demoTick(ts) {
+      if (demoStart === null) demoStart = ts;
+      var t = ts - demoStart;
+      if (t < 200) {
+        // 대기
+      } else if (t < 700) {
+        var p = (t - 200) / 500;
+        var ease = 1 - Math.pow(1 - p, 2);
+        var cx = ox0 + (tx0 - ox0) * ease;
+        var cy = oy0 + (ty0 - oy0) * ease;
+        if (t < 220) beginDrag(ox0, oy0);
+        moveDrag(cx, cy);
+      } else if (t < 1550) {
+        // 휴지통 위에서 대기 → 떨림 누적
+        moveDrag(tx0, ty0);
+      } else if (t < 1600) {
+        endDrag();
+      } else {
+        if (t > 2600) demoStart = ts - 60;
+      }
+      requestAnimationFrame(demoTick);
+    }
+    requestAnimationFrame(demoTick);
+  }
+})();
+</script>
+</body>
+</html>

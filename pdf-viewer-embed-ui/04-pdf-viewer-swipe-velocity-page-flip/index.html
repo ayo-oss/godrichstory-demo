@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스와이프가 끝나기 직전 몇 프레임의 이동 거리로 속도 값을 계산해, 그 값이 기준을 넘으면 다음 페이지로 넘어가고 못 넘으면 제자리로 되돌아간다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pvf is-demo" id="pvfRoot" tabindex="0" aria-label="페이지 스와이프 카드">
+  <div class="pvf__stack" id="pvfStack">
+    <div class="pvf__cardBack" id="pvfCardBack"></div>
+    <div class="pvf__card" id="pvfCard"></div>
+  </div>
+  <p class="pvf__hint" id="pvfHint">좌우로 밀기</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 포인터를 떼기 직전 몇 개의 샘플(좌표+시각)만 남겨 두고, 그 구간의 이동 거리를
+  // 경과 시간으로 나눠 px/s 속도를 계산한다. 기준(SWIPE_FLIP_VELOCITY_PX_S)을 넘으면
+  // 카드가 화면 밖으로 날아가 다음 페이지로 넘어가고, 못 넘으면 스프링으로 제자리에 되돌아간다.
+  // 자동 시연도 같은 push/release 함수를 그대로 호출해 실제 입력과 동일 경로를 탄다.
+  var root = document.getElementById('pvfRoot');
+  var card = document.getElementById('pvfCard');
+  var cardBack = document.getElementById('pvfCardBack');
+  var hint = document.getElementById('pvfHint');
+
+  // 변형 04: SWIPE_FLIP_VELOCITY_PX_S 300 → 600 (전값이 소스 초기값)
+  var SWIPE_FLIP_VELOCITY_PX_S = 300;
+  var LOOP_MS = 2000;
+
+  function seedRand(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  var pageSeed = 430041;
+  function paintPage(el) {
+    var rnd = seedRand(pageSeed);
+    pageSeed += 7;
+    var html = '<div class="pvf__title" style="width:' + (44 + rnd() * 16) + '%"></div>';
+    for (var i = 0; i < 6; i += 1) html += '<div class="pvf__line" style="width:' + (36 + rnd() * 56) + '%"></div>';
+    if (rnd() > 0.3) html += '<div class="pvf__fig"></div>';
+    el.innerHTML = html;
+  }
+  paintPage(card);
+  paintPage(cardBack);
+
+  var dragging = false, samples = [], dragStartX = 0, cardStartX = 0;
+  var curX = 0, curRot = 0, flying = false, flyAnim = null, springAnim = null;
+
+  function pushSample(x, t) { samples.push({ x: x, t: t }); if (samples.length > 10) samples.shift(); }
+  function render() {
+    card.style.transform = 'translateX(' + curX.toFixed(1) + 'px) rotate(' + curRot.toFixed(2) + 'deg)';
+    card.style.opacity = String(Math.max(0, 1 - Math.abs(curX) / 460));
+  }
+
+  function velocityNow(nowT) {
+    if (samples.length < 2) return 0;
+    var windowStart = nowT - 120, first = samples[0];
+    for (var i = 0; i < samples.length; i += 1) { if (samples[i].t >= windowStart) { first = samples[i]; break; } }
+    var last = samples[samples.length - 1];
+    var dt = (last.t - first.t) / 1000;
+    if (dt <= 0) return 0;
+    return (last.x - first.x) / dt;
+  }
+
+  function startDrag(x, t) { dragging = true; flying = false; springAnim = null; samples = []; dragStartX = x; cardStartX = curX; pushSample(x, t); }
+  function moveDrag(x, t) {
+    if (!dragging) return;
+    var dx = x - dragStartX;
+    curX = cardStartX + dx;
+    curRot = dx / 22;
+    pushSample(x, t);
+    render();
+  }
+  function release(t) {
+    if (!dragging) return;
+    dragging = false;
+    var v = velocityNow(t);
+    if (Math.abs(v) >= SWIPE_FLIP_VELOCITY_PX_S) flyOut(v < 0 ? -1 : 1, t);
+    else springBack(t);
+  }
+
+  function flyOut(dir, nowT) {
+    flying = true;
+    flyAnim = { fromX: curX, fromRot: curRot, toX: dir * 640, toRot: dir * 26, start: nowT, dur: 260 };
+  }
+  function springBack(nowT) {
+    springAnim = { fromX: curX, toX: 0, fromRot: curRot, toRot: 0, start: nowT, dur: 520 };
+  }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function springEase(t) {
+    // 오버슛이 있는 감쇠 스프링 근사
+    var d = 7.2, w = 5.6;
+    return 1 - Math.exp(-d * t) * Math.cos(w * t);
+  }
+
+  card.addEventListener('pointerdown', function (e) { markActive(); card.setPointerCapture(e.pointerId); startDrag(e.clientX, e.timeStamp); });
+  card.addEventListener('pointermove', function (e) { if (dragging) moveDrag(e.clientX, e.timeStamp); });
+  card.addEventListener('pointerup', function (e) { release(e.timeStamp); });
+  card.addEventListener('pointercancel', function (e) { release(e.timeStamp); });
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); hint.style.opacity = '0'; } }
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      markActive();
+      flyOut(e.key === 'ArrowLeft' ? -1 : 1, lastTs || 0);
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; hint.style.opacity = '0'; }
+
+  var fired = {};
+  var SCHEDULE = [
+    { t: 20, run: function (nowT) { paintPage(cardBack); curX = 0; curRot = 0; render(); startDrag(0, nowT); } },
+    { t: 420, run: function (nowT) { moveDrag(-360, nowT); } },
+    { t: 640, run: function (nowT) { release(nowT); } },
+    { t: 950, run: function (nowT) { paintPage(card); curX = 0; curRot = 0; render(); startDrag(0, nowT); } },
+    { t: 1350, run: function (nowT) { moveDrag(-70, nowT); } },
+    { t: 1650, run: function (nowT) { release(nowT); } }
+  ];
+
+  var lastTs = null, elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    lastTs = ts;
+    if (!userActive) {
+      elapsed = ts - (tick.originTs === undefined ? (tick.originTs = ts) : tick.originTs);
+      var loopIdx = Math.floor(elapsed / LOOP_MS);
+      var phase = elapsed % LOOP_MS;
+      SCHEDULE.forEach(function (a, i) {
+        var key = loopIdx + ':' + i;
+        if (phase >= a.t && !fired[key]) { fired[key] = true; a.run(ts); }
+      });
+    }
+    if (flyAnim) {
+      var p = Math.max(0, Math.min(1, (ts - flyAnim.start) / flyAnim.dur));
+      var e = easeOutCubic(p);
+      curX = flyAnim.fromX + (flyAnim.toX - flyAnim.fromX) * e;
+      curRot = flyAnim.fromRot + (flyAnim.toRot - flyAnim.fromRot) * e;
+      render();
+      if (p >= 1) { flyAnim = null; flying = false; }
+    } else if (springAnim) {
+      var sp = Math.max(0, Math.min(1, (ts - springAnim.start) / springAnim.dur));
+      var se = springEase(sp);
+      curX = springAnim.fromX + (springAnim.toX - springAnim.fromX) * se;
+      curRot = springAnim.fromRot + (springAnim.toRot - springAnim.fromRot) * se;
+      render();
+      if (sp >= 1) { curX = 0; curRot = 0; render(); springAnim = null; }
+    }
+    requestAnimationFrame(tick);
+  }
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

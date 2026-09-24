@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Placing item 01's thumbnail sync, item 02's pointer-focal zoom, and item 08's download ring together on one toolbar builds a finished scene for skimming, zooming, and downloading a document — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pht is-demo" id="phtRoot" tabindex="0" aria-label="A scene combining document skimming, zoom, and download — arrow keys move pages, +/- zooms">
+  <div class="pht__toolbar">
+    <div class="pht__rail" id="phtRail">
+      <div class="pht__railTrack" id="phtRailTrack"></div>
+    </div>
+    <button class="pht__ringBtn" id="phtRingBtn" type="button" aria-label="Download">
+      <svg class="pht__ring" viewBox="0 0 40 40" width="26" height="26" aria-hidden="true">
+        <circle class="pht__ringTrack" cx="20" cy="20" r="15"></circle>
+        <circle class="pht__ringFill" id="phtRingFill" cx="20" cy="20" r="15" transform="rotate(-90 20 20)"></circle>
+        <line class="pht__ringCheck" id="phtCheckA" x1="12" y1="21" x2="17" y2="27"></line>
+        <line class="pht__ringCheck" id="phtCheckB" x1="12" y1="21" x2="28" y2="12"></line>
+      </svg>
+    </button>
+  </div>
+  <div class="pht__stage" id="phtStage">
+    <div class="pht__doc" id="phtDoc">
+      <div class="pht__docInner" id="phtDocInner"></div>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 09 = 01(썸네일 레일 동기)+02(포인터 초점 줌)+08(Download 링) 결합. 각 장면의 계산을
+  // 그대로 가져와 한 무대에 얹는다: 스크롤 겹침 비율로 레일을 맞추고, 포인터 좌표비로
+  // 확대 원점을 계산하고, 받은 바이트 비율로 링을 채운다.
+  var root = document.getElementById('phtRoot');
+  var rail = document.getElementById('phtRail');
+  var railTrack = document.getElementById('phtRailTrack');
+  var stage = document.getElementById('phtStage');
+  var doc = document.getElementById('phtDoc');
+  var docInner = document.getElementById('phtDocInner');
+  var ringBtn = document.getElementById('phtRingBtn');
+  var ringFill = document.getElementById('phtRingFill');
+  var checkA = document.getElementById('phtCheckA');
+  var checkB = document.getElementById('phtCheckB');
+
+  var HERO_ZOOM_STEP = 1.2;
+  var HERO_RAIL_LERP = 0.18;
+  var HERO_TOTAL_BYTES = 200000;
+  var HERO_SPEED = 230000;
+  var LOOP_MS = 2000;
+  var N = 4;
+
+  function seedRand(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  var rnd = seedRand(430091);
+  function pageHTML(prefix) {
+    var h = '<div class="' + prefix + 'Title" style="width:' + (46 + rnd() * 14) + '%"></div>';
+    for (var i = 0; i < 4; i += 1) h += '<div class="' + prefix + 'Line" style="width:' + (36 + rnd() * 56) + '%"></div>';
+    if (rnd() > 0.4) h += '<div class="' + prefix + 'Fig"></div>';
+    return h;
+  }
+  for (var p = 0; p < N; p += 1) {
+    var page = document.createElement('div');
+    page.className = 'pht__page';
+    page.innerHTML = pageHTML('pht__doc');
+    docInner.appendChild(page);
+    var thumb = document.createElement('button');
+    thumb.type = 'button';
+    thumb.className = 'pht__thumb';
+    thumb.setAttribute('aria-label', 'Page ' + (p + 1) + ' thumbnail');
+    thumb.innerHTML = pageHTML('pht__mini');
+    railTrack.appendChild(thumb);
+  }
+  var pages = Array.prototype.slice.call(docInner.children);
+  var thumbs = Array.prototype.slice.call(railTrack.children);
+
+  function computeCurrent() {
+    var top = doc.scrollTop, h = doc.clientHeight, best = 0, bestRatio = -1;
+    pages.forEach(function (pg, i) {
+      var pTop = pg.offsetTop, pBot = pTop + pg.offsetHeight;
+      var visTop = Math.max(top, pTop), visBot = Math.min(top + h, pBot);
+      var ratio = Math.max(0, visBot - visTop) / pg.offsetHeight;
+      if (ratio > bestRatio) { bestRatio = ratio; best = i; }
+    });
+    return best;
+  }
+  var activeIdx = -1;
+  function markRail(idx) {
+    if (idx === activeIdx) return;
+    activeIdx = idx;
+    thumbs.forEach(function (t, i) { t.classList.toggle('pht__thumb--active', i === idx); });
+  }
+  var railX = 0;
+  function railTarget(idx) {
+    var t = thumbs[idx]; if (!t) return 0;
+    var want = t.offsetLeft + t.offsetWidth / 2 - rail.clientWidth / 2;
+    return -Math.max(0, Math.min(railTrack.scrollWidth - rail.clientWidth, want));
+  }
+
+  var zoomManual = { s: 1, x: .5, y: .5 };
+  function applyZoom(scale, ox, oy) {
+    docInner.style.transformOrigin = (ox * 100) + '% ' + (oy * 100) + '%';
+    docInner.style.transform = 'scale(' + scale.toFixed(3) + ')';
+  }
+
+  var phase = 'idle', received = 0, doneAt = 0, checkAnim = null;
+  var R = 15, CIRC = 2 * Math.PI * R;
+  ringFill.style.strokeDasharray = CIRC.toFixed(2);
+  function lineLen(el) { var x1 = +el.getAttribute('x1'), y1 = +el.getAttribute('y1'), x2 = +el.getAttribute('x2'), y2 = +el.getAttribute('y2'); return Math.hypot(x2 - x1, y2 - y1); }
+  var lenA = lineLen(checkA), lenB = lineLen(checkB);
+  checkA.style.strokeDasharray = lenA.toFixed(2); checkB.style.strokeDasharray = lenB.toFixed(2);
+  checkA.style.strokeDashoffset = lenA.toFixed(2); checkB.style.strokeDashoffset = lenB.toFixed(2);
+  function renderRing(ratio) { ringFill.style.strokeDashoffset = (CIRC * (1 - ratio)).toFixed(2); }
+  function startDownload() {
+    if (phase === 'loading') return;
+    phase = 'loading'; received = 0;
+    root.classList.remove('pht--done');
+    checkA.style.strokeDashoffset = lenA.toFixed(2); checkB.style.strokeDashoffset = lenB.toFixed(2);
+    renderRing(0);
+  }
+  function finishDownload(nowT) { phase = 'done'; doneAt = nowT; root.classList.add('pht--done'); checkAnim = { start: nowT }; }
+  function resetDownload() { phase = 'idle'; received = 0; root.classList.remove('pht--done'); renderRing(0); }
+
+  var userActive = false;
+  function markActive() { if (!userActive) { userActive = true; root.classList.remove('is-demo'); } }
+
+  doc.addEventListener('scroll', function () { markRail(computeCurrent()); });
+  stage.addEventListener('wheel', function (e) {
+    e.preventDefault(); markActive();
+    var r = stage.getBoundingClientRect();
+    var ox = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    var oy = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+    zoomManual.s = Math.max(1, Math.min(HERO_ZOOM_STEP * HERO_ZOOM_STEP * 1.4, zoomManual.s * Math.pow(HERO_ZOOM_STEP, (e.deltaY < 0 ? 1 : -1) * 0.6)));
+    zoomManual.x = ox; zoomManual.y = oy;
+    applyZoom(zoomManual.s, ox, oy);
+  }, { passive: false });
+  thumbs.forEach(function (t, i) {
+    t.addEventListener('click', function () {
+      markActive(); markRail(i);
+      doc.scrollTop = pages[i].offsetTop;
+    });
+  });
+  ringBtn.addEventListener('click', function () { markActive(); if (phase !== 'loading') { resetDownload(); startDownload(); } });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); markActive();
+      var next = Math.max(0, Math.min(N - 1, activeIdx + (e.key === 'ArrowDown' ? 1 : -1)));
+      doc.scrollTop = pages[next].offsetTop;
+    } else if (e.key === '+' || e.key === '=' || e.key === '-') {
+      e.preventDefault(); markActive();
+      zoomManual.s = Math.max(1, Math.min(HERO_ZOOM_STEP * HERO_ZOOM_STEP * 1.4, zoomManual.s * Math.pow(HERO_ZOOM_STEP, e.key === '-' ? -0.6 : 0.6)));
+      applyZoom(zoomManual.s, zoomManual.x, zoomManual.y);
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); userActive = true; markRail(0); applyZoom(1, .5, .5); renderRing(0.4); }
+
+  var fired = {};
+  var autoScale = { s: 1 };
+  var SCHEDULE = [
+    { t: 0, run: function () { doc.scrollTop = 0; } },
+    { t: 200, run: function () { doc.scrollTop = pages[1] ? pages[1].offsetTop : 0; } },
+    { t: 550, run: function () { autoScale.target = HERO_ZOOM_STEP; autoScale.ox = .3; autoScale.oy = .4; } },
+    { t: 900, run: function () { autoScale.target = 1; } },
+    { t: 1050, run: function () { doc.scrollTop = pages[2] ? pages[2].offsetTop : 0; } },
+    { t: 1300, run: function () { if (phase === 'idle') startDownload(); } },
+    { t: 1750, run: function () { doc.scrollTop = pages[3] ? pages[3].offsetTop : 0; } }
+  ];
+
+  var lastTs = null, originTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!userActive) {
+      if (originTs === null) originTs = ts;
+      var elapsed = ts - originTs;
+      var loopIdx = Math.floor(elapsed / LOOP_MS);
+      var phaseT = elapsed % LOOP_MS;
+      SCHEDULE.forEach(function (a, i) {
+        var key = loopIdx + ':' + i;
+        if (phaseT >= a.t && !fired[key]) { fired[key] = true; a.run(); }
+      });
+      if (autoScale.target !== undefined) {
+        zoomManual.s += (autoScale.target - zoomManual.s) * 0.14;
+        applyZoom(zoomManual.s, autoScale.ox || .5, autoScale.oy || .5);
+      }
+      markRail(computeCurrent());
+    }
+    railX += (railTarget(activeIdx < 0 ? 0 : activeIdx) - railX) * HERO_RAIL_LERP;
+    railTrack.style.transform = 'translateX(' + railX.toFixed(1) + 'px)';
+
+    if (phase === 'loading') {
+      received = Math.min(HERO_TOTAL_BYTES, received + HERO_SPEED * (dt / 1000));
+      var ratio = received / HERO_TOTAL_BYTES;
+      renderRing(ratio);
+      if (ratio >= 1) finishDownload(ts);
+    } else if (phase === 'done') {
+      if (checkAnim) {
+        var pA = Math.max(0, Math.min(1, (ts - checkAnim.start) / 180));
+        var pB = Math.max(0, Math.min(1, (ts - checkAnim.start - 110) / 220));
+        checkA.style.strokeDashoffset = (lenA * (1 - pA)).toFixed(2);
+        checkB.style.strokeDashoffset = (lenB * (1 - pB)).toFixed(2);
+        if (pB >= 1) checkAnim = null;
+      }
+      if (ts - doneAt > 560 && !userActive) resetDownload();
+    }
+    requestAnimationFrame(tick);
+  }
+  markRail(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
