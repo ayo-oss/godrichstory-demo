@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レーダーパルス待機 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pulse-wrap">
+<button type="button" class="pulse is-demo" id="pulse" aria-pressed="true">
+  <svg class="pulse__icon" viewBox="0 0 120 120" aria-hidden="true">
+    <circle class="pulse__ring" data-slot="0" cx="60" cy="60" r="0"></circle>
+    <circle class="pulse__ring" data-slot="1" cx="60" cy="60" r="0"></circle>
+    <circle class="pulse__ring" data-slot="2" cx="60" cy="60" r="0"></circle>
+    <circle class="pulse__ring" data-slot="3" cx="60" cy="60" r="0"></circle>
+    <circle class="pulse__core" cx="60" cy="60" r="14"></circle>
+    <path class="pulse__mark" d="M52,64 A8 8 0 0 1 68,64" />
+  </svg>
+  <span class="pulse__label">認証待機</span>
+</button>
+<p class="pulse__status" id="status">認証待機中</p>
+</div>
+<script>
+(function () {
+  // 계산 겹: 감쇠 함수 — 새 펄스가 뜬 뒤 지난 시간(age)에 지수 감쇠식을 걸어
+  // 반지름은 PULSE_MAX_R 로 점근하고(1 - e^(-age/TAU)), 밝기는 그 반지름 비율만큼 옅어진다.
+  // 트윈(펄스 개수·타이밍)이 아니라 매 프레임 이 식을 다시 계산해서 그린다.
+  var PULSE_MAX_R = 40; // 변형 02: PULSE_MAX_R 40 → 70 (펄스 최대 반경)
+  var TAU = 260; // 감쇠 시간 상수(ms) — 클수록 천천히 옅어진다
+  var LAUNCH_GAP = 550; // 새 펄스를 띄우는 간격(ms)
+  var CUTOFF = TAU * 4.4; // 이 age 를 넘으면 슬롯을 반납한다(반지름이 사실상 MAX_R 에 도달)
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('pulse');
+  var status = document.getElementById('status');
+  var rings = Array.prototype.slice.call(document.querySelectorAll('.pulse__ring'));
+  var STRINGS = { listening: '認証待機中', paused: '一時停止中' };
+  var isDemo = true;
+  var listening = true;
+  var slots = rings.map(function (el) { return { el: el, start: null }; });
+  var slotCursor = 0;
+  var lastLaunch = 0;
+
+  function spawn(now) {
+    var slot = slots[slotCursor % slots.length];
+    slotCursor++;
+    slot.start = now;
+  }
+
+  function tick(now) {
+    for (var i = 0; i < slots.length; i++) {
+      var slot = slots[i];
+      if (slot.start === null) { continue; }
+      var age = now - slot.start;
+      if (age > CUTOFF) {
+        slot.start = null;
+        slot.el.style.opacity = '0';
+        continue;
+      }
+      var radius = PULSE_MAX_R * (1 - Math.exp(-age / TAU));
+      var opacity = Math.max(0, 1 - radius / PULSE_MAX_R);
+      slot.el.setAttribute('r', radius.toFixed(2));
+      slot.el.style.opacity = opacity.toFixed(3);
+    }
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  function toggle() {
+    listening = !listening;
+    root.setAttribute('aria-pressed', String(listening));
+    status.textContent = listening ? STRINGS.listening : STRINGS.paused;
+  }
+
+  root.addEventListener('click', function () { human(); toggle(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { human(); }
+  });
+
+  function loop(ts) {
+    var active = listening && (isDemo ? !reduce : true);
+    if (active && ts - lastLaunch >= LAUNCH_GAP) {
+      lastLaunch = ts;
+      spawn(ts);
+    }
+    tick(ts);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

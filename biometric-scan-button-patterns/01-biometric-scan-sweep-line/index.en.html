@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scan-line sweep — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scan-wrap">
+<button type="button" class="scan is-demo" id="scan" aria-pressed="false">
+  <svg class="scan__icon" viewBox="0 0 120 130" aria-hidden="true">
+    <path class="scan__ridge" data-apex="72" d="M10,118 A50 46 0 0 1 110,118"></path>
+    <path class="scan__ridge" data-apex="77" d="M16,118 A44 41 0 0 1 104,118"></path>
+    <path class="scan__ridge" data-apex="82" d="M22,118 A38 36 0 0 1 98,118"></path>
+    <path class="scan__ridge" data-apex="87" d="M28,118 A32 31 0 0 1 92,118"></path>
+    <path class="scan__ridge" data-apex="92" d="M34,118 A26 26 0 0 1 86,118"></path>
+    <path class="scan__ridge" data-apex="97" d="M40,118 A20 21 0 0 1 80,118"></path>
+    <path class="scan__ridge" data-apex="102" d="M46,118 A14 16 0 0 1 74,118"></path>
+    <line class="scan__beam" id="beam" x1="6" x2="114" y1="6" y2="6"></line>
+  </svg>
+  <span class="scan__label">Fingerprint scan</span>
+</button>
+<p class="scan__status" id="status">Idle</p>
+</div>
+<script>
+(function () {
+  // 계산 겹: 능선 stagger 순서 계산 — 능선마다 정점(apex) y 값이 다르고, 스캔 라인 y 값이 그 정점을
+  // 지난 만큼(GLOW_BAND 로 나눈 비율)을 활성 값(act, 0~1)으로 써서 밝기를 매긴다. 정점이 위(작은 y)일수록
+  // 먼저 활성되므로 "능선이 순서대로 밝아지는" 흐름이 실제 계산으로 나온다.
+  var SWEEP_SPEED = 1.4; // 변형 01: SWEEP_SPEED 1.4 → 0.6 (스윕 속도)
+  var BASE_MS = 1000; // 기준 스윕 시간 — 실제 소요는 BASE_MS / SWEEP_SPEED
+  var GLOW_BAND = 16; // 스캔 라인이 능선 정점을 지난 뒤 완전히 밝아지기까지의 svg 단위 거리
+  var HOLD_MS = 500; // Scan complete 뒤 전체 밝기를 유지하는 시간
+  var GAP_MS = 700; // 다음 자동 스캔까지 대기하는 시간
+  var TOP = 6, BOTTOM = 124;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var DUR = reduce ? 1 : (BASE_MS / SWEEP_SPEED);
+
+  var root = document.getElementById('scan');
+  var beam = document.getElementById('beam');
+  var ridges = Array.prototype.slice.call(document.querySelectorAll('.scan__ridge'));
+  var status = document.getElementById('status');
+  var STRINGS = { idle: 'Idle', scanning: 'Scanning', done: 'Scan complete' };
+  var isDemo = true;
+  var running = false;
+  var startTs = 0;
+
+  function apply(scanY) {
+    beam.setAttribute('y1', scanY.toFixed(2));
+    beam.setAttribute('y2', scanY.toFixed(2));
+    for (var i = 0; i < ridges.length; i++) {
+      var apex = parseFloat(ridges[i].getAttribute('data-apex'));
+      var act = Math.max(0, Math.min(1, (scanY - apex) / GLOW_BAND + 0.001));
+      ridges[i].style.opacity = (0.26 + 0.74 * act).toFixed(3);
+    }
+  }
+
+  function runScan(ts) {
+    if (!startTs) startTs = ts;
+    var t = ts - startTs;
+    if (t <= DUR) {
+      apply(TOP + (BOTTOM - TOP) * (t / DUR));
+      status.textContent = STRINGS.scanning;
+      requestAnimationFrame(runScan);
+    } else if (t <= DUR + HOLD_MS) {
+      apply(BOTTOM);
+      status.textContent = STRINGS.done;
+      requestAnimationFrame(runScan);
+    } else {
+      apply(TOP);
+      status.textContent = STRINGS.idle;
+      running = false;
+      root.setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  function trigger() {
+    if (running) return;
+    running = true;
+    startTs = 0;
+    root.setAttribute('aria-pressed', 'true');
+    requestAnimationFrame(runScan);
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  root.addEventListener('click', function () { human(); trigger(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { human(); }
+  });
+
+  apply(TOP);
+
+  var cycleStart = 0;
+  var PERIOD = DUR + HOLD_MS + GAP_MS;
+  function loop(ts) {
+    if (isDemo && !reduce) {
+      if (!cycleStart) cycleStart = ts;
+      var phase = (ts - cycleStart) % PERIOD;
+      if (phase < 16 && !running) trigger();
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

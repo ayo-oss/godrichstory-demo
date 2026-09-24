@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pressure wave amplitude — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ripple-wrap">
+<button type="button" class="ripple is-demo" id="ripple" aria-pressed="false">
+  <svg class="ripple__icon" viewBox="0 0 120 120" aria-hidden="true">
+    <path class="ripple__wave" id="wave"></path>
+    <circle class="ripple__core" cx="60" cy="60" r="10"></circle>
+  </svg>
+  <span class="ripple__label">Press to authenticate</span>
+</button>
+<p class="ripple__status" id="status">Pressure 0%</p>
+</div>
+<script>
+(function () {
+  // 계산 겹: 물결 진폭 — 각도(θ)마다 반지름을 BASE_R + AMPLITUDE*pressure*sin(WAVE_K*θ - t*WAVE_SPEED)
+  // 로 계산해 M 개 점을 매 프레임 다시 찍는다. pressure 는 실 포인터 압력(e.pressure) 또는
+  // 자동 루프의 누르기-떼기 사인 곡선에서 온다 — 눌린 힘이 셀수록 물결의 진폭이 커진다.
+  var BASE_R = 30;
+  var AMPLITUDE = 11; // 최대 압력일 때 물결이 흔들리는 폭
+  var WAVE_K = 5; // 물결 마루 개수
+  var WAVE_SPEED = 0.0032; // 물결이 도는 각속도(rad/ms)
+  var M = 32; // 원둘레를 따라 찍는 점 개수
+  var PRESS_CYCLE_MS = 1400; // 자동 루프에서 누르기→떼기 한 번의 시간
+  var GAP_MS = 500;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('ripple');
+  var wave = document.getElementById('wave');
+  var status = document.getElementById('status');
+  var isDemo = true;
+  var pointerPressure = 0;
+  var pointerDown = false;
+  var autoStart = 0;
+
+  function buildPath(t, pressure) {
+    var d = '';
+    for (var i = 0; i <= M; i++) {
+      var theta = (i / M) * Math.PI * 2;
+      var r = BASE_R + AMPLITUDE * pressure * Math.sin(WAVE_K * theta - t * WAVE_SPEED);
+      var x = 60 + r * Math.cos(theta);
+      var y = 60 + r * Math.sin(theta);
+      d += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2) + ' ';
+    }
+    return d + 'Z';
+  }
+
+  function autoPressure(now) {
+    if (!autoStart) autoStart = now;
+    var phase = (now - autoStart) % (PRESS_CYCLE_MS + GAP_MS);
+    if (phase > PRESS_CYCLE_MS) return 0;
+    return Math.max(0, Math.sin((phase / PRESS_CYCLE_MS) * Math.PI));
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  root.addEventListener('pointerdown', function (e) {
+    human();
+    pointerDown = true;
+    pointerPressure = e.pressure > 0 ? e.pressure : 0.6;
+    root.setAttribute('aria-pressed', 'true');
+  });
+  root.addEventListener('pointermove', function (e) {
+    if (!pointerDown) return;
+    pointerPressure = e.pressure > 0 ? e.pressure : pointerPressure;
+  });
+  window.addEventListener('pointerup', function () {
+    if (!pointerDown) return;
+    pointerDown = false;
+    pointerPressure = 0;
+    root.setAttribute('aria-pressed', 'false');
+  });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { human(); }
+  });
+
+  function loop(ts) {
+    var reduceNow = reduce && isDemo;
+    var pressure = pointerDown ? pointerPressure : (isDemo && !reduce ? autoPressure(ts) : 0);
+    if (reduceNow) { pressure = 0; }
+    wave.setAttribute('d', buildPath(ts, pressure));
+    status.textContent = 'Pressure ' + Math.round(pressure * 100) + '%';
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

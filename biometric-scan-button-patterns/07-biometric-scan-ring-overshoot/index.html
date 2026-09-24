@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>일치율 링 오버슛 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ring-wrap">
+<button type="button" class="ring is-demo" id="ring" aria-pressed="false">
+  <svg class="ring__icon" viewBox="0 0 120 120" aria-hidden="true">
+    <circle class="ring__track" cx="60" cy="60" r="46"></circle>
+    <circle class="ring__fill" id="fill" cx="60" cy="60" r="46"></circle>
+    <text class="ring__pct" id="pct" x="60" y="66" text-anchor="middle">0%</text>
+  </svg>
+  <span class="ring__label">일치율 확인</span>
+</button>
+<p class="ring__status" id="status">대기 중</p>
+</div>
+<script>
+(function () {
+  // 계산 겹: 관성 오버슛 — 트윈 이징이 아니라 스프링 물리를 매 프레임 직접 적분한다.
+  // force = (target-pos)*STIFFNESS - vel*DAMPING, vel += force*dt, pos += vel*dt.
+  // 관성 때문에 목표를 넘어섰다가(오버슛) 다시 돌아와 멈춘다.
+  // 자동 루프는 목표값을 정착 시간보다 짧은 간격으로 두 값 사이에서 계속 바꾼다(재측정을
+  // 반복하는 계기판처럼) — 스프링이 한 번도 완전히 멈추지 않아 어느 구간을 잘라도 항상
+  // 진행 중인 움직임이 있다. 실제 조작(클릭·키보드)은 별도 경로로 한 번만 목표에 도달한다.
+  var STIFFNESS = 0.0006;
+  var DAMPING = 0.02;
+  var TARGET = 0.82; // 실제 조작이 향하는 목표 일치율(82%)
+  var AUTO_HIGH = 0.82, AUTO_LOW = 0.28; // 자동 루프가 번갈아 재는 두 목표값
+  var FLIP_MS = 480; // 정착 시간(약 400ms)보다 짧게 잡아 늘 진행 중이게 한다
+  var SETTLE_EPS = 0.0006; // 속도·오차가 이 밑이면 정지로 본다(실제 조작 경로에서만 쓴다)
+  var R = 46, CIRC = 2 * Math.PI * R;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('ring');
+  var fill = document.getElementById('fill');
+  var pctText = document.getElementById('pct');
+  var status = document.getElementById('status');
+  var STRINGS = { idle: '대기 중', running: '일치율 계산 중', done: '일치 확인' };
+  var isDemo = true;
+  var manualRunning = false;
+  var manualPos = 0, manualVel = 0, manualLastTs = 0;
+  var autoPos = 0, autoVel = 0, autoLastTs = 0, autoTargetHigh = true, autoFlipAt = 0;
+  var rafId = 0;
+
+  fill.style.strokeDasharray = CIRC.toFixed(2);
+
+  function paint(pos) {
+    var shown = Math.max(0, pos);
+    var offset = CIRC * (1 - Math.min(shown, 1.3));
+    fill.style.strokeDashoffset = offset.toFixed(2);
+    pctText.textContent = Math.round(shown * 100) + '%';
+  }
+
+  function runManual(ts) {
+    if (!manualLastTs) manualLastTs = ts;
+    var dt = Math.min(ts - manualLastTs, 32);
+    manualLastTs = ts;
+    var force = (TARGET - manualPos) * STIFFNESS - manualVel * DAMPING;
+    manualVel += force * dt;
+    manualPos += manualVel * dt;
+    paint(manualPos);
+    if (Math.abs(manualVel) > SETTLE_EPS || Math.abs(TARGET - manualPos) > SETTLE_EPS) {
+      status.textContent = STRINGS.running;
+      requestAnimationFrame(runManual);
+    } else {
+      manualPos = TARGET;
+      manualVel = 0;
+      paint(manualPos);
+      status.textContent = STRINGS.done;
+      manualRunning = false;
+      root.setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  function trigger() {
+    if (manualRunning || isDemo) return;
+    manualRunning = true;
+    manualPos = 0; manualVel = 0; manualLastTs = 0;
+    root.setAttribute('aria-pressed', 'true');
+    if (reduce) {
+      manualPos = TARGET; manualVel = 0;
+      paint(manualPos);
+      status.textContent = STRINGS.done;
+      manualRunning = false;
+      root.setAttribute('aria-pressed', 'false');
+      return;
+    }
+    requestAnimationFrame(runManual);
+  }
+
+  function human() {
+    if (isDemo) {
+      isDemo = false;
+      root.classList.remove('is-demo');
+      cancelAnimationFrame(rafId);
+      status.textContent = STRINGS.idle;
+      paint(0);
+    }
+  }
+
+  root.addEventListener('click', function () { human(); trigger(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { human(); }
+  });
+
+  paint(0);
+
+  function autoLoop(ts) {
+    if (!isDemo || reduce) return;
+    if (!autoLastTs) autoLastTs = ts;
+    var dt = Math.min(ts - autoLastTs, 32);
+    autoLastTs = ts;
+    if (!autoFlipAt) autoFlipAt = ts + FLIP_MS;
+    if (ts >= autoFlipAt) { autoTargetHigh = !autoTargetHigh; autoFlipAt = ts + FLIP_MS; }
+    var target = autoTargetHigh ? AUTO_HIGH : AUTO_LOW;
+    var force = (target - autoPos) * STIFFNESS - autoVel * DAMPING;
+    autoVel += force * dt;
+    autoPos += autoVel * dt;
+    paint(autoPos);
+    status.textContent = STRINGS.running;
+    rafId = requestAnimationFrame(autoLoop);
+  }
+
+  if (isDemo && !reduce) {
+    rafId = requestAnimationFrame(autoLoop);
+  } else if (reduce) {
+    paint(TARGET);
+    status.textContent = STRINGS.done;
+  }
+})();
+</script>
+</main>
+</body>
+</html>
