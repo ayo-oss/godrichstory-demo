@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>안 읽음 점이 빈 원으로 바뀌는 알림 목록 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="ud is-demo" id="ud">
+    <div class="ud__head">
+      <span class="ud__badge" id="udBadge">
+        <span class="ud__dotFill ud__badgeFill" id="udBadgeFill"></span>
+        <span class="ud__dotRing ud__badgeRing" id="udBadgeRing"></span>
+      </span>
+      <span class="ud__headLabel">알림</span>
+      <span class="ud__sr" id="udSr" aria-live="polite">4개 안 읽음</span>
+    </div>
+    <ul class="ud__list" id="udList" role="list"></ul>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var NAMES = [
+    "결제가 승인됐어요", "새 댓글이 달렸어요", "회의 10분 전이에요", "업로드가 끝났어요"
+  ];
+
+  var root = document.getElementById("ud");
+  var list = document.getElementById("udList");
+  var sr = document.getElementById("udSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  // 계산 겹: CSS 트랜지션이 아니라 매 프레임 위치·속도를 직접 적분하는 감쇠 스프링으로
+  // 채운 점 → 빈 원 전환을 만든다. target 을 0 또는 1 로 바꾸면 그 순간의 속도를 그대로
+  // 이어받아 다음 목표로 다시 움직인다(끊기지 않는다).
+  function Spring(tintEl, fillEl, ringEl, stiffness, damping) {
+    var pos = 0, vel = 0, target = 0, raf = 0, last = null;
+    function apply(p) {
+      var c = Math.max(0, Math.min(1, p));
+      var over = Math.max(0, p - 1);
+      fillEl.style.opacity = String(1 - c);
+      ringEl.style.borderWidth = (c * 2.4).toFixed(2) + "px";
+      var bump = 1 + over * 0.85;
+      fillEl.parentNode.style.transform = "scale(" + bump.toFixed(3) + ")";
+      // 같은 스프링 값(c)으로 행 전체 톤도 함께 보간한다 — 안 읽음일수록 진하고, 읽으면 투명해진다
+      if (tintEl) tintEl.style.opacity = (0.10 * (1 - c)).toFixed(3);
+    }
+    function tick(ts) {
+      if (last === null) last = ts;
+      var dt = Math.min((ts - last) / 1000, 0.032);
+      last = ts;
+      var acc = (-stiffness * (pos - target) - damping * vel);
+      vel += acc * dt;
+      pos += vel * dt;
+      apply(pos);
+      if (Math.abs(pos - target) > 0.002 || Math.abs(vel) > 0.01) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        pos = target;
+        apply(pos);
+        raf = 0;
+        last = null;
+      }
+    }
+    this.to = function (t, immediate) {
+      target = t;
+      if (immediate) {
+        pos = t; vel = 0; apply(pos);
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        last = null;
+        return;
+      }
+      if (!raf) { last = null; raf = requestAnimationFrame(tick); }
+    };
+    apply(0);
+  }
+
+  var badgeSpring = new Spring(
+    null,
+    document.getElementById("udBadgeFill"),
+    document.getElementById("udBadgeRing"),
+    reduce ? 999 : 220, reduce ? 999 : 17
+  );
+
+  var rows = [];
+  var unread = NAMES.length;
+
+  function updateSr() {
+    sr.textContent = unread + "개 안 읽음";
+  }
+
+  function markRead(row) {
+    if (row.read) return;
+    row.read = true;
+    unread--;
+    row.spring.to(1);
+    if (unread <= 0) badgeSpring.to(1);
+    updateSr();
+  }
+
+  function markUnread(row) {
+    if (!row.read) return;
+    row.read = false;
+    unread++;
+    row.spring.to(0);
+    badgeSpring.to(0);
+    updateSr();
+  }
+
+  NAMES.forEach(function (name, i) {
+    var li = document.createElement("li");
+    li.className = "ud__item";
+    li.setAttribute("role", "listitem");
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ud__row";
+    btn.setAttribute("aria-pressed", "false");
+
+    var tint = document.createElement("span");
+    tint.className = "ud__rowTint";
+    tint.setAttribute("aria-hidden", "true");
+
+    var dot = document.createElement("span");
+    dot.className = "ud__dot";
+    var fill = document.createElement("span");
+    fill.className = "ud__dotFill";
+    var ring = document.createElement("span");
+    ring.className = "ud__dotRing";
+    dot.appendChild(fill);
+    dot.appendChild(ring);
+
+    var nameEl = document.createElement("span");
+    nameEl.className = "ud__name";
+    nameEl.textContent = name;
+
+    btn.appendChild(tint);
+    btn.appendChild(dot);
+    btn.appendChild(nameEl);
+    li.appendChild(btn);
+    list.appendChild(li);
+
+    var row = { btn: btn, read: false, spring: new Spring(tint, fill, ring, reduce ? 999 : 220, reduce ? 999 : 17) };
+    rows.push(row);
+
+    btn.addEventListener("click", function () {
+      human();
+      if (row.read) markUnread(row); else markRead(row);
+      btn.setAttribute("aria-pressed", row.read ? "true" : "false");
+    });
+  });
+
+  if (reduce) {
+    rows.forEach(function (row) { markRead(row); });
+  } else {
+    var idx = 0;
+    var phase = "read";
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      synthetic = true;
+      if (phase === "read") {
+        var row = rows[idx];
+        markRead(row);
+        row.btn.setAttribute("aria-pressed", "true");
+        idx++;
+        if (idx >= rows.length) { phase = "reset"; }
+      } else {
+        rows.forEach(function (r) {
+          r.read = false;
+          r.spring.to(0, true);
+          r.btn.setAttribute("aria-pressed", "false");
+        });
+        unread = NAMES.length;
+        badgeSpring.to(0, true);
+        updateSr();
+        idx = 0;
+        phase = "read";
+      }
+      synthetic = false;
+      window.setTimeout(loop, phase === "reset" ? 900 : 480);
+    }
+    window.setTimeout(loop, 250);
+  }
+})();
+</script>
+</body>
+</html>

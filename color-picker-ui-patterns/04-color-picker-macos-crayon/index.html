@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>macOS 크레용 컬러피커 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel">
+  <div class="grid" id="grid" role="radiogroup" aria-label="크레용 팔레트">
+    <span class="crayon" data-i="0" role="radio" aria-checked="false" aria-label="크레용 1"></span>
+    <span class="crayon" data-i="1" role="radio" aria-checked="false" aria-label="크레용 2"></span>
+    <span class="crayon" data-i="2" role="radio" aria-checked="false" aria-label="크레용 3"></span>
+    <span class="crayon" data-i="3" role="radio" aria-checked="false" aria-label="크레용 4"></span>
+    <span class="crayon" data-i="4" role="radio" aria-checked="false" aria-label="크레용 5"></span>
+    <span class="crayon" data-i="5" role="radio" aria-checked="false" aria-label="크레용 6"></span>
+    <span class="crayon" data-i="6" role="radio" aria-checked="false" aria-label="크레용 7"></span>
+    <span class="crayon" data-i="7" role="radio" aria-checked="false" aria-label="크레용 8"></span>
+    <span class="crayon" data-i="8" role="radio" aria-checked="false" aria-label="크레용 9"></span>
+    <div class="ring" id="ring"></div>
+  </div>
+  <div class="readout" id="readout">
+    <span class="swatch" id="swatch"></span>
+    <span class="hex" id="hex">#000000</span>
+  </div>
+</section>
+</main>
+<script>
+// macOS 크레용(04) — 선택된 크레용 색의 밝기 값을 계산해 그 값이 낮으면 흰색 테두리,
+// 높으면 검은색 테두리로 선택 표시가 자동으로 바뀐다. 실키·실서버 요청 없음.
+(function () {
+  var gridEl = document.getElementById('grid');
+  var ringEl = document.getElementById('ring');
+  var readoutEl = document.getElementById('readout');
+  var swatchEl = document.getElementById('swatch');
+  var hexEl = document.getElementById('hex');
+  var crayonEls = gridEl ? gridEl.querySelectorAll('.crayon') : [];
+  if (!gridEl || !ringEl || !readoutEl || !swatchEl || !hexEl || crayonEls.length !== 9) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var LUM_THRESHOLD = .6;
+  var CELL = 40;
+  var GAP = 12;
+  var STEP = CELL + GAP;
+  var CYCLE_MS = 2700;
+
+  var CRAYONS = [
+    { h: 0, s: 70, l: 50 },
+    { h: 40, s: 80, l: 60 },
+    { h: 80, s: 60, l: 45 },
+    { h: 120, s: 50, l: 35 },
+    { h: 160, s: 55, l: 70 },
+    { h: 200, s: 65, l: 50 },
+    { h: 240, s: 60, l: 35 },
+    { h: 280, s: 50, l: 65 },
+    { h: 320, s: 70, l: 55 }
+  ];
+
+  var ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0];
+  var SEG_MS = CYCLE_MS / (ORDER.length - 1);
+
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    var k = function (n) { return (n + h / 30) % 12; };
+    var a = s * Math.min(l, 1 - l);
+    var f = function (n) { return l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); };
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  function toHex(n) {
+    return n.toString(16).padStart(2, '0');
+  }
+
+  function centerOf(i) {
+    var col = i % 3;
+    var row = Math.floor(i / 3);
+    return { x: col * STEP, y: row * STEP };
+  }
+
+  CRAYONS.forEach(function (c, i) {
+    var rgb = hslToRgb(c.h, c.s, c.l);
+    crayonEls[i].style.background = 'hsl(' + c.h + 'deg ' + c.s + '% ' + c.l + '%)';
+    crayonEls[i].dataset.hex = '#' + toHex(rgb[0]) + toHex(rgb[1]) + toHex(rgb[2]);
+  });
+
+  function apply(t) {
+    var idx = Math.min(ORDER.length - 2, Math.floor(t / SEG_MS));
+    var frac = (t % SEG_MS) / SEG_MS;
+    var a = centerOf(ORDER[idx]);
+    var b = centerOf(ORDER[idx + 1]);
+    var x = a.x + (b.x - a.x) * frac;
+    var y = a.y + (b.y - a.y) * frac;
+    ringEl.style.transform = 'translate(' + x.toFixed(2) + 'px, ' + y.toFixed(2) + 'px)';
+
+    var selIndex = ORDER[frac < .5 ? idx : idx + 1];
+    var c = CRAYONS[selIndex];
+    var rgb = hslToRgb(c.h, c.s, c.l);
+    var brightness = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000 / 255;
+    var white = brightness < LUM_THRESHOLD;
+    ringEl.classList.toggle('is-white-ring', white);
+    ringEl.classList.toggle('is-black-ring', !white);
+
+    var hex = crayonEls[selIndex].dataset.hex;
+    swatchEl.style.background = hex;
+    hexEl.textContent = hex;
+
+    for (var i = 0; i < crayonEls.length; i++) {
+      crayonEls[i].setAttribute('aria-checked', i === selIndex ? 'true' : 'false');
+    }
+  }
+
+  if (reduce) {
+    apply(0);
+    return;
+  }
+
+  var start = null;
+  function loop(ts) {
+    if (start === null) start = ts;
+    var t = (ts - start) % CYCLE_MS;
+    apply(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>共有ボーダー統合 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bg is-demo" id="bg" role="group" aria-label="テキスト整列">
+  <button class="bg__btn" data-align="left" aria-pressed="true">左</button>
+  <button class="bg__btn" data-align="center" aria-pressed="false">中央</button>
+  <button class="bg__btn" data-align="right" aria-pressed="false">右</button>
+  <button class="bg__btn" data-align="justify" aria-pressed="false">両端</button>
+  <span class="bg__seam" id="seam0" aria-hidden="true"></span>
+  <span class="bg__seam" id="seam1" aria-hidden="true"></span>
+  <span class="bg__seam" id="seam2" aria-hidden="true"></span>
+</div>
+<script>
+(function () {
+  var CYCLE_MS = 900; // 자동 루프가 다음 버튼으로 넘어가는 간격
+  var BLEED_PX = 6; // 계산 겹 상수: 파동이 이웃 경계선을 넘어 번질 수 있는 최대 여유(px) — 이 값만큼만 넘고 그 이상은 실측 경계선에서 잘린다
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var RIPPLE_MS = reduce ? 1 : 420; // 계산 자체는 유지하되 reduce 에서는 목표 상태로 즉시 놓는다
+
+  var root = document.getElementById('bg');
+  var btns = Array.prototype.slice.call(root.querySelectorAll('.bg__btn'));
+  var seams = [document.getElementById('seam0'), document.getElementById('seam1'), document.getElementById('seam2')];
+  var isDemo = true;
+
+  // 계산 겹: 버튼 사이 공유 경계선의 실제 화면 좌표를 getBoundingClientRect 로 잰다 — 짐작 px 를 쓰지 않는다.
+  function measureSeams() {
+    var rootRect = root.getBoundingClientRect();
+    for (var i = 0; i < seams.length; i++) {
+      var a = btns[i].getBoundingClientRect();
+      var b = btns[i + 1].getBoundingClientRect();
+      var seamX = (a.right + b.left) / 2 - rootRect.left; // 두 버튼이 겹치는 경계선의 실측 중점
+      seams[i].style.setProperty('--seam-x', seamX.toFixed(2) + 'px');
+    }
+  }
+
+  function setActive(btn) {
+    btns.forEach(function (b) { b.setAttribute('aria-pressed', String(b === btn)); b.classList.toggle('bg__btn--on', b === btn); });
+  }
+
+  var ripples = [];
+  function spawnRipple(btn, clientX) {
+    var idx = btns.indexOf(btn);
+    var rect = btn.getBoundingClientRect();
+    var rootRect = root.getBoundingClientRect();
+    var originX = (clientX == null ? rect.left + rect.width / 2 : clientX) - rect.left;
+    var leftSeam = idx > 0 ? btns[idx - 1].getBoundingClientRect().right - rect.left : null;
+    var rightSeam = idx < btns.length - 1 ? btns[idx + 1].getBoundingClientRect().left - rect.left : null;
+    var span = document.createElement('span');
+    span.className = 'bg__ripple';
+    span.style.left = originX + 'px';
+    span.style.top = (rect.height / 2) + 'px';
+    btn.appendChild(span);
+    ripples.push({
+      el: span, start: performance.now(), from: 0, to: Math.max(rect.width, rect.height) * 1.3,
+      // 계산 겹: 파동이 번질 수 있는 한계를 이웃 경계선 실측값 + BLEED_PX 로 고정한다
+      minClip: leftSeam == null ? -9999 : leftSeam - BLEED_PX,
+      maxClip: rightSeam == null ? 9999 : rightSeam + BLEED_PX,
+      originX: originX
+    });
+  }
+
+  function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
+
+  function tickRipples(ts) {
+    for (var i = ripples.length - 1; i >= 0; i--) {
+      var r = ripples[i];
+      var t = Math.min(1, (ts - r.start) / RIPPLE_MS);
+      var radius = r.from + (r.to - r.from) * easeOutQuad(t);
+      var left = Math.max(r.minClip, r.originX - radius);
+      var right = Math.min(r.maxClip, r.originX + radius);
+      r.el.style.width = radius * 2 + 'px';
+      r.el.style.height = radius * 2 + 'px';
+      r.el.style.marginLeft = -radius + 'px';
+      r.el.style.marginTop = -radius + 'px';
+      r.el.style.opacity = String(1 - t);
+      // clip-path 로 파동이 실측 경계선 밖으로 못 나가게 자른다
+      r.el.style.clipPath = 'inset(-9999px ' + Math.max(0, r.originX + radius - right) + 'px -9999px ' + Math.max(0, left - (r.originX - radius)) + 'px)';
+      if (t >= 1) { r.el.remove(); ripples.splice(i, 1); }
+    }
+  }
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      human();
+      setActive(b);
+      spawnRipple(b, reduce ? null : e.clientX);
+    });
+  });
+
+  window.addEventListener('resize', measureSeams);
+  measureSeams();
+
+  var cycleStart = 0, lastIdx = -1;
+  function loop(ts) {
+    if (!cycleStart) cycleStart = ts;
+    if (isDemo && !reduce) {
+      var idx = Math.floor((ts - cycleStart) / CYCLE_MS) % btns.length;
+      if (idx !== lastIdx) { lastIdx = idx; setActive(btns[idx]); spawnRipple(btns[idx], null); }
+    }
+    tickRipples(ts);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

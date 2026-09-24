@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>드래그할 때마다 막대 높이가 다시 계산되는 히스토그램 피커 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="hg is-demo" id="hg">
+  <figcaption class="hg__head">
+    <span class="hg__title">구간별 표본 분포</span>
+    <span class="hg__stat" aria-hidden="true">값 <b class="hg__n" id="hg-val">50</b> · 구간 <b class="hg__n" id="hg-bucket">6</b>/12</span>
+  </figcaption>
+
+  <div class="hg__zone">
+    <svg class="hg__chart" id="chart" viewBox="0 0 480 200" preserveAspectRatio="none" role="img" aria-label="구간 12개 표본 분포 막대그래프, 값이 속한 구간의 막대만 다시 계산되어 올라간다">
+      <line class="hg__base" x1="0" y1="200" x2="480" y2="200"></line>
+    </svg>
+  </div>
+
+  <div class="hg__track" id="track">
+    <span class="hg__rail" aria-hidden="true"></span>
+    <button class="hg__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="값 고르기" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="50" aria-valuetext="값 50, 구간 6/12">
+      <svg class="hg__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M96 64v128a8 8 0 0 1-16 0V64a8 8 0 0 1 16 0m88 0v128a8 8 0 0 1-16 0V64a8 8 0 0 1 16 0" opacity=".2"/><path d="M188 32a8 8 0 0 0-8 8v176a8 8 0 0 0 16 0V40a8 8 0 0 0-8-8M76 32a8 8 0 0 0-8 8v176a8 8 0 0 0 16 0V40a8 8 0 0 0-8-8"/></g></svg>
+    </button>
+  </div>
+
+  <p class="hg__hint">막대 위를 드래그하거나 화살표키를 누르면 그 값이 속한 구간의 막대만 다시 계산됩니다</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="hg-live"></span>
+    <table>
+      <caption>구간별 기준 높이</caption>
+      <thead><tr><th>구간</th><th>기준 높이</th></tr></thead>
+      <tbody id="hg-table"></tbody>
+    </table>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown(화살표·Home·End) 이 값(0~100)을 바꾸면
+// 그 값이 속한 구간 하나만 목표 높이를 다시 계산해 올리고 나머지 11개는 기준 높이로 낮춘다.
+// 매 프레임 rAF 루프가 현재 높이를 목표 높이로 관성 보간(lerp)한다 — CSS @keyframes 는
+// 0개(어떤 구간이 지금 활성인지는 매 순간 바뀌는 정수라 선언형 keyframes 로 표현할 수 없다,
+// 395 의 캔버스 rAF 선례와 같은 이유로 실시간 캡처 경로를 그대로 쓴다).
+var root = document.getElementById('hg');
+var chart = document.getElementById('chart');
+var track = document.getElementById('track');
+var grab = document.getElementById('grab');
+var valEl = document.getElementById('hg-val');
+var bucketEl = document.getElementById('hg-bucket');
+var live = document.getElementById('hg-live');
+var tableBody = document.getElementById('hg-table');
+
+var BUCKET_COUNT = 12;                 // picker-graph-histogram-bucket-count — 변형 01 의 조정 대상
+var BASE = [0.34, 0.52, 0.28, 0.61, 0.45, 0.72, 0.38, 0.55, 0.30, 0.48, 0.65, 0.42]; // 고정 표본(0~1, RNG 없음)
+var PEAK_BOOST = 0.40;                 // 활성 구간에 더해지는 최대 여유 높이(0~1)
+var LERP_RATE = 0.22;                  // 프레임마다 목표에 다가가는 비율 — 관성
+var AUTO_PERIOD = 1.5;                 // 자동 시연 한 바퀴(초)
+var STEP = 5;                          // 키보드 한 번에 움직이는 값
+var CHART_H = 200;
+
+var css = getComputedStyle(root);
+function cssv(name) { return css.getPropertyValue(name).trim(); }
+
+var currentH = BASE.slice();
+var targetH = BASE.slice();
+var value = 50;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var trackRect = null;
+var rafId = 0;
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function bucketOf(v) {
+  var idx = Math.floor(v / 100 * BUCKET_COUNT);
+  return Math.max(0, Math.min(BUCKET_COUNT - 1, idx));
+}
+
+function fracIn(v, bucket) {
+  var raw = v / 100 * BUCKET_COUNT - bucket;
+  return Math.max(0, Math.min(1, raw));
+}
+
+// 구간 하나만 목표 높이를 다시 계산한다 — 나머지는 기준 높이 그대로
+function recompute() {
+  var b = bucketOf(value);
+  var f = fracIn(value, b);
+  for (var i = 0; i < BUCKET_COUNT; i++) {
+    targetH[i] = BASE[i];
+  }
+  targetH[b] = Math.min(0.96, BASE[b] + PEAK_BOOST * (0.4 + 0.6 * f));
+  return b;
+}
+
+function buildBars() {
+  var gap = 6;
+  var w = 480 / BUCKET_COUNT;
+  for (var i = 0; i < BUCKET_COUNT; i++) {
+    var r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('class', 'hg__bar');
+    r.setAttribute('x', String(i * w + gap / 2));
+    r.setAttribute('width', String(Math.max(1, w - gap)));
+    r.dataset.i = String(i);
+    chart.appendChild(r);
+
+    var tr = document.createElement('tr');
+    var th = document.createElement('th');
+    th.textContent = String(i + 1);
+    var td = document.createElement('td');
+    td.textContent = Math.round(BASE[i] * 100) + '%';
+    tr.appendChild(th); tr.appendChild(td);
+    tableBody.appendChild(tr);
+  }
+}
+
+function paint() {
+  var bars = chart.querySelectorAll('.hg__bar');
+  var activeIdx = bucketOf(value);
+  for (var i = 0; i < bars.length; i++) {
+    var h = currentH[i] * CHART_H;
+    bars[i].setAttribute('y', String(CHART_H - h));
+    bars[i].setAttribute('height', String(h));
+    bars[i].classList.toggle('is-active', i === activeIdx);
+  }
+  var rv = Math.round(value);
+  valEl.textContent = String(rv);
+  bucketEl.textContent = String(activeIdx + 1);
+  grab.style.left = value + '%';
+  grab.setAttribute('aria-valuenow', String(rv));
+  var text = '값 ' + rv + ', 구간 ' + (activeIdx + 1) + '/12';
+  grab.setAttribute('aria-valuetext', text);
+}
+
+function announce() {
+  var activeIdx = bucketOf(value);
+  live.textContent = '값 ' + Math.round(value) + ', 구간 ' + (activeIdx + 1) + '/12로 다시 계산됨';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(0, Math.min(100, v));
+  if (isManual) {
+    manual = true;
+    root.classList.remove('is-demo');
+  }
+  recompute();
+}
+
+function fromPointer(clientX) {
+  if (!trackRect) trackRect = track.getBoundingClientRect();
+  var ratio = (clientX - trackRect.left) / trackRect.width;
+  setValue(ratio * 100, true);
+}
+
+function onDown(e) {
+  trackRect = track.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX);
+  if (reduced()) { currentH = targetH.slice(); paint(); announce(); }
+}
+function onMove(e) {
+  if (e.buttons === 0 && e.pointerType !== 'touch') { /* 버튼 안 눌렸으면 무시 */ }
+  fromPointer(e.clientX);
+  if (reduced()) { currentH = targetH.slice(); paint(); announce(); }
+}
+function onUp() { announce(); }
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(0, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(100, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) { currentH = targetH.slice(); paint(); announce(); }
+}
+
+function onResize() {
+  trackRect = track.getBoundingClientRect();
+  if (reduced()) { paint(); }
+}
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  var v = 50 + 46 * Math.sin(autoT * omega);
+  value = v;
+  recompute();
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) { autoStep(dt); }
+  for (var i = 0; i < BUCKET_COUNT; i++) {
+    currentH[i] += (targetH[i] - currentH[i]) * LERP_RATE;
+  }
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+buildBars();
+recompute();
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+track.addEventListener('pointerdown', function (e) {
+  trackRect = track.getBoundingClientRect();
+  fromPointer(e.clientX);
+  if (reduced()) { currentH = targetH.slice(); paint(); announce(); }
+});
+grab.addEventListener('keydown', onKey);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  currentH = targetH.slice();
+  paint();
+} else {
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

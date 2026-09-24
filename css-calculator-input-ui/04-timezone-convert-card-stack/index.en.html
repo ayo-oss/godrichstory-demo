@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Timezone Card Stack Where One Time Splits Into Several Cards — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tz is-demo" id="tz">
+  <label class="tz__field">
+    <span class="tz__cap">Reference time</span>
+    <input class="tz__input" id="tzBase" type="time" step="60" value="09:30" aria-describedby="tzReadout">
+  </label>
+  <div class="tz__cards" id="tzCards" aria-hidden="true"></div>
+  <p class="tz__readout" id="tzReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('tz');
+  var input = document.getElementById('tzBase');
+  var cardsBox = document.getElementById('tzCards');
+  var readout = document.getElementById('tzReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  // 카드마다 UTC 오프셋(시)You are 쓴다 — 도시·국가 이름 없음
+  var OFFSETS = [-8, 0, 9, 5.5];
+  var cards = OFFSETS.map(function (off) {
+    var el = document.createElement('div');
+    el.className = 'tz__card';
+    el.innerHTML = '<span class="tz__offset"></span><span class="tz__time"></span>';
+    cardsBox.appendChild(el);
+    return { off: off, el: el, offsetEl: el.querySelector('.tz__offset'), timeEl: el.querySelector('.tz__time') };
+  });
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function formatOffset(off) {
+    var sign = off >= 0 ? '+' : '-';
+    var abs = Math.abs(off);
+    var h = Math.floor(abs);
+    var m = Math.round((abs - h) * 60);
+    return 'UTC' + sign + h + (m ? ':' + pad2(m) : '');
+  }
+  // 계산 한 겹 — Reference time(분) 에 오프셋(분)을 더해 각 카드 시각을 구하고, 시간대를 낮·밤으로 판정해 밝기를 정한다
+  function addOffsetMinutes(baseMinutes, offsetHours) {
+    var total = (baseMinutes + offsetHours * 60) % 1440;
+    if (total < 0) total += 1440;
+    return total;
+  }
+  function isDaytime(minutes) { return minutes >= 360 && minutes < 1080; }
+  function brightnessOf(minutes) {
+    var distFromNoon = Math.abs(minutes - 720) / 720;
+    return clamp01(1 - distFromNoon * 0.7);
+  }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  var SENT_PREFIX = 'At reference ', SENT_MID = ' time, the first card shows ', SENT_SUFFIX = '.';
+
+  var targets = cards.map(function () { return 0; });
+  var rendered = cards.map(function () { return 0; });
+  var LERP_RATE = 0.15; // 변형 04: 낮추면 카드 밝기가 값 변화를 더 천천히 뒤따라간다
+
+  function readBaseMinutes() {
+    var parts = input.value.split(':');
+    var h = parseInt(parts[0], 10) || 0;
+    var m = parseInt(parts[1], 10) || 0;
+    return h * 60 + m;
+  }
+
+  function applyValue(baseMinutes) {
+    cards.forEach(function (card, i) {
+      var minutes = addOffsetMinutes(baseMinutes, card.off);
+      var h = Math.floor(minutes / 60);
+      var m = Math.floor(minutes % 60);
+      card.offsetEl.textContent = formatOffset(card.off);
+      card.timeEl.textContent = pad2(h) + ':' + pad2(m);
+      card.el.classList.toggle('is-night', !isDaytime(minutes));
+      targets[i] = brightnessOf(minutes);
+      if (reduce) { rendered[i] = targets[i]; }
+    });
+    var bh = Math.floor(baseMinutes / 60), bm = Math.floor(baseMinutes % 60);
+    var first = cards[0];
+    var firstMinutes = addOffsetMinutes(baseMinutes, first.off);
+    var fh = Math.floor(firstMinutes / 60), fm = Math.floor(firstMinutes % 60);
+    readout.textContent = SENT_PREFIX + pad2(bh) + ':' + pad2(bm) + SENT_MID + pad2(fh) + ':' + pad2(fm) + SENT_SUFFIX;
+    if (reduce) paint();
+  }
+
+  function paint() {
+    cards.forEach(function (card, i) {
+      card.el.style.setProperty('--b', rendered[i].toFixed(3));
+    });
+  }
+
+  input.addEventListener('input', function () { human(); applyValue(readBaseMinutes()); });
+  input.addEventListener('change', function () { human(); applyValue(readBaseMinutes()); });
+
+  var DEMO_TIMES = ['09:30', '14:00', '23:15', '03:45', '18:20'];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_TIMES.length);
+      if (idx !== lastIdx) { lastIdx = idx; input.value = DEMO_TIMES[idx]; applyValue(readBaseMinutes()); }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame() {
+    rendered = rendered.map(function (v, i) { return v + (targets[i] - v) * LERP_RATE; });
+    paint();
+    requestAnimationFrame(frame);
+  }
+
+  applyValue(readBaseMinutes());
+
+  if (!reduce) { requestAnimationFrame(driveTick); requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

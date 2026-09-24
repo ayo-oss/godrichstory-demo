@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RGB 分布バー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hg is-demo" id="hg">
+  <div class="hg__top">
+    <div class="hg__frame">
+      <canvas class="hg__view" id="view" width="320" height="200" role="img" aria-label="サンプル写真"></canvas>
+    </div>
+    <div class="hg__chart">
+      <p class="hg__cap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" class="hg__ico" aria-hidden="true"><g fill="currentColor"><path d="M208 40v168h-56V40Z" opacity=".2"/><path d="M224 200h-8V40a8 8 0 0 0-8-8h-56a8 8 0 0 0-8 8v40H96a8 8 0 0 0-8 8v40H48a8 8 0 0 0-8 8v64h-8a8 8 0 0 0 0 16h192a8 8 0 0 0 0-16M160 48h40v152h-40Zm-56 48h40v104h-40Zm-48 48h32v56H56Z"/></g></svg><span>ヒストグラム</span></p>
+      <div class="hg__plot">
+        <canvas class="hg__hist" id="hist" width="240" height="120" role="img" aria-label="チャンネル別の分布グラフ"></canvas>
+        <span class="hg__bars" aria-hidden="true">
+          <span class="hg__gb" style="--i:0; --h:.18"></span><span class="hg__gb" style="--i:1; --h:.3"></span><span class="hg__gb" style="--i:2; --h:.46"></span><span class="hg__gb" style="--i:3; --h:.62"></span>
+          <span class="hg__gb" style="--i:4; --h:.8"></span><span class="hg__gb" style="--i:5; --h:.95"></span><span class="hg__gb" style="--i:6; --h:.72"></span><span class="hg__gb" style="--i:7; --h:.5"></span>
+          <span class="hg__gb" style="--i:8; --h:.38"></span><span class="hg__gb" style="--i:9; --h:.44"></span><span class="hg__gb" style="--i:10; --h:.58"></span><span class="hg__gb" style="--i:11; --h:.7"></span>
+          <span class="hg__gb" style="--i:12; --h:.85"></span><span class="hg__gb" style="--i:13; --h:.62"></span><span class="hg__gb" style="--i:14; --h:.4"></span><span class="hg__gb" style="--i:15; --h:.24"></span>
+        </span>
+      </div>
+    </div>
+  </div>
+  <div class="hg__ctl">
+    <span class="hg__lab" id="lab">明るさ</span>
+    <span class="hg__track" id="track" role="slider" tabindex="0" aria-labelledby="lab" aria-valuemin="0.6" aria-valuemax="1.6" aria-valuenow="1"><span class="hg__thumb" id="thumb"></span></span>
+  </div>
+</div>
+</main>
+<script>
+var hg = document.getElementById('hg');
+var view = document.getElementById('view');
+var hist = document.getElementById('hist');
+var track = document.getElementById('track');
+var thumb = document.getElementById('thumb');
+var vctx = view.getContext('2d');
+var hctx = hist.getContext('2d');
+var work = document.createElement('canvas');
+var wctx = work.getContext('2d', { willReadFrequently: true });
+var BINS = 16;
+var CHANNEL = ['rgba(47, 109, 246, .85)', 'rgba(43, 157, 116, .85)', 'rgba(194, 54, 26, .85)'];
+var level = 1, queued = 0;
+var VOICE = '%v 倍';
+
+// 가짜 사진 — 외부 파일 없이 그라디언트와 도형으로 합성한다. 필터·히스토그램이 보이도록 대비를 세게 준다
+function paintPhoto(c, w, h) {
+  var sky = c.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#2f6df6'); sky.addColorStop(0.55, '#ff9ebb'); sky.addColorStop(1, '#ffd23f');
+  c.fillStyle = sky; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#fff7e6';
+  c.beginPath(); c.arc(w * 0.74, h * 0.28, h * 0.13, 0, Math.PI * 2); c.fill();
+  // 곧은 수평선 하나 — 기울기 보정이 눈에 보이려면 비교할 직선이 있어야 한다
+  c.fillStyle = 'rgba(23, 20, 26, 0.5)'; c.fillRect(0, Math.round(h * 0.66), w, 2);
+  c.fillStyle = '#17141a';
+  c.beginPath(); c.moveTo(0, h); c.lineTo(w * 0.34, h * 0.36); c.lineTo(w * 0.62, h); c.closePath(); c.fill();
+  c.fillStyle = '#c2361a';
+  c.beginPath(); c.moveTo(w * 0.46, h); c.lineTo(w * 0.78, h * 0.52); c.lineTo(w, h); c.closePath(); c.fill();
+  for (var i = 0; i < 6; i++) { c.fillStyle = i % 2 ? '#fff7e6' : '#17141a'; c.fillRect(w * (0.08 + i * 0.07), h * (0.14 + (i % 3) * 0.06), 7, 7); }
+}
+
+// 보정을 먹인 사진을 작은 판에 다시 그린 다음 픽셀을 통째로 읽어 칸마다 센다.
+// 한 칸은 明るさ 16단계 — 256 단계를 そのまま 세면 막대가 너무 잘아서 모양이 안 읽힌다.
+// ctx.filter 는 Safari 에 아직 없다(caniuse 81.08%). 없으면 읽은 값에 직접 곱해 같은 결과를 만든다
+var CAN_FILTER = typeof wctx.filter === 'string';
+
+function countBins() {
+  if (CAN_FILTER) { wctx.filter = 'brightness(' + level.toFixed(2) + ')'; }
+  wctx.clearRect(0, 0, work.width, work.height);
+  wctx.drawImage(view, 0, 0, work.width, work.height);
+  var data = wctx.getImageData(0, 0, work.width, work.height).data;
+  var bins = [], i;
+  for (i = 0; i < BINS * 3; i++) { bins.push(0); }
+  for (var p = 0; p < data.length; p += 4) {
+    for (var ch = 0; ch < 3; ch++) {
+      var v = CAN_FILTER ? data[p + ch] : Math.min(255, Math.round(data[p + ch] * level));
+      bins[Math.min(BINS - 1, v >> 4) * 3 + ch] += 1;
+    }
+  }
+  return bins;
+}
+
+function drawHist(bins) {
+  var w = hist.width, h = hist.height, top = 1, i;
+  for (i = 0; i < bins.length; i++) { if (bins[i] > top) { top = bins[i]; } }
+  hctx.clearRect(0, 0, w, h);
+  var slot = w / BINS, bar = slot / 3;
+  for (i = 0; i < BINS; i++) {
+    for (var ch = 0; ch < 3; ch++) {
+      var tall = bins[i * 3 + ch] / top * h;
+      hctx.fillStyle = CHANNEL[ch];
+      hctx.fillRect(i * slot + ch * bar, h - tall, bar - 1, tall);
+    }
+  }
+}
+
+function refresh() {
+  view.style.filter = 'brightness(' + level.toFixed(2) + ')';
+  thumb.style.left = ((level - 0.6) * 100) + '%';
+  track.setAttribute('aria-valuenow', level.toFixed(2));
+  track.setAttribute('aria-valuetext', VOICE.replace('%v', level.toFixed(2)));
+  // 픽셀 세기는 무거우니 프레임마다 한 번으로 묶는다 — 슬라이더를 빠르게 끌어도 밀리지 않는다
+  if (queued) { return; }
+  queued = requestAnimationFrame(function () { queued = 0; drawHist(countBins()); });
+}
+
+function setLevel(next) {
+  level = Math.max(0.6, Math.min(1.6, Math.round(next * 100) / 100));
+  hg.classList.remove('is-demo');
+  refresh();
+}
+
+function fromPointer(e) {
+  var r = track.getBoundingClientRect();
+  setLevel((e.clientX - r.left) / r.width + 0.6);
+}
+track.addEventListener('pointerdown', function (e) { track.setPointerCapture(e.pointerId); fromPointer(e); });
+track.addEventListener('pointermove', function (e) { if (e.buttons) { fromPointer(e); } });
+// 화살표 0.02, Shift 와 함께면 0.1
+track.addEventListener('keydown', function (e) {
+  var step = e.shiftKey ? 0.1 : 0.02;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); setLevel(level - step); }
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); setLevel(level + step); }
+});
+
+work.width = 80; work.height = 50;
+paintPhoto(vctx, view.width, view.height);
+refresh();
+</script>
+</body>
+</html>

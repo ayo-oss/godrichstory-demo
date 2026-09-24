@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>선 그래프 그리기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lc" id="lc">
+  <p class="lc__hint">
+    <svg class="lc__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 64v144H32V48h176a16 16 0 0 1 16 16" opacity=".2"/><path d="M232 208a8 8 0 0 1-8 8H32a8 8 0 0 1-8-8V48a8 8 0 0 1 16 0v108.69l50.34-50.35a8 8 0 0 1 11.32 0L128 132.69L180.69 80H160a8 8 0 0 1 0-16h40a8 8 0 0 1 8 8v40a8 8 0 0 1-16 0V91.31l-58.34 58.35a8 8 0 0 1-11.32 0L96 123.31l-56 56V200h184a8 8 0 0 1 8 8"/></g></svg>
+    <span>A 12-week sales line draws itself from left to right — <code>quadraticCurveTo</code>·<code>clip</code>·<code>lineTo</code></span>
+  </p>
+  <div class="lc__field" id="field" role="application" aria-label="Line chart drawing test board" tabindex="0">
+    <canvas class="lc__cv" id="cv" role="img" aria-label="12-week sales line chart — a bending line climbing week by week"></canvas>
+  </div>
+  <div class="lc__bar">
+    <button class="lc__btn" id="replay" type="button">
+      <svg class="lc__bico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 128a88 88 0 1 1-88-88a88 88 0 0 1 88 88" opacity=".2"/><path d="M224 128a96 96 0 0 1-94.71 96H128a95.38 95.38 0 0 1-65.9-26.2a8 8 0 0 1 11-11.63a80 80 0 1 0-1.67-114.78a3 3 0 0 1-.26.25L44.59 96H72a8 8 0 0 1 0 16H24a8 8 0 0 1-8-8V56a8 8 0 0 1 16 0v29.8L60.25 60A96 96 0 0 1 224 128"/></g></svg>
+      <span>Redraw</span>
+    </button>
+    <table class="sr-only">
+      <caption>12-week sales (unit: units)</caption>
+      <thead><tr><th scope="col">Week</th><th scope="col">Sales</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">W1</th><td>128</td></tr>
+        <tr><th scope="row">W2</th><td>176</td></tr>
+        <tr><th scope="row">W3</th><td>142</td></tr>
+        <tr><th scope="row">W4</th><td>210</td></tr>
+        <tr><th scope="row">W5</th><td>248</td></tr>
+        <tr><th scope="row">W6</th><td>204</td></tr>
+        <tr><th scope="row">W7</th><td>292</td></tr>
+        <tr><th scope="row">W8</th><td>336</td></tr>
+        <tr><th scope="row">W9</th><td>288</td></tr>
+        <tr><th scope="row">W10</th><td>372</td></tr>
+        <tr><th scope="row">W11</th><td>414</td></tr>
+        <tr><th scope="row">W12</th><td>468</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</main>
+<script>
+// 선 그래프 그리기 — W12 판매량을 이어 그리는 애니메이션.
+// 두 겹이 함께 움직인다:
+//   1) 끝점이 x 축을 따라 이동하며, 지나온 꼭짓점들은 quadraticCurveTo 로 모서리를 눌러 이어진다(중점 제어).
+//   2) 클리핑 사각형이 같은 속도로 왼쪽에서 오른쪽으로 열려, 선이 지나온 순서대로 드러난다.
+// 그리드와 Axis 라벨은 정적이므로 reveal 초반에 먼저 띄우고, 선이 그 위를 지나간다.
+var root = document.getElementById('lc');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var replayBtn = document.getElementById('replay');
+
+var css = getComputedStyle(root);
+var C_LINE = css.getPropertyValue('--chart-1').trim();
+var C_FILL = css.getPropertyValue('--fill-1').trim();
+var C_INK = css.getPropertyValue('--ink').trim();
+var C_MUTE = css.getPropertyValue('--mute').trim();
+var C_GRID = css.getPropertyValue('--grid').trim();
+var C_PAPER = css.getPropertyValue('--paper').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+// 고정 시드 데이터 — W12 Sales(개). 난수가 아니라 코드 안 배열이므로 다시 그려도 같은 그림
+var WEEKS = [128, 176, 142, 210, 248, 204, 292, 336, 288, 372, 414, 468];
+var PAD_L = 40, PAD_R = 16, PAD_T = 18, PAD_B = 30;   // Axis 라벨 여백(CSS px)
+var LOOP = 2;               // 한 사이클 2초 — 캡처 창과 같아 gif 가 이어진다
+var DRAW_AT = 0.88;         // 전체 2초의 88% 에 그리기가 끝나고, 끝점이 커지며 잠시 쉰다
+var Y_TOP = 100, Y_SPAN = 500;   // y Axis 스케일 고정(100~500개)
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var t0 = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 데이터 인덱스 → 플롯 좌표. y 는 위로 갈수록 크다
+function xAt(i) { return PAD_L + (W - PAD_L - PAD_R) * (i / (WEEKS.length - 1)); }
+function yAt(v) { return PAD_T + (H - PAD_T - PAD_B) * (1 - (v - Y_TOP) / (Y_SPAN - Y_TOP)); }
+
+// 그리기 진행 p(0..1) → { i, k, ex, ey, f }
+//   f = 0..11 정규화 경과, i·k = 현재 변, (ex,ey) = 끝점 좌표
+function headAt(p) {
+  var n = WEEKS.length;
+  var f = Math.min(1, p / DRAW_AT) * (n - 1);
+  var i = Math.min(n - 2, Math.floor(f));
+  var k = f - i;
+  var ex = xAt(i) + (xAt(i + 1) - xAt(i)) * k;
+  var ey = yAt(WEEKS[i]) + (yAt(WEEKS[i + 1]) - yAt(WEEKS[i])) * k;
+  return { i: i, k: k, f: f, ex: ex, ey: ey };
+}
+
+// 현재 끝점까지의 부드러운 경로를 만든다.
+// 지나온 꼭짓점은 제어점으로 삼아 다음 꼭짓점과의 중점까지 quadraticCurveTo 로 누른다(정점을 스치듯),
+// 마지막 구간은 현재 끝점까지 직선(lineTo) — 그리고 있는 순간의 펜 끝이다.
+function tracePath(p) {
+  var d = headAt(p);
+  ctx.beginPath();
+  ctx.moveTo(xAt(0), yAt(WEEKS[0]));
+  for (var j = 1; j < d.i; j++) {
+    ctx.quadraticCurveTo(xAt(j), yAt(WEEKS[j]), (xAt(j) + xAt(j + 1)) / 2, (yAt(WEEKS[j]) + yAt(WEEKS[j + 1])) / 2);
+  }
+  if (d.i >= 1) {
+    ctx.quadraticCurveTo(xAt(d.i), yAt(WEEKS[d.i]), d.ex, d.ey);
+  } else {
+    ctx.lineTo(d.ex, d.ey);
+  }
+  return d;
+}
+
+// 목표를 살짝 넘겼다가 돌아오는 오버슛 — 끝점이 자리 잡을 때 커지는 감
+function easeOutBack(t) {
+  var c = 1.7;
+  return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2);
+}
+
+function draw(p) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C_PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  // 가로 그리드 + y 라벨 — 100~500 다섯 줄. 첫 12% 동안 아래에서 위로 떠오른다
+  var axisP = Math.min(1, p / 0.12);
+  ctx.lineWidth = 1;
+  ctx.font = '600 10px ' + FONT;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  for (var g = Y_TOP; g <= Y_SPAN; g += 100) {
+    var gy = yAt(g) + (1 - axisP) * 14;
+    ctx.strokeStyle = C_GRID;
+    ctx.beginPath();
+    ctx.moveTo(PAD_L, Math.round(gy) + 0.5);
+    ctx.lineTo(W - PAD_R, Math.round(gy) + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = C_MUTE;
+    ctx.globalAlpha = axisP;
+    ctx.fillText(String(g), PAD_L - 6, gy);
+    ctx.globalAlpha = 1;
+  }
+
+  // x 라벨(Week) — 축이 뜬 뒤 왼쪽부터 차례로 나타난다
+  ctx.textAlign = 'center';
+  for (var w = 0; w < WEEKS.length; w++) {
+    var wp = Math.max(0, Math.min(1, (p - 0.10 - w * 0.018) / 0.10));
+    if (wp <= 0) continue;
+    ctx.fillStyle = C_MUTE;
+    ctx.globalAlpha = wp;
+    ctx.fillText('W' + (w + 1), xAt(w), H - PAD_B + 13);
+    ctx.globalAlpha = 1;
+  }
+
+  // 클리핑 사각형 — 왼쪽에서 오른쪽으로 열린다. 이 안에서만 면과 선이 보인다
+  var cutX = PAD_L + (W - PAD_L - PAD_R) * Math.min(1, p / DRAW_AT);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, cutX + 1, H);
+  ctx.clip();
+
+  // 영역 채움(면) — 선 아래를 옅게 깐다. 움직이는 면적이 커야 측정 강도가 오른다
+  var d0 = tracePath(p);
+  ctx.lineTo(d0.ex, H - PAD_B);
+  ctx.lineTo(xAt(0), H - PAD_B);
+  ctx.closePath();
+  ctx.fillStyle = C_FILL;
+  ctx.fill();
+
+  // 선 — 3px. 경로를 다시 만들어 그린다
+  var d1 = tracePath(p);
+  ctx.strokeStyle = C_LINE;
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.restore();
+
+  // 꼭짓점 마커 — 끝점이 지나온 점만 종이색 속에 파란 테두리로 박는다(지나온 순서 확인)
+  for (var m = 0; m <= d1.i; m++) {
+    ctx.beginPath();
+    ctx.arc(xAt(m), yAt(WEEKS[m]), 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = C_PAPER;
+    ctx.fill();
+    ctx.strokeStyle = C_LINE;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // 끝점 — 그리기가 끝나면 오버슛으로 커진다(2.6 에서 5.5 로). 커지며 링이 한 번 퍼진다
+  var settled = Math.max(0, (p - DRAW_AT) / (1 - DRAW_AT));
+  var r0 = 2.6 + 2.9 * easeOutBack(Math.min(1, settled * 1.8));
+  ctx.beginPath();
+  ctx.arc(d1.ex, d1.ey, r0, 0, Math.PI * 2);
+  ctx.fillStyle = C_LINE;
+  ctx.fill();
+  if (settled > 0 && settled < 1) {
+    ctx.beginPath();
+    ctx.arc(d1.ex, d1.ey, r0 + 14 * settled, 0, Math.PI * 2);
+    ctx.strokeStyle = C_LINE;
+    ctx.globalAlpha = 0.5 * (1 - settled);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // 끝 Value 라벨 — 끝점 위에서 따라오르는 Value(변 위에서 보간되어 카운트업처럼 오른다)
+  if (p > 0.06) {
+    var lv = Math.round(WEEKS[d1.i] + (WEEKS[d1.i + 1] - WEEKS[d1.i]) * d1.k);
+    ctx.font = '700 12px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = C_INK;
+    ctx.fillText(String(lv), Math.min(W - 20, Math.max(PAD_L, d1.ex)), d1.ey - 12 - 6 * settled);
+  }
+}
+
+function frame(now) {
+  if (!t0) t0 = now;
+  var p = ((now - t0) / 1000 % LOOP) / LOOP;      // 0..1, 2초 루프
+  draw(p);
+  raf = requestAnimationFrame(frame);
+}
+
+replayBtn.addEventListener('click', function () { t0 = 0; });
+window.addEventListener('resize', function () { fit(); if (reduce) draw(1); });
+
+fit();
+if (reduce) {
+  // reduce — 루프 없이 완성 상태(W12 전체가 그려지고 끝점이 커진 한 장)만 그린다
+  draw(1);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLIPリスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fl">
+  <p class="fl__hint">ドロップ前後の座標差をtransformで打ち消してから解放し、行が滑って整列します</p>
+  <ul class="fl__list" id="flList" role="listbox" aria-label="プレイリスト" aria-describedby="flHint">
+    <li class="fl__row" role="option" aria-selected="false" tabindex="0"><span class="fl__rank" aria-hidden="true">1</span><span class="fl__name">朝の散歩</span><span class="fl__len">3:12</span></li>
+    <li class="fl__row" role="option" aria-selected="false" tabindex="0"><span class="fl__rank" aria-hidden="true">2</span><span class="fl__name">昼のラジオ</span><span class="fl__len">4:05</span></li>
+    <li class="fl__row" role="option" aria-selected="false" tabindex="0"><span class="fl__rank" aria-hidden="true">3</span><span class="fl__name">午後の集中</span><span class="fl__len">5:48</span></li>
+    <li class="fl__row" role="option" aria-selected="false" tabindex="0"><span class="fl__rank" aria-hidden="true">4</span><span class="fl__name">夜のジャズ</span><span class="fl__len">3:57</span></li>
+    <li class="fl__row" role="option" aria-selected="false" tabindex="0"><span class="fl__rank" aria-hidden="true">5</span><span class="fl__name">夜空</span><span class="fl__len">4:31</span></li>
+  </ul>
+  <p class="fl__meta"><b class="fl__tag" id="flState">FLIP 180ms</b><span class="fl__unit" id="flDelta">dy 0px</span></p>
+</div>
+</main>
+<script>
+// FLIP 리스트(01) — 드롭으로 배열이 바뀌는 순간, 바뀌기 전 각 행의 getBoundingClientRect().top(first)을
+// 재 두었다가 바뀐 뒤 좌표(last)와의 차(invert)를 transform translateY 로 즉시 되돌리고, 다음 프레임에
+// transform 을 0 으로 풀어(play) 행들이 자연스럽게 미끄러지게 한다. 문구 사전과 실제 이동 픽셀은
+// rAF 시계가 매 프레임 갱신한다. 포인터 조작도 같은 함수를 탄다(라이브러리 0, Pointer Events 기반).
+(function () {
+  var list = document.getElementById('flList');
+  var stateEl = document.getElementById('flState');
+  var deltaEl = document.getElementById('flDelta');
+  if (!list || !stateEl || !deltaEl) return;
+
+  var DUR = 180;          // FLIP 정리 시간(ms) — 변형 칩이 이 값만 바꾼다
+  var ROWS = ['朝の散歩', '昼のラジオ', '午後の集中', '夜のジャズ', '夜空'];
+  var LENS = ['3:12', '4:05', '5:48', '3:57', '4:31'];
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function rows() { return Array.prototype.slice.call(list.children); }
+
+  // FLIP — 순서 배열 order 를 적용하고 이동한 행을 되돌렸다가 푼다
+  function applyOrder(order) {
+    var rs = rows();
+    var first = rs.map(function (r) { return r.getBoundingClientRect().top; });
+    // 배열 순서대로 다시 붙인다
+    for (var i = 0; i < order.length; i++) list.appendChild(rs[order[i]]);
+    rs = rows();
+    var maxAbs = 0;
+    for (var j = 0; j < rs.length; j++) {
+      var dy = first[order[j]] - rs[j].getBoundingClientRect().top; // invert
+      if (Math.abs(dy) > Math.abs(maxAbs)) maxAbs = dy;
+      if (dy !== 0) {
+        rs[j].style.transition = 'none';
+        rs[j].style.transform = 'translateY(' + dy + 'px)';
+      }
+    }
+    deltaEl.textContent = 'dy ' + Math.round(maxAbs) + 'px';
+    // play — 다음 프레임에 되돌림을 푼다
+    requestAnimationFrame(function () {
+      rs.forEach(function (r) {
+        r.style.transition = 'transform ' + DUR + 'ms cubic-bezier(.2,.8,.2,1)';
+        r.style.transform = 'translateY(0)';
+      });
+      setTimeout(function () { rs.forEach(function (r) { r.style.transition = ''; }); }, DUR + 40);
+    });
+    // rank 갱신
+    rs.forEach(function (r, i) { r.querySelector('.fl__rank').textContent = String(i + 1); });
+    return rs;
+  }
+
+  // 사람 조작 — 행을 클릭해 아래로, Shift+클릭으로 위로 (같은 FLIP 경로)
+  list.addEventListener('click', function (e) {
+    stop();
+    var li = e.target.closest('.fl__row');
+    if (!li) return;
+    var idx = rows().indexOf(li);
+    var order = [0, 1, 2, 3, 4];
+    if (e.shiftKey) {
+      if (idx === 0) return;
+      order.splice(idx - 1, 0, order.splice(idx, 1)[0]);
+    } else {
+      if (idx === 4) return;
+      order.splice(idx + 1, 0, order.splice(idx, 1)[0]);
+    }
+    applyOrder(order);
+  });
+
+  // 자동 시연 — 시드 고정 시나리오: 3→1, 1→4, 원복. 한 사이클 2초.
+  var playing = true;
+  function stop() { playing = false; }
+  var CYCLE = [
+    { pick: 2, to: 0, hold: 700 },   // 午後の集中 3번째 → 1번째
+    { pick: 0, to: 3, hold: 700 },   // 朝の散歩 1번째 → 4번째
+    { pick: 0, to: 1, hold: 600 }    // 1번째와 2번째 교환(원복 성분)
+  ];
+  function permute(pick, to) {
+    var order = [0, 1, 2, 3, 4];
+    order.splice(to, 0, order.splice(pick, 1)[0]);
+    applyOrder(order);
+  }
+  if (reduce) {
+    permute(2, 0);
+  } else {
+    var seg = 0, segStart = performance.now();
+    (function step(now) {
+      if (playing) {
+        var s = CYCLE[seg];
+        if (now - segStart >= s.hold) {
+          seg = (seg + 1) % CYCLE.length;
+          segStart = now;
+          permute(CYCLE[seg].pick, CYCLE[seg].to);
+        }
+      }
+      requestAnimationFrame(step);
+    })(segStart);
+  }
+})();
+</script>
+</body>
+</html>

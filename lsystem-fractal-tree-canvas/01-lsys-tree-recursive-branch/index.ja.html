@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>再帰的な枝分かれ — Lシステム フラクタルツリー 9種 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>F 1つは前進、+ 1つは回転。F → F[+F][-F]F を6世代だけ書き換えれば枝は自然に伸びます。世代ごとに止めて見ると、規則がどこで枝分かれするかが分かります</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="再帰的な枝分かれラボ" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">規則 F[+F][-F]F · 角度26° · 世代0→6</span>
+    <span class="ls__meta ls__meta--dim">canvas · 文字列書き換え · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 재귀 가지(01) — L-시스템 최소 木. 줄기 F 를 규칙 F[+F][-F]F 로 다시 쓰고
+// 거북이(F=전진, +=반시계 회전, -=시계 회전, [=상태 저장, ]=복귀)로 선분을 적분한다.
+// [ ] 스택이 없으면 두 번째 갈래가 첫 갈래 끝에서 시작해 나무가 아니라 지그재그가 된다.
+// 움직임 = 世代 성장 애니메이션. 6세대까지 자라면(약 1.5초) 2초 루프 안에서 잎 호흡(가지 끝
+// 밝기 진동)으로 23/23 프레임을 채운다. 계산 축: 세대마다 문자열을 다시 쓰고 좌표를 적분.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var ANGLE  = 26;    // 가지 각도(도) — 25도에 가까운 낮은 각이 침엽수 실루엣
+  var RATIO  = 0.74;  // 세대마다 줄기가 짧아지는 비율
+  var CYCLE  = 2.0;   // 성장+호흡 주기(초) — 설정 초(2s)와 같아 한 루프
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_BARK  = tokRGB('--ls-bark');   // 줄기 — 베이지
+  var C_BARK2 = tokRGB('--ls-bark2');  // 어린 가지 — 밝은 색
+  var C_LEAF  = tokRGB('--ls-leaf');   // 잎 — 파스텔 민트
+  var C_INK   = tokRGB('--ls-ink');    // 관측창 바닥
+  var C_MOTE  = tokRGB('--ls-mote');   // 떠다니는 씨앗 점
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  // L-시스템 문자열 재쓰기 — axiom F 를 규칙으로 n世代 전개
+  var RULE = { 'F': 'F[+F][-F]F' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  // 세대별 문자열을 미리 전개해 둔다 — 매 프레임 재계산하지 않는다(문자 길이 3^gen)
+  var GENS = [];
+  for (var g = 0; g <= 6; g++) GENS.push(expand('F', g));
+
+  // 거북 해석 — 문자열을 선분 목록 {x1,y1,x2,y2,depth} 로 적분
+  function turtle(str, x0, y0, len0, angDeg) {
+    var segs = [];
+    var x = x0, y = y0, a = -Math.PI / 2;   // 위를 향해 시작(캔버스 y축 아래방향 보정)
+    var stackX = [], stackY = [], stackA = [];
+    var len = len0;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        var nx = x + Math.cos(a) * len, ny = y + Math.sin(a) * len;
+        segs.push({ x1: x, y1: y, x2: nx, y2: ny });
+        x = nx; y = ny;
+      } else if (ch === '+') {
+        a -= angDeg * Math.PI / 180;
+      } else if (ch === '-') {
+        a += angDeg * Math.PI / 180;
+      } else if (ch === '[') {
+        stackX.push(x); stackY.push(y); stackA.push(a);
+      } else if (ch === ']') {
+        x = stackX.pop(); y = stackY.pop(); a = stackA.pop();
+        len *= 0; len += RATIO; // 닫힌 가지 뒤 길이 단계는 유지 — 아래에서 세대별로 다시 계산
+      }
+    }
+    return segs;
+  }
+  // 간단화: depth 는 스택 깊이로 세며 선분에 새기는 두 번째 구현이 아래 render 안에 있다.
+
+  // 떠다니는 씨앗 점 7개 — 성장 전 광합성 모티프(결정적 위상)
+  var MOTES = [];
+  for (var m = 0; m < 7; m++) {
+    MOTES.push({ px: 0.12 + 0.76 * ((m * 0.37) % 1), py: 0.2 + 0.5 * ((m * 0.61) % 1), ph: m * 0.9 });
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    // 성장 스케줄(2초 루프): 0~0.72 世代 0→6 성장, 0.72~1.0 완전 상태 유지+잎 호흡
+    var grPhase = Math.min(loop / 0.72, 1);
+    var genF = grPhase * 6;                    // 실수 世代 — 世代 사이를 선형으로 지나며 자란다
+    var gen = Math.min(6, Math.floor(genF));
+    var frac = genF - gen;                     // 현재 世代 안 진행률
+    var breath = 0.5 + 0.5 * Math.sin(loop / CYCLE * Math.PI * 6);  // 잎 밝기 진동
+
+    // 바닥
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 떠다니는 씨앗 — 성장 초기(世代 0~2)에 잘 보이고 나중에도 느리게 떠 있는다
+    for (var mo = 0; mo < MOTES.length; mo++) {
+      var M = MOTES[mo];
+      var wx = M.px + 0.03 * Math.sin(loop / CYCLE * Math.PI * 2 + M.ph);
+      var wy = M.py + 0.05 * Math.cos(loop / CYCLE * Math.PI * 2 + M.ph * 1.3);
+      ctx.globalAlpha = 0.5 + 0.3 * Math.sin(loop / CYCLE * Math.PI * 4 + M.ph);
+      ctx.fillStyle = 'rgb(' + C_MOTE[0] + ',' + C_MOTE[1] + ',' + C_MOTE[2] + ')';
+      ctx.beginPath();
+      ctx.arc(wx * W, wy * H, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // 뿌리 지면 — 얕은 실선
+    ctx.strokeStyle = 'rgba(' + C_BARK[0] + ',' + C_BARK[1] + ',' + C_BARK[2] + ',0.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.12, H * 0.92);
+    ctx.lineTo(W * 0.88, H * 0.92);
+    ctx.stroke();
+
+    // 성장 — 이전 世代(전체)를 밝게 깔고 현재 世代 마지막 분기를 이어 그린다
+    var baseLen = H * 0.24;
+    var x0 = W * 0.5, y0 = H * 0.92;
+    var strFull = GENS[gen];
+    if (gen > 0 && frac > 0) {
+      // 이전 세대를 완성형으로 깔고(어둡게), 현재 세대의 새 선분을 frac 비율로 이어 그린다.
+      drawTree(ctx, GENS[gen - 1], x0, y0, baseLen, 0.85, 0, gen - 1, 0);
+      drawTree(ctx, strFull, x0, y0, baseLen, 1.0, frac, gen, breath);
+    } else {
+      drawTree(ctx, strFull, x0, y0, baseLen, 1.0, gen === 0 ? Math.min(1, grPhase * 6) : 1, gen, breath);
+    }
+  }
+
+  // 거북 렌더러 — drawFrac: 마지막 세대의 새 선분은 frac 길이로.
+  // depth 는 스택 깊이 — 世代 번호를 그대로 색·굵기 감쇠 파라미터로 쓴다(077 기준 계산 축).
+  function drawTree(ctx, str, x0, y0, len0, dim, drawFrac, gen, breath) {
+    var x = x0, y = y0, a = -Math.PI / 2;
+    var stackX = [], stackY = [], stackA = [], stackL = [];
+    var depth = 0;
+    var maxDepth = Math.max(1, gen);
+    // 규칙 F[+F][-F]F 에서 한 세대에 F 세 개가 새로 생긴다 — 문자 인덱스로 새 선분 판별 대신
+    // 스택 깊이(=depth) 로 세대를 근사: depth 가 gen-1 이면 마지막 세대의 새 가지다.
+    var isNew = false;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        var segLen = len0 * Math.pow(RATIO, depth);
+        var f = (depth >= gen && gen > 0) || (gen === 0) ? drawFrac : 1;
+        // depth >= gen 인 선분 = 이번 세대에 새로 생긴 선분 → 부분 길이로 성장
+        var nx = x + Math.cos(a) * segLen * f;
+        var ny = y + Math.sin(a) * segLen * f;
+        // 색: 깊을수록 어린 가지 — 베이지 → 밝은색, 끝은 잎색
+        var t = Math.min(1, depth / maxDepth);
+        var cr = C_BARK[0] + (C_BARK2[0] - C_BARK[0]) * t;
+        var cg = C_BARK[1] + (C_BARK2[1] - C_BARK[1]) * t;
+        var cb = C_BARK[2] + (C_BARK2[2] - C_BARK[2]) * t;
+        var isTip = (depth >= maxDepth);
+        if (isTip) {
+          var bl = 0.55 + 0.45 * breath;      // 잎 호흡 — 끝 노드 밝기 진동
+          cr = C_BARK2[0] + (C_LEAF[0] - C_BARK2[0]) * bl;
+          cg = C_BARK2[1] + (C_LEAF[1] - C_BARK2[1]) * bl;
+          cb = C_BARK2[2] + (C_LEAF[2] - C_BARK2[2]) * bl;
+        }
+        ctx.globalAlpha = dim;
+        ctx.strokeStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+        ctx.lineWidth = Math.max(1, 5 * Math.pow(0.62, depth));
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(nx, ny);
+        ctx.stroke();
+        if (f >= 1) { x = nx; y = ny; }        // 부분 성장 중에는 끝점을 옮기지 않는다
+        // 새 가지 끝에 잎 점
+        if (isTip && f >= 1) {
+          ctx.fillStyle = 'rgb(' + C_LEAF[0] + ',' + C_LEAF[1] + ',' + C_LEAF[2] + ')';
+          ctx.globalAlpha = dim * (0.16 + 0.18 * breath);
+          ctx.beginPath();
+          ctx.arc(nx, ny, 6.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = dim * (0.4 + 0.45 * breath);
+          ctx.beginPath();
+          ctx.arc(nx, ny, 2.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      } else if (ch === '+') {
+        a -= ANGLE * Math.PI / 180;
+      } else if (ch === '-') {
+        a += ANGLE * Math.PI / 180;
+      } else if (ch === '[') {
+        stackX.push(x); stackY.push(y); stackA.push(a); stackL.push(depth);
+        depth++;
+      } else if (ch === ']') {
+        x = stackX.pop(); y = stackY.pop(); a = stackA.pop(); depth = stackL.pop();
+      }
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;   // 0~1 루프 위상
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.6 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.6);                              // reduce — 완성 木 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

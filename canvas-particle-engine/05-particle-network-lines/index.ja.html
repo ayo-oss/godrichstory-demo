@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>거리로 이어지는 연결선 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="nw" id="nw">
+  <p class="nw__hint">
+    <svg class="nw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M164 128a36 36 0 1 1-36-36a36 36 0 0 1 36 36" opacity=".2"/><path d="M128 84a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28m0-128a100 100 0 1 0 100 100A100.11 100.11 0 0 0 128 28m0 184a84 84 0 1 1 84-84a84.09 84.09 0 0 1-84 84"/></g></svg>
+    <span>盤にポインタを置くと点が一つのノードとして入り、周囲とつながります</span>
+  </p>
+  <div class="nw__field" id="field" role="application" aria-label="連結線ネットワークの実験台" tabindex="0">
+    <canvas class="nw__cv" id="cv"></canvas>
+    <b class="nw__live" aria-hidden="true"><span class="nw__liveNum" id="links">0</span><span class="nw__liveUnit"> 本のリンク</span></b>
+  </div>
+  <div class="nw__bar">
+    <label class="nw__dial">半径
+      <input type="range" id="radius" min="50" max="130" step="10" value="90" aria-label="連結半径">
+      <b class="nw__val" id="radiusVal">90px</b>
+    </label>
+    <button class="nw__reset" id="reset" type="button">
+      <svg class="nw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>撒き直し</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 거리 기반 연결선 — 매 프레임 모든 쌍을 견주되 半径 안쪽만 선으로 그려 인접 그래프를 만든다.
+// 점이 64개라 쌍은 2,016개지만 그려지는 건 半径 안에 든 것뿐이라 화면에는 옅은 실 몇 줄만 남는다.
+var root = document.getElementById('nw');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var radiusIn = document.getElementById('radius');
+var radiusVal = document.getElementById('radiusVal');
+var linksOut = document.getElementById('links');
+var resetBtn = document.getElementById('reset');
+
+var COUNT = 64;                 // 점 64개 — 전체 쌍은 64*63/2 = 2,016쌍
+var LINK_R = 90;                // 이 거리 안쪽일 때만 실이 나타난다(px 단위)
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var nodes = [];
+var pointer = { x: 0, y: 0, on: false };
+
+// 점 한 개 — 느리게 떠다니는 속도와 크기만 가진다
+function seedNode(n) {
+  n.x = Math.random() * W;
+  n.y = Math.random() * H;
+  var ang = Math.random() * Math.PI * 2;
+  var sp = 7 + Math.random() * 13;
+  n.vx = Math.cos(ang) * sp;
+  n.vy = Math.sin(ang) * sp;
+  n.r = 1.8 + Math.random() * 1.5;
+  return n;
+}
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  var links = 0;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#fff7e6';          // 실은 낮은 알파의 크림 — 알파는 globalAlpha 로 준다
+  // 점과 점 — 매 프레임 모든 쌍을 견주고 半径 안쪽만 선으로 남긴다
+  for (var i = 0; i < COUNT; i++) {
+    var a = nodes[i];
+    for (var j = i + 1; j < COUNT; j++) {
+      var b = nodes[j];
+      var dx = a.x - b.x, dy = a.y - b.y;
+      var d2 = dx * dx + dy * dy;
+      if (d2 >= LINK_R * LINK_R) continue;
+      var fade = 1 - Math.sqrt(d2) / LINK_R;
+      ctx.globalAlpha = fade * fade * 0.5;   // 가까울수록 짙어지는 실
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      links++;
+    }
+  }
+  // 포인터도 노드 하나 — 가까운 점과는 노란 실로 이어진다
+  if (pointer.on) {
+    ctx.strokeStyle = '#ffd23f';
+    for (var k = 0; k < COUNT; k++) {
+      var nd = nodes[k];
+      var pdx = nd.x - pointer.x, pdy = nd.y - pointer.y;
+      var pd2 = pdx * pdx + pdy * pdy;
+      if (pd2 >= LINK_R * LINK_R) continue;
+      var pf = 1 - Math.sqrt(pd2) / LINK_R;
+      ctx.globalAlpha = pf * pf * 0.7;
+      ctx.beginPath();
+      ctx.moveTo(pointer.x, pointer.y);
+      ctx.lineTo(nd.x, nd.y);
+      ctx.stroke();
+      links++;
+    }
+  }
+  ctx.globalAlpha = 1;
+  // 점 — 크림을 기본으로 노랑과 밝은 파랑을 섞는다
+  for (var m = 0; m < COUNT; m++) {
+    var p = nodes[m];
+    ctx.fillStyle = m % 9 === 0 ? '#ffd23f' : (m % 9 === 5 ? '#5b8cf8' : '#fff7e6');
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (pointer.on) {
+    ctx.strokeStyle = '#ffd23f';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(pointer.x, pointer.y, 6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  linksOut.textContent = String(links);
+}
+
+function step(dt) {
+  for (var i = 0; i < COUNT; i++) {
+    var n = nodes[i];
+    n.x += n.vx * dt;
+    n.y += n.vy * dt;
+    if (n.x < n.r) { n.x = n.r; n.vx = Math.abs(n.vx); }
+    if (n.x > W - n.r) { n.x = W - n.r; n.vx = -Math.abs(n.vx); }
+    if (n.y < n.r) { n.y = n.r; n.vy = Math.abs(n.vy); }
+    if (n.y > H - n.r) { n.y = H - n.r; n.vy = -Math.abs(n.vy); }
+  }
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function scatter() {
+  for (var i = 0; i < COUNT; i++) seedNode(nodes[i]);
+  draw();
+}
+
+radiusIn.addEventListener('input', function () {
+  LINK_R = Number(radiusIn.value);
+  radiusVal.textContent = LINK_R + 'px';
+});
+resetBtn.addEventListener('click', scatter);
+field.addEventListener('click', scatter);
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); scatter(); }
+});
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  pointer.x = e.clientX - r.left;
+  pointer.y = e.clientY - r.top;
+  pointer.on = true;
+});
+field.addEventListener('pointerleave', function () { pointer.on = false; });
+window.addEventListener('resize', function () {
+  fit();
+  for (var i = 0; i < COUNT; i++) {
+    if (nodes[i].x > W) nodes[i].x = Math.random() * W;
+    if (nodes[i].y > H) nodes[i].y = Math.random() * H;
+  }
+  draw();
+});
+
+// 조작 실측용 — run/012/_probe/interact_b.py 가 살아 있는 참조를 읽는다
+window.__state = { nodes: nodes, pointer: pointer };
+
+fit();
+for (var i0 = 0; i0 < COUNT; i0++) nodes.push(seedNode({}));
+if (reduce) {
+  // reduce — 루프를 아예 돌리지 않고 점이 골고루 퍼진 한 장만 그린다
+  root.classList.add('is-still');
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>選択ボックス上部から伸びる回転ハンドル — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="frame" id="frame">
+    <div class="rotator" id="rotator">
+      <div class="subjectShape"></div>
+      <div class="stick" aria-hidden="true"></div>
+      <div class="handle" id="handle" tabindex="0" role="slider" aria-label="回転ハンドル、ドラッグして回転" aria-valuemin="0" aria-valuemax="360" aria-valuenow="0"></div>
+    </div>
+  </div>
+  <div class="readout" id="readout" aria-hidden="true"><span id="rd">0</span>°</div>
+</div>
+</main>
+<script>
+(function () {
+  var ROTATE_SNAP_DEG = 15; // 변형 03 이 5 로 좁힌다
+  var LOOP_SEQUENCE = [70, 200, 320, 360];
+  var HOP_MS = 560;
+  var HOLD_MS = 260;
+
+  var scene = document.getElementById('scene');
+  var frame = document.getElementById('frame');
+  var rotator = document.getElementById('rotator');
+  var handle = document.getElementById('handle');
+  var rd = document.getElementById('rd');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var angle = 0;
+  var dragging = false;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function mod360(v) { return ((v % 360) + 360) % 360; }
+
+  function applyRotate(deg) {
+    angle = mod360(deg);
+    rotator.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
+    rd.textContent = Math.round(angle);
+    handle.setAttribute('aria-valuenow', String(Math.round(angle)));
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  // 회전 핸들 = atan2 각 → rotate. 프레임 중심(회전하지 않는 고정 요소)에서 포인터까지의 벡터로
+  // 절대 각도를 매 프레임 구하고, ROTATE_SNAP_DEG 배수로 반올림해 스냅한다.
+  function angleFromPointer(e) {
+    var r = frame.getBoundingClientRect();
+    var cx = r.left + r.width / 2;
+    var cy = r.top + r.height / 2;
+    var raw = Math.atan2(e.clientY - cy, e.clientX - cx) * 180 / Math.PI;
+    return mod360(raw + 90);
+  }
+
+  handle.addEventListener('pointerdown', function (e) {
+    human();
+    dragging = true;
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var a = angleFromPointer(e);
+    var snapped = Math.round(a / ROTATE_SNAP_DEG) * ROTATE_SNAP_DEG;
+    applyRotate(snapped);
+  });
+  function end(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+  handle.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { human(); applyRotate(angle + ROTATE_SNAP_DEG); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { human(); applyRotate(angle - ROTATE_SNAP_DEG); e.preventDefault(); }
+  });
+
+  // reduce: 실사용 경로 적용 — 핸들 pointer·keydown 은 위에서 즉시 반영한다.
+  // 아래 hopRotate()·cycle() 은 시연 게이트만(연속 각도, 스냅 없이 부드럽게 돈다) — reduce 에서는 정지.
+  function hopRotate(target, onDone) {
+    var from = angle;
+    var start = performance.now();
+    function frame(now) {
+      if (!scene.classList.contains('is-demo')) return;
+      var p = clamp((now - start) / HOP_MS, 0, 1);
+      applyRotate(from + (target - from) * easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function cycle(i) {
+    if (!scene.classList.contains('is-demo')) return;
+    var target = LOOP_SEQUENCE[i % LOOP_SEQUENCE.length];
+    hopRotate(target, function () {
+      timers.push(setTimeout(function () { cycle(i + 1); }, HOLD_MS));
+    });
+  }
+
+  if (!reduce) {
+    cycle(0);
+  }
+})();
+</script>
+</body>
+</html>

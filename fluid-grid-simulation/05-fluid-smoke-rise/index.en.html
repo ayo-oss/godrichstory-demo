@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>연기 상승 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage stage--ink">
+<div class="fa" id="fa">
+  <p class="fa__hint">
+    <svg class="fa__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M236 128a108 108 0 0 1-216 0a100 100 0 0 1 100-100a92 92 0 0 1 92 92a84 84 0 0 1-84 84a76 76 0 0 1-76-76a68 68 0 0 1 68-68a60 60 0 0 1 60 60a52 52 0 0 1-52 52a44 44 0 0 1-44-44a36 36 0 0 1 36-36a28 28 0 0 1 28 28a20 20 0 0 1-20 20a12 12 0 0 1-12-12" opacity=".2" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24Zm0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88Zm0-152a64 64 0 1 0 64 64a64.07 64.07 0 0 0-64-64Zm0 112a48 48 0 1 1 48-48a48.05 48.05 0 0 1-48 48Z"/></g></svg>
+    <span>Smoke rising from below climbs on buoyancy proportional to its density and sways in a sideways breeze — press the screen to puff more smoke</span>
+  </p>
+  <div class="fa__field" id="field" role="application" aria-label="Rising smoke board" tabindex="0">
+    <canvas class="fa__cv" id="cv"></canvas>
+    <b class="fa__badge" aria-hidden="true">32<span class="fa__badgeUnit">grid</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 연기 상승 — 밀도에 비례하는 부력을 속도장에 매 걸음 더한다. 온도장을 따로 두지 않고
+// 밀도 자체가 곧 온도(더운 연기 = 진한 연기)라는 근사. 여기에 결정적 가우시안 옆흔들림을
+// u 에 얹으면 아래에서 피어오르며 좌우로 갈라지는 연기 기둥이 된다 — 01·03·04 와 같은
+// 32×32 안정 유체 격자와 advect 를 공유하고, 확산은 아주 약하게만(연기는 이류가 주역).
+var root = document.getElementById('fa');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { willReadFrequently: true });
+
+var css = getComputedStyle(root);
+var PAL0 = css.getPropertyValue('--dye-0').trim();
+var PAL1 = css.getPropertyValue('--dye-1').trim();
+var PAL2 = css.getPropertyValue('--dye-2').trim();
+
+var N = 32;
+var SIZE = (N + 2) * (N + 2);
+var IX = function (x, y) { return x + (N + 2) * y; };
+var u = new Float32Array(SIZE), v = new Float32Array(SIZE);
+var u0 = new Float32Array(SIZE), v0 = new Float32Array(SIZE);
+var d = new Float32Array(SIZE), d0 = new Float32Array(SIZE);
+
+var BUOY = 3.2;   // 부력 계수 — 밀도 1 에 매 걸음 얹는 상승 속도. 크면 연기가 뿜어오른다
+var WIND = 0.55;  // 옆흔들림 진폭 — 가우시안 노이즈가 u 를 흔드는 세기
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, raf = 0, seedT = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  W = r.width; H = r.height;
+  cv.width = Math.round(W); cv.height = Math.round(H);
+}
+
+// 결정적 가우시안 노이즈 — Math.sin 해시 조합. Math.random 을 쓰지 않아
+// 같은 편의 gif·poster 가 언제나 같은 연기 모양새로 담긴다.
+function gnoise(x, y) {
+  return Math.sin(x * 12.9898 + y * 78.233) * 43758.5453 % 1;
+}
+
+// 후방 이류(semi-Lagrangian) — 칸 (x,y) 의 새 값을 속도를 dt 만큼 거슬러 간 좌표의
+// 옛 값으로 채운다. 04 와 같은 구조를 05 용으로 다시 썼다(확산은 거시적으로 약하게).
+function advect(b, dt) {
+  var src = b === 'u' ? u0 : (b === 'v' ? v0 : d0);
+  var dst = b === 'u' ? u : (b === 'v' ? v : d);
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var x = i - dt * N * u0[IX(i, j)];
+      var y = j - dt * N * v0[IX(i, j)];
+      if (x < 0.5) x = 0.5; else if (x > N + 0.5) x = N + 0.5;
+      var i0 = x | 0; var i1 = i0 + 1;
+      if (y < 0.5) y = 0.5; else if (y > N + 0.5) y = N + 0.5;
+      var j0 = y | 0; var j1 = j0 + 1;
+      var s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+      dst[IX(i, j)] = s0 * (t0 * src[IX(i0, j0)] + t1 * src[IX(i0, j1)]) +
+                      s1 * (t0 * src[IX(i1, j0)] + t1 * src[IX(i1, j1)]);
+    }
+  }
+}
+
+// 아주 약한 확산 — 연기 가장자리를 스모키하게 부드럽게 하는 정도. 이류가 주역이라 이걸 크게
+// 하면 기둥이 아니라 안개가 된다.
+function diffuse(b, k, dt) {
+  var src = b === 'u' ? u : (b === 'v' ? v : d);
+  var a = dt * k * N * N;
+  for (var iter = 0; iter < 2; iter++) {
+    for (var j = 1; j <= N; j++) {
+      for (var i = 1; i <= N; i++) {
+        var idx = IX(i, j);
+        src[idx] = (src[idx] + a * (src[IX(i - 1, j)] + src[IX(i + 1, j)] + src[IX(i, j - 1)] + src[IX(i, j + 1)])) / (1 + 4 * a);
+      }
+    }
+  }
+}
+
+// 경계 — 위 가장자리로 빠져나간 연기는 사라지고(감쇠), 벽 유출 속도는 줄인다
+function bounds() {
+  for (var i = 1; i <= N; i++) {
+    d[IX(i, 0)] = d[IX(i, 1)] * 0.35; d[IX(i, N + 1)] = d[IX(i, N)] * 0.35;
+    u[IX(i, 0)] = u[IX(i, 1)] * 0.4; u[IX(i, N + 1)] = u[IX(i, N)] * 0.4;
+    v[IX(i, 0)] = v[IX(i, 1)] * 0.4; v[IX(i, N + 1)] = v[IX(i, N)] * 0.4;
+  }
+  for (var j = 1; j <= N; j++) {
+    d[IX(0, j)] = d[IX(1, j)] * 0.5; d[IX(N + 1, j)] = d[IX(N, j)] * 0.5;
+    u[IX(0, j)] = u[IX(1, j)] * 0.4; u[IX(N + 1, j)] = u[IX(N, j)] * 0.4;
+    v[IX(0, j)] = v[IX(1, j)] * 0.4; v[IX(N + 1, j)] = v[IX(N, j)] * 0.4;
+  }
+}
+
+// 연기 플렉스(뿜기) — 밀도 덩어리를 가우시안으로 심고 위로 살짝 밀어올리는 초기 속도를 얹는다.
+// 부력이 본 일을 시작하게 하는 점화만 담당 — 뒤는 밀도 곧 온도 근사가 알아서 올린다.
+function puff(gx, gy, amp) {
+  var r = 3.2;
+  for (var j = -r; j <= r; j++) {
+    for (var i = -r; i <= r; i++) {
+      var q = (i * i + j * j) / (r * r);
+      if (q > 1) continue;
+      var f = Math.exp(-q * 2.2) * amp;
+      var ix = Math.round(gx + i), iy = Math.round(gy + j);
+      if (ix < 1 || ix > N || iy < 1 || iy > N) continue;
+      var idx = IX(ix, iy);
+      d[idx] = Math.min(2.4, d[idx] + f);
+      u[idx] += gnoise(ix, iy) * f * 0.06;
+      v[idx] -= f * 0.16;   // grid y 는 위가 작은 값 — 상승 = v 감소. 점화용 살짝 밀어올림
+    }
+  }
+}
+
+// 미리보기 주입원 — 하단 세 곳 고정 좌표에서 2초(60스텝 @30fps)마다 번갈아 피운다. 시드 고정.
+var seedSpots = [
+  { x: N * 0.30, y: N - 1.5 },
+  { x: N * 0.55, y: N - 1.5 },
+  { x: N * 0.76, y: N - 1.5 }
+];
+var seedPeriod = 20;
+var lastSeedStep = -999;
+var stepCount = 0;
+
+function step(dt) {
+  if (stepCount - lastSeedStep >= seedPeriod) {
+    // 세 곳을 3걸음에 걸쳐 연달아 피운다 — 쉼 없이 여러 기둥이 화면을 채운다
+    var order = (stepCount / seedPeriod | 0) % seedSpots.length;
+    puff(seedSpots[order].x + Math.sin(seedT * 0.9) * 1.2, seedSpots[order].y, 2.1);
+    if (stepCount - lastSeedStep >= 1) {
+      puff(seedSpots[(order + 1) % seedSpots.length].x + Math.cos(seedT * 0.7) * 1.4, seedSpots[(order + 1) % seedSpots.length].y, 2.1);
+      puff(seedSpots[(order + 2) % seedSpots.length].x + Math.sin(seedT * 0.5 + 2) * 1.4, seedSpots[(order + 2) % seedSpots.length].y, 2.1);
+      lastSeedStep = stepCount;
+    }
+  }
+  u0.set(u); v0.set(v); d0.set(d);
+  // 부력 — 밀도가 진한 칸일수록 위로(v 마이너스) 밀어올린다. 온도장 없는 근사의 핵심 한 줄.
+  for (var k = 0; k < SIZE; k++) v0[k] -= Math.min(1.6, d0[k]) * BUOY * dt;
+  // 옆흔들림 — 결정적 가우시안 노이즈로 매 걸음 u 를 살짝 흔든다. 시간축 해시를 더해 흔들림이
+  // 프레임마다 다르게 구르게 한다(연기 기둥이 갈라지며 올라가는 이유).
+  var h = Math.sin(seedT * 1.7) * 3.1;
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var idx2 = IX(i, j);
+      var sw = gnoise(i * 0.31 + h, j * 0.27 - h * 0.6) + gnoise(i * 0.13 - h * 0.4, j * 0.19 + h * 0.8) * 0.5;
+      u0[idx2] += sw * WIND * dt * Math.min(1, d0[idx2] * 0.9);
+    }
+  }
+  advect('u', dt); u0.set(u);
+  advect('v', dt); v0.set(v);
+  advect('d', dt);
+  diffuse('d', 0.0006, dt);
+  bounds();
+  for (var m = 0; m < SIZE; m++) { d[m] *= 0.998; u[m] *= 0.988; v[m] *= 0.988; }
+  seedT += dt;
+  stepCount++;
+}
+
+function render() {
+  var img = ctx.createImageData(cv.width, cv.height);
+  var px = img.data;
+  var cellW = cv.width / N, cellH = cv.height / N;
+  var pal = [PAL0, PAL1, PAL2];
+  for (var py = 0; py < cv.height; py++) {
+    var gy = Math.min(N - 1, (py / cellH) | 0);
+    for (var pxx = 0; pxx < cv.width; pxx++) {
+      var gx = Math.min(N - 1, (pxx / cellW) | 0);
+      var q = d[IX(gx + 1, gy + 1)];
+      var o = (py * cv.width + pxx) * 4;
+      if (q <= 0.012) { px[o] = 23; px[o + 1] = 20; px[o + 2] = 26; px[o + 3] = 255; continue; }
+      var band = q > 0.85 ? 2 : (q > 0.34 ? 1 : 0);
+      var c = pal[band];
+      var rr = parseInt(c.slice(1, 3), 16), gg = parseInt(c.slice(3, 5), 16), bb = parseInt(c.slice(5, 7), 16);
+      var a = Math.min(1, q * 0.95);
+      px[o] = 23 + (rr - 23) * a; px[o + 1] = 20 + (gg - 20) * a; px[o + 2] = 26 + (bb - 26) * a; px[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function frame() {
+  step(1 / 30);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+// 실제 사용 — pointermove 로 그 자리를 지나가며 연기를 피우고, 누르면 진하게 피운다
+field.addEventListener('pointermove', function (e) {
+  if (e.pressure === 0 && e.buttons === 0) return;
+  var r = field.getBoundingClientRect();
+  var gx = 1 + ((e.clientX - r.left) / r.width * (N - 1));
+  var gy = 1 + ((e.clientY - r.top) / r.height * (N - 1));
+  puff(gx, gy, 0.5);
+  if (reduce) render();
+});
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var gx = 1 + ((e.clientX - r.left) / r.width * (N - 1));
+  var gy = 1 + ((e.clientY - r.top) / r.height * (N - 1));
+  puff(gx, gy, 2.0);
+  if (reduce) render();
+});
+field.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  puff(N * 0.5, N * 0.8, 2.0);
+  if (reduce) render();
+});
+window.addEventListener('resize', function () { fit(); if (reduce) render(); });
+
+fit();
+if (reduce) {
+  // reduce — 시뮬레이션을 40 걸음만 앞으로 감아 연기 기둥이 자리잡은 한 장을 그린다(빈 화면이 아니다)
+  for (var k = 0; k < 40; k++) step(1 / 30);
+  render();
+} else {
+  // 웜업 — 캡처 첫 장이 빈 화면이 되지 않게 연기가 피어오르기 시작한 상태에서 루프를 연다
+  for (var w = 0; w < 90; w++) step(1 / 30);
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

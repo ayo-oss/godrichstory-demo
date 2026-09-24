@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launch a comet — n-body gravity — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gx is-demo" id="gxRoot">
+  <p class="gx__hint">
+    <span>Drag from the galaxy to throw a star in — by the angle it settles into orbit or escapes outright</span>
+  </p>
+  <div class="gx__field" id="gxField" role="application" aria-label="Launch a comet lab" tabindex="0">
+    <canvas class="gx__cv" id="gxCv"></canvas>
+    <span class="gx__aim" id="aimLbl" hidden>drag to launch</span>
+  </div>
+  <div class="gx__bar">
+    <span class="gx__meta">180 stars · central attracting mass</span>
+    <span class="gx__meta gx__meta--dim">canvas · drag to launch · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 혜성 쏘기(07) — 포인터로 발사체를 던져 넣는 조작 장면.
+// 무대: 원반 은하(중심 질량 + 별 180개). 드래그(pointerdown → pointermove → pointerup)로
+// 새 혜성을 만들어 던진다 — 놓은 지점에서 당긴 반대 방향으로 slingshot 발사.
+// 혜성은 같은 O(N²) 중력장에 그대로 들어간다: 각도·속도에 따라
+//  · 궤도에 잡혀 타원 궤도(중심 질량 지배) — 첫 스침 후 포획
+//  · 스침이 살짝 어긋나 그대로 탈출(쌍곡선) — 중력 도우거림
+// is-demo(렌더)에서는 입력 없이도 3발이 정해진 각도로 자동 발사된다(결정론 렌더).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NSTARS = 180;   // 원반 별 수
+  var LAUNCHV = 0.55; // 발사 속도 배율(캔버스 대각선 비례) — 변형 "발사 속도"
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('gxRoot');
+  var field = document.getElementById('gxField');
+  var cv = document.getElementById('gxCv');
+  var aimLbl = document.getElementById('aimLbl');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--gx-ink');
+  var C_GLOW = tokRGB('--gx-glow');
+  var C_HOT  = tokRGB('--gx-hot');
+  var C_TAIL = tokRGB('--gx-tail');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var chainCv, chainCtx;
+
+  var N = 0, X = [], Y = [], VX = [], VY = [];
+  // 혜성은 별 배열에 그대로 추가된다(같은 O(N²) 계산 — 특별 대우 없음)
+  var NC0 = 0;                          // 원반 별 수 고정(혜성 이전)
+  var comets = [];                      // {x, y, vx, vy, born, trail: []}
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    chainCv = document.createElement('canvas');
+    chainCv.width = W * dpr; chainCv.height = H * dpr;
+    chainCtx = chainCv.getContext('2d');
+    chainCtx.scale(dpr, dpr);
+  }
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // G·질량은 캔버스 픽셀 단위 시뮬레이션 값(물리 상수 아님 — 글에서 설명)
+  var G = 60.0, SOFT2 = 40;
+  var DT = 1 / 60;
+  var MHALO = 5400;   // 중심 질량 — 원반을 지탱하는 핵(그리지 않는다)
+
+  var AX = [], AY = [];
+  function accel() {
+    // 중심 질량 + 전 쌍 O(N²) 별 상호 중력(혜성 포함 — 배열 뒤에 추가돼 있다)
+    var i, j, dx, dy, d2, inv, f;
+    for (i = 0; i < N; i++) { AX[i] = 0; AY[i] = 0; }
+    var cx = W * 0.5, cy = H * 0.5;
+    for (i = 0; i < N; i++) {
+      dx = cx - X[i]; dy = cy - Y[i];
+      d2 = dx * dx + dy * dy + SOFT2;
+      inv = 1 / Math.sqrt(d2);
+      f = G * MHALO * inv * inv * inv;
+      AX[i] += dx * f; AY[i] += dy * f;
+    }
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        dx = X[j] - X[i]; dy = Y[j] - Y[i];
+        d2 = dx * dx + dy * dy + SOFT2;
+        inv = 1 / Math.sqrt(d2);
+        f = G * inv * inv * inv;
+        AX[i] += dx * f; AY[i] += dy * f;
+        AX[j] -= dx * f; AY[j] -= dy * f;
+      }
+    }
+  }
+
+  var aReady = false;
+  function stepLeap() {
+    if (!aReady) { accel(); aReady = true; }
+    var h = DT * 0.5;
+    for (var i = 0; i < N; i++) {
+      VX[i] += AX[i] * h; VY[i] += AY[i] * h;
+      X[i]  += VX[i] * DT; Y[i] += VY[i] * DT;
+    }
+    accel();
+    for (var j = 0; j < N; j++) {
+      VX[j] += AX[j] * h; VY[j] += AY[j] * h;
+    }
+  }
+
+  function seed() {
+    X = []; Y = []; VX = []; VY = []; N = 0; aReady = false; comets = [];
+    var rnd = mulberry32(17);
+    var cx = W * 0.5, cy = H * 0.5;
+    var R = Math.min(W, H) * 0.46;
+    for (var i = 0; i < NSTARS; i++) {
+      var far = rnd() < 0.38;                       // 바깥 별 — 원반 밖까지 오가는 넓은 궤도
+      var r = far
+        ? R * (0.46 + 1.75 * rnd())
+        : 0.12 * R + R * 0.80 * Math.sqrt(rnd());
+      var a = rnd() * Math.PI * 2;
+      var v = Math.sqrt(G * MHALO / Math.max(r, 8)) * (far ? 0.80 : 1.0);
+      X.push(cx + Math.cos(a) * r);
+      Y.push(cy + Math.sin(a) * r * 0.90);
+      VX.push(-Math.sin(a) * v + (rnd() - 0.5) * 1.4);
+      VY.push( Math.cos(a) * v * 0.90 + (rnd() - 0.5) * 1.4);
+      N++;
+    }
+    NC0 = N;
+  }
+
+  function addComet(px, py, vx, vy, born) {
+    // 혜성 — 별 배열 뒤에 추가(같은 중력 계산). 오래된 혜성은 되감을 때 같이 지운다
+    X.push(px); Y.push(py); VX.push(vx); VY.push(vy); N++;
+    aReady = false;   // AX/AY 버퍼가 이전 크기(혜성 이전)다 — 재계산 전에 쓰면 undefined*NaN 전파
+    if (prev) { prev[0].push(px); prev[1].push(py); }   // 잔상 이전점 배열도 같은 길이로
+    comets.push({ idx: N - 1, born: born, trail: [] });
+    if (comets.length > 4) {
+      var old = comets.shift();
+      removeStar(old.idx);
+    }
+  }
+  function removeStar(idx) {
+    // 배열 압축 — 인덱스가 뒤로 밀리는 혜성 참조를 같이 고친다
+    X.splice(idx, 1); Y.splice(idx, 1); VX.splice(idx, 1); VY.splice(idx, 1); N--;
+    aReady = false;
+    if (prev) { prev[0].splice(idx, 1); prev[1].splice(idx, 1); }
+    for (var c = 0; c < comets.length; c++) {
+      if (comets[c].idx > idx) comets[c].idx--;
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function decay() {
+    chainCtx.setTransform(1, 0, 0, 1, 0, 0);
+    chainCtx.globalCompositeOperation = 'destination-out';
+    chainCtx.fillStyle = 'rgba(0,0,0,0.013)';
+    chainCtx.fillRect(0, 0, W * dpr, H * dpr);
+    chainCtx.globalCompositeOperation = 'source-over';
+    chainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var prev = null;
+  function stamp() {
+    if (prev) {
+      for (var i = 0; i < N; i++) {
+        var isComet = i >= NC0;
+        chainCtx.strokeStyle = rgba(isComet ? C_HOT : C_GLOW, isComet ? 0.55 : 0.24);
+        chainCtx.lineWidth = isComet ? 2.6 : 1.5;
+        chainCtx.beginPath();
+        chainCtx.moveTo(prev[0][i], prev[1][i]);
+        chainCtx.lineTo(X[i], Y[i]);
+        chainCtx.stroke();
+      }
+    }
+    if (!prev) { prev = [X.slice(), Y.slice()]; }
+    else { prev[0] = X.slice(); prev[1] = Y.slice(); }
+  }
+
+  function draw(aim) {
+    var ctx = cv.getContext('2d');   // CanvasRenderingContext2D — 이 데모의 그리기 문맥
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+    var rnd = mulberry32(18);
+    ctx.fillStyle = rgba(C_GLOW, 0.35);
+    for (var k = 0; k < 40; k++) {
+      var bx = rnd() * W, by = rnd() * H, br = rnd() * 0.8 + 0.3;
+      ctx.globalAlpha = 0.12 + rnd() * 0.22;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(chainCv, 0, 0, W, H);
+    // 원반 별 — 페리윙클 점
+    for (var i = 0; i < NC0; i++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.11);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 3.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(C_GLOW, 0.6);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+    // 중심 질량 자리 — 앰버 점
+    ctx.fillStyle = rgba(C_HOT, 0.9);
+    ctx.beginPath(); ctx.arc(W * 0.5, H * 0.5, 2.4, 0, Math.PI * 2); ctx.fill();
+    // 혜성 — 앰버 큰 글로우 + 코어
+    for (i = NC0; i < N; i++) {
+      ctx.fillStyle = rgba(C_HOT, 0.18);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(C_HOT, 0.65);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 4.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(C_HOT, 1);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 2.0, 0, Math.PI * 2); ctx.fill();
+    }
+    // 조준선 — 드래그 중에만. 당긴 방향 반대로 발사된다(slingshot)
+    if (aim) {
+      ctx.strokeStyle = rgba(C_TAIL, 0.9);
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(aim.x0, aim.y0);
+      ctx.lineTo(aim.x1, aim.y1);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = rgba(C_HOT, 0.95);
+      ctx.beginPath();
+      ctx.moveTo(aim.x0, aim.y0);
+      ctx.lineTo(aim.x0 + (aim.x0 - aim.x1) * 2.2, aim.y0 + (aim.y0 - aim.y1) * 2.2);
+      ctx.stroke();
+      ctx.fillStyle = rgba(C_HOT, 0.9);
+      ctx.beginPath(); ctx.arc(aim.x0, aim.y0, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  // ── 포인터 발사 — pointerdown → pointermove(조준) → pointerup(발사) ──
+  var aim = null;
+  function ptr(e) {
+    var r = cv.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  field.addEventListener('pointerdown', function (e) {
+    var p = ptr(e);
+    aim = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    aimLbl.hidden = false;
+    aimLbl.textContent = 'drag to launch';
+    e.preventDefault();
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!aim) return;
+    var p = ptr(e);
+    aim.x1 = p.x; aim.y1 = p.y;
+  });
+  field.addEventListener('pointerup', function (e) {
+    if (!aim) return;
+    var p = ptr(e);
+    var dx = aim.x0 - p.x, dy = aim.y0 - p.y;       // 당긴 반대 = 발사 방향
+    var len = Math.hypot(dx, dy);
+    if (len > 6) {
+      var sp = Math.min(260, len * 2.2) * LAUNCHV;
+      addComet(aim.x0, aim.y0, dx / len * sp, dy / len * sp, simSteps);
+    }
+    aim = null; aimLbl.hidden = true;
+  });
+  field.addEventListener('pointerleave', function () { aim = null; aimLbl.hidden = true; });
+
+  var simSteps = 0;
+  // 자동 발사 스케줄 — is-demo 렌더에서도 장면이 차게 찬다(결정론: 시드·각도 고정)
+  function autoSchedule() {
+    return [
+      { t: 10,  x: 0.04, y: 0.14, ang: 0.48, sp: 1.00 },
+      { t: 34,  x: 0.96, y: 0.20, ang: 2.35, sp: 0.90 },
+      { t: 58,  x: 0.48, y: 0.03, ang: 1.20, sp: 0.66 },
+      { t: 80,  x: 0.08, y: 0.86, ang: 0.80, sp: 1.10 },
+      { t: 100, x: 0.92, y: 0.90, ang: 3.70, sp: 0.95 },
+      { t: 116, x: 0.30, y: 0.06, ang: 1.60, sp: 0.75 }
+    ];
+  }
+  var AUTO = autoSchedule();
+  function fireAuto() {
+    var diag = Math.hypot(W, H);
+    while (AUTO.length && AUTO[0].t <= simSteps) {
+      var a = AUTO.shift();
+      var sp = diag * 0.42 * a.sp * LAUNCHV;
+      addComet(W * a.x, H * a.y, Math.cos(a.ang) * sp, Math.sin(a.ang) * sp, simSteps);
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 3.6;       // 3.6초 루프 — 4연발 → 궤도/탈출이 갈리는 순간
+    var target = Math.floor(loop / DT);
+    while (simSteps < target) { fireAuto(); stepLeap(); simSteps++; stamp(); }
+    if (target < simSteps - 3) { seed(); simSteps = 0; prev = null; AUTO = autoSchedule(); chainCtx.clearRect(0, 0, W, H); }
+    decay();
+    draw(aim);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 혜성 2발이 궤도에 오른 장면까지 적분한 뒤 한 장 고정
+    for (var s = 0; s < 100; s++) { fireAuto(); stepLeap(); simSteps++; stamp(); }
+    draw(null);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); seed(); simSteps = 0; prev = null; aReady = false;
+    AUTO = autoSchedule();   // 스케줄 되감기
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  seed();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

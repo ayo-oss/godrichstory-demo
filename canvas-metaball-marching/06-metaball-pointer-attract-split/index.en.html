@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터 인력 — 당겼다 찢어지는 메타볼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M150 14 66 146h49l-24 96 99-138h-52l28-90z"/></svg>
+    <span>Only the balls near the pointer accelerate toward it, then ease off as it moves away — get close and a thick bridge forms; pull the cursor off and it stretches until it snaps. Hover and move your mouse to try it</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Pointer-Attraction Metaball test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">balls <b class="cd__val" id="cdN">9</b>count · attraction radius <b class="cd__val">168</b>px</span>
+    <span class="cd__meta cd__meta--dim">canvas · pointermove · quadraticCurveTo</span>
+  </div>
+</div>
+</main>
+<script>
+// 포인터 인력 메타볼(06). 포인터(또는 자동 모드의 가상 포인터) 반경 안의 볼만 인력 방향으로
+// 가속하고, 반경 밖으로 나가면 감쇠하며 원래 궤도로 놓아준다. 필드는 마칭 스퀘어로 매 프레임
+// 경계를 다시 추출해 quadraticCurveTo 로 잇는다 — 볼이 몰리면 두꺼운 다리가, 흩어지면 가는 목이
+// 늘어나다 끊어진다(임계값을 넘던 셀이 넘지 못하면 다리가 자연히 사라진다). pointermove 없으면
+// (렌더 환경) 원운동 자동 순찰 경로를 따라가는 가상 포인터가 같은 인력을 만든다(is-demo 자동 모드).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N_BALLS = 9;    // balls 수
+  var PULL_R  = 168;  // 인력 반경(px)
+  var PULL_K  = 3.4;  // 인력 가속 배율
+  // ────────────────────────────────────────────────────
+
+  var GRID = 22;   // 마칭 스퀘어 격자(px)
+  var THR  = 1.05; // 임계값
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x317A06);
+
+  // 색은 CSS 커스텀 프로퍼티(--pull-*)에서 getComputedStyle 로 읽는다
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--pull-ink');
+  var C_DUSK = tokRGB('--pull-dusk');
+  var C_BODY = tokRGB('--pull-body');
+  var C_HI   = tokRGB('--pull-hi');
+  var C_RING = tokRGB('--pull-ring');
+  var C_MIST = tokRGB('--pull-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var STILL_T = 1.4;
+
+  var balls = [];
+  var hasPointer = false;   // pointermove 를 한 번이라도 받았는가
+  var ptrX = 0, ptrY = 0;
+  var cols = 0, rows = 0, fieldGrid = null;
+
+  function build() {
+    balls = [];
+    for (var i = 0; i < N_BALLS; i++) {
+      var ang = (i / N_BALLS) * TAU;
+      var rad = Math.min(W, H) * (0.24 + rand() * 0.14);
+      balls.push({
+        homeX: W * 0.5 + Math.cos(ang) * rad,
+        homeY: H * 0.5 + Math.sin(ang) * rad,
+        x: W * 0.5 + Math.cos(ang) * rad,
+        y: H * 0.5 + Math.sin(ang) * rad,
+        r: 12 + rand() * 7,
+        vx: 0, vy: 0,
+        ph: rand() * TAU
+      });
+    }
+    cols = Math.ceil(W / GRID) + 1;
+    rows = Math.ceil(H / GRID) + 1;
+    fieldGrid = new Float32Array(cols * rows);
+    ptrX = W * 0.5; ptrY = H * 0.5;
+  }
+
+  function fieldAt(px, py) {
+    var s = 0;
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var dx = px - b.x, dy = py - b.y;
+      var q = (dx * dx + dy * dy) / (b.r * b.r);
+      s += 1 / (1 + q);
+    }
+    return s;
+  }
+
+  function sampleGrid() {
+    for (var j = 0; j < rows; j++) {
+      for (var i = 0; i < cols; i++) {
+        fieldGrid[j * cols + i] = fieldAt(i * GRID, j * GRID);
+      }
+    }
+  }
+
+  function lerpPt(x1, y1, v1, x2, y2, v2) {
+    var t = (THR - v1) / (v2 - v1 || 1e-6);
+    t = Math.max(0, Math.min(1, t));
+    return [x1 + (x2 - x1) * t, y1 + (y2 - y1) * t];
+  }
+
+  // ── 마칭 스퀘어 — 16경우 테이블로 경계 세그먼트를 뽑는다 ──
+  function march() {
+    var segs = [];
+    for (var j = 0; j < rows - 1; j++) {
+      for (var i = 0; i < cols - 1; i++) {
+        var x = i * GRID, y = j * GRID;
+        var vTL = fieldGrid[j * cols + i];
+        var vTR = fieldGrid[j * cols + i + 1];
+        var vBR = fieldGrid[(j + 1) * cols + i + 1];
+        var vBL = fieldGrid[(j + 1) * cols + i];
+        var code = (vTL > THR ? 8 : 0) | (vTR > THR ? 4 : 0) | (vBR > THR ? 2 : 0) | (vBL > THR ? 1 : 0);
+        if (code === 0 || code === 15) continue;
+        var top    = lerpPt(x, y, vTL, x + GRID, y, vTR);
+        var right  = lerpPt(x + GRID, y, vTR, x + GRID, y + GRID, vBR);
+        var bottom = lerpPt(x + GRID, y + GRID, vBR, x, y + GRID, vBL);
+        var left   = lerpPt(x, y + GRID, vBL, x, y, vTL);
+        switch (code) {
+          case 1: case 14: segs.push([left, bottom]); break;
+          case 2: case 13: segs.push([bottom, right]); break;
+          case 3: case 12: segs.push([left, right]); break;
+          case 4: case 11: segs.push([top, right]); break;
+          case 6: case 9:  segs.push([top, bottom]); break;
+          case 7: case 8:  segs.push([left, top]); break;
+          case 5: segs.push([left, top]); segs.push([bottom, right]); break;
+          case 10: segs.push([top, right]); segs.push([left, bottom]); break;
+        }
+      }
+    }
+    return segs;
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function mix(c1, c2, k) {
+    return [c1[0] + (c2[0] - c1[0]) * k, c1[1] + (c2[1] - c1[1]) * k, c1[2] + (c2[2] - c1[2]) * k];
+  }
+
+  function update(t, dt) {
+    // 자동 모드 — pointermove 가 없으면 원운동 순찰 경로를 가상 포인터로 쓴다
+    if (!hasPointer) {
+      var a = t * 0.7;
+      ptrX = W * 0.5 + Math.cos(a) * W * 0.34;
+      ptrY = H * 0.5 + Math.sin(a * 1.15) * H * 0.32;
+    }
+    var m = 16;
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var dx = ptrX - b.x, dy = ptrY - b.y;
+      var d = Math.hypot(dx, dy) || 1;
+      if (d < PULL_R) {
+        var pull = (1 - d / PULL_R) * PULL_K;
+        b.vx += (dx / d) * pull * 60 * dt;
+        b.vy += (dy / d) * pull * 60 * dt;
+      } else {
+        // 감쇠 — 홈 위치로 서서히 되돌아간다
+        b.vx += (b.homeX - b.x) * 0.9 * dt;
+        b.vy += (b.homeY - b.y) * 0.9 * dt;
+      }
+      // 살짝 배회 — 정지 상태를 피한다
+      b.vx += Math.cos(t * 0.8 + b.ph) * 3 * dt;
+      b.vy += Math.sin(t * 0.9 + b.ph) * 3 * dt;
+      b.vx *= 0.9; b.vy *= 0.9;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < m) { b.x = m; b.vx *= -0.4; }
+      if (b.x > W - m) { b.x = W - m; b.vx *= -0.4; }
+      if (b.y < m) { b.y = m; b.vy *= -0.4; }
+      if (b.y > H - m) { b.y = H - m; b.vy *= -0.4; }
+    }
+  }
+
+  function draw(t) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = rgba(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    // 인력장 안개 — 포인터 주변이 은은히 밝다(배경도 함께 숨쉰다)
+    var fog = ctx.createRadialGradient(ptrX, ptrY, 0, ptrX, ptrY, PULL_R * 1.3);
+    fog.addColorStop(0, rgba(C_DUSK, 0.34));
+    fog.addColorStop(1, rgba(C_DUSK, 0));
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, 0, W, H);
+
+    sampleGrid();
+    var segs = march();
+    var path = new Path2D();
+    for (var s = 0; s < segs.length; s++) {
+      var sg = segs[s];
+      path.moveTo(sg[0][0], sg[0][1]);
+      path.quadraticCurveTo(sg[0][0], sg[0][1], (sg[0][0] + sg[1][0]) / 2, (sg[0][1] + sg[1][1]) / 2);
+      path.lineTo(sg[1][0], sg[1][1]);
+    }
+    // 글로우 겹
+    ctx.strokeStyle = rgba(C_RING, 0.28);
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.stroke(path);
+    // 본체
+    ctx.fillStyle = rgba(C_BODY, 0.9);
+    ctx.strokeStyle = rgba(C_HI, 0.95);
+    ctx.lineWidth = 2.4;
+    ctx.stroke(path);
+
+    // balls 하이라이트
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var rr = b.r * 0.55;
+      var g = ctx.createRadialGradient(b.x - rr * 0.3, b.y - rr * 0.3, 0, b.x, b.y, rr);
+      g.addColorStop(0, rgba(C_HI, 0.35));
+      g.addColorStop(1, rgba(C_HI, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(b.x - rr, b.y - rr, rr * 2, rr * 2);
+    }
+
+    // 포인터 표시 — 자동/실제 공통
+    ctx.beginPath();
+    ctx.arc(ptrX, ptrY, 5, 0, TAU);
+    ctx.strokeStyle = rgba(C_RING, 0.6);
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 먼지
+    for (var k = 0; k < 16; k++) {
+      var a = 0.05 + 0.2 * (0.5 + 0.5 * Math.sin(t * (0.7 + k * 0.13) + k));
+      var px = ((k * 53) % W); var py = ((k * 91) % H);
+      ctx.fillStyle = rgba(C_MIST, a);
+      ctx.fillRect(px, py, 1.4, 1.4);
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+  }
+
+  // 포인터 — 첫 이동부터 추적. field 밖으로 나가도 마지막 좌표를 유지한다
+  field.addEventListener('pointermove', function (ev) {
+    var r = field.getBoundingClientRect();
+    ptrX = ev.clientX - r.left;
+    ptrY = ev.clientY - r.top;
+    hasPointer = true;
+  });
+  field.addEventListener('pointerleave', function () {
+    hasPointer = false;   // 커서를 치우면 다시 자동 순찰로 — 다리가 늘어났다 끊어진다
+  });
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    update(t, dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); build();
+    if (reduce) draw(STILL_T);
+  });
+
+  fit();
+  build();
+  nOut.textContent = String(N_BALLS);
+  if (reduce) {
+    for (var q = 0; q < 40; q++) update(STILL_T, 1 / 60);
+    draw(STILL_T);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>불 번짐 소모 규칙 — 폴링 샌드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint"><span>Fire ignites neighboring trees with a probability, then itself turns to ash</span></p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Fire Spread cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">6</b>% ignition chance</span>
+    <span class="cd__meta cd__meta--dim">canvas · ImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 불 번짐(04). 재료 코드 0 빈칸 1 모래 2 물 3 벽 4 나무 5 불 6 재 7 연기 8 씨앗 9 식물 10 흙 11 돌.
+// 불 칸은 매 틱 이웃(4방향) 나무·기름(밝은 fire 색 조명 나무) 칸을 IGNITE_P 확률로 불로 바꾸고,
+// 자신은 LIFE 틱의 수명이 다하면 재가 된 뒤 위로 연기를 몇 칸 보낸다 — 타고 넘어가며 꺼지는 불줄기.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var IGNITE_P = 0.06;  // 이웃 점화 확률 — 0.02 는 느린 은은한 불씨, 0.14 는 폭발적 화염
+  var LIFE     = 14;    // 불 수명(틱) — 짧으면 잔불 없이 스치듯, 길면 오래 타오른다
+  // ────────────────────────────────────────────────────
+
+  var EMPTY=0, WOOD=4, FIRE=5, ASH=6, SMOKE=7, OIL=8;
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 연소 순서로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A44);
+
+  // 색은 CSS 커스텀 프로퍼티(--sand-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_NIGHT = tokRGB('--sand-night');
+  var C_GLOW  = tokRGB('--sand-glow');
+  var C_FIRE  = tokRGB('--sand-fire');
+  var C_FLAME = tokRGB('--sand-flame');
+  var C_GOLD  = tokRGB('--sand-gold');
+  var C_ASH   = tokRGB('--sand-ash');
+  var C_SMOKE = tokRGB('--sand-smoke');
+  var C_WOOD  = tokRGB('--sand-wood');
+  var C_MIST  = tokRGB('--sand-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, cols = 0, rows = 0, CELL = 4;
+  var grid = null, life = null, img = null, buf = null;
+  var raf = 0, t0 = -1;
+  var tick = 0;
+
+  // ── 장면 — 계단식 나무 발판 3단 + 바닥 기름 웅덩이 ──
+  // 오일은 '밝은 fire 색조로 조명된 나무' — 가연물이되 셀 색만 fire 톤으로 둔다(기름 표면의 광택)
+  function idx(x, y) { return y * cols + x; }
+  function build() {
+    grid = new Uint8Array(cols * rows);
+    life = new Uint8Array(cols * rows);
+    var x, y, i;
+    // 계단식 나무 발판 3단 — 좌하단에서 우상단으로 올라가는 층
+    var rowsPer = Math.max(2, Math.round(rows * 0.05));
+    var y0 = rows - Math.max(2, Math.round(rows * 0.16));
+    for (var step = 0; step < 3; step++) {
+      var x0 = Math.round(cols * (0.06 + step * 0.24));
+      var x1 = Math.round(cols * (0.30 + step * 0.24));
+      var yy = y0 - step * Math.round(rows * 0.16);
+      for (x = x0; x < x1; x++)
+        for (y = yy; y < yy + rowsPer; y++)
+          if (x >= 0 && x < cols && y >= 0 && y < rows) grid[idx(x, y)] = WOOD;
+    }
+    // 바닥 기름 웅덩이 — 맨 아래 2줄 전체 폭
+    for (x = 0; x < cols; x++)
+      for (y = rows - 2; y < rows; y++)
+        grid[idx(x, y)] = OIL;
+    img = ctx.createImageData(cols, rows);
+    buf = img.data;
+  }
+
+  // ── 점화 스케줄 — t=0 첫 나무, 이후 ~1.2초마다 다른 위치(우측 발판 → 기름) 재점화 ──
+  var ignitions = [];
+  function scheduleIgnitions() {
+    ignitions = [
+      { at: 0.05, kind: 'wood1' },
+      { at: 1.2,  kind: 'wood3' },
+      { at: 2.4,  kind: 'oil' },
+      { at: 3.6,  kind: 'wood2' },
+      { at: 4.8,  kind: 'oil' },
+      { at: 6.0,  kind: 'wood1' },
+      { at: 7.2,  kind: 'wood3' },
+      { at: 8.4,  kind: 'oil' }
+    ];
+  }
+  var ignIdx = 0;
+  function doIgnite(kind) {
+    var y0 = rows - Math.max(2, Math.round(rows * 0.16));
+    var rowsPer = Math.max(2, Math.round(rows * 0.05));
+    function spark(cx, top, w, h, mat) {
+      // 해당 재료 영역에서 무작위 한 칸을 찾아 불로
+      for (var k = 0; k < 60; k++) {
+        var x = cx + Math.floor(rand() * w);
+        var y = top + Math.floor(rand() * h);
+        if (x < 0 || x >= cols || y < 0 || y >= rows) continue;
+        var i = idx(x, y);
+        if (grid[i] === mat) { grid[i] = FIRE; life[i] = LIFE; return true; }
+      }
+      return false;
+    }
+    if (kind === 'wood1') spark(Math.round(cols * 0.10), y0, Math.round(cols * 0.22), rowsPer, WOOD);
+    else if (kind === 'wood2') spark(Math.round(cols * 0.34), y0 - Math.round(rows * 0.16), Math.round(cols * 0.22), rowsPer, WOOD);
+    else if (kind === 'wood3') spark(Math.round(cols * 0.58), y0 - Math.round(rows * 0.32), Math.round(cols * 0.22), rowsPer, WOOD);
+    else spark(Math.round(cols * 0.1), rows - 2, Math.round(cols * 0.8), 2, OIL);
+  }
+
+  function update() {
+    tick++;
+    // 아래 행 → 위 행. 이미 이번 틱에 갱신된 칸은 건너뛴다(불의 연쇄가 한 틱에 끝까지 달리는 것 방지)
+    var moved = new Uint8Array(cols * rows);
+    var x, y, i, d;
+    for (y = rows - 1; y >= 0; y--) {
+      var ltr = (tick & 1) === 0; // 홀짝 스캔 방향 교차 — 번짐 비대칭 방지
+      for (var s = 0; s < cols; s++) {
+        x = ltr ? s : cols - 1 - s;
+        i = idx(x, y);
+        if (moved[i]) continue;
+        var m = grid[i];
+        if (m === FIRE) {
+          // 이웃 점화 — 4방향의 나무·기름을 확률로 불로
+          var nb = [[1,0],[-1,0],[0,1],[0,-1]];
+          for (d = 0; d < 4; d++) {
+            var nx = x + nb[d][0], ny = y + nb[d][1];
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            var j = idx(nx, ny);
+            if ((grid[j] === WOOD || grid[j] === OIL) && rand() < IGNITE_P) {
+              grid[j] = FIRE; life[j] = LIFE; moved[j] = 1;
+            }
+          }
+          // 수명 감소 — 다하면 재, 위 빈칸에 연기 시도
+          if (life[i] <= 1) {
+            grid[i] = ASH;
+            if (y > 0 && grid[idx(x, y - 1)] === EMPTY && rand() < 0.5) {
+              grid[idx(x, y - 1)] = SMOKE;
+              if (y > 1 && grid[idx(x, y - 2)] === EMPTY && rand() < 0.5) grid[idx(x, y - 2)] = SMOKE;
+            }
+          } else {
+            life[i]--;
+          }
+        } else if (m === SMOKE) {
+          // 연기 — 위로 한 칸, 막히면 옆. 오래 남지 않게 확률 소멸
+          if (rand() < 0.22) { grid[i] = EMPTY; continue; }
+          var up = y > 0 ? idx(x, y - 1) : -1;
+          if (up >= 0 && grid[up] === EMPTY) {
+            grid[up] = SMOKE; grid[i] = EMPTY; moved[up] = 1;
+          } else if (x > 0 && grid[idx(x - 1, y)] === EMPTY && rand() < 0.5) {
+            grid[idx(x - 1, y)] = SMOKE; grid[i] = EMPTY;
+          } else if (x < cols - 1 && grid[idx(x + 1, y)] === EMPTY && rand() < 0.5) {
+            grid[idx(x + 1, y)] = SMOKE; grid[i] = EMPTY;
+          }
+        } else if (m === ASH) {
+          // 재 — 낙하(아래 빈칸) + 확률 소멸. 소멸한 자리는 연기 없이 비운다
+          if (y < rows - 1 && grid[idx(x, y + 1)] === EMPTY) {
+            grid[idx(x, y + 1)] = ASH; grid[i] = EMPTY; moved[idx(x, y + 1)] = 1;
+          } else if (rand() < 0.012) { grid[i] = EMPTY; }
+        }
+      }
+    }
+  }
+
+  // ── 렌더 — ImageData 버퍼 → putImageData. 1 픽셀 = 1 칸 ──
+  function px(o, c, k) {
+    buf[o]     = c[0] * k;
+    buf[o + 1] = c[1] * k;
+    buf[o + 2] = c[2] * k;
+    buf[o + 3] = 255;
+  }
+  function draw(t) {
+    var x, y, i, o;
+    // 배경 — 밤. 칸 단위로 밤색을 깔아 ImageData 전체를 채운다
+    for (i = 0; i < cols * rows; i++) {
+      o = i * 4;
+      buf[o] = C_NIGHT[0]; buf[o + 1] = C_NIGHT[1]; buf[o + 2] = C_NIGHT[2]; buf[o + 3] = 255;
+    }
+    // 격자 재료 렌더
+    var flicker = 0.5 + 0.5 * Math.sin(t * 9.3) * Math.cos(t * 6.1);
+    for (y = 0; y < rows; y++) {
+      for (x = 0; x < cols; x++) {
+        i = idx(x, y);
+        o = i * 4;
+        var m = grid[i];
+        if (m === WOOD) px(o, C_WOOD, 1);
+        else if (m === OIL) px(o, C_FIRE, 0.9);
+        else if (m === ASH) px(o, C_ASH, 0.95);
+        else if (m === SMOKE) px(o, C_SMOKE, 0.8);
+        else if (m === FIRE) {
+          // 매 틱 fire/flame/gold 랜덤 스왑 — 타오르는 질감
+          var r3 = rand();
+          var fc = r3 < 0.4 ? C_FIRE : (r3 < 0.8 ? C_FLAME : C_GOLD);
+          px(o, fc, 0.85 + 0.3 * flicker);
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // 잔광(안개) — 중심이 sin/cos 로 천천히 도는 radial gradient, 알파 낮게 — 화면이 늘 살아 있다
+    var gx = W * (0.5 + 0.30 * Math.sin(t * 0.9));
+    var gy = H * (0.55 + 0.26 * Math.cos(t * 0.7));
+    var gr = Math.max(W, H) * 0.52;
+    var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+    g.addColorStop(0, 'rgba(' + C_GLOW.join(',') + ',0.07)');
+    g.addColorStop(1, 'rgba(' + C_GLOW.join(',') + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    cols = Math.max(8, Math.floor(W / CELL));
+    rows = Math.max(8, Math.floor(H / CELL));
+    build();
+    scheduleIgnitions();
+    ignIdx = 0;
+    tick = 0;
+  }
+
+  function stillFrame() {
+    // reduce — 점화 직후 몇 틱만 돌리고 한 장
+    doIgnite('wood1');
+    for (var k = 0; k < 12; k++) update();
+    draw(0.2);
+  }
+
+  var STEP = 1000 / 60, acc = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = now - t0;
+    acc = acc + (now - (frame.prev || now));
+    frame.prev = now;
+    while (acc >= STEP) {
+      update();
+      var t = tick / 60;
+      while (ignIdx < ignitions.length && ignitions[ignIdx].at <= t) {
+        doIgnite(ignitions[ignIdx].kind);
+        ignIdx++;
+      }
+      acc -= STEP;
+    }
+    draw(dt / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  nOut.textContent = String(Math.round(IGNITE_P * 100));
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

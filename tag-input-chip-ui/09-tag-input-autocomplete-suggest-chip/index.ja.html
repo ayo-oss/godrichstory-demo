@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>入力値に近い順で候補を見せるチップ入力 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="as is-demo" id="as">
+  <div class="as__chips" id="asChips"></div>
+  <div class="as__row">
+    <input type="text" class="as__input" id="asInput" aria-label="タグ検索、重なる文字数順に候補表示" placeholder="タグ検索">
+  </div>
+  <ul class="as__list" id="asList" role="listbox" aria-label="おすすめタグ"></ul>
+  <p class="as__sr" role="status" aria-live="polite" id="asLive"></p>
+</div>
+<script>
+(function () {
+  var CANDIDATES = ['赤', '青', '緑', '黄色', '紫', 'オレンジ', '白', '黒'];
+  var TOP_N = 4;
+  var TYPE_SEQUENCE = ['青', '紫'];
+  var TYPE_MS = 130, HOLD_MS = 500, PAUSE_MS = 900;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('as');
+  var chipsWrap = document.getElementById('asChips');
+  var input = document.getElementById('asInput');
+  var list = document.getElementById('asList');
+  var live = document.getElementById('asLive');
+  var seq = 0;
+
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  // 계산 겹: 입력 글자와 후보 글자를 하나씩 겹치는 개수로 세어 점수를 매기고, 점수 내림차순으로 다시 늘어놓는다.
+  function score(query, cand) {
+    if (!query) return 0;
+    var pool = {};
+    for (var i = 0; i < query.length; i++) { var c = query[i]; pool[c] = (pool[c] || 0) + 1; }
+    var s = 0;
+    for (var j = 0; j < cand.length; j++) {
+      var ch = cand[j];
+      if (pool[ch] > 0) { s++; pool[ch]--; }
+    }
+    return s;
+  }
+
+  function addChip(text) {
+    seq++;
+    var chip = document.createElement('span');
+    chip.className = 'as__chip as__chip--enter';
+    chip.id = 'asChip' + seq;
+    chip.innerHTML = '<span class="as__chipText"></span><button type="button" class="as__chipX">×</button>';
+    chip.querySelector('.as__chipText').textContent = text;
+    chip.querySelector('.as__chipX').setAttribute('aria-label', 'タグ削除: ' + text);
+    chip.querySelector('.as__chipX').addEventListener('click', function () { human(); chip.remove(); });
+    chipsWrap.appendChild(chip);
+    requestAnimationFrame(function () { chip.classList.remove('as__chip--enter'); });
+  }
+
+  function commit(text) {
+    addChip(text);
+    input.value = '';
+    renderList('');
+    live.textContent = text + ' タグ追加';
+  }
+
+  function renderList(query) {
+    var scored = CANDIDATES.map(function (c) { return { text: c, score: score(query, c) }; });
+    scored.sort(function (a, b) { return b.score - a.score; });
+    var top = scored.slice(0, TOP_N);
+    list.innerHTML = '';
+    top.forEach(function (item, i) {
+      var li = document.createElement('li');
+      li.className = 'as__opt' + (i === 0 && item.score > 0 ? ' as__opt--lead' : '');
+      li.setAttribute('role', 'option');
+      li.setAttribute('tabindex', '0');
+      li.textContent = item.text;
+      li.addEventListener('click', function (e) { if (e.isTrusted) human(); commit(item.text); });
+      li.addEventListener('keydown', function (e) { if (e.key === 'Enter') { human(); commit(item.text); } });
+      list.appendChild(li);
+    });
+  }
+
+  input.addEventListener('input', function (e) { if (e.isTrusted) human(); renderList(input.value); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && input.value.trim()) { human(); commit(input.value.trim()); }
+  });
+
+  var timer = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function setInputValue(v) {
+    input.value = v;
+    renderList(v);
+  }
+
+  function typeWord(word, i, cb) {
+    if (!root.classList.contains('is-demo')) return;
+    if (i <= word.length) {
+      setInputValue(word.slice(0, i));
+      schedule(function () { typeWord(word, i + 1, cb); }, TYPE_MS);
+    } else {
+      schedule(cb, HOLD_MS);
+    }
+  }
+
+  function loop(i) {
+    if (!root.classList.contains('is-demo')) return;
+    if (i < TYPE_SEQUENCE.length) {
+      typeWord(TYPE_SEQUENCE[i], 0, function () {
+        var lead = list.querySelector('.as__opt--lead');
+        var text = lead ? lead.textContent : TYPE_SEQUENCE[i];
+        commit(text);
+        schedule(function () { loop(i + 1); }, HOLD_MS);
+      });
+    } else {
+      chipsWrap.querySelectorAll('.as__chip').forEach(function (c) { c.remove(); });
+      schedule(function () { loop(0); }, PAUSE_MS);
+    }
+  }
+
+  renderList('');
+  if (!reduce) {
+    schedule(function () { loop(0); }, 300);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

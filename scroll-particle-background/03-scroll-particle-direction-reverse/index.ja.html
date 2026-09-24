@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>方向反転 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>上下にスクロールする方向によって、交差する模様が反転します。</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="パーティクル方向 スクロール領域">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">↓</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(7331);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#17141a';
+
+  // 계산 겹: 방향 부호장(direction-sign field) — 파티클은 레인마다 고정된 부호(lane sign)를 갖고,
+  // 실제 가로 속도는 그 부호에 스크롤 방향 부호를 곱한 값이다. 방향이 바뀌면 레인의 엇갈림이 통째로 뒤집힌다.
+  var LANES = 5;
+  var LANE_SPEED = 46;   // 레인 가로 속도 크기 (px/s)
+  var RISE_SPEED = 20;   // 기준 상승 속도 (px/s)
+  var COUNT = 40;
+
+  var W = 0, H = 0, dpr = 1;
+  var particles = [];
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function laneSign(lane) { return (lane % 2 === 0) ? 1 : -1; }
+
+  function spawnAt(p, first) {
+    var lane = Math.floor(rng() * LANES);
+    p.lane = lane;
+    p.x = (lane + 0.5) / LANES * W + (rng() - 0.5) * (W / LANES) * 0.6;
+    p.y = first ? rng() * H : H + rng() * 20;
+    p.r = 1.4 + rng() * 2.2;
+    p.alpha = 0.4 + rng() * 0.45;
+  }
+
+  function initParticles() {
+    particles = [];
+    for (var i = 0; i < COUNT; i++) { var p = {}; spawnAt(p, true); particles.push(p); }
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, dirSign = 1, idleMs = 0, lastTop = 0, lastT = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.3;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; dirSign = scrollDir; idleMs = 0; }
+    else { scrollDir = 0; idleMs += dt; } // dirSign 은 마지막 방향을 유지한다 — 정지해도 결이 사라지지 않는다
+    lastTop = top; lastT = now;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function step(dtSec) {
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      p.y -= RISE_SPEED * dtSec;
+      p.x += laneSign(p.lane) * dirSign * LANE_SPEED * dtSec;
+      var laneMin = p.lane / LANES * W, laneMax = (p.lane + 1) / LANES * W;
+      if (p.x < laneMin - 6) p.x = laneMin - 6; else if (p.x > laneMax + 6) p.x = laneMax + 6;
+      if (p.y < -8) spawnAt(p, false);
+    }
+  }
+
+  function paint() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      ctx.globalAlpha = p.alpha;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateVal() { val.textContent = dirSign >= 0 ? '↓' : '↑'; }
+
+  function paintStatic() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var laneMid = (p.lane + 0.5) / LANES * W;
+      var offset = laneSign(p.lane) * dirSign * scrollPos * (W / LANES) * 0.35;
+      ctx.globalAlpha = p.alpha;
+      ctx.beginPath(); ctx.arc(laneMid + offset, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(dtSec);
+    paint();
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = triangle(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+  initParticles();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

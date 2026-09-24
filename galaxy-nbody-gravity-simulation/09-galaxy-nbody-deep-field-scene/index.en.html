@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep-field scene — n-body gravity — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gx is-demo" id="gxRoot">
+  <p class="gx__hint">
+    <span>On a nebula-sprinkled deep field, several galaxies graze and merge in an evolution sequence</span>
+  </p>
+  <div class="gx__field" id="gxField" role="application" aria-label="Deep-field evolution lab" tabindex="0">
+    <canvas class="gx__cv" id="gxCv"></canvas>
+  </div>
+  <div class="gx__bar">
+    <span class="gx__meta">3 galaxies · 330 stars</span>
+    <span class="gx__meta gx__meta--dim">canvas · nebula sprites · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 심우주 씬(09) — 성운을 깐 무대에 은하 3개를 놓는 장면.
+// 무대: createRadialGradient 로 구운 성운 스프라이트 3장(청록·장미·앰버)을
+// 미리 별도 캔버스에 구워 두고 매 프레임 drawImage 로 얹는다 — 매 프레임 그라디언트를
+// 다시 만들지 않아 330개 별 계산과 함께 돌아도 프레임이 나간다.
+// 은하 3개(별 110+110+110)는 01 과 같은 전 쌍 O(N²) 뉴턴 중력 + leapfrog 으로 적분한다(근사 아님).
+// 궤도는 대각선으로 엇갈리게 심는다 — 스침 → 조석 꼬리 → 합체(타원화) 순서의 진화 시퀀스가
+// 한 루프 안에 차례로 나타난다. 별 색은 은하마다 다른 파스텔 3색.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NSTARS = 330;   // 세 은하 합계 별 수
+  var NEBULA = 3;     // 성운 스프라이트 수 — 변형 "성운 밀도"
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('gxRoot');
+  var field = document.getElementById('gxField');
+  var cv = document.getElementById('gxCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--gx-ink');
+  var C_GLOW = tokRGB('--gx-glow');
+  var C_HOT  = tokRGB('--gx-hot');
+  var C_TAIL = tokRGB('--gx-tail');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var chainCv, chainCtx;
+  var nebCvs = [];                       // 구워 둔 성운 스프라이트
+
+  var N = 0, X = [], Y = [], VX = [], VY = [], GID = [];   // GID — 별이 속한 은하(색·코어 계산용)
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    chainCv = document.createElement('canvas');
+    chainCv.width = W * dpr; chainCv.height = H * dpr;
+    chainCtx = chainCv.getContext('2d');
+    chainCtx.scale(dpr, dpr);
+    bakeNebulas();
+  }
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // 성운 스프라이트 — createRadialGradient 로 한 번 구워 둔다(매 프레임 재계산 없음)
+  function bakeNebulas() {
+    nebCvs = [];
+    var rnd = mulberry32(77);
+    var cols = [C_GLOW, C_TAIL, C_HOT];
+    for (var k = 0; k < NEBULA; k++) {
+      var s = document.createElement('canvas');
+      var sz = Math.max(160, Math.round(Math.min(W, H) * (0.55 + rnd() * 0.5)));
+      s.width = sz; s.height = sz;
+      var sc = s.getContext('2d');
+      var g = sc.createRadialGradient(sz * 0.5, sz * 0.5, 0, sz * 0.5, sz * 0.5, sz * 0.5);
+      var c = cols[k % 3];
+      g.addColorStop(0.00, rgba(c, 0.16));
+      g.addColorStop(0.35, rgba(c, 0.07));
+      g.addColorStop(0.70, rgba(c, 0.02));
+      g.addColorStop(1.00, rgba(c, 0));
+      sc.fillStyle = g;
+      sc.fillRect(0, 0, sz, sz);
+      nebCvs.push({ cv: s, x: 0.12 + rnd() * 0.76, y: 0.10 + rnd() * 0.80, sz: sz });
+    }
+  }
+
+  // G·질량은 캔버스 픽셀 단위 시뮬레이션 값(물리 상수 아님 — 글에서 설명)
+  var G = 120.0, SOFT2 = 20;
+  var DT = 1 / 60;
+
+  var AX = [], AY = [];
+  function accel() {
+    // 전 쌍 O(N²) 뉴턴 — a_i = Σ G·(x_j - x_i)/(|d|²+ε²)^1.5 (근사 아님)
+    var i, j, dx, dy, d2, inv, f;
+    for (i = 0; i < N; i++) { AX[i] = 0; AY[i] = 0; }
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        dx = X[j] - X[i]; dy = Y[j] - Y[i];
+        d2 = dx * dx + dy * dy + SOFT2;
+        inv = 1 / Math.sqrt(d2);
+        f = G * inv * inv * inv;
+        AX[i] += dx * f; AY[i] += dy * f;
+        AX[j] -= dx * f; AY[j] -= dy * f;
+      }
+    }
+  }
+
+  var aReady = false;
+  function stepLeap() {
+    if (!aReady) { accel(); aReady = true; }
+    var h = DT * 0.5;
+    for (var i = 0; i < N; i++) {
+      VX[i] += AX[i] * h; VY[i] += AY[i] * h;
+      X[i]  += VX[i] * DT; Y[i] += VY[i] * DT;
+    }
+    accel();
+    for (var j = 0; j < N; j++) {
+      VX[j] += AX[j] * h; VY[j] += AY[j] * h;
+    }
+  }
+
+  function placeDisk(cx, cy, R, count, phase, dvx, dvy, dir, gid, rnd) {
+    var M = R * R * 0.90;
+    for (var i = 0; i < count; i++) {
+      var r = R * Math.sqrt(rnd());
+      var a = phase + (i / count) * Math.PI * 2 + rnd() * 0.5;
+      var v = Math.sqrt(M / Math.max(r, 6)) * dir;
+      X.push(cx + Math.cos(a) * r);
+      Y.push(cy + Math.sin(a) * r);
+      VX.push(dvx * R * 0.30 + -Math.sin(a) * v + (rnd() - 0.5) * 2);
+      VY.push(dvy * R * 0.30 +  Math.cos(a) * v + (rnd() - 0.5) * 2);
+      GID.push(gid);
+      N++;
+    }
+  }
+
+  function seed() {
+    // 세 은하 — 대각선으로 엇갈리는 궤도. 시간이 흐르면 두 쌍이 스치고 세째가 합류한다.
+    // 산개 별(STRAY)을 섞어 궤적이 캔버스 구석까지 뻗게 한다 — 심우주의 백업 별밭 역할
+    X = []; Y = []; VX = []; VY = []; GID = []; N = 0; aReady = false;
+    var rnd = mulberry32(29);
+    var per = Math.floor(NSTARS / 3);
+    var R = Math.min(W, H) * 0.28;
+    placeDisk(W * 0.22, H * 0.26, R, per - 28, 0,           0.62, -0.40, 1.00, 0, rnd);
+    placeDisk(W * 0.78, H * 0.52, R, per - 28, Math.PI,    -0.62,  0.40, 0.85, 1, rnd);
+    placeDisk(W * 0.38, H * 0.82, R, NSTARS - 2 * per - 28, Math.PI * 0.5, 0.34, -0.62, 0.92, 2, rnd);
+    // 산개 별 84개 — 세 은하 사이 공간을 채워 스치는 순간 전체가 살아 난다
+    for (var s = 0; s < 84; s++) {
+      var sx = W * (0.04 + rnd() * 0.92);
+      var sy = H * (0.06 + rnd() * 0.88);
+      var sa = rnd() * Math.PI * 2;
+      var sv = 38 + rnd() * 34;
+      X.push(sx); Y.push(sy);
+      VX.push(Math.cos(sa) * sv); VY.push(Math.sin(sa) * sv);
+      GID.push(s % 3);
+      N++;
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function gcol(gid) { return [C_GLOW, C_TAIL, C_HOT][gid % 3]; }
+
+  function decay() {
+    chainCtx.setTransform(1, 0, 0, 1, 0, 0);
+    chainCtx.globalCompositeOperation = 'destination-out';
+    chainCtx.fillStyle = 'rgba(0,0,0,0.013)';
+    chainCtx.fillRect(0, 0, W * dpr, H * dpr);
+    chainCtx.globalCompositeOperation = 'source-over';
+    chainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var prev = null;
+  function stamp() {
+    if (prev) {
+      for (var i = 0; i < N; i++) {
+        chainCtx.strokeStyle = rgba(gcol(GID[i]), 0.26);
+        chainCtx.lineWidth = 1.7;
+        chainCtx.beginPath();
+        chainCtx.moveTo(prev[0][i], prev[1][i]);
+        chainCtx.lineTo(X[i], Y[i]);
+        chainCtx.stroke();
+      }
+    }
+    if (!prev) { prev = [X.slice(), Y.slice()]; }
+    else { prev[0] = X.slice(); prev[1] = Y.slice(); }
+  }
+
+  function draw() {
+    var ctx = cv.getContext('2d');   // CanvasRenderingContext2D — 이 데모의 그리기 문맥
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 심우주 배경 — 잉크
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+    // 먼 별밭(정적·시드 고정)
+    var rnd = mulberry32(31);
+    ctx.fillStyle = rgba(C_GLOW, 0.35);
+    for (var k = 0; k < 55; k++) {
+      var bx = rnd() * W, by = rnd() * H, br = rnd() * 0.8 + 0.3;
+      ctx.globalAlpha = 0.10 + rnd() * 0.24;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // 성운 스프라이트 — 구워 둔 것을 얹는다. 아주 느린 드리프트로 심우주 배경 자체를 살린다
+    for (var n = 0; n < nebCvs.length; n++) {
+      var nb = nebCvs[n];
+      var ph = n * 2.1;
+      var dx = Math.sin(simSteps * 0.0031 + ph) * W * 0.035;
+      var dy = Math.cos(simSteps * 0.0026 + ph * 1.7) * H * 0.045;
+      var sc = 1 + Math.sin(simSteps * 0.0022 + ph) * 0.10;
+      var sz2 = nb.sz * sc;
+      ctx.drawImage(nb.cv, W * nb.x + dx - sz2 * 0.5, H * nb.y + dy - sz2 * 0.5, sz2, sz2);
+    }
+    // 궤도 잔상
+    ctx.drawImage(chainCv, 0, 0, W, H);
+    // 별 — 은하별 파스텔 3색
+    for (var i = 0; i < N; i++) {
+      var col = gcol(GID[i]);
+      ctx.fillStyle = rgba(col, 0.10);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 3.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(col, 0.6);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+    // 각 은하의 코어 — 같은 색 밝은 점(무게중심)
+    for (var g = 0; g < 3; g++) {
+      var sx = 0, sy = 0, c = 0;
+      for (var i2 = 0; i2 < N; i2++) {
+        if (GID[i2] !== g) continue;
+        sx += X[i2]; sy += Y[i2]; c++;
+      }
+      if (!c) continue;
+      ctx.fillStyle = rgba(gcol(g), 0.9);
+      ctx.beginPath(); ctx.arc(sx / c, sy / c, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  var simSteps = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 4.5;      // 4.5초 루프 — 스침 → 꼬리 → 합류 순서가 다 보이게
+    var target = Math.floor(loop / DT);
+    while (simSteps < target) { stepLeap(); simSteps++; stamp(); }
+    if (target < simSteps - 3) { seed(); simSteps = 0; prev = null; chainCtx.clearRect(0, 0, W, H); }
+    decay();
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 첫 스침이 일어난 장면까지 적분한 뒤 한 장 고정
+    for (var s = 0; s < 200; s++) { stepLeap(); stamp(); }
+    draw();
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); seed(); simSteps = 0; prev = null; aReady = false;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  seed();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

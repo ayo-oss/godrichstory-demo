@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>긁힌 픽셀 비율을 01 과 같은 계산식으로 재서 도넛형 진행 링에 매 프레임 반영한다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">스크래치 카드</p>
+    <div class="scv__row">
+      <div class="scv__zone" id="zone">
+        <div class="scv__prize">
+          <p class="scv__prizeTitle">적립 쿠폰</p>
+          <p class="scv__prizeSub">긁은 만큼 링이 채워져요</p>
+        </div>
+        <canvas class="scv__foil" id="foil" width="220" height="140" aria-hidden="true"></canvas>
+      </div>
+      <div class="scv__ringWrap">
+        <canvas class="scv__ring" id="ring" width="104" height="104" aria-hidden="true"></canvas>
+        <p class="scv__ringPct" id="ringPct">0%</p>
+      </div>
+    </div>
+    <button type="button" class="scv__reveal" id="revealBtn">한 번에 보기</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: clearedPixelRatio() 는 01 항목과 완전히 같은 getImageData 알파 카운트 계산식이다.
+  // 이 값을 매 프레임 진행 링(canvas arc)에도 그대로 반영해 두 시각 요소가 항상 같은 숫자를
+  // 공유하도록 한다 — 링은 별도 애니메이션이 아니라 같은 픽셀 계산의 또 다른 표현이다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var ring = document.getElementById('ring');
+  var rctx = ring.getContext('2d');
+  var ringPct = document.getElementById('ringPct');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var FW = foil.width, FH = foil.height;
+  var RING_SYNC_THRESHOLD_PCT = 92; // 시연 내내 링·카드가 계속 움직이도록 자동 오픈을 뒤로 미룬다
+  var SCRATCH_BRUSH_R = 12;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424061);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, FW, FH);
+    var grad = ctx.createLinearGradient(0, 0, FW, FH);
+    grad.addColorStop(0, '#e8c344');
+    grad.addColorStop(.5, '#f6dd7c');
+    grad.addColorStop(1, '#c99f22');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.strokeStyle = 'rgba(23,20,26,.16)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 16; i += 1) {
+      var x = foilRand() * FW, y = foilRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 18 - 9), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  function scratchAt(x, y) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function clearedPixelRatio() {
+    var data = ctx.getImageData(0, 0, FW, FH).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  function drawRing(ratio) {
+    var cx = ring.width / 2, cy = ring.height / 2, r = 42;
+    rctx.clearRect(0, 0, ring.width, ring.height);
+    rctx.lineWidth = 11;
+    rctx.strokeStyle = 'rgba(23,20,26,.18)';
+    rctx.beginPath();
+    rctx.arc(cx, cy, r, 0, Math.PI * 2);
+    rctx.stroke();
+    rctx.strokeStyle = '#0a4fe8';
+    rctx.lineCap = 'round';
+    rctx.beginPath();
+    rctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio);
+    rctx.stroke();
+    ringPct.textContent = Math.round(ratio * 100) + '%';
+  }
+
+  var opened = false;
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = '적립 쿠폰이 열렸어요';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  paintFoil();
+  drawRing(0);
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dragging = false;
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    dragging = true;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+    if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!dragging || opened) return;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+  });
+  window.addEventListener('pointerup', function () { dragging = false; });
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+
+  var demoRand = seedRand(424062);
+  // 격자를 미리 정해두고 순간이동하며 찍으면 캡처 간격(83ms)과 점 간격(58ms)이 어긋나
+  // 특정 프레임 구간이 통째로 비는 앨리어싱이 생긴다(실측: 12.8%·14/23 로 고정).
+  // 대신 실제 손가락 드래그처럼 매 rAF 틱마다 좌표를 연속으로 옮기며 긁어 — 캡처가
+  // 몇 ms 에 떨어지든 그 구간 안에 새로 지나간 궤적이 반드시 남는다.
+  var SWIPE_START = 180, SWIPE_DUR = 2200, SWIPE_ROWS = 7;
+  function swipePos(t) {
+    var f = Math.max(0, Math.min(1, (t - SWIPE_START) / SWIPE_DUR));
+    var rowF = f * SWIPE_ROWS;
+    var row = Math.min(SWIPE_ROWS - 1, Math.floor(rowF));
+    var frac = rowF - row;
+    var xFrac = (row % 2 === 0) ? frac : (1 - frac);
+    return {
+      x: FW * (0.08 + xFrac * 0.84) + (demoRand() - .5) * 3,
+      y: FH * (0.10 + (row / (SWIPE_ROWS - 1)) * 0.80) + (demoRand() - .5) * 3
+    };
+  }
+  var DEMO_LOOP_MS = 3600;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+  }
+  function runDemo(tMod) {
+    if (tMod < SWIPE_START || tMod > SWIPE_START + SWIPE_DUR) return false;
+    var p = swipePos(tMod);
+    scratchAt(p.x, p.y);
+    return true;
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null, ringTick = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    var scratched = false;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      scratched = runDemo(tMod);
+    }
+    // getImageData 전체 스캔은 무겁다 — 매 rAF 틱(약 60fps)마다 부르면 헤드리스 렌더 파이프라인이
+    // 밀려 일정 시점 뒤 rAF 자체가 멎는 현상이 실측됐다(23 프레임 중 17 부터 완전 정지).
+    // 실제로 긁은 틱과 3틱에 한 번(약 50ms, 출력 12fps 보다 촘촘)만 다시 재서 부하를 줄인다.
+    ringTick += 1;
+    if (scratched || ringTick % 3 === 0) {
+      var ratio = clearedPixelRatio();
+      drawRing(ratio);
+      // 시연 중엔 링·카드가 캡처 구간 내내 계속 움직여야 하므로 자동 오픈으로 멈추지 않는다 —
+      // 실제 사용자가 긁어서(is-demo 해제) 임계를 넘겼을 때만 카드가 열린다.
+      if (!root.classList.contains('is-demo') && ratio * 100 >= RING_SYNC_THRESHOLD_PCT) openCard();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

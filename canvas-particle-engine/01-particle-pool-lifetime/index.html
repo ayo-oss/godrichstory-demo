@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>파티클 풀과 수명 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pp" id="pp">
+  <p class="pp__hint">
+    <svg class="pp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M164 128a36 36 0 1 1-36-36a36 36 0 0 1 36 36" opacity=".2"/><path d="M128 84a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28m0-128a100 100 0 1 0 100 100A100.11 100.11 0 0 0 128 28m0 184a84 84 0 1 1 84-84a84.09 84.09 0 0 1-84 84"/></g></svg>
+    <span>판을 클릭하면 파티클 전부가 수명을 다시 시작합니다</span>
+  </p>
+  <div class="pp__field" id="field" role="application" aria-label="파티클 풀 실험판" tabindex="0">
+    <canvas class="pp__cv" id="cv"></canvas>
+    <b class="pp__live" id="live" aria-hidden="true"><span class="pp__liveNum" id="alive">220</span><span class="pp__liveUnit">개 살아 있음</span></b>
+  </div>
+  <div class="pp__bar">
+    <label class="pp__dial">수명
+      <input type="range" id="life" min="6" max="24" step="2" value="12" aria-label="수명">
+      <b class="pp__val" id="lifeVal">1.2초</b>
+    </label>
+    <button class="pp__reset" id="reset" type="button">
+      <svg class="pp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>전부 다시</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 파티클 풀 — 배열 길이를 고정해 두고 수명이 끝난 칸을 덮어쓴다.
+// push/splice 로 배열을 늘였다 줄이면 프레임마다 할당과 회수가 생겨 시간이 튄다.
+var root = document.getElementById('pp');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var lifeIn = document.getElementById('life');
+var lifeVal = document.getElementById('lifeVal');
+var aliveOut = document.getElementById('alive');
+var resetBtn = document.getElementById('reset');
+
+var POOL = 220;                 // 풀 크기 — 이 숫자는 처음 한 번만 정해지고 끝까지 바뀌지 않는다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var pool = new Array(POOL);
+var lifeSec = 1.2;
+
+// 파티클 한 칸 — 객체를 새로 만들지 않고 이 자리의 값만 갈아 끼운다
+function spawn(p, seedT) {
+  p.x = Math.random() * W;
+  p.y = H + Math.random() * 18;
+  p.vx = (Math.random() - 0.5) * 18;
+  p.vy = -(90 + Math.random() * 70);
+  p.r = 1.2 + Math.random() * 2.6;
+  p.life = lifeSec * (0.6 + Math.random() * 0.8);
+  p.age = seedT === undefined ? 0 : Math.random() * p.life;
+  p.wait = 0;
+  return p;
+}
+
+for (var i = 0; i < POOL; i++) pool[i] = spawn({}, 1);
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  var alive = 0;
+  for (var i = 0; i < POOL; i++) {
+    var p = pool[i];
+    if (p.wait > 0) continue;            // 비어 있는 칸 — 아직 아무것도 그리지 않는다
+    var t = p.age / p.life;
+    if (t >= 1) continue;
+    alive++;
+    // 수명이 끝나갈수록 투명해진다 — 사라지는 것이 아니라 자리를 비우는 중이다
+    ctx.globalAlpha = t < 0.18 ? t / 0.18 : 1 - (t - 0.18) / 0.82;
+    ctx.fillStyle = i % 7 === 0 ? '#ffd23f' : '#2f6df6';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  aliveOut.textContent = String(alive);
+}
+
+function step(dt) {
+  for (var i = 0; i < POOL; i++) {
+    var p = pool[i];
+    // 빈 칸은 잠깐 쉬었다 다시 쓴다 — 배열은 그대로고 이 칸만 비어 있다
+    if (p.wait > 0) { p.wait -= dt; if (p.wait <= 0) spawn(p); continue; }
+    p.age += dt;
+    if (p.age >= p.life) { p.wait = 0.05 + Math.random() * 0.4; continue; }   // 죽은 칸은 버리지 않고 비워 둔다
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 30 * dt;                                // 위로 뜬 알갱이를 다시 끌어내리는 중력
+    if (p.x < -8) p.x = W + 8;
+    if (p.x > W + 8) p.x = -8;
+  }
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function restart() {
+  for (var i = 0; i < POOL; i++) spawn(pool[i]);
+  draw();
+}
+
+lifeIn.addEventListener('input', function () {
+  lifeSec = Number(lifeIn.value) / 10;
+  lifeVal.textContent = lifeSec.toFixed(1) + '초';
+});
+resetBtn.addEventListener('click', restart);
+field.addEventListener('click', restart);
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); restart(); }
+});
+window.addEventListener('resize', function () { fit(); draw(); });
+
+fit();
+if (reduce) {
+  // reduce — 루프를 아예 돌리지 않고 알갱이가 골고루 퍼진 한 장만 그린다
+  root.classList.add('is-still');
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

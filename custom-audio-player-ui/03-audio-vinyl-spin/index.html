@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>각속도 값으로 도는 턴테이블 앨범 아트 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-play" viewBox="0 0 256 256"><g fill="currentColor"><path d="M228.23 134.69L84.15 222.81A8 8 0 0 1 72 216.12V39.88a8 8 0 0 1 12.15-6.69l144.08 88.12a7.82 7.82 0 0 1 0 13.38" opacity=".2"/><path d="M232.4 114.49L88.32 26.35a16 16 0 0 0-16.2-.3A15.86 15.86 0 0 0 64 39.87v176.26A15.94 15.94 0 0 0 80 232a16.07 16.07 0 0 0 8.36-2.35l144.04-88.14a15.81 15.81 0 0 0 0-27ZM80 215.94V40l143.83 88Z"/></g></symbol>
+    <symbol id="ico-pause" viewBox="0 0 256 256"><g fill="currentColor"><path d="M208 48v160a8 8 0 0 1-8 8h-40a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8h40a8 8 0 0 1 8 8M96 40H56a8 8 0 0 0-8 8v160a8 8 0 0 0 8 8h40a8 8 0 0 0 8-8V48a8 8 0 0 0-8-8" opacity=".2"/><path d="M200 32h-40a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176h-40V48h40ZM96 32H56a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176H56V48h40Z"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="tt is-demo is-playing" id="tt">
+  <p class="tt__hint"><span>재생을 누르면 각속도 값으로 앨범판이 돌고, 일시정지하면 관성으로 서서히 멈춥니다</span></p>
+  <div class="tt__panel">
+    <div class="tt__deck">
+      <div class="tt__disc" id="disc"></div>
+      <div class="tt__arm" id="arm"></div>
+    </div>
+    <button class="tt__play" id="play" type="button" aria-label="재생">
+      <svg class="tt__ico tt__ico--play" aria-hidden="true"><use href="#ico-play"></use></svg>
+      <svg class="tt__ico tt__ico--pause" aria-hidden="true"><use href="#ico-pause"></use></svg>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('tt');
+  var playBtn = document.getElementById('play');
+  var disc = document.getElementById('disc');
+  var arm = document.getElementById('arm');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  var PLAY_LENGTH_S = 214; // 합성 트랙 길이 — 톤암이 바깥에서 안쪽까지 이동하는 기준 시간
+  var TARGET_VELOCITY = 200; // 33+1/3 rpm 을 각속도(도/초)로 환산한 값
+  var SPIN_UP_RATE = 0.06; // 정지 상태에서 재생 각속도까지 붙는 속도(프레임당 비율)
+  var SPIN_DECAY = 0.965; // 관성 감쇠 값 — 변형: 키우면 일시정지 후 멈추기까지 시간이 길어진다
+  var ARM_ANGLE_START = -18; // 바깥쪽 홈(재생 시작 위치)
+  var ARM_ANGLE_END = -34;   // 안쪽 홈(재생 끝 위치)
+
+  var angle = 0, velocity = 0, progressS = 0, playing = true, demoPlaying = true, last = 0, driveStart = 0;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  function setPlaying(next) {
+    playing = next;
+    root.classList.toggle('is-playing', next);
+  }
+
+  function step(effPlaying, dt) {
+    if (effPlaying) {
+      velocity += (TARGET_VELOCITY - velocity) * SPIN_UP_RATE;
+      progressS = Math.min(PLAY_LENGTH_S, progressS + dt);
+    } else {
+      velocity *= SPIN_DECAY; // 매 프레임 각속도를 줄여 관성으로 멎는 것처럼 보이게 한다
+    }
+    angle = (angle + velocity * dt) % 360;
+    disc.style.transform = 'rotate(' + angle.toFixed(2) + 'deg)';
+    var t = progressS / PLAY_LENGTH_S;
+    var armAngle = ARM_ANGLE_START + (ARM_ANGLE_END - ARM_ANGLE_START) * t;
+    arm.style.transform = 'rotate(' + armAngle.toFixed(2) + 'deg)';
+  }
+
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var DRIVE_PERIOD_MS = 2000; // 렌더 캐처 창(설정 초=2.0)과 같은 주기 — 시연 전용
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      demoPlaying = frac < 0.6; // 앞 60% 구간 재생, 뒤 40% 구간 정지 → 감쇠 구간을 눈에 보이게 한다
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    if (!last) last = now;
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    step(isDemo ? demoPlaying : playing, dt);
+    requestAnimationFrame(frame);
+  }
+
+  function onPlayClick() { human(); setPlaying(!playing); }
+  function onPlayKeydown(e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); setPlaying(!playing); }
+  }
+
+  if (reduce) {
+    root.classList.add('is-still');
+    disc.style.transform = 'rotate(0deg)';
+    arm.style.transform = 'rotate(' + ARM_ANGLE_START + 'deg)';
+    playBtn.addEventListener('click', function () {
+      human();
+      setPlaying(!playing);
+      arm.style.transform = 'rotate(' + (playing ? ARM_ANGLE_END : ARM_ANGLE_START) + 'deg)';
+    });
+    playBtn.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); human(); setPlaying(!playing);
+        arm.style.transform = 'rotate(' + (playing ? ARM_ANGLE_END : ARM_ANGLE_START) + 'deg)';
+      }
+    });
+  } else {
+    playBtn.addEventListener('click', onPlayClick);
+    playBtn.addEventListener('keydown', onPlayKeydown);
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

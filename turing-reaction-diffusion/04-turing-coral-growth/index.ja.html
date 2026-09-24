@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>サンゴ成長デモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tcg" id="tcg">
+  <p class="tcg__hint">
+    <svg class="tcg__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 1 1 16 16a16 16 0 0 1-16-16m56 32a16 16 0 1 0 16 16a16 16 0 0 0-16-16m-112 0a16 16 0 1 0 16 16a16 16 0 0 0-16-16" opacity=".2"/><path d="M232 112a24 24 0 0 0-20.42 12.73A39.87 39.87 0 0 1 200 126.6V112a24 24 0 0 0-48 0v-8a24 24 0 0 0-48 0v22.6a39.87 39.87 0 0 1-11.58-1.87A24 24 0 1 0 88 152h16v8a56.06 56.06 0 0 0 48 55.42V216a8 8 0 0 1-16 0a8 8 0 0 0-16 0a24 24 0 0 0 48 0v-.58A56.06 56.06 0 0 0 216 160v-8h16a24 24 0 0 0 0-48m-104 48a8 8 0 0 1-16 0v-24a8 8 0 0 1 16 0Z"/></g></svg>
+    <span>種から外へ伸びる反応前線 — シードを変えるとサンゴが育ち直します</span>
+  </p>
+  <div class="tcg__field" id="field">
+    <canvas class="tcg__cv" id="cv"></canvas>
+  </div>
+  <div class="tcg__bar">
+    <label class="tcg__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="パターンシード">
+    </label>
+    <label class="tcg__dial tcg__grow">供給率 F
+      <input type="range" id="fk" min="0.010" max="0.070" step="0.001" value="0.046" aria-label="供給率 F">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 산호 성장 — Gray-Scott 반응-확산. U(사료)·V(촉매) 두 격자를 64x40 셀에 두고
+// 매 프레임 12스텝씩 확산 + 반응항을 계산해 ImageData 로 화소를 박는다.
+// 시드는 중앙의 큰 덩어리 하나 — 반응 전선이 밖으로 뻗으며 산호처럼 자란다.
+// 라플라스는 간선 0.2·대각 0.05 가중(9점) — 5점 대비 이방성 노이즈가 적어
+// 성장 무늬가 부드럽다. DU=1.0 DV=0.5 dt=1.0 (브리프 규격).
+// 렌더: 셀 V 값을 파스텔 LUT 로 색을 정해 저해상 버퍼에 putImageData, 그 버퍼를
+// drawImage 로 확대한다(imageSmoothingEnabled — 부드럽게).
+var root = document.getElementById('tcg');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var fkIn = document.getElementById('fk');
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var GW = 64, GH = 40;            // 격자 셀 수 (480x300 비율)
+var DU = 1.0, DV = 0.5;          // 확산 계수 (고정)
+var F = 0.046, K = 0.063;        // 사료율·제거율 (fk 슬라이더가 F 를 움직인다)
+var STEPS = 14;                  // 프레임당 시뮬레이션 스텝
+var PRE = 780;                   // 시작 시 미리 성숙시키는 스텝 — 성장 중간 상태에서 출발
+var u = new Float32Array(GW * GH);
+var v = new Float32Array(GW * GH);
+var u2 = new Float32Array(GW * GH);
+var v2 = new Float32Array(GW * GH);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+// ── 색 — scss 가 내려준 파스텔 사용자속성을 읽어 5단계 LUT 를 미리 편다 ──
+var css = getComputedStyle(root);
+var LUT = new Uint8Array(256 * 3);
+function tok(name) { return css.getPropertyValue(name); }
+function col2rgb(s) {
+  // sass 가 rgb(...) 함수꼴로 내려보내는 값과 hex 를 둘 다 받는다
+  s = String(s).trim();
+  var m = s.match(/^rgba?\(([^)]+)\)$/);
+  if (m) {
+    var parts = m[1].split(',');
+    var out = [];
+    for (var i = 0; i < 3; i++) {
+      var p = parseFloat(parts[i]);
+      out.push(parts[i].indexOf('%') >= 0 ? Math.round(p * 2.55) : Math.round(p));
+    }
+    return out;
+  }
+  s = s.replace('#', '');
+  if (s.length === 3) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+  return [parseInt(s.slice(0, 2), 16) || 0, parseInt(s.slice(2, 4), 16) || 0, parseInt(s.slice(4, 6), 16) || 0];
+}
+function buildLut() {
+  var stops = [col2rgb(tok('--tcg-c0')), col2rgb(tok('--tcg-c1')), col2rgb(tok('--tcg-c2')), col2rgb(tok('--tcg-c3')), col2rgb(tok('--tcg-c4'))];
+  for (var q = 0; q < 256; q++) {
+    var t = q / 255 * (stops.length - 1);
+    var k = Math.min(stops.length - 2, Math.floor(t));
+    var f = t - k;
+    for (var c = 0; c < 3; c++) LUT[q * 3 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f;
+  }
+}
+
+// ── シード — 중앙에 큰 덩어리 하나(가장자리는 rng 로 약간 물결). 시드가 좌표를 결정 ──
+function seedField(sd) {
+  var rng = mulberry32(sd >>> 0);
+  u.fill(1); v.fill(0);
+  var cx = GW / 2 + (rng() - 0.5) * 6, cy = GH / 2 + (rng() - 0.5) * 4;
+  var rr = 5.5 + rng() * 2;
+  for (var y = 0; y < GH; y++) {
+    for (var x = 0; x < GW; x++) {
+      var dx = x - cx, dy = (y - cy) * 1.15;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      // 가장자리를 노이즈로 울퉁불퉁하게 — 산호 씨앗다운 불규칙 시작
+      var wob = rr * (0.7 + 0.5 * rng());
+      if (d < wob) { v[y * GW + x] = 0.5; u[y * GW + x] = 0.25; }
+    }
+  }
+}
+
+// ── 한 스텝 — 9점 가중 라플라스(토러스 경계) + Gray-Scott 반응항 ──
+function step() {
+  for (var y = 0; y < GH; y++) {
+    var yT = ((y - 1 + GH) % GH) * GW, yB = ((y + 1) % GH) * GW, yC = y * GW;
+    for (var x = 0; x < GW; x++) {
+      var xL = (x - 1 + GW) % GW, xR = (x + 1) % GW;
+      var i = yC + x;
+      var uc = u[i], vc = v[i];
+      var lapU = 0.2 * (u[yC + xL] + u[yC + xR] + u[yT + x] + u[yB + x])
+               + 0.05 * (u[yT + xL] + u[yT + xR] + u[yB + xL] + u[yB + xR]) - uc;
+      var lapV = 0.2 * (v[yC + xL] + v[yC + xR] + v[yT + x] + v[yB + x])
+               + 0.05 * (v[yT + xL] + v[yT + xR] + v[yB + xL] + v[yB + xR]) - vc;
+      var uvv = uc * vc * vc;
+      u2[i] = uc + DU * lapU - uvv + F * (1 - uc);
+      v2[i] = vc + DV * lapV + uvv - (F + K) * vc;
+    }
+  }
+  var tu = u; u = u2; u2 = tu;
+  var tv = v; v = v2; v2 = tv;
+}
+
+var buf = null, small = null, sctx = null;
+function setupBuffers() {
+  small = document.createElement('canvas');
+  small.width = GW; small.height = GH;
+  sctx = small.getContext('2d');
+  buf = sctx.createImageData(GW, GH);
+}
+
+function paint() {
+  var px = buf.data, i4 = 0;
+  for (var p = 0; p < GW * GH; p++) {
+    // V 농도 0(종이) → 1(잉크끼 파스텔) — LUT 로 색 단계
+    var q = Math.max(0, Math.min(255, (v[p] * 460) | 0));
+    px[i4] = LUT[q * 3];
+    px[i4 + 1] = LUT[q * 3 + 1];
+    px[i4 + 2] = LUT[q * 3 + 2];
+    px[i4 + 3] = 255;
+    i4 += 4;
+  }
+  sctx.putImageData(buf, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, GW, GH, 0, 0, W, H);
+}
+
+function frame() {
+  for (var s = 0; s < STEPS; s++) step();
+  paint();
+  raf = requestAnimationFrame(frame);
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// シード 재생성 → 미리성숙(PRE 스텝 동기) → 즉시 다시 그리기 (reduce 경로에서도)
+function regrow(sd) {
+  seedField(sd);
+  for (var s = 0; s < PRE; s++) step();
+  paint();
+}
+
+function onSeed() {
+  var val = Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1));
+  regrow(val);
+}
+function onFk() {
+  F = Number(fkIn.value);
+  // reduce 경로에서도 프레임이 변해야 한다 — シード 유지 상태로 새 F 로 다시 성숙시켜 그린다
+  if (reduce) regrow(Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1)));
+}
+
+seedIn.addEventListener('input', onSeed);
+seedIn.addEventListener('change', onSeed);
+fkIn.addEventListener('input', onFk);
+fkIn.addEventListener('change', onFk);
+window.addEventListener('resize', function () { fit(); paint(); });
+
+buildLut();
+setupBuffers();
+fit();
+regrow(Number(seedIn.value) || 7);
+if (reduce) {
+  // reduce — 루프를 돌지 않고 성숙 상태 한 장만 그린다
+  root.classList.add('is-still');
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>반사 하이라이트 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sg" id="sg">
+  <p class="sg__hint">
+    <svg class="sg__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M16 120c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".25"/><path d="M16 168c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".15"/><path d="M228.92 49.09a112 112 0 1 0 14 84.91a8 8 0 0 0-15.5-4a96 96 0 1 1-12-72.91A8 8 0 0 1 216 71.63V40a8 8 0 0 1-8-8h-31.63a8 8 0 0 1-5.65-13.09ZM64 104a12 12 0 1 1 12 12a12 12 0 0 1-12-12m40 64a12 12 0 1 1 12 12a12 12 0 0 1-12-12m72-16a16 16 0 1 1 16 16a16 16 0 0 1-16-16" opacity=".9"/></g></svg>
+    <span>Raises the dot of surface gradient and sun direction to a power to stamp only the glints — drag to move the sun</span>
+  </p>
+  <div class="sg__field" id="field" role="application" aria-label="Specular highlight playground" tabindex="0">
+    <canvas class="sg__cv" id="cv"></canvas>
+    <b class="sg__badge" aria-hidden="true"><span class="sg__badgeNum" id="shinyVal">shininess 48</span><span class="sg__badgeUnit" id="windVal">wind 1.0</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 반사 하이라이트 — 01 과 같은 뿌리(정현파 6개 mulberry32(7) + Gerstner 처짐)의 2D 파도장에서
+// 중앙차분으로 법선(nx, ny, 1)을 근사하고, 태양(광원) 방향 L 과의 내적 dot(N,L) 을 shininess 로
+// 제곱해(pow) 스페큘러 세기를 얻는다. 세기가 문턱을 넘는 칸만 반짝이(glint)로 찍어
+// "찰나의 빛무리"를 만든다 — 램프 전체를 밝히는 것과 다르다. 태양 방향은 포인터 드래그로 조절.
+var root = document.getElementById('sg');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var shinyVal = document.getElementById('shinyVal');
+var windVal = document.getElementById('windVal');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var WATER0 = v('--water0'), WATER1 = v('--water1'); // 바탕 물색 — 억제된 파랑 램프
+var GLINT = v('--glint'), GLINT2 = v('--glint2');    // 반짝이 — 크림 → 밝은 크림
+
+var COLS = 110;   // 수면 격자 가로 칸 수(01 과 동일)
+var STEP = 3;     // 격자 한 칸이 렌더 버퍼에서 차지하는 픽셀
+var NW = 6;       // 겹칠 정현파 개수
+var SHINY = 48;   // 스페큘러 지수(shininess) — 클수록 반짝이가 더 좁고 날카롭다
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    var u = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((u ^ (u >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var rng = mulberry32(7);
+
+var WAVES = [];
+(function () {
+  var lam = 34;
+  for (var i = 0; i < NW; i++) {
+    var ang = rng() * Math.PI * 2;
+    WAVES.push({
+      lam: lam,
+      freq: (Math.PI * 2) / lam,
+      dirX: Math.cos(ang), dirY: Math.sin(ang),
+      amp: 0.58 / (i * 0.62 + 1),
+      spd: 0.55 + rng() * 0.25,
+      ph: rng() * Math.PI * 2
+    });
+    lam *= 0.55;
+  }
+})();
+for (var w = 0; w < NW; w++) {
+  WAVES[w].om = WAVES[w].spd * 3.6 * Math.sqrt(1 / WAVES[w].lam) * 6;
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, ROWS = 0;
+var hgt = null;           // 격자 높이(Float32Array)
+var buf = null, bctx = null, out = null;
+var RW = 0, RH = 0;
+var raf = 0, auto = true, nowSec = 0;
+var wind = 1.0, windT = 1.0;
+var windAng = 0.5, windAngT = 0.5;
+var lastPX = -1, lastPY = -1, lastPT = 0;
+// 태양(광원) 방향 — 단위벡터(lx, ly, lz). 자동 모드에서는 천천히 원을 그리고, 드래그 중엔 포인터를 따라간다.
+var sunAng = 0.9, sunAngT = 0.9;
+var sunZ = 0.62, sunZT = 0.62;   // z 성분(하늘 쪽 기울기) — 클수록 광원이 수직에 가깝다(반짝이가 넓게 퍼짐)
+var dragging = false;
+
+function hex2rgb(s) {
+  var pm = /^\s*rgb\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)\s*$/.exec(s);
+  if (pm) return [Math.round(pm[1] * 2.55), Math.round(pm[2] * 2.55), Math.round(pm[3] * 2.55)];
+  s = s.replace('#', '');
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+  var n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+var RW0 = hex2rgb(WATER0), RW1 = hex2rgb(WATER1);
+var RG = hex2rgb(GLINT), RG2 = hex2rgb(GLINT2);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROWS = Math.max(40, Math.round(COLS * H / W));
+  hgt = new Float32Array(COLS * ROWS);
+  RW = COLS * STEP; RH = ROWS * STEP;
+  buf = document.createElement('canvas');
+  buf.width = RW; buf.height = RH;
+  bctx = buf.getContext('2d');
+  out = bctx.createImageData(RW, RH);
+}
+
+// 파도장 높이 합성 — 01 과 같은 뿌리
+function fieldcalc(t, wstr, wang) {
+  var i = 0;
+  for (var y = 0; y < ROWS; y++) {
+    for (var x = 0; x < COLS; x++, i++) {
+      var h = 0;
+      for (var w2 = 0; w2 < NW; w2++) {
+        var WV = WAVES[w2];
+        var da = wang * 0.5;
+        var dx = WV.dirX * Math.cos(da) - WV.dirY * Math.sin(da);
+        var dy = WV.dirX * Math.sin(da) + WV.dirY * Math.cos(da);
+        var ph = (x * dx + y * dy) * WV.freq * 0.62 + t * WV.om + WV.ph;
+        h += WV.amp * wstr * Math.sin(ph);
+      }
+      hgt[i] = h;
+    }
+  }
+}
+
+// 렌더 — 바탕은 억제된 물색 램프, 그 위에 중앙차분 법선과 태양 벡터의 내적을 shininess 로 제곱해
+// threshold 넘는 칸만 glint 로 찍는다. 경계 칸(x/y 끝)은 차분을 안쪽으로만 잡아 배열 밖을 읽지 않는다.
+function render() {
+  var o = out.data;
+  var lx = Math.cos(sunAng) * (1 - sunZ), ly = Math.sin(sunAng) * (1 - sunZ), lz = sunZ + 0.3;
+  var llen = Math.sqrt(lx * lx + ly * ly + lz * lz);
+  lx /= llen; ly /= llen; lz /= llen;
+  for (var y = 0; y < ROWS; y++) {
+    var row = y * COLS;
+    var y0 = y > 0 ? y - 1 : y, y1 = y < ROWS - 1 ? y + 1 : y;
+    for (var x = 0; x < COLS; x++) {
+      var idx = row + x;
+      var x0 = x > 0 ? x - 1 : x, x1 = x < COLS - 1 ? x + 1 : x;
+      // 중앙차분 기울기 — 법선(nx, ny, nz) 근사. 분모(x1-x0, y1-y0)가 0 이 되는 경계는 위에서 안쪽 클램프로 방지.
+      var gx = (hgt[row + x1] - hgt[row + x0]) / Math.max(1, x1 - x0);
+      var gy = (hgt[y1 * COLS + x] - hgt[y0 * COLS + x]) / Math.max(1, y1 - y0);
+      var nx = -gx * 5.2, ny = -gy * 5.2, nz = 1;
+      var nlen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      nx /= nlen; ny /= nlen; nz /= nlen;
+      var d = nx * lx + ny * ly + nz * lz;
+      if (d < 0) d = 0;
+      var spec = Math.pow(d, SHINY);   // dot(N,L)^shininess — 좁고 날카로운 반짝이
+      // 바탕 물색 — 높이를 낮은 대비로만 섞어 캔버스가 완전 단색이 되지 않게
+      var u = hgt[idx] * 0.6 + 0.5;
+      if (u < 0) u = 0; else if (u > 1) u = 1;
+      var r = RW0[0] + (RW1[0] - RW0[0]) * u;
+      var g = RW0[1] + (RW1[1] - RW0[1]) * u;
+      var b = RW0[2] + (RW1[2] - RW0[2]) * u;
+      if (spec > 0.02) {
+        var f = spec > 1 ? 1 : spec;
+        var top = f > 0.6 ? (f - 0.6) / 0.4 : 0;
+        var gr = RG[0] + (RG2[0] - RG[0]) * top;
+        var gg = RG[1] + (RG2[1] - RG[1]) * top;
+        var gb = RG[2] + (RG2[2] - RG[2]) * top;
+        r = r * (1 - f) + gr * f;
+        g = g * (1 - f) + gg * f;
+        b = b * (1 - f) + gb * f;
+      }
+      for (var sy = 0; sy < STEP; sy++) {
+        var base = ((y * STEP + sy) * RW + x * STEP) * 4;
+        for (var sx = 0; sx < STEP; sx++, base += 4) {
+          o[base] = r;
+          o[base + 1] = g;
+          o[base + 2] = b;
+          o[base + 3] = 255;
+        }
+      }
+    }
+  }
+  bctx.putImageData(out, 0, 0);
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+
+function frame(now) {
+  nowSec = now / 1000;
+  if (auto) {
+    var th = nowSec * 0.31;
+    windT = 1.05 + Math.sin(th * 0.9 + 0.4) * 0.55 + Math.sin(th * 2.3) * 0.12;
+    windAngT = 0.5 + Math.sin(th * 0.42) * 0.85;
+  }
+  if (!dragging) {
+    sunAngT = nowSec * 0.18;   // 자동 모드 — 태양이 천천히 원을 그린다
+  }
+  wind += (windT - wind) * 0.05;
+  windAng += (windAngT - windAng) * 0.05;
+  sunAng += (sunAngT - sunAng) * 0.06;
+  sunZ += (sunZT - sunZ) * 0.06;
+  fieldcalc(nowSec, wind, windAng);
+  render();
+  windVal.textContent = 'wind ' + wind.toFixed(2);
+  raf = requestAnimationFrame(frame);
+}
+
+// 정지판 — 루프 없이 시드가 정한 한 시각의 파도장 + 태양 위치를 계산해 반짝이가 박힌 정적 한 장
+function still() {
+  fieldcalc(7.3, 1.35, 0.5);
+  sunAng = 0.9; sunZ = 0.62;
+  render();
+}
+
+function localXY(e) {
+  var r = field.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+field.addEventListener('pointerdown', function (e) {
+  dragging = true;
+  field.setPointerCapture(e.pointerId);
+  var p = localXY(e);
+  sunAngT = Math.atan2(p[1] - H / 2, p[0] - W / 2);
+  sunZT = Math.max(0.1, Math.min(0.95, 1 - Math.sqrt((p[0] - W / 2) * (p[0] - W / 2) + (p[1] - H / 2) * (p[1] - H / 2)) / (W * 0.6)));
+});
+field.addEventListener('pointermove', function (e) {
+  var p = localXY(e);
+  var t = performance.now();
+  if (dragging) {
+    sunAngT = Math.atan2(p[1] - H / 2, p[0] - W / 2);
+    sunZT = Math.max(0.1, Math.min(0.95, 1 - Math.sqrt((p[0] - W / 2) * (p[0] - W / 2) + (p[1] - H / 2) * (p[1] - H / 2)) / (W * 0.6)));
+  }
+  if (lastPX >= 0 && t > lastPT) {
+    var vx = p[0] - lastPX, vy = p[1] - lastPY;
+    var sp2 = Math.sqrt(vx * vx + vy * vy);
+    if (sp2 > 0.5) {
+      windT = Math.max(0.35, Math.min(2.1, 0.9 + sp2 * 0.02));
+      windAngT = Math.atan2(vy, vx) * 0.16;
+    }
+  }
+  lastPX = p[0]; lastPY = p[1]; lastPT = t;
+  auto = false;
+});
+field.addEventListener('pointerup', function () { dragging = false; });
+field.addEventListener('pointerleave', function () {
+  auto = true;
+  dragging = false;
+  lastPX = -1;
+});
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  auto = false;
+  dragging = true;
+  sunAngT = sunAngT + d[0] * 0.2;
+  sunZT = Math.max(0.1, Math.min(0.95, sunZT + d[1] * 0.08));
+  if (reduce) { fieldcalc(nowSec || 3.1, windT, windAngT); render(); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+fit();
+shinyVal.textContent = 'shininess ' + SHINY;
+if (reduce) {
+  root.classList.add('is-still');
+  still();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

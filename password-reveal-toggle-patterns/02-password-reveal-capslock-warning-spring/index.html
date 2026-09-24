@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>캡스락 켜짐을 스프링으로 알리는 경고 배지 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pcs is-demo" id="pcsRoot">
+  <form class="pcs__form" id="pcsForm" novalidate>
+    <label class="pcs__field">
+      <span class="pcs__labelRow">
+        <span class="pcs__labelText">비밀번호</span>
+        <span class="pcs__badge" id="pcsBadge" role="status">
+          <svg class="pcs__badgeIcon" width="1em" height="1em" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88m-8-80V80a8 8 0 0 1 16 0v56a8 8 0 0 1-16 0m20 36a12 12 0 1 1-12-12a12 12 0 0 1 12 12"/></g></svg>
+          <span class="pcs__badgeText">Caps Lock</span>
+        </span>
+        <span class="pcs__srAnnounce" id="pcsAnnounce" aria-live="polite"></span>
+      </span>
+      <span class="pcs__inputWrap">
+        <input class="pcs__input" id="pcsInput" type="password" autocomplete="new-password" spellcheck="false" value="">
+        <button class="pcs__toggle" id="pcsToggle" type="button" aria-pressed="false" aria-label="비밀번호 표시">
+          <svg class="pcs__eyeShow" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M2,12 C5,6 9,4 12,4 C15,4 19,6 22,12 C19,18 15,20 12,20 C9,20 5,18 2,12 Z" fill="none" stroke="currentColor" stroke-width="2"/>
+            <circle cx="12" cy="12" r="3.2" fill="currentColor"/>
+          </svg>
+          <svg class="pcs__eyeHide" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M2,12 Q12,4 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M2,12 Q12,20 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </span>
+    </label>
+  </form>
+</div>
+<script>
+(function () {
+  // 기법: keydown/keyup 에서 실제 KeyboardEvent.getModifierState('CapsLock') 을 읽어 setCapsLock() 하나로
+  // 몰아 보낸다. 배지는 항상 DOM 에 있고 pos 스프링 값(0~1, 언더댐프라 1을 넘겨 튄다)으로 매 프레임
+  // translateY·scale·opacity 를 다시 그린다. CAPSLOCK_BADGE_OVERSHOOT_PX 는 그 튐의 최대 폭(px).
+  var root = document.getElementById('pcsRoot');
+  var form = document.getElementById('pcsForm');
+  var input = document.getElementById('pcsInput');
+  var toggle = document.getElementById('pcsToggle');
+  var badge = document.getElementById('pcsBadge');
+  var announce = document.getElementById('pcsAnnounce');
+
+  var CAPSLOCK_BADGE_OVERSHOOT_PX = 6;
+  var SPRING_STIFFNESS = 210;
+  var SPRING_DAMPING = 14;
+  var BADGE_RISE_PX = 14;
+
+  var LABEL_SHOW = '비밀번호 표시';
+  var LABEL_HIDE = '비밀번호 숨기기';
+  var ANNOUNCE_ON = 'Caps Lock 켜짐';
+  var ANNOUNCE_OFF = 'Caps Lock 꺼짐';
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var pwRand = seedRand(426021);
+  var POOL_ALL = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%*?-';
+  function makeFakePassword() {
+    var len = 8 + Math.floor(pwRand() * 5);
+    var out = '';
+    for (var i = 0; i < len; i += 1) out += POOL_ALL.charAt(Math.floor(pwRand() * POOL_ALL.length));
+    return out;
+  }
+  input.value = makeFakePassword();
+
+  var revealed = false;
+  function setRevealed(next) {
+    revealed = next;
+    input.type = revealed ? 'text' : 'password';
+    toggle.setAttribute('aria-pressed', String(revealed));
+    toggle.setAttribute('aria-label', revealed ? LABEL_HIDE : LABEL_SHOW);
+    root.classList.toggle('pcs--revealed', revealed);
+  }
+  toggle.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    setRevealed(!revealed);
+  });
+
+  var pos = 0;
+  var vel = 0;
+  var target = 0;
+  var springRaf = null;
+  var lastT = null;
+
+  function paintBadge(p) {
+    var clamped = Math.min(1, Math.max(0, p));
+    var overshoot = Math.max(0, p - 1);
+    var y = BADGE_RISE_PX * (1 - clamped) - CAPSLOCK_BADGE_OVERSHOOT_PX * overshoot;
+    var scale = 0.86 + 0.14 * clamped + 0.05 * overshoot;
+    var opacity = Math.min(1, clamped * 3);
+    badge.style.transform = 'translateY(' + y.toFixed(2) + 'px) scale(' + scale.toFixed(3) + ')';
+    badge.style.opacity = String(opacity);
+  }
+  paintBadge(pos);
+
+  function stepSpring(ts) {
+    if (lastT === null) lastT = ts;
+    var dt = Math.min(0.032, (ts - lastT) / 1000);
+    lastT = ts;
+    var acc = (target - pos) * SPRING_STIFFNESS - vel * SPRING_DAMPING;
+    vel += acc * dt;
+    pos += vel * dt;
+    paintBadge(pos);
+    var settled = Math.abs(target - pos) < 0.002 && Math.abs(vel) < 0.01;
+    if (!settled) {
+      springRaf = requestAnimationFrame(stepSpring);
+    } else {
+      pos = target;
+      paintBadge(pos);
+      springRaf = null;
+      lastT = null;
+    }
+  }
+
+  function setCapsLock(on) {
+    var next = on ? 1 : 0;
+    if (target === next) return;
+    target = next;
+    badge.classList.toggle('pcs__badge--active', on);
+    root.classList.toggle('pcs--warning', on);
+    announce.textContent = on ? ANNOUNCE_ON : ANNOUNCE_OFF;
+    if (reduce) {
+      if (springRaf) { cancelAnimationFrame(springRaf); springRaf = null; }
+      pos = target;
+      vel = 0;
+      lastT = null;
+      paintBadge(pos);
+      return;
+    }
+    if (!springRaf) { lastT = null; springRaf = requestAnimationFrame(stepSpring); }
+  }
+
+  function onKey(e) {
+    if (!e.getModifierState) return;
+    setCapsLock(e.getModifierState('CapsLock'));
+  }
+  input.addEventListener('keydown', onKey);
+  input.addEventListener('keyup', onKey);
+
+  form.addEventListener('submit', function (e) { e.preventDefault(); });
+
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function demoLoop() {
+    if (reduce) return;
+    setCapsLock(true);
+    setTimeout(function () { setCapsLock(false); }, 1100);
+    setTimeout(demoLoop, 2200);
+  }
+  if (!reduce) { setTimeout(demoLoop, 240); }
+})();
+</script>
+</main>
+</body>
+</html>

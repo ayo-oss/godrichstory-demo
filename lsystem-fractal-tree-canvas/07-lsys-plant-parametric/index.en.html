@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parametric plant — L-system fractal tree, 9 pieces — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>Adding F→FF to the one line X→F+[[X]-X]-F[-FX]+X and changing just two numbers — angle and ratio — grows entirely different plants, from ferns to shrubs, out of the same grammar: the parameters decide the species</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="Parametric plant lab" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">rule X→F+[[X]-X]-F[-FX]+X · angle <b id="lsAng">25</b>°</span>
+    <span class="ls__meta ls__meta--dim">canvas · globalAlpha</span>
+  </div>
+</div>
+</main>
+<script>
+// 매개변수 식물(07) — Prusinkiewicz 고전 식물 L-시스템(X 축, X→F+[[X]-X]-F[-FX]+X, F→FF).
+// 대괄호 [ ] 로 위치·방향을 스택에 쌓아 가지치기를 표현하는 전형적 매개변수 문법.
+// 움직임 = gen 크로스페이드 성장(0→5) + 완성 뒤 각도를 서서히 흔들어(매개변수 자체가 시간 함수)
+// "같은 문법·다른 매개변수 = 다른 식물"을 실시간으로 보여준다. 잎은 globalAlpha 로 깊이 페이드.
+(function () {
+  // ── 변형 상수 블록 ──
+  var ANGLE0 = 25;    // 기준 분기각(도) — 이 값이 흔들리며 식물 형태가 바뀐다
+  var SWING  = 6;      // 각도 흔들림 폭(도)
+  var MAXGEN = 5;
+  var CYCLE  = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var angEl = document.getElementById('lsAng');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_STEM = tokRGB('--ls-bark');
+  var C_LEAF = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  var RULE = { 'X': 'F+[[X]-X]-F[-FX]+X', 'F': 'FF' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+  var STRS = [];
+  for (var g0 = 0; g0 <= MAXGEN; g0++) STRS.push(expand('X', g0));
+
+  function rgb(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+
+  // 거북 렌더러 — angleDeg 는 매 프레임 바뀌는 매개변수(같은 문자열, 다른 각도 → 다른 식물)
+  function drawPlant(ctx, str, x0, y0, stepLen, angleDeg, ox, oy, sc, alphaMul, drawFrac) {
+    var x = x0, y = y0, a = -Math.PI / 2;
+    var stack = [];
+    var n = str.length;
+    var drawUpto = Math.floor(n * drawFrac);
+    for (var i = 0; i < drawUpto; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        var nx = x + Math.cos(a) * stepLen;
+        var ny = y + Math.sin(a) * stepLen;
+        var depth = stack.length;
+        var t = Math.min(1, depth / 6);
+        var cr = C_STEM[0] + (C_LEAF[0] - C_STEM[0]) * t;
+        var cg = C_STEM[1] + (C_LEAF[1] - C_STEM[1]) * t;
+        var cb = C_STEM[2] + (C_LEAF[2] - C_STEM[2]) * t;
+        ctx.globalAlpha = alphaMul * (0.55 + 0.45 * t);
+        ctx.strokeStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+        ctx.lineWidth = Math.max(0.9, 3.2 * Math.pow(0.72, depth));
+        ctx.beginPath();
+        ctx.moveTo(ox + x * sc, oy + y * sc);
+        ctx.lineTo(ox + nx * sc, oy + ny * sc);
+        ctx.stroke();
+        if (depth >= 4) {
+          ctx.globalAlpha = alphaMul * 0.5;
+          ctx.beginPath();
+          ctx.arc(ox + nx * sc, oy + ny * sc, 3.2, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+          ctx.fill();
+        }
+        x = nx; y = ny;
+      } else if (ch === '+') {
+        a += angleDeg * Math.PI / 180;
+      } else if (ch === '-') {
+        a -= angleDeg * Math.PI / 180;
+      } else if (ch === '[') {
+        stack.push({ x: x, y: y, a: a });
+      } else if (ch === ']') {
+        var st = stack.pop();
+        if (st) { x = st.x; y = st.y; a = st.a; }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = Math.min(W, H) * 0.16;
+    var ox = W * 0.5, oy = H * 0.95;
+
+    var grPhase = Math.min(loop / 0.55, 1);
+    var genF = grPhase * MAXGEN;
+    var gA = Math.min(MAXGEN, Math.floor(genF));
+    var drawFrac = gA >= MAXGEN ? 1 : Math.min(1, genF - gA);
+
+    // 성장 뒤 각도를 흔들어 매개변수가 형태를 바꾸는 걸 실시간으로 보여준다
+    var angT = loop >= 0.55 ? (loop - 0.55) / 0.45 : 0;
+    var angle = ANGLE0 + (loop >= 0.55 ? Math.sin(angT * Math.PI * 3) * SWING : 0);
+
+    if (angEl) angEl.textContent = String(Math.round(angle));
+
+    drawPlant(ctx, STRS[gA], 0, 0, 1 / Math.pow(1.55, gA) * 0.62, angle, ox, oy, sc, 1, gA >= MAXGEN ? 1 : drawFrac);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.85 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.85);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

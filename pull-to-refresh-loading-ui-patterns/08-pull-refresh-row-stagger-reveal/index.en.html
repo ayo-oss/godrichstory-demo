@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Row-by-row reveal after refresh — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prsg is-demo" id="prsg">
+  <div class="prsg__phone" id="prsgPhone">
+    <div class="prsg__zone">
+      <span class="prsg__disc" id="prsgDisc"></span>
+    </div>
+    <div class="prsg__list" id="prsgList">
+      <div class="prsg__row"></div>
+      <div class="prsg__row"></div>
+      <div class="prsg__row"></div>
+      <div class="prsg__row"></div>
+      <div class="prsg__row"></div>
+    </div>
+  </div>
+  <span class="prsg__hint" id="prsgHint">Pull down</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prsgPhone');
+  var disc = document.getElementById('prsgDisc');
+  var list = document.getElementById('prsgList');
+  var hint = document.getElementById('prsgHint');
+  var root = document.getElementById('prsg');
+  var rows = list.querySelectorAll('.prsg__row');
+
+  // 계산 겹: 새로고침이 끝난 뒤 각 행의 등장 지연은 STAGGER_MS * 행 순번 — 한 번의 CSS
+  // animation-delay 로 걸지 않고 행마다 setTimeout 을 따로 걸어 순번 계산을 그대로 노출한다.
+  var REF = 90, MAX = 130, STAGGER_MS = 90, LATENCY_MS = 420;
+
+  var raw = 0, target = 0, raf = null;
+  function apply(raw) {
+    var pull = Math.min(raw, MAX) * 0.28;
+    disc.style.transform = 'translateY(' + pull.toFixed(1) + 'px) scale(' + (0.7 + 0.3 * Math.min(1, raw / REF)).toFixed(2) + ')';
+    disc.classList.toggle('prsg__disc--ready', raw >= REF);
+    hint.textContent = raw >= REF ? 'Release to refresh' : (raw > 4 ? 'Pull more (' + Math.round(raw) + '/' + REF + 'px)' : 'Pull down');
+  }
+  function settle() {
+    raw += (target - raw) * 0.3;
+    if (Math.abs(target - raw) < 0.3) { raw = target; }
+    apply(raw);
+    if (raw !== target) { raf = requestAnimationFrame(settle); } else { raf = null; }
+  }
+  function goTo(v) { target = v; if (raf === null) { raf = requestAnimationFrame(settle); } }
+
+  var timers = [];
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+  function refreshCycle() {
+    disc.classList.add('prsg__disc--spin');
+    hint.textContent = 'Refreshing';
+    timers.push(setTimeout(function () {
+      for (var i = 0; i < rows.length; i++) { rows[i].classList.remove('prsg__row--in'); }
+      // 강제 리플로우 — 클래스를 뗀 상태를 브라우저가 실제로 반영하게 한다.
+      void list.offsetHeight;
+      for (var j = 0; j < rows.length; j++) {
+        (function (idx) {
+          timers.push(setTimeout(function () { rows[idx].classList.add('prsg__row--in'); }, idx * STAGGER_MS));
+        })(j);
+      }
+      var totalDelay = (rows.length - 1) * STAGGER_MS + 260;
+      timers.push(setTimeout(function () {
+        disc.classList.remove('prsg__disc--spin', 'prsg__disc--ready');
+        hint.textContent = 'Pull down';
+        raw = 0; apply(0);
+      }, totalDelay));
+    }, LATENCY_MS));
+  }
+
+  var dragging = false, startY = 0, startRaw = 0, committing = false;
+  function onDown(y) { if (committing) { return; } dragging = true; startY = y; startRaw = raw; if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(MAX, startRaw + (y - startY)));
+    apply(raw);
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (raw >= REF) {
+      committing = true;
+      refreshCycle();
+      timers.push(setTimeout(function () { committing = false; }, LATENCY_MS + (rows.length - 1) * STAGGER_MS + 260));
+    } else {
+      goTo(0);
+    }
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  for (var k = 0; k < rows.length; k++) { rows[k].classList.add('prsg__row--in'); }
+  apply(0);
+
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (committing) { return; }
+    autoRaw += 18;
+    if (autoRaw >= REF) {
+      raw = REF; apply(raw); autoRaw = 0;
+      committing = true;
+      refreshCycle();
+      timers.push(setTimeout(function () { committing = false; }, LATENCY_MS + (rows.length - 1) * STAGGER_MS + 260));
+      return;
+    }
+    raw = autoRaw; apply(raw);
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } clearTimers(); }
+  if (!reduce) { autoTimer = setInterval(autoTick, 190); }
+})();
+</script>
+</body>
+</html>

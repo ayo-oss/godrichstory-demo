@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surrounding buttons that blur as the distance value grows — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bf is-demo" id="bf">
+  <div class="bf__row" id="bfRow">
+    <button class="bf__btn" type="button" data-i="0">New</button>
+    <button class="bf__btn" type="button" data-i="1">Popular</button>
+    <button class="bf__btn" type="button" data-i="2">Sale</button>
+    <button class="bf__btn" type="button" data-i="3">Recommended</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var PROX_RADIUS_PX = 220;
+  var BF_BLUR_MAX_PX = 6;
+  var LERP = 0.2;
+
+  var root = document.getElementById('bf');
+  var row = document.getElementById('bfRow');
+  var btns = Array.prototype.slice.call(row.querySelectorAll('.bf__btn'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var targetBlur = btns.map(function () { return BF_BLUR_MAX_PX; });
+  var curBlur = btns.map(function () { return BF_BLUR_MAX_PX; });
+  var hasPointer = false;
+
+  function centersOf() {
+    return btns.map(function (b) {
+      var r = b.getBoundingClientRect();
+      return [r.left + r.width / 2, r.top + r.height / 2];
+    });
+  }
+
+  function updateTargets(px, py) {
+    var centers = centersOf();
+    var dists = centers.map(function (c) { return Math.hypot(px - c[0], py - c[1]); });
+    // 거리 정렬: 가장 가까운 버튼의 순위(rank)를 구해 순위가 낮을수록(가까울수록) 흐림을 줄인다.
+    var order = dists.map(function (d, i) { return i; }).sort(function (a, b) { return dists[a] - dists[b]; });
+    order.forEach(function (idx, rank) {
+      var near = clamp(1 - dists[idx] / PROX_RADIUS_PX, 0, 1);
+      var byRank = rank === 0 ? 0 : Math.min(1, rank / (btns.length - 1));
+      var mix = Math.max(byRank, 1 - near);
+      targetBlur[idx] = mix * BF_BLUR_MAX_PX;
+    });
+  }
+
+  function render() {
+    btns.forEach(function (b, i) {
+      curBlur[i] += (targetBlur[i] - curBlur[i]) * LERP;
+      // 계산 레이어: 같은 흐림 값(curBlur)을 채도·명도에도 전파한다 — 멀수록 흐리고 탁하게.
+      var t = clamp(curBlur[i] / BF_BLUR_MAX_PX, 0, 1);
+      var sat = (1 - t * 0.55).toFixed(2);
+      var bri = (1 - t * 0.24).toFixed(2);
+      b.style.filter = 'blur(' + curBlur[i].toFixed(2) + 'px) saturate(' + sat + ') brightness(' + bri + ')';
+      // 계산 레이어: 흐림이 풀릴수록(근접) 같은 값을 후광 그림자 반경·불투명도에도 전파한다.
+      var near = 1 - t;
+      var spread = (near * 22).toFixed(1);
+      var glowA = (near * 0.5).toFixed(2);
+      b.style.boxShadow = '0 0 ' + spread + 'px ' + spread + 'px rgba(10,79,232,' + glowA + ')';
+    });
+  }
+
+  function syntheticPoint(t) {
+    var centers = centersOf();
+    var rowRect = row.getBoundingClientRect();
+    var idx = Math.floor((t * 0.6) % centers.length);
+    var target = centers[idx] || [rowRect.left + rowRect.width / 2, rowRect.top + rowRect.height / 2];
+    var wobble = Math.sin(t * Math.PI) * 30;
+    return [target[0] + wobble, target[1]];
+  }
+
+  var startTime = null;
+  function loop(now) {
+    if (startTime === null) { startTime = now; }
+    var t = (now - startTime) / 1000;
+    if (!hasPointer && !reduce) {
+      var p = syntheticPoint(t);
+      updateTargets(p[0], p[1]);
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  row.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    updateTargets(e.clientX, e.clientY);
+    if (reduce) { curBlur = targetBlur.slice(); render(); }
+  });
+  row.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetBlur = btns.map(function () { return BF_BLUR_MAX_PX * 0.4; });
+    if (reduce) { curBlur = targetBlur.slice(); render(); }
+  });
+  btns.forEach(function (b, i) {
+    b.addEventListener('focus', function () {
+      hasPointer = true;
+      targetBlur = btns.map(function (_, j) { return j === i ? 0 : BF_BLUR_MAX_PX; });
+      if (reduce) { curBlur = targetBlur.slice(); render(); }
+    });
+    b.addEventListener('blur', function () {
+      hasPointer = false;
+      targetBlur = btns.map(function () { return BF_BLUR_MAX_PX * 0.4; });
+      if (reduce) { curBlur = targetBlur.slice(); render(); }
+    });
+  });
+
+  if (reduce) {
+    targetBlur = btns.map(function () { return BF_BLUR_MAX_PX * 0.4; });
+    curBlur = targetBlur.slice();
+    render();
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

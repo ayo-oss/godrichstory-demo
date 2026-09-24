@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Today Badge Pulse — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tb is-demo" id="tb">
+  <div class="tb__head"><span class="tb__label">March 2026</span></div>
+  <div class="tb__weekday" aria-hidden="true">
+    <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+  </div>
+  <div class="tb__grid" id="tbGrid"></div>
+</div>
+<script>
+(function () {
+  var BASE = { y: 2026, m: 3, d: 14 }; // 계산 겹 상수: 고정 오늘, new Date() 미사용
+  var CELL_TOTAL = 42;
+  var CYCLE = 1500; // ms, 자동재생이 펄스를 다시 트는 간격
+  var DUR = 1100; // ms, 감쇠 진동 한 회가 잦아드는 데 걸리는 시간
+  var FREQ = 2 * Math.PI * 2.3 / DUR; // 계산 겹: 진동 각속도
+  var ZETA = 4.2; // 계산 겹: 감쇠 상수 — 클수록 빨리 잦아든다
+
+  function isLeap(y) { return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
+  function daysInMonth(y, m) {
+    var t = [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return t[m - 1];
+  }
+  function dow(y, m, d) { // Zeller 합동식 — 0=Sun ~ 6=Sat
+    var yy = y, mm = m;
+    if (mm < 3) { yy -= 1; mm += 12; }
+    var K = yy % 100, J = Math.floor(yy / 100);
+    var h = (d + Math.floor(13 * (mm + 1) / 5) + K + Math.floor(K / 4) + Math.floor(J / 4) - 2 * J) % 7;
+    h = ((h % 7) + 7) % 7;
+    return (h + 6) % 7;
+  }
+
+  var tb = document.getElementById('tb');
+  var grid = document.getElementById('tbGrid');
+  var n = daysInMonth(BASE.y, BASE.m);
+  var lead = dow(BASE.y, BASE.m, 1);
+  var trail = CELL_TOTAL - lead - n;
+  var i, wrap, cell;
+  var ring = null, badgeCell = null;
+
+  for (i = 0; i < lead; i++) {
+    wrap = document.createElement('span');
+    wrap.className = 'tb__cellWrap';
+    cell = document.createElement('span');
+    cell.className = 'tb__cell tb__cell--out';
+    wrap.appendChild(cell);
+    grid.appendChild(wrap);
+  }
+  for (var d = 1; d <= n; d++) {
+    wrap = document.createElement('span');
+    wrap.className = 'tb__cellWrap';
+    if (d === BASE.d) {
+      ring = document.createElement('span');
+      ring.className = 'tb__ring';
+      wrap.appendChild(ring);
+      cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = 'tb__cell tb__cell--today tb__badge';
+      cell.textContent = String(d);
+      wrap.appendChild(cell);
+      badgeCell = cell;
+    } else {
+      cell = document.createElement('span');
+      cell.className = 'tb__cell';
+      cell.textContent = String(d);
+      wrap.appendChild(cell);
+    }
+    grid.appendChild(wrap);
+  }
+  for (i = 0; i < trail; i++) {
+    wrap = document.createElement('span');
+    wrap.className = 'tb__cellWrap';
+    cell = document.createElement('span');
+    cell.className = 'tb__cell tb__cell--out';
+    wrap.appendChild(cell);
+    grid.appendChild(wrap);
+  }
+
+  var isDemo = true;
+  var triggerTime = 0;
+  var rafId = null;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function pulseAt(t) {
+    // 계산 겹: 지수 감쇠 x 코사인 진동 — 스프링이 잦아드는 물리량을 그대로 계산한다
+    if (t < 0 || t > DUR) return { ring: 0, ringAlpha: 0, badge: 1 };
+    var x = t / DUR;
+    var amp = Math.exp(-ZETA * x);
+    var osc = Math.cos(FREQ * t);
+    var ringScale = 1 + 1.9 * (1 - amp);
+    var ringAlpha = Math.max(0, amp * .55);
+    var badgeScale = 1 + .16 * amp * osc;
+    return { ring: ringScale, ringAlpha: ringAlpha, badge: badgeScale };
+  }
+
+  function human() {
+    tb.classList.remove('is-demo');
+    isDemo = false;
+  }
+
+  function trigger(ts) {
+    triggerTime = ts;
+  }
+
+  function loop(ts) {
+    if (!triggerTime) triggerTime = ts;
+    var elapsed = ts - triggerTime;
+    if (isDemo && !reduce && elapsed > CYCLE) {
+      triggerTime = ts;
+      elapsed = 0;
+    }
+    var p = pulseAt(elapsed);
+    if (ring) {
+      ring.style.transform = 'scale(' + p.ring.toFixed(3) + ')';
+      ring.style.opacity = String(p.ringAlpha.toFixed(3));
+    }
+    if (badgeCell) {
+      badgeCell.style.transform = 'scale(' + p.badge.toFixed(3) + ')';
+    }
+    rafId = requestAnimationFrame(loop);
+  }
+
+  badgeCell.addEventListener('click', function (ev) {
+    human();
+    trigger(performance.now());
+  });
+  badgeCell.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    human();
+    trigger(performance.now());
+  });
+
+  if (!reduce) {
+    rafId = requestAnimationFrame(loop);
+  } else if (ring) {
+    ring.style.display = 'none';
+  }
+})();
+</script>
+</main>
+</body>
+</html>

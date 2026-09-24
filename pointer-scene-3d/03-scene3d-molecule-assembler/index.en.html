@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>분자 모형 미니어처 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mol is-demo" id="molRoot">
+  <p class="mol__hint">
+    <svg class="mol__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M210.26 210.26c-17.23 17.23-68-5.63-113.46-51.06S28.51 63 45.74 45.74s68 5.63 113.46 51.06s68.29 96.2 51.06 113.46" opacity=".2"/><path d="M196.12 128c24.65-34.61 37.22-70.38 19.74-87.86S162.61 35.23 128 59.88C93.39 35.23 57.62 22.66 40.14 40.14S35.23 93.39 59.88 128c-24.65 34.61-37.22 70.38-19.74 87.86c5.63 5.63 13.15 8.14 21.91 8.14c18.48 0 42.48-11.17 66-27.88C151.47 212.83 175.47 224 194 224c8.76 0 16.29-2.52 21.91-8.14c17.43-17.48 4.86-53.25-19.79-87.86m8.43-76.55c7.64 7.64 2.48 32.4-18.52 63.28a300 300 0 0 0-21.19-23.57A300 300 0 0 0 141.27 70c30.88-21 55.64-26.2 63.28-18.55M176.29 128a289 289 0 0 1-22.76 25.53A289 289 0 0 1 128 176.29a289 289 0 0 1-25.53-22.76A289 289 0 0 1 79.71 128A298.6 298.6 0 0 1 128 79.71a289 289 0 0 1 25.53 22.76A289 289 0 0 1 176.29 128M51.45 51.45c2.2-2.21 5.83-3.35 10.62-3.35c11.82 0 30.69 6.9 52.65 21.9a304 304 0 0 0-23.56 21.16A300 300 0 0 0 70 114.73C49 83.85 43.81 59.09 51.45 51.45m0 153.1c-7.64-7.64-2.45-32.4 18.55-63.28a300 300 0 0 0 21.19 23.57A304 304 0 0 0 114.73 186c-30.88 21-55.64 26.2-63.28 18.55m153.1 0c-7.64 7.65-32.4 2.48-63.28-18.52a304 304 0 0 0 23.57-21.19A300 300 0 0 0 186 141.27c21 30.88 26.19 55.64 18.55 63.28M140 128a12 12 0 1 1-12-12a12 12 0 0 1 12 12"/></g></svg>
+    <span>The pointer spins the molecule and the atoms pulse — rotation matrices multiplied directly</span>
+  </p>
+  <div class="mol__field" id="molField" role="application" aria-label="Molecule perspective board" tabindex="0">
+    <canvas class="mol__cv" id="molCv"></canvas>
+  </div>
+  <div class="mol__bar">
+    <label class="mol__dial">spin speed
+      <input type="range" id="molSpin" min="0" max="120" step="5" value="35" aria-label="spin speed">
+      <b class="mol__val" id="molSpinVal">35%</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 분자 모형 미니어처 — 원자 15개(구)와 결합선을 회전 행렬 rotY·rotX 직접 곱셈으로 돌린다.
+// 원자는 파동 위상으로 반경 ±5% 맥동하고, 결합선은 원자와 같은 z 정렬(화가 알고리즘)에 태운다.
+// 3D 라이브러리·행렬 라이브러리 없이 sin/cos 곱셈 세 번으로 전부다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var AUTOSPIN = 0.35;   // 기본 자전 속도(라디안/초 배율) — 다이얼로 배율이 변한다
+  var PULSE = 0.05;      // 원자 맥동 진폭(반경 ±5%)
+  var LOOP_MS = 2000;    // 미리보기 가상 포인터 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('molRoot');
+  var field = document.getElementById('molField');
+  var cv = document.getElementById('molCv');
+  var ctx = cv.getContext('2d');
+  var spinIn = document.getElementById('molSpin');
+  var spinOut = document.getElementById('molSpinVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var C_PINK = tok('--mol-pink');
+  var C_MINT = tok('--mol-mint');
+  var C_LILAC = tok('--mol-lilac');
+  var C_SKY = tok('--mol-sky');
+  var C_CREAM = tok('--mol-cream');
+  var C_BOND = tok('--mol-bond');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var spinMul = Number(spinIn.value) / 100;
+  var baseY = 0.4;                   // 자전 누적각 — 미리보기에서만 쌓인다
+  var angY = 0.4, angX = -0.18;      // 표시 회전각(라디안) — rot() 가 쓴다
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+  var focal = 300;
+
+  // 원자 배치 — 중심 1 + 주변 14. 씨앗 고정(변형끼리 같은 분자여야 비교가 된다)
+  var SCALE = 1.95;    // 좌표 배율 — 분자가 화면 대부분을 차지하게(피사체 크기가 면적이다)
+  function atom(x, y, z, r, col) { return { x: x * SCALE, y: y * SCALE, z: z * SCALE, r: r, col: col }; }
+  var atoms = [
+    atom(0, 0, 0, 30, C_CREAM),
+    atom(42, 0, 0, 22, C_PINK),
+    atom(-42, 0, 0, 22, C_PINK),
+    atom(0, 42, 0, 22, C_MINT),
+    atom(0, -42, 0, 22, C_MINT),
+    atom(0, 0, 46, 22, C_LILAC),
+    atom(0, 0, -46, 22, C_LILAC),
+    atom(34, 34, 30, 16, C_SKY),
+    atom(-34, 34, 30, 16, C_SKY),
+    atom(34, -34, -30, 16, C_SKY),
+    atom(-34, -34, -30, 16, C_SKY),
+    atom(58, 18, -22, 16, C_PINK),
+    atom(-58, -18, 22, 16, C_PINK),
+    atom(18, 58, 22, 16, C_MINT),
+    atom(-18, -58, -22, 16, C_MINT)
+  ];
+  var bonds = [
+    [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6],
+    [1, 7], [1, 11], [2, 8], [2, 12], [3, 13], [3, 14],
+    [5, 7], [5, 8], [6, 9], [6, 10], [1, 4], [2, 3]
+  ];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 회전 행렬 직접 곱셈 — rotY 다음 rotX. 두 번의 sin/cos 로 전부다
+  function rot(p) {
+    var cy = Math.cos(angY), sy = Math.sin(angY);
+    var x1 = p.x * cy + p.z * sy;
+    var z1 = -p.x * sy + p.z * cy;
+    var cx = Math.cos(angX), sx = Math.sin(angX);
+    var y2 = p.y * cx - z1 * sx;
+    var z2 = p.y * sx + z1 * cx;
+    return { x: x1, y: y2, z: z2 };
+  }
+
+  function project(p) {
+    var s = focal / (focal + p.z + 150);      // 원근 투영 — 이 한 줄이 전부다(가까이 붙어 크게)
+    return { sx: W * 0.5 + p.x * s, sy: H * 0.5 - p.y * s, s: s };
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+
+    var items = [];
+    // 원자 — 구(원). 맥동: 반경 ±5% 사인파, 원자마다 위상이 다르다
+    for (var i = 0; i < atoms.length; i++) {
+      (function (idx) {
+        var a = atoms[idx];
+        var pw = rot(a);
+        var pr = project(pw);
+        var pulseR = a.r * (1 + Math.sin(t / 700 + idx * 1.9) * PULSE);
+        var r = pulseR * pr.s;
+        items.push({ z: pw.z, fn: function () {
+          var g = ctx.createRadialGradient(pr.sx - r * 0.34, pr.sy - r * 0.36, r * 0.08, pr.sx, pr.sy, r);
+          g.addColorStop(0, C_CREAM);
+          g.addColorStop(0.45, a.col);
+          g.addColorStop(1, a.col);
+          ctx.fillStyle = g;
+          ctx.globalAlpha = 0.82 + 0.18 * Math.min(1, pr.s * 1.5);
+          ctx.beginPath();
+          ctx.arc(pr.sx, pr.sy, r, 0, TAU);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }});
+      })(i);
+    }
+    // 결합선 — 원자 사이. z 정렬에 같이 태운다(두 끝 z 평균)
+    for (var b = 0; b < bonds.length; b++) {
+      (function (bi) {
+        var bd = bonds[bi];
+        var p1 = rot(atoms[bd[0]]), p2 = rot(atoms[bd[1]]);
+        var q1 = project(p1), q2 = project(p2);
+        items.push({ z: (p1.z + p2.z) / 2 + 3, fn: function () {
+          ctx.strokeStyle = C_BOND;
+          ctx.lineWidth = 3.2 * ((q1.s + q2.s) / 2);
+          ctx.beginPath();
+          ctx.moveTo(q1.sx, q1.sy);
+          ctx.lineTo(q2.sx, q2.sy);
+          ctx.stroke();
+        }});
+      })(b);
+    }
+    items.sort(function (a, b2) { return b2.z - a.z; });
+    for (var q = 0; q < items.length; q++) items[q].fn();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    var t = now;
+    var pxOffset = 0, pyOffset = 0;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. 자전이 기본이고 포인터가 각도를 살짝 가감
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.36 * Math.sin(ph);
+      py01 = 0.5 + 0.3 * Math.sin(2 * ph + 2.1);
+      baseY += AUTOSPIN * spinMul * 3 * dt;       // 자전 — 다이얼 배율
+    }
+    pxOffset = (px01 - 0.5) * 0.5;
+    pyOffset = (py01 - 0.5) * 0.7;
+    angY = baseY + pxOffset;                       // 매끄럽게 따라가는 대상을 그대로 쓴다
+    angX += ((-0.18 + pyOffset) - angX) * 0.12;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setSpin(v) {
+    spinMul = Number(v) / 100;
+    spinOut.textContent = v + '%';
+  }
+
+  spinIn.addEventListener('input', function () { setSpin(spinIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { baseY = 0.9; angY = 0.9 + (px01 - 0.5) * 0.5; angX = -0.18 + (py01 - 0.5) * 0.7; draw(last); }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.12, 0], ArrowRight: [0.12, 0], ArrowUp: [0, -0.1], ArrowDown: [0, 0.1] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    baseY += d[0]; angY = baseY;
+    angX = Math.max(-1.1, Math.min(1.1, angX + d[1]));
+    if (reduce) draw(last);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 맥동·자전 없이 원자가 겹치지 않는 한 각도의 한 장
+    baseY = 0.9; angY = 0.9; angX = -0.18;
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Crumpled Paper Texture Shaded by Noise — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">A Crumpled Paper Texture Shaded by Noise</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var PAGE_L = 30, PAGE_T = 20, PAGE_R = 290, PAGE_B = 180;
+  var CELL = 6;
+  var SCENE_BG = '#17141a';
+  var PAPER = [255, 247, 230];
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function smoothStep(t) { return t * t * (3 - 2 * t); }
+
+  function makeValueNoise(seed) {
+    var rnd = seedRand(seed);
+    var GRID = 24;
+    var lattice = [];
+    for (var i = 0; i < GRID * GRID; i += 1) lattice.push(rnd());
+    function latAt(xi, yi) {
+      xi = ((xi % GRID) + GRID) % GRID; yi = ((yi % GRID) + GRID) % GRID;
+      return lattice[yi * GRID + xi];
+    }
+    return function valueNoise(x, y) {
+      var xi = Math.floor(x), yi = Math.floor(y);
+      var xf = x - xi, yf = y - yi;
+      var v00 = latAt(xi, yi), v10 = latAt(xi + 1, yi), v01 = latAt(xi, yi + 1), v11 = latAt(xi + 1, yi + 1);
+      var sx = smoothStep(xf), sy = smoothStep(yf);
+      var a = v00 + (v10 - v00) * sx;
+      var b = v01 + (v11 - v01) * sx;
+      return a + (b - a) * sy;
+    };
+  }
+  var valueNoise = makeValueNoise(41306);
+
+  function crumpleHeight(x, y, phase) {
+    var n1 = valueNoise(x * 0.16 + phase, y * 0.16);
+    var n2 = valueNoise(x * 0.4 - phase * 1.4, y * 0.4 + phase * 0.6);
+    return n1 * 0.66 + n2 * 0.34;
+  }
+
+  var phase = 0;
+  var CYCLE_MS = 900;
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    ctx.fillRect(PAGE_L - 6, PAGE_B + 3, PAGE_R - PAGE_L + 12, 6);
+
+    var lightX = -0.7, lightY = -0.7;                   // 좌상단 광원 방향 (정규화 근사)
+    for (var y = PAGE_T; y < PAGE_B; y += CELL) {
+      for (var x = PAGE_L; x < PAGE_R; x += CELL) {
+        var u = (x - PAGE_L) / CELL, v = (y - PAGE_T) / CELL;
+        var h0 = crumpleHeight(u, v, phase);
+        var hx = crumpleHeight(u + 1, v, phase);
+        var hy = crumpleHeight(u, v + 1, phase);
+        var gx = (hx - h0) * 6, gy = (hy - h0) * 6;      // 높낮이 기울기 = 음영의 근거
+        var lambert = clamp(0.72 - (gx * lightX + gy * lightY) * 0.9, 0.28, 1.15);
+        var r = clamp(Math.round(PAPER[0] * lambert), 0, 255);
+        var g = clamp(Math.round(PAPER[1] * lambert), 0, 255);
+        var b = clamp(Math.round(PAPER[2] * lambert), 0, 255);
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+        ctx.fillRect(x, y, CELL + 1, CELL + 1);
+      }
+    }
+
+    // 대각으로 훑는 광택 — 노이즈만으론 프레임 간 변화가 작아 별도로 움직임을 더한다
+    var p = (nowMs % CYCLE_MS) / CYCLE_MS;
+    var sweepX = PAGE_L - 60 + p * (PAGE_R - PAGE_L + 120);
+    var g2 = ctx.createLinearGradient(sweepX - 34, 0, sweepX + 34, 0);
+    g2.addColorStop(0, 'rgba(255,255,255,0)');
+    g2.addColorStop(0.5, 'rgba(255,255,255,.16)');
+    g2.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g2;
+    ctx.fillRect(PAGE_L, PAGE_T, PAGE_R - PAGE_L, PAGE_B - PAGE_T);
+  }
+
+  var nowMs = 0;
+  function update(dt, tMs) {
+    if (reduce) return;
+    nowMs = tMs;
+    phase += dt * 0.5;
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); phase = 1.2; nowMs = 0; }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

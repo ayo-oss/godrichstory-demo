@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>揺れていたピクセルが位置に収まるコード生成 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gns is-demo" id="gnsRoot">
+  <div class="gns__badge" id="gnsBadge">コード生成中</div>
+  <button class="gns__ctrl" id="gnsCtrl" type="button">一時停止</button>
+  <div class="gns__canvas-wrap">
+    <canvas class="gns__canvas" id="gnsCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // QR_NOISE_SETTLE_AMPLITUDE_PX — 변형 1: 6 → 2 로 늘리면 초기 흔들림 폭이 더 커진다(전값이 초기값).
+  var QR_NOISE_SETTLE_AMPLITUDE_PX = 6;
+  var LOOP_MS = 2000;
+  var SETTLE_MS = 1500;
+  var SIZE = 13;
+
+  var canvas = document.getElementById('gnsCanvas');
+  var ctx = canvas.getContext('2d');
+  var badge = document.getElementById('gnsBadge');
+  var ctrl = document.getElementById('gnsCtrl');
+  var root = document.getElementById('gnsRoot');
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(407060);
+  var modules = [];
+  for (var y = 0; y < SIZE; y += 1) {
+    for (var x = 0; x < SIZE; x += 1) {
+      if (rand() < 0.45) {
+        modules.push({
+          x: x, y: y,
+          phase: rand() * Math.PI * 2,
+          freq: 6 + rand() * 4,
+          dir: rand() * Math.PI * 2
+        });
+      }
+    }
+  }
+
+  function draw(elapsed) {
+    var cw = canvas.width, ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+    var box = Math.min(cw, ch) - 40;
+    var cell = box / SIZE;
+    var ox = (cw - box) / 2, oy = (ch - box) / 2;
+
+    // 계산 한 겹: 진폭이 시간에 따라 지수 감쇠 — 초기 QR_NOISE_SETTLE_AMPLITUDE_PX 에서
+    // SETTLE_MS 동안 0으로 잦아들며, 모듈마다 다른 위상·방향으로 흔들려 자리를 잡는다.
+    var settleP = Math.min(1, elapsed / SETTLE_MS);
+    var amp = QR_NOISE_SETTLE_AMPLITUDE_PX * Math.exp(-4 * settleP);
+
+    ctx.fillStyle = 'rgb(255,247,230)';
+    modules.forEach(function (m) {
+      var wobble = Math.sin(elapsed / 1000 * m.freq + m.phase) * amp;
+      var jx = Math.cos(m.dir) * wobble;
+      var jy = Math.sin(m.dir) * wobble;
+      var s = cell * 0.68;
+      var cx = ox + m.x * cell + cell / 2 + jx;
+      var cy = oy + m.y * cell + cell / 2 + jy;
+      ctx.globalAlpha = 0.55 + 0.45 * settleP;
+      ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+    });
+    ctx.globalAlpha = 1;
+
+    badge.textContent = settleP >= 1 ? 'コード生成完了' : 'コード生成中 ' + Math.round(settleP * 100) + '%';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? SETTLE_MS : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? '一時停止' : '再生';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = '一時停止';
+    }
+  });
+})();
+</script>
+</body>
+</html>

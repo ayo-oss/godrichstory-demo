@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>값이 궤도를 도는 길이로 바뀌는 오빗 다이얼 피커 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="od is-demo" id="od">
+  <div class="od__zone" id="zone">
+    <svg class="od__chart" id="chart" viewBox="0 0 480 300" role="img" aria-label="원 둘레를 도는 오빗 다이얼, 손잡이를 돌리면 시작점부터 점까지 이어진 궤도 호의 길이가 매 순간 다시 그려진다">
+      <circle class="od__orbit" cx="240" cy="150" r="106"></circle>
+      <path class="od__arc" id="arc"></path>
+      <circle class="od__dot" id="dot" r="19"></circle>
+    </svg>
+    <button class="od__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="궤도 각도 고르기" aria-valuemin="1" aria-valuemax="99"
+            aria-valuenow="35" aria-valuetext="궤도 126도">
+      <svg class="od__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="128" cy="128" r="96" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88 88.1 88.1 0 0 1-88 88"/></g></svg>
+    </button>
+    <b class="od__badge" aria-hidden="true"><span id="od-val">126</span>°</b>
+  </div>
+
+  <p class="od__hint">손잡이를 끌거나 화살표키를 누르면 궤도 호의 길이가 다시 계산됩니다</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="od-live"></span>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown 이 각도값(1~99, 도 단위로 환산)을 바꾸면,
+// 원 둘레 위 점의 위치를 극좌표로 다시 계산하고, 시작점(위쪽)부터 그 점까지 이어진
+// 궤도 호의 길이(path d 속성)를 매 프레임 다시 그린다. 값은 관성 lerp(ARC_LERP)로
+// 목표를 뒤따른다. CSS @keyframes 없음(각도가 매 프레임 실수로 바뀌어 선언형으로
+// 못 담는다, 398-01~06 과 같은 이유).
+var root = document.getElementById('od');
+var zone = document.getElementById('zone');
+var arcEl = document.getElementById('arc');
+var dotEl = document.getElementById('dot');
+var grab = document.getElementById('grab');
+var valEl = document.getElementById('od-val');
+var live = document.getElementById('od-live');
+
+var CX = 240, CY = 150, R = 106;        // picker-graph-orbit-radius — 궤도 반지름
+var START = -90;
+var MIN_V = 1, MAX_V = 99;
+var ARC_LERP = 0.18;                    // picker-graph-orbit-dial-arc-smoothing — 변형 07 의 조정 대상
+var AUTO_PERIOD = 1.5;
+var STEP = 5;
+
+var value = 35;
+var current = 35;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var zoneRect = null;
+var rafId = 0;
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function polar(cx, cy, r, deg) {
+  var rad = deg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(cx, cy, r, a0, a1) {
+  if (a1 - a0 < 0.6) return '';
+  var s = polar(cx, cy, r, a0), e = polar(cx, cy, r, a1);
+  var large = (a1 - a0) > 180 ? 1 : 0;
+  return 'M ' + s.x + ' ' + s.y + ' A ' + r + ' ' + r + ' 0 ' + large + ' 1 ' + e.x + ' ' + e.y;
+}
+
+function angleOf(v) { return START + (v / 100) * 360; }
+
+function paint() {
+  var deg = angleOf(current);
+  arcEl.setAttribute('d', arcPath(CX, CY, R, START, deg));
+  var p = polar(CX, CY, R, deg);
+  dotEl.setAttribute('cx', String(p.x));
+  dotEl.setAttribute('cy', String(p.y));
+  grab.style.left = (p.x / 480 * 100) + '%';
+  grab.style.top = (p.y / 300 * 100) + '%';
+  var rd = Math.round(deg - START);
+  valEl.textContent = String(rd);
+  grab.setAttribute('aria-valuenow', String(Math.round(current)));
+  grab.setAttribute('aria-valuetext', '궤도 ' + rd + '도');
+}
+
+function announce() {
+  live.textContent = '궤도 ' + Math.round(angleOf(current) - START) + '도로 다시 계산됨';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(MIN_V, Math.min(MAX_V, v));
+  if (isManual) { manual = true; root.classList.remove('is-demo'); }
+}
+
+function angleFromPointer(clientX, clientY) {
+  if (!zoneRect) zoneRect = zone.getBoundingClientRect();
+  var cx = zoneRect.left + zoneRect.width * (CX / 480);
+  var cy = zoneRect.top + zoneRect.height * (CY / 300);
+  var deg = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
+  while (deg < START) deg += 360;
+  while (deg >= START + 360) deg -= 360;
+  return deg;
+}
+
+function fromPointer(clientX, clientY) {
+  var deg = angleFromPointer(clientX, clientY);
+  var v = (deg - START) / 360 * 100;
+  setValue(v, true);
+}
+
+function onDown(e) {
+  zoneRect = zone.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX, e.clientY);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+function onMove(e) { fromPointer(e.clientX, e.clientY); if (reduced()) { current = value; paint(); announce(); } }
+function onUp() { announce(); }
+function onZoneDown(e) {
+  zoneRect = zone.getBoundingClientRect();
+  fromPointer(e.clientX, e.clientY);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(MIN_V, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(MAX_V, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) { current = value; paint(); announce(); }
+}
+
+function onResize() { zoneRect = zone.getBoundingClientRect(); if (reduced()) paint(); }
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  value = 50 + 46 * Math.sin(autoT * omega);
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) autoStep(dt);
+  current += (value - current) * ARC_LERP;
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+grab.addEventListener('keydown', onKey);
+zone.addEventListener('pointerdown', onZoneDown);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  current = value;
+  paint();
+} else {
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

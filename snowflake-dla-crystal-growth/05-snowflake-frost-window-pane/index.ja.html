@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>서리 낀 창 — 가장자리에서 안쪽으로 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="18" d="M20 20h216v216H20z"/><path fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="round" d="M40 40l60 60M216 40l-60 60M40 216l60-60M216 216l-60-60M128 20v70M128 166v70M20 128h70M166 128h70"/></svg>
+    <span>種を窓枠の縁全体に敷き、温度場を内側へ向けて下げると、凝集が窓辺の霜のように縁から内側へフラクタル模様で広がっていきます</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="霜の降りた窓実験版" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">格子 <b class="cd__val" id="cdGrid"></b> · 凝集 <b class="cd__val" id="cdRate"></b>/秒</span>
+    <span class="cd__meta cd__meta--dim">キャンバス · ImageData · putImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 서리 낀 창(05). 창틀 네 변 전체를 씨앗으로 깔고, 온도 필드(가장자리=따뜻해 잘 얼고 →
+// 중심=차가워 얼기 어려운 역방향 그라디언트)를 반영한 확률로 DLA 랜덤워크를 돌린다.
+// 워커는 아직 얼지 않은 안쪽 어디서나 출발해 사방으로 걷다가 이미 언 이웃에 닿으면
+// (이웃 수·온도로 정해지는 확률로) 얼어붙는다 — 서리가 유리창 가장자리에서 안으로
+// 기어드는 진짜 모양이다. 格子(저해상도) 점유를 ImageData 한 장으로 그려 확대해 붙인다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var GW = 72, GH = 45;   // 格子(480×300 과 같은 8:5 비율) — 커질수록 서리 결이 촘촘해진다
+  var SPS = 2600;         // 초당 응집 셀 수 — 변형 "번지는 속도" 축(1400 → 3600)
+  var COLD = 0.34;        // 중심 냉기 계수 — 클수록 중심까지 다 얼기 전에 가지가 가늘어진다
+  var BIAS = 0.55;        // 온도 필드 드리프트 — 걸음이 가장 가까운 창틀 쪽으로 쏠리는 비율(0.55 = 절반 조금 넘게)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  document.getElementById('cdGrid').textContent = GW + '×' + GH;
+  document.getElementById('cdRate').textContent = String(SPS);
+
+  var SEED = 0x3190405;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--flake-ink');
+  var C_DUSK = tokRGB('--flake-dusk');
+  var C_CORE = tokRGB('--flake-core');
+  var C_HALO = tokRGB('--flake-halo');
+  var C_MIST = tokRGB('--flake-mist');
+
+  // ── 格子 점유 — 네 변 전체가 씨앗, 중심 냉기 필드에 따라 안쪽으로 자란다 ──
+  var occ = new Uint8Array(GW * GH);
+  var noise = new Float32Array(GW * GH);     // 셀마다 고정 반짝임 계수(정적 프리컴퓨트) — 얼음 결 질감
+  var cx0 = (GW - 1) / 2, cy0 = (GH - 1) / 2;
+  var maxDist = Math.sqrt(cx0 * cx0 + cy0 * cy0);
+  var walkers = [];
+  var WALKERS = 60;
+  var filled = 0, TOTAL = GW * GH;
+  var phase = 0, shineT = 0;
+
+  function idx(gx, gy) { return gy * GW + gx; }
+  function edgeDist(gx, gy) { return Math.min(gx, gy, GW - 1 - gx, GH - 1 - gy); }
+  function respawn(w) {
+    var tries = 0;
+    do {
+      w.gx = 1 + ((rand() * (GW - 2)) | 0);
+      w.gy = 1 + ((rand() * (GH - 2)) | 0);
+      tries++;
+    } while (occ[idx(w.gx, w.gy)] && tries < 40);
+  }
+  var DX = [1, -1, 0, 0], DY = [0, 0, 1, -1];
+  // 방향 index: 0=+x(DX[0]=1) · 1=-x(DX[1]=-1) · 2=+y(DY[2]=1) · 3=-y(DY[3]=-1)
+  function stepWalker(w) {
+    var d;
+    if (rand() < BIAS) {
+      // 온도 필드 드리프트 — 가장 가까운 창틀로 한 걸음(방향 index: 0=+x,1=-x,2=+y,3=-y)
+      var dl = w.gx, dr = GW - 1 - w.gx, dt = w.gy, db = GH - 1 - w.gy;
+      var m = Math.min(dl, dr, dt, db);
+      d = m === dl ? 1 : m === dr ? 0 : m === dt ? 3 : 2;
+    } else {
+      d = (rand() * 4) | 0;   // 무작위 걸음 — 이게 없으면 직선으로만 얼어 가지가 안 갈라진다
+    }
+    var nx = w.gx + DX[d], ny = w.gy + DY[d];
+    if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) { respawn(w); return false; }
+    w.gx = nx; w.gy = ny;
+    var i = idx(nx, ny);
+    if (occ[i]) return false;
+    var nc = (nx > 0 && occ[idx(nx - 1, ny)] ? 1 : 0) + (nx < GW - 1 && occ[idx(nx + 1, ny)] ? 1 : 0) +
+              (ny > 0 && occ[idx(nx, ny - 1)] ? 1 : 0) + (ny < GH - 1 && occ[idx(nx, ny + 1)] ? 1 : 0);
+    if (!nc) return false;
+    // 온도 필드 — 중심에 가까울수록(dist 작을수록) 차가워 얼기 어렵다(가지가 가늘어진다)
+    var dist = Math.min(1, edgeDist(nx, ny) / maxDist);
+    var temp = 1 - dist * COLD;
+    var p = (nc === 1 ? 1.0 : nc === 2 ? 0.58 : nc === 3 ? 0.24 : 0.12) * temp;
+    if (rand() >= p) return false;
+    occ[i] = 1;
+    filled++;
+    respawn(w);
+    return true;
+  }
+  function resetSim() {
+    occ.fill(0);
+    for (var x = 0; x < GW; x++) { occ[idx(x, 0)] = 1; occ[idx(x, GH - 1)] = 1; }
+    for (var y = 0; y < GH; y++) { occ[idx(0, y)] = 1; occ[idx(GW - 1, y)] = 1; }
+    filled = 2 * (GW + GH) - 4;
+    phase = 0; shineT = 0;
+    walkers = [];
+    for (var i = 0; i < WALKERS; i++) { var w = { gx: 1, gy: 1 }; respawn(w); walkers.push(w); }
+  }
+  for (var ni = 0; ni < noise.length; ni++) noise[ni] = rand();
+  resetSim();
+
+  function sim(dt) {
+    if (phase === 1) {
+      shineT += dt;
+      if (shineT > 650) resetSim();
+      return;
+    }
+    var quota = SPS * dt / 1000;
+    var stuck = 0, steps = 0, maxSteps = 400000;   // 순수 배열 연산이라 프레임당 이 정도는 가볍다
+    var t0 = performance.now(), budgetMs = 9;      // 시간 예산으로 자른다 — 워커 수 공식보다 실측이 정확하다
+    while (stuck < quota && steps < maxSteps) {
+      for (var i = 0; i < walkers.length; i++) {
+        if (stepWalker(walkers[i])) stuck++;
+        steps++;
+        if (stuck >= quota) break;
+      }
+      if ((steps & 2047) === 0 && performance.now() - t0 > budgetMs) break;
+    }
+    if (filled > TOTAL * 0.62) { phase = 1; shineT = 0; }   // 다 자라면 잠깐 반짝이고 리셋
+  }
+
+  var W = 0, H = 0, img = null, gimg = null, gctx = null, gcanvas = null;
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+    img = ctx.createImageData(W, H);
+    var d = img.data;
+    for (var i = 3; i < d.length; i += 4) d[i] = 255;
+    gcanvas = document.createElement('canvas');
+    gcanvas.width = GW; gcanvas.height = GH;
+    gctx = gcanvas.getContext('2d');
+    gimg = gctx.createImageData(GW, GH);
+    var gd = gimg.data;
+    for (var j = 3; j < gd.length; j += 4) gd[j] = 255;
+    prngState = SEED >>> 0;
+    resetSim();
+  }
+
+  // 格子 점유 → 작은 캔버스에 ImageData 로 그리고, 큰 캔버스에 확대해 putImageData 결과를 그린다
+  function drawGrid() {
+    var gd = gimg.data;
+    for (var gy = 0; gy < GH; gy++) {
+      for (var gx = 0; gx < GW; gx++) {
+        var i = gy * GW + gx, j = i << 2;
+        if (!occ[i]) { gd[j] = C_INK[0]; gd[j + 1] = C_INK[1]; gd[j + 2] = C_INK[2]; continue; }
+        var dist = Math.min(1, edgeDist(gx, gy) / maxDist);
+        var wave = Math.sin(fr * 0.11 - dist * 5.2 + noise[i] * 6.283);    // 결정을 타고 도는 결빛 파동(나무결 반짝임) — 여러 파가 겹쳐 자리마다 다른 박자로 밝아진다
+        var sparkle = 0.36 + 0.28 * noise[i] + 0.36 * (0.5 + 0.5 * wave);
+        var t = Math.min(1, dist * 1.15) * sparkle;
+        var r0 = C_HALO[0] + (C_CORE[0] - C_HALO[0]) * t, g0 = C_HALO[1] + (C_CORE[1] - C_HALO[1]) * t, b0 = C_HALO[2] + (C_CORE[2] - C_HALO[2]) * t;
+        gd[j] = r0; gd[j + 1] = g0; gd[j + 2] = b0;
+      }
+    }
+    gctx.putImageData(gimg, 0, 0);
+  }
+
+  var fr = 0;
+  function compose(now) {
+    var d = img.data;
+    // ① 유리창 배경 — 세로 그라디언트 + 숨쉬는 성에 안개(가장자리 밝게)
+    var topR = C_INK[0] + 4, topG = C_INK[1] + 4, topB = C_INK[2] + 8;
+    var botR = C_INK[0] + (C_DUSK[0] - C_INK[0]) * 0.30, botG = C_INK[1] + (C_DUSK[1] - C_INK[1]) * 0.30, botB = C_INK[2] + (C_DUSK[2] - C_INK[2]) * 0.30;
+    var breathe = 0.5 + 0.5 * Math.sin(fr * 0.05);
+    for (var y = 0; y < H; y++) {
+      var ty = y / H;
+      var br = topR + (botR - topR) * ty, bg = topG + (botG - topG) * ty, bb = topB + (botB - topB) * ty;
+      var edgeY = Math.min(y, H - 1 - y) / (H * 0.5);
+      var row = y * W;
+      for (var x = 0; x < W; x++) {
+        var edgeX = Math.min(x, W - 1 - x) / (W * 0.5);
+        var edge = 1 - Math.min(edgeX, edgeY);
+        var vig = Math.pow(Math.max(0, edge), 2.2) * (0.10 + 0.05 * breathe);
+        var j = (row + x) << 2;
+        d[j]     = br + (C_MIST[0] - br) * vig;
+        d[j + 1] = bg + (C_MIST[1] - bg) * vig;
+        d[j + 2] = bb + (C_MIST[2] - bb) * vig;
+      }
+    }
+    // ② 서리 결정 — 格子 이미지를 확대해 얹는다(가까운 이웃 보간 없이 또렷하게)
+    drawGrid();
+    var sx = W / GW, sy = H / GH;
+    for (var gy2 = 0; gy2 < GH; gy2++) {
+      var gy0 = (gy2 * sy) | 0, gy1 = ((gy2 + 1) * sy) | 0;
+      for (var gx2 = 0; gx2 < GW; gx2++) {
+        var gi = (gy2 * GW + gx2) << 2;
+        if (gimg.data[gi] === C_INK[0] && gimg.data[gi + 1] === C_INK[1] && gimg.data[gi + 2] === C_INK[2]) continue;
+        var R = gimg.data[gi], G = gimg.data[gi + 1], B = gimg.data[gi + 2];
+        var gx0 = (gx2 * sx) | 0, gx1 = ((gx2 + 1) * sx) | 0;
+        for (var yy = gy0; yy < gy1 && yy < H; yy++) {
+          var rowo = yy * W;
+          for (var xx = gx0; xx < gx1 && xx < W; xx++) {
+            var jj = (rowo + xx) << 2;
+            d[jj] = R; d[jj + 1] = G; d[jj + 2] = B;
+          }
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // ③ 창을 닦고 지나가는 결빛 스윕 — 자란 뒤에도 화면이 계속 산다(성에 위 대각선 하이라이트)
+    for (var sw = 0; sw < 2; sw++) {                    // 두 줄기가 반 周期 어긋나게 — 쉬는 구간 없다
+      var ph = ((now * 0.0013) % 1 + 0.5 * sw) % 1;     // 0→1 순환(≈0.77초 周期)
+      var cx = (ph * 1.7 - 0.35) * W, cy = (-0.15 + ph * 0.5) * H;
+      var rr = W * 0.34, r2 = rr * rr;
+      var x0 = Math.max(0, (cx - rr) | 0), x1 = Math.min(W - 1, (cx + rr) | 0);
+      var y0 = Math.max(0, (cy - rr) | 0), y1 = Math.min(H - 1, (cy + rr) | 0);
+      if (x1 < x0 || y1 < y0) continue;
+      var pd = ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      var pdd = pd.data, pw = x1 - x0 + 1;
+      for (var yy = y0; yy <= y1; yy++) {
+        var dyy = yy - cy;
+        for (var xx = x0; xx <= x1; xx++) {
+          var dxx = xx - cx;
+          var q = (dxx * dxx + dyy * dyy) / r2;
+          if (q > 1) continue;
+          var a = Math.pow(1 - q, 2) * 0.16;            // 부드러운 가우시안 느낌의 산
+          var pj = ((yy - y0) * pw + (xx - x0)) << 2;
+          pdd[pj]     += (C_CORE[0] - pdd[pj]) * a;
+          pdd[pj + 1] += (C_CORE[1] - pdd[pj + 1]) * a;
+          pdd[pj + 2] += (C_CORE[2] - pdd[pj + 2]) * a;
+        }
+      }
+      ctx.putImageData(pd, x0, y0);
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, prev = 0;
+  function frame(now) {
+    var dt = Math.min(50, now - (prev || now));
+    prev = now;
+    sim(dt);
+    compose(now);
+    fr++;
+    raf = requestAnimationFrame(frame);
+  }
+  function stillDraw() {
+    fit();
+    for (var i = 0; i < 30; i++) sim(33);
+    compose(0);
+  }
+
+  window.addEventListener('resize', function () { if (reduce) stillDraw(); });
+
+  fit();
+  if (reduce) {
+    stillDraw();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

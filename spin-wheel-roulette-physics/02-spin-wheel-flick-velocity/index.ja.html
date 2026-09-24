@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>はじき角速度 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fw" id="fw">
+  <p class="fw__hint">pointermoveごとにatan2で中心角を測り、前回角度・時間との差で rad/s を作ります</p>
+  <div class="fw__row">
+    <div class="fw__field" id="field" role="application" aria-label="はじき角速度実験盤" tabindex="0">
+      <canvas class="fw__cv" id="cv"></canvas>
+    </div>
+    <div class="fw__side">
+      <b class="fw__vel" id="vel">0.0</b>
+      <span class="fw__unit">rad/s 指を離した瞬間の値が初期速度</span>
+      <div class="fw__bar" id="bar" aria-hidden="true"></div>
+      <p class="fw__meta">はじきの強さ <b class="fw__count" id="pow">0</b><span class="fw__metaUnit">段階</span></p>
+      <p class="fw__meta">ふち近くをドラッグして離してみてください</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 튕김 각속도(02) — 포인터 이동을 회전 속도로 바꾼다. pointermove 마다 중심에서의 각도를
+// Math.atan2 로 재고 이전 각도와의 차에 경과 시간을 나누면 rad/s 각속도가 나온다.
+// 손을 뗀 순간의 값이 초기 회전 속도가 되어 튕긴 세기 그대로 판이 돈다.
+(function () {
+  var root = document.getElementById('fw');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var velEl = document.getElementById('vel');
+  var barEl = document.getElementById('bar');
+  var powEl = document.getElementById('pow');
+  if (!root || !field || !cv || !velEl || !barEl || !powEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 5; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var N = 5, SEG = TAU / N;
+
+  var ang = -1.1, vel = 0;
+  var FRICTION = 0.26, STOP = 0.5;
+  var FLICKS = [10.2, -15.8, 6.8];   // 자동 시연 튕김 — 고정값이라 항상 같은 시연이 반복된다
+  var fi = 1, markAng = -1.1, markOp = 0, idle = 0, dpr = 1;
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+
+  function draw(peak) {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 10;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ang);
+    for (var k = 0; k < N; k++) {
+      var a0 = k * SEG;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a0 + SEG); ctx.closePath();
+      ctx.fillStyle = PAL[k]; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.20)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.save();
+      ctx.rotate(a0 + SEG / 2);
+      ctx.fillStyle = INK;
+      ctx.font = '700 13px sans-serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(k + 1), R - 14, 0);
+      ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill();
+    ctx.strokeStyle = 'rgba(23,20,26,.35)'; ctx.stroke();
+    ctx.restore();
+    // 12시 고정 포인터
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - R - 8); ctx.lineTo(cx + 7, cy - R - 8); ctx.lineTo(cx, cy - R + 8);
+    ctx.closePath();
+    ctx.fillStyle = INK; ctx.fill();
+    // 손 뗀 순간의 각도 자취 — 튕김의 시작점을 허브에서 표시한다
+    if (markOp > 0) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, 20, markAng - 0.5, markAng + 0.5);
+      ctx.strokeStyle = 'rgba(23,20,26,' + markOp * 0.7 + ')';
+      ctx.lineWidth = 4; ctx.stroke();
+    }
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+    velEl.textContent = (drag.v).toFixed(1);
+    idle = 1.2;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-24, Math.min(24, drag.v));
+    markAng = ang; markOp = 1;
+    powEl.textContent = String(Math.min(5, Math.max(1, Math.ceil(Math.abs(vel) / 4.8))));
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      vel = FLICKS[fi++ % FLICKS.length];
+      markAng = ang; markOp = 1; idle = 0;
+      powEl.textContent = String(Math.min(5, Math.max(1, Math.ceil(Math.abs(vel) / 4.8))));
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt;
+        vel *= Math.pow(FRICTION, dt);
+        velEl.textContent = vel.toFixed(1);
+        if (Math.abs(vel) < STOP) { vel = 0; velEl.textContent = '0.0'; }
+      } else if (idle > 0) { idle -= dt; }
+      else {
+        vel = FLICKS[fi++ % FLICKS.length];
+        markAng = ang; markOp = 1;
+        powEl.textContent = String(Math.min(5, Math.max(1, Math.ceil(Math.abs(vel) / 4.8))));
+      }
+    }
+    if (markOp > 0) markOp = Math.max(0, markOp - dt * 0.9);
+    draw(markOp);
+    // 속도 바 — 5단계로 채운다 (레이아웃이 아니라 transform 이다)
+    var lv = Math.min(5, Math.ceil(Math.abs(drag.on ? drag.v : vel) / 4.8));
+    for (var q = 0; q < barEl.children.length; q++) {
+      barEl.children[q].className = q < lv ? 'fw__seg is-on' : 'fw__seg';
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  for (var s = 0; s < 5; s++) {
+    var seg = document.createElement('span');
+    seg.className = 'fw__seg';
+    barEl.appendChild(seg);
+  }
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 자취 표시가 진행 중인 상태로 고정하고 루프는 돌지 않는다
+    markOp = 0.5;
+    draw(0.5);
+    for (var z = 0; z < barEl.children.length; z++) barEl.children[z].className = z < 2 ? 'fw__seg is-on' : 'fw__seg';
+    root.classList.add('is-still');
+  } else {
+    vel = FLICKS[0]; markAng = ang; markOp = 1;
+    powEl.textContent = '2';
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

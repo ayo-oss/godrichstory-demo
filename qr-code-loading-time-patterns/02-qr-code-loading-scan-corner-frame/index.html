@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>모서리 프레임이 코드 위를 훑는 스캔 애니메이션 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scf is-demo" id="scfRoot">
+  <div class="scf__badge" id="scfBadge">스캔 중 0%</div>
+  <button class="scf__ctrl" id="scfCtrl" type="button">일시정지</button>
+  <div class="scf__canvas-wrap">
+    <canvas class="scf__canvas" id="scfCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // SCF_CORNER_GLOW_RANGE_PX — 변형 1: 26 → 46 으로 늘리면 코너가 더 일찍, 더 오래 밝아진다.
+  var SCF_CORNER_GLOW_RANGE_PX = 26;
+  var SWEEP_MS = 1400;
+  var SIZE = 15;
+
+  var canvas = document.getElementById('scfCanvas');
+  var ctx = canvas.getContext('2d');
+  var badge = document.getElementById('scfBadge');
+  var ctrl = document.getElementById('scfCtrl');
+  var root = document.getElementById('scfRoot');
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+  var rand = seedRand(407025);
+  var dots = [];
+  for (var y = 0; y < SIZE; y += 1) {
+    for (var x = 0; x < SIZE; x += 1) {
+      if (rand() < 0.4) dots.push({ x: x, y: y });
+    }
+  }
+
+  function cornerGlow(dist) {
+    // 계산 한 겹: 스캔선까지 거리 → 코너 발광 강도(0~1), 범위 밖이면 0
+    var p = 1 - dist / SCF_CORNER_GLOW_RANGE_PX;
+    return p < 0 ? 0 : (p > 1 ? 1 : p);
+  }
+
+  function draw(elapsed) {
+    var cw = canvas.width, ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+
+    var pad = 28;
+    var boxX = pad, boxY = pad, boxW = cw - pad * 2, boxH = ch - pad * 2;
+    var cell = boxW / SIZE;
+
+    ctx.fillStyle = 'rgba(255,247,230,.65)';
+    dots.forEach(function (d) {
+      var s = cell * 0.55;
+      ctx.fillRect(boxX + d.x * cell + (cell - s) / 2, boxY + d.y * cell + (cell - s) / 2, s, s);
+    });
+
+    var t = (elapsed % SWEEP_MS) / SWEEP_MS;
+    var scanY = boxY + t * boxH;
+
+    var grad = ctx.createLinearGradient(0, scanY - 18, 0, scanY + 18);
+    grad.addColorStop(0, 'rgba(120,200,255,0)');
+    grad.addColorStop(0.5, 'rgba(120,200,255,.55)');
+    grad.addColorStop(1, 'rgba(120,200,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(boxX, scanY - 18, boxW, 36);
+    ctx.strokeStyle = 'rgba(180,225,255,.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(boxX, scanY);
+    ctx.lineTo(boxX + boxW, scanY);
+    ctx.stroke();
+
+    var corners = [
+      { x: boxX, y: boxY, dx: 1, dy: 1 },
+      { x: boxX + boxW, y: boxY, dx: -1, dy: 1 },
+      { x: boxX, y: boxY + boxH, dx: 1, dy: -1 },
+      { x: boxX + boxW, y: boxY + boxH, dx: -1, dy: -1 }
+    ];
+    var len = 18;
+    corners.forEach(function (c) {
+      var g = cornerGlow(Math.abs(scanY - c.y));
+      var lw = 3 + g * 2.5;
+      ctx.strokeStyle = 'rgba(' + (180 + g * 75) + ',' + (225) + ',255,' + (0.55 + g * 0.45) + ')';
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y + c.dy * len);
+      ctx.lineTo(c.x, c.y);
+      ctx.lineTo(c.x + c.dx * len, c.y);
+      ctx.stroke();
+    });
+
+    badge.textContent = '스캔 중 ' + Math.round(t * 100) + '%';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? SWEEP_MS : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= SWEEP_MS) elapsed -= SWEEP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? '일시정지' : '재생';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = '일시정지';
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ブッダブロ — マンデルブロ脱出時間フラクタル — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>発散する点の軌道だけを積み重ねると、瞑想するような対称の形がゆっくり浮かびます。同じ式で残す軌道を変えただけの絵です</span>
+  </p>
+  <div class="mb__field" role="application" aria-label="ブッダブロラボ" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta">フレームあたり軌道260 · 減衰0.94</span>
+    <span class="mb__meta mb__meta--dim">canvas · シード付き乱数 · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 부다브로트(05) — 탈출 시간의 거울상.
+// 01 은 발산 횟수를 색으로 썼다. 여기선 발산하는 점을 골라 그 궤적이 지나간 모든 픽셀에
+// 1 씩 더한다. 발산하지 않는 점(집합 내부)의 궤적은 버린다 — 이 한 줄 차이가 명치 모양을
+// 명상 상 인체상으로 뒤집는다. 표준 부다브로트는 90도 회전한 뷰(세로 대칭 인체상)를 쓴다.
+// 난수 표본은 시드 고정 LCG — 결정론 렌더(같은 프레임 시각 = 같은 누적 상태).
+// 2초 루프: 누적 → 리셋 → 다시 누적. 감마 0.94 감쇠로 오래된 궤적이 서서히 잦아들게 하면
+// 형상이 떠오르는 과정 자체가 매 루프 재현된다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var ORBITS = 260;   // 프레임당 새로 뿌리는 궤적 수 — 밝아지는 속도
+  var MAXIT  = 90;    // 궤적 추적 반복 — 이 안에 발산해야 궤적을 남긴다
+  var DECAY  = 0.94;  // 프레임 감마 감쇠 — 오래된 궤적이 잦아드는 비율
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var cv = document.getElementById('mbCv');
+  var field = cv.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_GLOW  = tokRGB('--mb-glow');   // 궤적 빛 — 라벤더
+  var C_WARM  = tokRGB('--mb-warm');   // 밝은 중심 — 복숭아
+  var C_INK   = tokRGB('--mb-ink');    // 바닥
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, IRES = 200;
+  var ov, octx, ctx;
+
+  // 표본 영역 — 만델브로가 살고 있는 c 상자(약 -2.2~1.2 · ±1.4)
+  var RX0 = -2.2, RX1 = 1.2, RY0 = -1.4, RY1 = 1.4;
+  var acc;                                 // 픽셀 누적 버퍼(Float32)
+  var rndState = 20260916;
+
+  function rnd() {
+    // mulberry32 — 시드 고정. Math.random 을 쓰면 렌더마다 다른 그림이 나온다
+    rndState |= 0; rndState = (rndState + 0x6D2B79F5) | 0;
+    var t = Math.imul(rndState ^ (rndState >>> 15), 1 | rndState);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ctx = cv.getContext('2d');
+    ov = document.createElement('canvas');
+    ov.width = IRES; ov.height = Math.max(2, Math.round(IRES * H / W));
+    octx = ov.getContext('2d');
+    reset();
+  }
+
+  function reset() {
+    acc = new Float32Array(ov.width * ov.height);
+  }
+
+  // 궤적 하나 시도 — 발산하면 지나간 픽셀에 가중치를 남긴다
+  function traceOrbit() {
+    var cr = RX0 + rnd() * (RX1 - RX0);
+    var ci = RY0 + rnd() * (RY1 - RY0);
+    var zr = 0, zi = 0, n = 0;
+    // 먼저 발산 판정(궤적 저장 없이) — 발산하는 점만 다시 걸어 흔적을 남긴다
+    while (n < MAXIT && zr * zr + zi * zi <= 4) {
+      var t = zr * zr - zi * zi + cr;
+      zi = 2 * zr * zi + ci;
+      zr = t; n++;
+    }
+    if (n >= MAXIT) return;                    // 집합 내부 — 궤적을 남기지 않는다(부다브로트의 조건)
+    zr = 0; zi = 0;                            // 다시 출발해 흔적을 남긴다
+    var iw = ov.width, ih = ov.height;
+    for (var m = 0; m < n; m++) {
+      // 표준 부다브로트 뷰 — 만델브로를 90도 회전해 세로 대칭 인체상으로
+      var px = (zi - RX0) / (RX1 - RX0) * iw;  // 허수축을 가로로(회전)
+      var py = (zr - RY0) / (RY1 - RY0) * ih;  // 실수축을 세로로
+      var ix = px | 0, iy = py | 0;
+      if (ix >= 0 && ix < iw && iy >= 0 && iy < ih) {
+        acc[iy * iw + ix] += 1;                // 방문 가중치(반복이 늦게까지 갈수록 1로 동일 — 긴 궤적이 더 밝다)
+      }
+      var t2 = zr * zr - zi * zi + cr;
+      zi = 2 * zr * zi + ci;
+      zr = t2;
+    }
+  }
+
+  function render() {
+    var iw = ov.width, ih = ov.height;
+    var img = octx.createImageData(iw, ih);
+    var px = img.data;
+    var k = 0;
+    // 누적값 로그 스케일 → 라벤더에서 복숭아로 옮는 온도곡선
+    for (var q = 0; q < acc.length; q++) {
+      var v = Math.log(1 + acc[q]) / Math.log(1 + 30);   // 0~1(30 방문이면 포화)
+      v = v > 1 ? 1 : v;
+      var r = C_INK[0] + (C_WARM[0] - C_GLOW[0]) * v + (C_GLOW[0] - C_INK[0]) * Math.min(1, v * 1.8);
+      var g = C_INK[1] + (C_WARM[1] - C_GLOW[1]) * v + (C_GLOW[1] - C_INK[1]) * Math.min(1, v * 1.8);
+      var b = C_INK[2] + (C_WARM[2] - C_GLOW[2]) * v + (C_GLOW[2] - C_INK[2]) * Math.min(1, v * 1.8);
+      px[k++] = r; px[k++] = g; px[k++] = b; px[k++] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+    // 밝은 궤적 위 얇은 광채 겹 — globalAlpha 로 온도곡선 하이라이트를 살짝 덧칠한다
+    ctx.globalAlpha = 1;
+    ctx.drawImage(ov, 0, 0, W, H);
+    ctx.globalAlpha = 0.14;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(ov, 0, 0, W, H);   // 같은 프레임 두 번 — 밝은 곳만 더 밝게(가산)
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  var steps = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 2.0;
+    var target = Math.floor(loop * 30);            // 초당 30 스텝 기준 누적 목표
+    while (steps < target) {
+      for (var o = 0; o < ORBITS; o++) traceOrbit();
+      steps++;
+    }
+    if (target < steps - 3) { reset(); steps = 0; } // 루프 리셋 — 되감아 다시 떠오른다
+    // 감쇠 — 오래된 궤적이 잦아들며 형상이 계속 다듬어진다
+    if (steps % 4 === 0) for (var q = 0; q < acc.length; q++) acc[q] *= DECAY;
+    render();
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); for (var s = 0; s < 60; s++) for (var o = 0; o < ORBITS; o++) traceOrbit(); render(); });
+
+  fit();
+  if (reduce) {
+    // reduce — 40 스텝만 쌓은 한 장을 고정(형상이 떠오른 직후)
+    for (var s = 0; s < 40; s++) for (var o = 0; o < ORBITS; o++) traceOrbit();
+    render();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

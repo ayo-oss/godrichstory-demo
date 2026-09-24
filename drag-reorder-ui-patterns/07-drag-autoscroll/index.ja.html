@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>端の自動スクロール — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="as">
+  <p class="as__hint">端までの残り距離を正規化して毎フレームのスクロール速度に掛けます</p>
+  <div class="as__view" id="asView">
+    <ul class="as__list" id="asList">
+      <li class="as__row"><span class="as__txt">出荷準備</span></li>
+      <li class="as__row"><span class="as__txt">配送中</span></li>
+      <li class="as__row"><span class="as__txt">受渡完了</span></li>
+      <li class="as__row"><span class="as__txt">チケット発行</span></li>
+      <li class="as__row"><span class="as__txt">問い合わせ確定</span></li>
+      <li class="as__row"><span class="as__txt">ポイント加算</span></li>
+      <li class="as__row"><span class="as__txt">クーポン付与</span></li>
+      <li class="as__row"><span class="as__txt">レビュー依頼</span></li>
+      <li class="as__row"><span class="as__txt">返金処理</span></li>
+    </ul>
+  </div>
+  <p class="as__meta"><b class="as__state" id="asState">speed 0px/s</b><span class="as__unit">毎秒480px</span></p>
+</div>
+</main>
+<script>
+// 가장자리 자동 スクロール(07) — 든 행을 옮기는 동안 포인터 y 를 スクロール 상자(view) rect 와 비교해
+// 위/아래 40px 밴드 안이면 가장자리까지 남은 거리를 0..1 로 정규화하고, 그 값에 최대 속도(毎秒480px)
+// 를 곱해 매 rAF 프레임 scrollBy 로 스크롤한다. 밴드 밖이면 速度 0 — 정지.
+(function () {
+  var view = document.getElementById('asView');
+  var list = document.getElementById('asList');
+  var stateEl = document.getElementById('asState');
+  if (!view || !list || !stateEl) return;
+
+  var EDGE_PX = 40;
+  var MAX_SPEED = 480; // px per second — 문구 "毎秒480px" 과 같은 값
+
+  var drag = null;   // { row, offsetInRow }
+  var lastT = 0;
+  var raf = null;
+
+  function rowsExcept(row) {
+    return Array.prototype.slice.call(list.children).filter(function (r) { return r !== row; });
+  }
+
+  function flipInsert(row, target) {
+    var siblings = rowsExcept(row);
+    var first = siblings.map(function (s) { return s.getBoundingClientRect(); });
+    list.insertBefore(row, target);
+    siblings.forEach(function (s, i) {
+      var r = s.getBoundingClientRect();
+      var dy = first[i].top - r.top;
+      if (dy !== 0) {
+        s.style.transition = 'none';
+        s.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(function () {
+          s.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+          s.style.transform = 'translateY(0)';
+        });
+      }
+    });
+  }
+
+  function reflow(row, pointerY) {
+    var siblings = rowsExcept(row);
+    var target = null;
+    for (var i = 0; i < siblings.length; i++) {
+      var r = siblings[i].getBoundingClientRect();
+      if (pointerY < r.top + r.height / 2) { target = siblings[i]; break; }
+    }
+    if (target === row.nextElementSibling) return;
+    if (target === null && row === list.lastElementChild) return;
+    flipInsert(row, target);
+  }
+
+  // 가장자리 거리 → 0..1 정규화 → 프레임당 스크롤량
+  function edgeFactor(pointerY, viewRect) {
+    var topDist = pointerY - viewRect.top;
+    var botDist = viewRect.bottom - pointerY;
+    if (topDist >= 0 && topDist < EDGE_PX) return -(1 - topDist / EDGE_PX);
+    if (botDist >= 0 && botDist < EDGE_PX) return (1 - botDist / EDGE_PX);
+    return 0;
+  }
+
+  function tick(now) {
+    if (!drag) { raf = null; stateEl.textContent = 'speed 0px/s'; return; }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    lastT = now;
+    var viewRect = view.getBoundingClientRect();
+    var f = edgeFactor(drag.pointerY, viewRect);
+    var speed = f * MAX_SPEED;
+    if (speed !== 0 && dt > 0) view.scrollBy(0, speed * dt);
+    stateEl.textContent = 'speed ' + Math.round(Math.abs(speed)) + 'px/s';
+    raf = requestAnimationFrame(tick);
+  }
+
+  function moveDrag(clientY) {
+    if (!drag) return;
+    drag.pointerY = clientY;
+    var listRect = list.getBoundingClientRect();
+    var ty = clientY - drag.offsetInRow - listRect.top - drag.row.offsetTop;
+    drag.row.style.transform = 'translateY(' + ty.toFixed(1) + 'px)';
+    reflow(drag.row, clientY);
+  }
+
+  function beginDrag(row, clientY) {
+    var r = row.getBoundingClientRect();
+    row.classList.add('as__row--drag');
+    drag = { row: row, offsetInRow: clientY - r.top, pointerY: clientY };
+    lastT = 0;
+    if (!raf) raf = requestAnimationFrame(tick);
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    var row = drag.row;
+    drag = null;
+    row.classList.remove('as__row--drag');
+    row.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+    row.style.transform = 'translateY(0)';
+    setTimeout(function () { row.style.transition = ''; }, 240);
+  }
+
+  function onDown(e) {
+    var row = e.target.closest('.as__row');
+    if (!row) return;
+    stop();
+    row.setPointerCapture(e.pointerId);
+    beginDrag(row, e.clientY);
+  }
+  function onMove(e) { moveDrag(e.clientY); }
+  function onUp() { endDrag(); }
+
+  list.addEventListener('pointerdown', onDown);
+  list.addEventListener('pointermove', onMove);
+  list.addEventListener('pointerup', onUp);
+  list.addEventListener('pointercancel', onUp);
+
+  // 자동 시연 — 같은 함수를 합성 좌표로 호출해 위/아래 가장자리를 번갈아 지나가게 한다
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function loopOnce() {
+    var vr = view.getBoundingClientRect();
+    var row = list.children[3];
+    beginDrag(row, vr.top + vr.height / 2);
+    moveDrag(vr.bottom - 6);
+    setTimeout(function () { if (drag) moveDrag(vr.top + 6); }, 520);
+    setTimeout(function () { endDrag(); }, 980);
+  }
+
+  if (reduce) {
+    view.scrollTop = 40;
+  } else {
+    loopOnce();
+    setInterval(function () { if (playing) loopOnce(); }, 1700);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오로라 커튼 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ac" id="ac">
+  <p class="ac__hint">
+    <svg class="ac__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M120 96a24 24 0 1 1 24-24a24 24 0 0 1-24 24m88-16a24 24 0 1 0 24 24a24 24 0 0 0-24-24m-56 80a24 24 0 1 0 24 24a24 24 0 0 0-24-24" opacity=".2"/><path d="M184 184a32 32 0 0 1-32 32c-13.7 0-26.95-8.93-31.5-21.22a8 8 0 0 1 15-5.56C137.74 195.27 145 200 152 200a16 16 0 0 0 0-32H40a8 8 0 0 1 0-16h112a32 32 0 0 1 32 32m-64-80a32 32 0 0 0 0-64c-13.7 0-26.95 8.93-31.5 21.22a8 8 0 0 0 15 5.56C105.74 60.73 113 56 120 56a16 16 0 0 1 0 32H24a8 8 0 0 0 0 16Zm88-32c-13.7 0-26.95 8.93-31.5 21.22a8 8 0 0 0 15 5.56C193.74 92.73 201 88 208 88a16 16 0 0 1 0 32H32a8 8 0 0 0 0 16h176a32 32 0 0 0 0-64"/></g></svg>
+    <span>カーテンが重なる場所は lighter で加算されてより明るくなり、シードを変えると空が再び広がります</span>
+  </p>
+  <div class="ac__field" id="field" role="application" aria-label="オーロラカーテン実験盤" tabindex="0">
+    <canvas class="ac__cv" id="cv"></canvas>
+    <b class="ac__badge" aria-hidden="true">160 &times; 100 &middot; lighter &times; 6</b>
+  </div>
+  <div class="ac__bar">
+    <label class="ac__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7">
+    </label>
+    <label class="ac__dial">カーテンの強さ
+      <input type="range" id="glow" min="0" max="100" step="1" value="55">
+      <b class="ac__val" id="glowVal">55</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 오로라 커튼 — 세로 노이즈 광막 여러 장을 가산(lighter) 으로 포개 놓는 밤하늘.
+// 화면은 세 겹으로 쌓는다: ① 값 노이즈 ridged 능선으로 산 실루엣이 깔린 밤하늘(배경),
+// ② 세로로 긴 fbm 장막 여섯 장 — 각 장막의 중심선이 노이즈로 좌우로 흔들리고(hem),
+// 세로 주름(strap) 이 시간축을 타고 흘러내리며, ③ 전부 globalCompositeOperation 'lighter'
+// 로 더해진다. 겹치는 만큼 밝아지는 것이 lighter 합성의 본질이고, 오로라가 이렇게 빛난다.
+// 노이즈의 셋째 축 z 는 시간(sec*FLOW) 이다 — 24프레임 내내 장막이 다시 짜여진다.
+var root = document.getElementById('ac');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var glowIn = document.getElementById('glow');
+var glowOut = document.getElementById('glowVal');
+
+var NW = 160, NH = 100;                 // 노이즈 버퍼 해상도 — 장막 여섯 장을 이 크기로 계산하고
+var bg = document.createElement('canvas');      // 나머지는 브라우저 확대 보간이 채운다
+bg.width = NW; bg.height = NH;
+var bctx = bg.getContext('2d');
+var bbuf = bctx.createImageData(NW, NH);        // 배경(밤하늘+산) 버퍼 — 매 프레임 덮어쓴다
+var bpx = bbuf.data;
+var curt = document.createElement('canvas');    // 장막 한 장을 담는 재사용 버퍼
+curt.width = NW; curt.height = NH;
+var cctx = curt.getContext('2d');
+var cbuf = cctx.createImageData(NW, NH);
+var cpx = cbuf.data;
+
+// ── mulberry32 — 시드를 고정한다. Math.random() 을 쓰면 같은 시드가 같은 하늘을 내지 않는다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── 노이즈 테이블 — PERM 은 격자 좌표를 흩는 해시, VAL 은 격자 꼭짓점마다의 값.
+// 같은 rng 로 星 위치와 장막 파라메터까지 뽑는다 — シード 하나가 하늘 전체를 결정한다.
+var PERM = new Uint8Array(512);
+var VAL = new Float32Array(256);
+var STARS = new Float32Array(46 * 4);   // x · y · 밝기 · 반짝임 속도
+var NB = 6;                             // 장막 수
+var BP = [];                            // 장막 파라메터 — bx · sig · amp · spd · ph
+function buildTables(seed) {
+  var rng = mulberry32(seed >>> 0);
+  var p = [], i, j, t;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) { j = (rng() * (i + 1)) | 0; t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  for (i = 0; i < 256; i++) VAL[i] = rng();
+  for (i = 0; i < 46; i++) {            // 星 — 산 위 하늘에만 뜬다(그리는 쪽에서 걸러 낸다)
+    STARS[i * 4] = (rng() * NW) | 0;
+    STARS[i * 4 + 1] = (rng() * NH * 0.82) | 0;
+    STARS[i * 4 + 2] = 0.3 + rng() * 0.7;
+    STARS[i * 4 + 3] = 0.4 + rng() * 1.6;
+  }
+  BP.length = 0;
+  for (var b = 0; b < NB; b++) {
+    BP.push({
+      bx: (b + 0.5) / NB * NW + (rng() - 0.5) * 14,   // 기둥 위치 — 고르게 깔고 시드로 흔든다
+      sig: 6.5 + rng() * 5.5,                          // 장막 두께(가우스 시그마)
+      amp: 13 + rng() * 11,                            // 중심선이 좌우로 치우치는 폭
+      spd: 0.7 + rng() * 0.7,                          // 이 장막만의 시간 흐름 속도(위상차)
+      ph: rng() * 64                                   // 노이즈 공간에서의 출발점
+    });
+  }
+}
+
+// ── 3D 값 노이즈 — 격자 꼭짓점마다 난수를 두고 fade 로 삼중선형 보간한다.
+// 셋째 축(z) 이 시간이다. fade 는 5차(격자 경계에서 2계도항까지 0).
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lp(a, b, t) { return a + (b - a) * t; }
+function vnoise3(x, y, z) {
+  var xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  var xf = x - xi, yf = y - yi, zf = z - zi;
+  var X = xi & 255, Y = yi & 255, Z = zi & 255;
+  var u = fade(xf), v = fade(yf), w = fade(zf);
+  var a = PERM[X] + Y, b = PERM[X + 1] + Y;
+  var aa = PERM[a] + Z, ab = PERM[a + 1] + Z, ba = PERM[b] + Z, bb = PERM[b + 1] + Z;
+  var c000 = VAL[PERM[aa]], c100 = VAL[PERM[ba]], c010 = VAL[PERM[ab]], c110 = VAL[PERM[bb]];
+  var c001 = VAL[PERM[aa + 1]], c101 = VAL[PERM[ba + 1]], c011 = VAL[PERM[ab + 1]], c111 = VAL[PERM[bb + 1]];
+  var x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+  var x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+  var y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  return y0 + (y1 - y0) * w;
+}
+
+// fbm — 주파수 2배·진폭 절반으로 쌓는다. 겹 수가 곧 장막 결의 고움이다
+function fbm(x, y, z, oct) {
+  var sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (var i = 0; i < oct; i++) {
+    sum += vnoise3(x * f, y * f, z * f) * amp;
+    norm += amp; amp *= 0.5; f *= 2;
+  }
+  return sum / norm;
+}
+
+// ridged — fbm 을 0.5 기준으로 접어 능선만 세운다. 산 실루엣의 뼈대
+function ridged(x, z) {
+  var r = 1 - Math.abs(2 * fbm(x, 7.7, z, 3) - 1);
+  return r * r;
+}
+
+function sstep(a, b, t) {
+  t = (t - a) / (b - a);
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  return t * t * (3 - 2 * t);
+}
+function clamp01(t) { return t < 0 ? 0 : (t > 1 ? 1 : t); }
+
+// ── 색 — scss 가 내린 파스텔 변수를 읽어 온다 (밤하늘·산·장막 두 단계)
+var css = getComputedStyle(root);
+function rgbOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+var NIGHT = rgbOf('--night'), NHI = rgbOf('--night-hi'), RIDGEC = rgbOf('--ridge');
+var CA1 = rgbOf('--aur-a1'), CA2 = rgbOf('--aur-a2');   // 장막 하단→상단 색 쌍 A (mint→pink)
+var CB1 = rgbOf('--aur-b1'), CB2 = rgbOf('--aur-b2');   // 쌍 B (lilac→mint)
+
+var SCALE = 0.022;         // 배경 격자 간격 — 산 능선의 굵기
+var FLOW = 0.26;           // 시간축이 흐르는 속도. 시간은 노이즈의 셋째 차원이다
+var DRIFT = 1.6;           // 산이 아주 느리게 옆으로 미끄러지는 속도(px/s)
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+var glowVal = 55;
+function glowNow() { return 0.45 + glowVal * 0.011; }   // カーテンの強さ 다이얼 → 가산 계수
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// ① 밤하늘 + 산 — ridged fbm 능선 아래를 어두운 자색으로 깔고 별을 찍는다
+function paintBack(z) {
+  var i = 0, x, y;
+  var hcol = new Float32Array(NW);      // 컬럼마다 산 높이 — 컬럼당 한 번만 샘플링한다
+  for (x = 0; x < NW; x++) {
+    hcol[x] = NH * (0.09 + 0.21 * Math.pow(ridged((x + z * DRIFT * 30) * SCALE, z * 0.05), 1.3));
+  }
+  for (y = 0; y < NH; y++) {
+    var t = y / NH;                     // 하늘 세로 그라디언트 — 지평선 쪽이 한 단계 밝다
+    var r = NIGHT[0] + (NHI[0] - NIGHT[0]) * t;
+    var g = NIGHT[1] + (NHI[1] - NIGHT[1]) * t;
+    var b = NIGHT[2] + (NHI[2] - NIGHT[2]) * t;
+    for (x = 0; x < NW; x++) {
+      if (y >= NH - hcol[x]) {          // 산 아래 — 실루엣은 하늘보다 더 어둡다
+        bpx[i] = RIDGEC[0]; bpx[i + 1] = RIDGEC[1]; bpx[i + 2] = RIDGEC[2];
+      } else {
+        bpx[i] = r; bpx[i + 1] = g; bpx[i + 2] = b;
+      }
+      bpx[i + 3] = 255;
+      i += 4;
+    }
+  }
+  for (var s = 0; s < 46; s++) {        // 星 — 반짝임은 z 의 사인, 산에 가린 별은 찍지 않는다
+    var sx = STARS[s * 4] | 0, sy = STARS[s * 4 + 1] | 0;
+    if (sy >= NH - hcol[sx]) continue;
+    var tw = STARS[s * 4 + 2] * (0.62 + 0.38 * Math.sin(z * STARS[s * 4 + 3] * 5 + sx));
+    var k = (sy * NW + sx) * 4;
+    bpx[k] = Math.min(255, bpx[k] + 165 * tw);
+    bpx[k + 1] = Math.min(255, bpx[k + 1] + 175 * tw);
+    bpx[k + 2] = Math.min(255, bpx[k + 2] + 205 * tw);
+  }
+  bctx.putImageData(bbuf, 0, 0);
+}
+
+// ② 장막 한 장 — 세로 프로파일(위가 짙고 아래로 흐려진다) × 가우스 두께 × 세로 주름.
+// 색은 하단(cLow) 에서 상단(cHigh) 로 섞인다 — 오로라의 색 변화를 세로축에 얹는다.
+function paintBand(b, z, cLow, cHigh) {
+  var P = BP[b];
+  var sig = P.sig, inv2 = 1 / (2 * sig * sig);
+  var cut = 3.5 * sig;
+  cpx.fill(0);
+  var sway = new Float32Array(NH);      // 중심선의 좌우 치우침 — 행마다 한 번 샘플링한다
+  for (var yy = 0; yy < NH; yy++) {
+    var sv = fbm(P.ph * 0.13, yy * 0.02, z * P.spd, 3);
+    sway[yy] = (sv - 0.5) * 2 * P.amp;
+  }
+  var i = 0;
+  for (var y = 0; y < NH; y++) {
+    var vy = 1 - y / NH;                                   // 위=1 · 아래=0
+    var vert = sstep(0.02, 0.36, vy) * (0.28 + 0.72 * vy); // 상단 짙게, 최하단은 산에 녹는다
+    if (vert < 0.01) { i += NW * 4; continue; }
+    var xc = P.bx + sway[y];
+    var x0 = Math.max(0, Math.floor(xc - cut));
+    var x1 = Math.min(NW - 1, Math.ceil(xc + cut));
+    i = (y * NW + x0) * 4;
+    for (var x = 0; x < NW; x++) {
+      if (x < x0 || x > x1) { i += 4; continue; }
+      var d = x - xc;
+      var gse = Math.exp(-d * d * inv2);                   // 가우스 — 장막의 단면
+      var st = fbm(x * 0.085 + P.ph, y * 0.02 - z * P.spd * 1.7, z * P.spd, 3);
+      st = clamp01((st - 0.5) * 1.9 + 0.5);                // 대비를 펴 주름을 또렷하게
+      var a = gse * vert * (0.15 + 0.85 * st) * glowNow();
+      if (a > 0.004) {
+        cpx[i]     = cLow[0] + (cHigh[0] - cLow[0]) * vy;
+        cpx[i + 1] = cLow[1] + (cHigh[1] - cLow[1]) * vy;
+        cpx[i + 2] = cLow[2] + (cHigh[2] - cLow[2]) * vy;
+        cpx[i + 3] = a * 255;                              // 알파만 조절 — rgb 는 순색 그대로
+      }
+      i += 4;
+    }
+  }
+  cctx.putImageData(cbuf, 0, 0);
+}
+
+function paint(sec) {
+  var z = sec * FLOW;                 // 셋째 축 = 시간
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  paintBack(z);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(bg, 0, 0, NW, NH, 0, 0, W, H);
+  // ③ 포개기 — lighter 는 src+dst 를 더한다. 장막이 겹치는 곳이 절로 밝아진다
+  ctx.globalCompositeOperation = 'lighter';
+  for (var b = 0; b < NB; b++) {
+    paintBand(b, z, b % 2 ? CB1 : CA1, b % 2 ? CB2 : CA2);
+    ctx.drawImage(curt, 0, 0, NW, NH, 0, 0, W, H);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function applySeed() {
+  var s = Number(seedIn.value);
+  if (!isFinite(s) || s < 1) s = 1;
+  buildTables(s);
+  if (reduce) paint(0);      // 정적 경로에서도 시드를 바꾸면 즉시 다시 그린다
+}
+function setGlow(v) {
+  glowVal = v;
+  glowOut.textContent = String(v);
+  if (reduce) paint(0);
+}
+
+seedIn.addEventListener('input', applySeed);
+seedIn.addEventListener('change', applySeed);
+glowIn.addEventListener('input', function () { setGlow(Number(glowIn.value)); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+buildTables(Number(seedIn.value) || 7);
+fit();
+setGlow(Number(glowIn.value));
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 장막이 멈춰 선 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

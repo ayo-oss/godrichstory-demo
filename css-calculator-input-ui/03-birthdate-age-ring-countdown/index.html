@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>생년월일 값이 남은 날을 채우는 디데이 링 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ar is-demo" id="ar">
+  <div class="ar__fields">
+    <label class="ar__field">
+      <span class="ar__cap">생년월일</span>
+      <input class="ar__input" id="arBirth" type="date" value="1996-04-12" aria-describedby="arReadout">
+    </label>
+    <label class="ar__field">
+      <span class="ar__cap">기준 날짜</span>
+      <input class="ar__input" id="arToday" type="date" value="2026-09-23" aria-describedby="arReadout">
+    </label>
+  </div>
+  <div class="ar__ring" aria-hidden="true">
+    <svg viewBox="0 0 72 72">
+      <circle class="ar__track" cx="36" cy="36" r="30"></circle>
+      <circle class="ar__fill" id="arFill" cx="36" cy="36" r="30"></circle>
+    </svg>
+    <span class="ar__age" id="arAge">30</span>
+  </div>
+  <p class="ar__readout" id="arReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('ar');
+  var birthInput = document.getElementById('arBirth');
+  var refInput = document.getElementById('arToday');
+  var fill = document.getElementById('arFill');
+  var ageEl = document.getElementById('arAge');
+  var readout = document.getElementById('arReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var RADIUS = 30;
+  var CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+  fill.style.strokeDasharray = CIRCUMFERENCE.toFixed(2);
+
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function parseYmd(s) {
+    var p = s.split('-');
+    return { y: parseInt(p[0], 10), m: parseInt(p[1], 10), d: parseInt(p[2], 10) };
+  }
+  function daysBetween(a, b) {
+    var msPerDay = 86400000;
+    var da = Date.UTC(a.y, a.m - 1, a.d);
+    var db = Date.UTC(b.y, b.m - 1, b.d);
+    return Math.round((db - da) / msPerDay);
+  }
+  // 계산 한 겹 — 생년월일·기준일 두 값의 날짜 차이로 나이와 다음 생일까지 남은 날, 그 비율(링 채움)을 구한다
+  function ageAt(birth, ref) {
+    var age = ref.y - birth.y;
+    var hadBirthdayThisYear = (ref.m > birth.m) || (ref.m === birth.m && ref.d >= birth.d);
+    if (!hadBirthdayThisYear) age -= 1;
+    return age;
+  }
+  function nextBirthdayGap(birth, ref) {
+    var nextY = ref.y;
+    var thisYearBday = { y: ref.y, m: birth.m, d: birth.d };
+    var gapThisYear = daysBetween(ref, thisYearBday);
+    if (gapThisYear < 0) { nextY = ref.y + 1; }
+    var target = { y: nextY, m: birth.m, d: birth.d };
+    return daysBetween(ref, target);
+  }
+
+  var SENT_PREFIX = '만 ', SENT_MID = '세이고, 다음 생일까지 ', SENT_SUFFIX = '일 남았습니다';
+
+  var targetT = 0, renderedT = 0;
+  var LERP_RATE = 0.13; // 변형 03: 낮추면 링이 값 변화를 더 천천히 뒤따라간다
+
+  function applyValues() {
+    var birth = parseYmd(birthInput.value);
+    var ref = parseYmd(refInput.value);
+    var age = ageAt(birth, ref);
+    var gap = nextBirthdayGap(birth, ref);
+    var yearLen = 365.2425;
+    targetT = clamp01(1 - gap / yearLen);
+    ageEl.textContent = age;
+    readout.textContent = SENT_PREFIX + age + SENT_MID + gap + SENT_SUFFIX;
+    if (reduce) { renderedT = targetT; paint(); }
+  }
+
+  function paint() {
+    var offset = CIRCUMFERENCE * (1 - renderedT);
+    fill.style.strokeDashoffset = offset.toFixed(2);
+  }
+
+  birthInput.addEventListener('input', function () { human(); applyValues(); });
+  birthInput.addEventListener('change', function () { human(); applyValues(); });
+  refInput.addEventListener('input', function () { human(); applyValues(); });
+  refInput.addEventListener('change', function () { human(); applyValues(); });
+
+  var DEMO_BIRTHDAYS = ['1996-04-12', '1990-12-30', '2001-09-24', '1988-02-05', '2015-06-18'];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_BIRTHDAYS.length);
+      if (idx !== lastIdx) { lastIdx = idx; birthInput.value = DEMO_BIRTHDAYS[idx]; applyValues(); }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame() { renderedT += (targetT - renderedT) * LERP_RATE; paint(); requestAnimationFrame(frame); }
+
+  applyValues();
+
+  if (!reduce) { requestAnimationFrame(driveTick); requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

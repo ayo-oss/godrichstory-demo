@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buffering Overlay on a Frozen Frame — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="player is-demo" id="player">
+  <div class="frame" id="frame" aria-hidden="true">
+    <span class="frameDot"></span>
+    <span class="frameDot"></span>
+    <span class="frameDot"></span>
+  </div>
+  <div class="overlay" id="overlay">
+    <span class="ring" id="ring"></span>
+  </div>
+  <button class="toggleBtn" id="toggleBtn" type="button" aria-pressed="false">Try stalling buffering now</button>
+  <p class="status" id="status" aria-live="polite">Buffering</p>
+</div>
+</main>
+<script>
+(function () {
+  var STALL_CYCLE_MS = 2000; // 정지→회복 한 사이클 — 캡처 창(2초)의 약수
+  var STALL_PORTION = 0.72; // 한 사이클 중 정지 상태가 차지하는 비율
+  var TICK_MS = 60; // 계산 갱신 간격
+  var SPIN_MS_STALL_START = 1500; // 정지 시작 시 스피너 한 바퀴 시간(느림)
+  var SPIN_MS_STALL_END = 550; // 정지가 길어질수록 빨라지는 하한
+
+  var overlay = document.getElementById('overlay');
+  var ring = document.getElementById('ring');
+  var status = document.getElementById('status');
+  var toggleBtn = document.getElementById('toggleBtn');
+  var player = document.getElementById('player');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  // 정지 경과 시간과 사이클 위상만으로 스피너 속도·오버레이 흐림 정도를 계산한다 — 값 자체는 CSS 트윈이 아니라 산술이다
+  function tick(elapsedMs) {
+    var phase = elapsedMs % STALL_CYCLE_MS;
+    var stallSpan = STALL_CYCLE_MS * STALL_PORTION;
+    var stalling = phase < stallSpan;
+    if (stalling) {
+      var stallFrac = clamp(phase / stallSpan, 0, 1);
+      var spinMs = SPIN_MS_STALL_START - (SPIN_MS_STALL_START - SPIN_MS_STALL_END) * stallFrac;
+      // 합성파 두 개로 네트워크 흔들림을 흉내낸다 — Math.random 은 렌더마다 프레임이 달라져 측정을 어지럽힌다
+      var jitter = 0.5 + 0.28 * Math.sin(elapsedMs / 190) + 0.14 * Math.sin(elapsedMs / 61);
+      jitter = clamp(jitter, 0, 1);
+      ring.style.setProperty('--spin-duration', spinMs.toFixed(0) + 'ms');
+      overlay.style.setProperty('--blur', (4 + jitter * 7).toFixed(2) + 'px');
+      overlay.style.opacity = (0.5 + jitter * 0.28).toFixed(2);
+      if (status.textContent !== 'Buffering') status.textContent = 'Buffering';
+    } else {
+      overlay.style.opacity = '0';
+      if (status.textContent !== 'Playback resumed') status.textContent = 'Playback resumed';
+    }
+  }
+
+  var timer = null;
+  var start = 0;
+  function loop() {
+    tick(performance.now() - start);
+  }
+
+  function human() {
+    if (player.classList.contains('is-demo')) {
+      player.classList.remove('is-demo');
+      window.clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  toggleBtn.addEventListener('click', function () {
+    human();
+    var manualStall = overlay.style.opacity !== '1';
+    overlay.style.opacity = manualStall ? '1' : '0';
+    overlay.style.setProperty('--blur', '8px');
+    ring.style.setProperty('--spin-duration', '900ms');
+    status.textContent = manualStall ? 'Buffering' : 'Playback resumed';
+    toggleBtn.setAttribute('aria-pressed', manualStall ? 'true' : 'false');
+    toggleBtn.textContent = manualStall ? 'Resume playback' : 'Try stalling buffering now';
+  });
+
+  if (!reduce) {
+    start = performance.now();
+    tick(0);
+    timer = window.setInterval(loop, TICK_MS);
+  } else {
+    // reduce: 실사용 경로 — 회전·흐림 변화는 멈추고 정지된 오버레이 상태 하나만 고정으로 보여준다
+    overlay.style.opacity = '0.6';
+    overlay.style.setProperty('--blur', '6px');
+    status.textContent = 'Buffering';
+  }
+})();
+</script>
+</body>
+</html>

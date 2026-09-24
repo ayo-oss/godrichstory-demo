@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>미로 무늬 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tml" id="tml">
+  <p class="tml__hint">
+    <svg class="tml__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M144 48h32v32h-32zm40 40h32v32h-32zm-40 40h32v32h-32zm-40 40h32v32h-32z" opacity=".2"/><path d="M228 92h-44V48a12 12 0 0 0-12-12H48a12 12 0 0 0-12 12v56a12 12 0 0 0 12 12h44v44a12 12 0 0 0 12 12h44v44a12 12 0 0 0 12 12h68a12 12 0 0 0 12-12v-56a12 12 0 0 0-12-12h-44v-44a12 12 0 0 0-12-12m-12 24h44v32h-44zm-56 56h44v32h-44zm-56 56h44v32H60zm124 32h-44v-32h44zM60 92V60h44v32zm44 24H60v-16h44z"/></g></svg>
+    <span>점과 줄 사이의 중간 지점 — 줄이 꺾여 길을 냅니다. F 를 움직이면 미로가 다시 짜입니다</span>
+  </p>
+  <div class="tml__field" id="field">
+    <canvas class="tml__cv" id="cv"></canvas>
+  </div>
+  <div class="tml__bar">
+    <label class="tml__dial">시드
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="패턴 시드">
+    </label>
+    <label class="tml__dial tml__grow">사료율 F
+      <input type="range" id="fk" min="0.010" max="0.070" step="0.001" value="0.037" aria-label="사료율 F">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 미로 — Gray-Scott 반응-확산. 점(높은 F)과 줄(낮은 F) 사이 구간에서는
+// 줄이 마구 꺾이고 갈라져 미로 같은 통로 무늬가 된다. 격자가 낮은 해상도라
+// 곡선에 계단이 살짝 보이는 것도 이 계열의 특징이다.
+// 매 프레임 8스텝씩 라플라스 확산 + 반응항을 계산해 ImageData 로 화소를 박고
+// 저해상 버퍼를 putImageData 로 그린 뒤 drawImage 로 확대한다.
+var root = document.getElementById('tml');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var fkIn = document.getElementById('fk');
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var GW = 64, GH = 40;            // 격자 셀 수 (480x300 비율)
+var DU = 0.16, DV = 0.08;        // 확산 계수 (고정 — 5점 라플라스 dt=1 안정 스케일)
+var F = 0.037, K = 0.060;        // 사료율·제거율 (fk 슬라이더가 F 를 움직인다)
+var STEPS = 8;                   // 프레임당 시뮬레이션 스텝
+var PRE = 900;                   // 시작 시 미리 성숙시키는 스텝 — 통로가 짜인 직후
+var WOBBLE = 0.006;              // 성숙 뒤에도 계속 주는 미세 U 주입량 — 미로가 살아 흐른다
+var u = new Float32Array(GW * GH);
+var v = new Float32Array(GW * GH);
+var u2 = new Float32Array(GW * GH);
+var v2 = new Float32Array(GW * GH);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0, phase = 0;
+
+// ── 색 — scss 가 내려준 파스텔 사용자속성을 읽어 5단계 LUT 를 미리 편다 ──
+var css = getComputedStyle(root);
+var LUT = new Uint8Array(256 * 3);
+function hex6(s) {
+  s = String(s).trim().replace('#', '');
+  if (s.length === 3) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+  return [parseInt(s.slice(0, 2), 16) || 0, parseInt(s.slice(2, 4), 16) || 0, parseInt(s.slice(4, 6), 16) || 0];
+}
+function buildLut() {
+  var stops = [hex6(tok('--tml-c0')), hex6(tok('--tml-c1')), hex6(tok('--tml-c2')), hex6(tok('--tml-c3')), hex6(tok('--tml-c4'))];
+  for (var q = 0; q < 256; q++) {
+    var t = q / 255 * (stops.length - 1);
+    var k = Math.min(stops.length - 2, Math.floor(t));
+    var f = t - k;
+    for (var c = 0; c < 3; c++) LUT[q * 3 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f;
+  }
+}
+function tok(name) { return css.getPropertyValue(name); }
+
+// ── 시드 — 작은 V 조각 20개를 널브러뜨린다. 자라 만나며 통로가 생긴다 ──
+function seedField(sd) {
+  var rng = mulberry32(sd >>> 0);
+  u.fill(1); v.fill(0);
+  var n = 20;
+  for (var s = 0; s < n; s++) {
+    var cx = 2 + Math.floor(rng() * (GW - 6));
+    var cy = 1 + Math.floor(rng() * (GH - 4));
+    var w = 1 + Math.floor(rng() * 4);
+    var h = 1 + Math.floor(rng() * 3);
+    for (var y = cy; y < Math.min(GH, cy + h); y++) {
+      for (var x = cx; x < Math.min(GW, cx + w); x++) {
+        v[y * GW + x] = 0.5; u[y * GW + x] = 0.25;
+      }
+    }
+  }
+}
+
+// ── 한 스텝 — 5점 라플라스(토러스 경계) + Gray-Scott 반응항 ──
+function step() {
+  for (var y = 0; y < GH; y++) {
+    var yT = ((y - 1 + GH) % GH) * GW, yB = ((y + 1) % GH) * GW, yC = y * GW;
+    for (var x = 0; x < GW; x++) {
+      var xL = (x - 1 + GW) % GW, xR = (x + 1) % GW;
+      var i = yC + x;
+      var uc = u[i], vc = v[i];
+      var lapU = u[yC + xL] + u[yC + xR] + u[yT + x] + u[yB + x] - 4 * uc;
+      var lapV = v[yC + xL] + v[yC + xR] + v[yT + x] + v[yB + x] - 4 * vc;
+      var uvv = uc * vc * vc;
+      var nu = uc + DU * lapU - uvv + F * (1 - uc);
+      var nv = vc + DV * lapV + uvv - (F + K) * vc;
+      u2[i] = nu < 0 ? 0 : (nu > 1 ? 1 : nu);
+      v2[i] = nv < 0 ? 0 : (nv > 1 ? 1 : nv);
+    }
+  }
+  var tu = u; u = u2; u2 = tu;
+  var tv = v; v = v2; v2 = tv;
+}
+
+var buf = null, small = null, sctx = null;
+function setupBuffers() {
+  small = document.createElement('canvas');
+  small.width = GW; small.height = GH;
+  sctx = small.getContext('2d');
+  buf = sctx.createImageData(GW, GH);
+}
+
+function paint() {
+  var px = buf.data, i4 = 0;
+  for (var p = 0; p < GW * GH; p++) {
+    // V 농도 0(종이) → 1(잉크끼 파스텔) — LUT 로 색 단계
+    var q = Math.max(0, Math.min(255, (v[p] * 340) | 0));
+    px[i4] = LUT[q * 3];
+    px[i4 + 1] = LUT[q * 3 + 1];
+    px[i4 + 2] = LUT[q * 3 + 2];
+    px[i4 + 3] = 255;
+    i4 += 4;
+  }
+  sctx.putImageData(buf, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, GW, GH, 0, 0, W, H);
+}
+
+// 미세 U 주입 — 사인 리본이 시간에 흐르며 아주 조금씩 U 를 채운다.
+// 짜인 미로가 이 흔들림에 반응해 통로를 계속 다시 낸다(살아 있는 무늬).
+function wobble(tt) {
+  var ph = phase;
+  for (var y = 0; y < GH; y++) {
+    for (var x = 0; x < GW; x++) {
+      var wob = 0.5 + 0.5 * Math.sin(x * 0.18 + y * 0.12 + tt + ph);
+      var i = y * GW + x;
+      var nu = u[i] + wob * WOBBLE;
+      u[i] = nu > 1 ? 1 : nu;
+    }
+  }
+}
+
+function frame() {
+  for (var s = 0; s < STEPS; s++) { wobble(phase + s * 0.02); step(); }
+  phase += STEPS * 0.02;
+  paint();
+  raf = requestAnimationFrame(frame);
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 시드 재생성 → 미리성숙(PRE 스텝 동기) → 즉시 다시 그리기 (reduce 경로에서도)
+function regrow(sd) {
+  phase = sd * 0.7;
+  seedField(sd);
+  for (var s = 0; s < PRE; s++) step();
+  paint();
+}
+
+function onSeed() {
+  var val = Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1));
+  regrow(val);
+}
+function onFk() {
+  F = Number(fkIn.value);
+  // reduce 경로에서도 프레임이 즉시 반응하게 — 새 F 로 짧게 진행해 다시 그린다
+  if (reduce) { for (var s = 0; s < 60; s++) step(); paint(); }
+}
+
+seedIn.addEventListener('input', onSeed);
+seedIn.addEventListener('change', onSeed);
+fkIn.addEventListener('input', onFk);
+fkIn.addEventListener('change', onFk);
+window.addEventListener('resize', function () { fit(); paint(); });
+
+buildLut();
+setupBuffers();
+fit();
+regrow(Number(seedIn.value) || 7);
+if (reduce) {
+  // reduce — 루프를 돌지 않고 성숙 상태 한 장만 그린다
+  root.classList.add('is-still');
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

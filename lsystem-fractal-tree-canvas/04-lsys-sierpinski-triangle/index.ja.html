@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シェルピンスキーの三角形 — Lシステム フラクタルツリー 9種 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>A→B-A-B、B→A+B+A の2文字を60°の亀歩きで展開すると一筆書きの矢じり曲線になります。世代を重ねるほど、その曲線がシェルピンスキーの三角形の隙間をそのまま埋めていきます</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="シェルピンスキーの三角形ラボ" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">規則 A→B-A-B · 角度60° · 世代 <b id="lsGen">0</b></span>
+    <span class="ls__meta ls__meta--dim">canvas · 文字列書き換え · beginPath</span>
+  </div>
+</div>
+</main>
+<script>
+// 셸핀스키 삼각형(04) — 화살촉(Arrowhead) L-시스템: A,B 두 기호가 서로를 끼워 넣으며
+// 자라는 한붓그리기 곡선이 세대가 늘수록 삼각형 가스켓의 구멍을 정확히 남긴다.
+// 움직임 = 世代 크로스페이드 성장(0→6) + 완성 뒤 곡선을 따라 도는 빛 한 점.
+(function () {
+  // ── 변형 상수 블록 ──
+  var ANGLE  = 60;
+  var MAXGEN = 6;
+  var CYCLE  = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var genEl = document.getElementById('lsGen');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_LINE = tokRGB('--ls-bark2');
+  var C_GLOW = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  var RULE = { 'A': 'B-A-B', 'B': 'A+B+A' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  // 거북 해석 — A,B 모두 전진 한 걸음, +,- 는 60도 회전. 열린 곡선 점 목록을 만든다.
+  function turtlePath(str, step) {
+    var x = 0, y = 0, a = 0;
+    var pts = [{ x: x, y: y }];
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'A' || ch === 'B') {
+        x += Math.cos(a) * step;
+        y += Math.sin(a) * step;
+        pts.push({ x: x, y: y });
+      } else if (ch === '+') {
+        a -= ANGLE * Math.PI / 180;
+      } else if (ch === '-') {
+        a += ANGLE * Math.PI / 180;
+      }
+    }
+    return pts;
+  }
+
+  var AXIOM = 'A';
+  var POLY = [];
+  (function precompute() {
+    var strs = [];
+    for (var g = 0; g <= MAXGEN; g++) strs.push(expand(AXIOM, g));
+    var raw = [];
+    for (var g2 = 0; g2 <= MAXGEN; g2++) raw.push(turtlePath(strs[g2], 1 / Math.pow(2, g2)));
+    var last = raw[MAXGEN];
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < last.length; i++) {
+      minX = Math.min(minX, last[i].x); maxX = Math.max(maxX, last[i].x);
+      minY = Math.min(minY, last[i].y); maxY = Math.max(maxY, last[i].y);
+    }
+    var span = Math.max(maxX - minX, maxY - minY) || 1;
+    for (var g3 = 0; g3 <= MAXGEN; g3++) {
+      var norm = [];
+      for (var j = 0; j < raw[g3].length; j++) {
+        norm.push({ x: (raw[g3][j].x - minX) / span, y: (raw[g3][j].y - minY) / span });
+      }
+      POLY.push(norm);
+    }
+  })();
+
+  function rgb(c, a) {
+    return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')';
+  }
+
+  function drawPath(ctx, pts, ox, oy, sc, col, alpha, lw) {
+    if (!pts.length) return;
+    ctx.strokeStyle = rgb(col, alpha);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(ox + pts[0].x * sc, oy + pts[0].y * sc);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(ox + pts[i].x * sc, oy + pts[i].y * sc);
+    ctx.stroke();
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = Math.min(W, H) * 0.82;
+    var ox = (W - sc) / 2, oy = (H - sc) / 2;
+
+    var grPhase = Math.min(loop / 0.68, 1);
+    var genF = grPhase * MAXGEN;
+    var gA = Math.min(MAXGEN, Math.floor(genF));
+    var gB = Math.min(MAXGEN, gA + 1);
+    var f = genF - gA;
+
+    // 세대가 늘수록 선분 간격이 좁아지므로 굵기를 간격에 맞춰 키운다 —
+    // 화살촉 곡선이 스스로 겹치며 가스켓 안쪽을 실제로 채운다(피사체를 키운다 원칙)
+    var lwA = Math.min(4.2, Math.max(1.3, sc / Math.pow(2, gA) * 0.62));
+    var lwB = Math.min(4.2, Math.max(1.1, sc / Math.pow(2, gB) * 0.62));
+    drawPath(ctx, POLY[gA], ox, oy, sc, C_LINE, 1, lwA);
+    if (f > 0 && gB !== gA) drawPath(ctx, POLY[gB], ox, oy, sc, C_GLOW, f, lwB);
+
+    if (genEl) genEl.textContent = String(gA);
+
+    if (loop >= 0.68) {
+      var t = (loop - 0.68) / 0.32;
+      var pts = POLY[MAXGEN];
+      var idxF = t * (pts.length - 1);
+      var i0 = Math.floor(idxF) % (pts.length - 1);
+      var lf = idxF - Math.floor(idxF);
+      var p0 = pts[i0], p1 = pts[i0 + 1] || pts[pts.length - 1];
+      var lx = ox + (p0.x + (p1.x - p0.x) * lf) * sc;
+      var ly = oy + (p0.y + (p1.y - p0.y) * lf) * sc;
+      ctx.fillStyle = rgb(C_GLOW, 0.9);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.85 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.85);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

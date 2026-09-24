@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Button whose edge lights up by tilt amount — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="eb is-demo" id="eb">
+  <p class="eb__hint"><span>Tilt magnitude becomes an angle, and a thin edge band brightens along that direction</span></p>
+  <div class="eb__scene" id="scene">
+    <span class="eb__floor" id="floor" aria-hidden="true"></span>
+    <div class="eb__wrap" id="wrap">
+      <button class="eb__btn" id="btn" type="button" aria-label="Learn more — button whose edge brightens with the tilt amount">
+        <span class="eb__bevel" id="bevel" aria-hidden="true"></span>
+        <span class="eb__label">Learn more</span>
+      </button>
+      <span class="eb__side" id="side" aria-hidden="true"></span>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('eb');
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var bevel = document.getElementById('bevel');
+  var floor = document.getElementById('floor');
+  var side = document.getElementById('side');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var MAX_DEG = 13;   // 불변
+  var LERP = 0.16;
+  var targetNX = 0, targetNY = 0;
+  var curNX = 0, curNY = 0;
+  var hasPointer = false;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function syntheticTarget(t) { return [Math.sin(t * 1.2 + 0.6), Math.sin(t * 0.88)]; }
+
+  // 기울기 벡터의 각도·크기 → conic-gradient 회전각·광 폭. 테두리 광의 위치는 기운 방향과 같다
+  // 폭·대비를 키워 테두리 띠가 버튼 변 전체를 가로지르게 한다 — MAX_DEG(기울기 각) 값은 그대로
+  function render(nx, ny) {
+    var rotY = nx * MAX_DEG;
+    var rotX = -ny * MAX_DEG;
+    btn.style.transform = 'rotateX(' + rotX.toFixed(2) + 'deg) rotateY(' + rotY.toFixed(2) + 'deg)';
+    var mag = clamp(Math.sqrt(nx * nx + ny * ny), 0, 1);
+    var ang = Math.atan2(ny, nx) * 180 / Math.PI + 90;
+    var width = 70 + mag * 110;
+    var alpha = (0.38 + mag * 0.6).toFixed(2);
+    bevel.style.background = 'conic-gradient(from ' + ang.toFixed(1) + 'deg, rgba(91,140,248,0), rgba(91,140,248,' + alpha + ') ' + (width / 2).toFixed(1) + 'deg, rgba(91,140,248,0) ' + width.toFixed(1) + 'deg)';
+    // 바닥 그림자 — 기운 방향으로 옮겨간다
+    var floorShift = nx * 46;
+    floor.style.transform = 'translateX(' + floorShift.toFixed(1) + 'px) scale(' + (1 + mag * 0.4).toFixed(2) + ')';
+    floor.style.opacity = (0.14 + mag * 0.7).toFixed(2);
+    // 측면 두께 — 기운 크기만큼 버튼 아래 「옆면」이 길어져 3D 두께로 읽힌다(MAX_DEG 불변, 순수 표현 한 겹)
+    side.style.transform = 'scaleY(' + (0.4 + mag * 2.6).toFixed(2) + ')';
+    side.style.opacity = (0.25 + mag * 0.7).toFixed(2);
+  }
+
+  var t0 = null;
+  function loop(now) {
+    if (t0 === null) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!hasPointer && !reduce) {
+      var s = syntheticTarget(t);
+      targetNX = s[0]; targetNY = s[1];
+    }
+    curNX += (targetNX - curNX) * LERP;
+    curNY += (targetNY - curNY) * LERP;
+    render(curNX, curNY);
+    requestAnimationFrame(loop);
+  }
+
+  function pointFromEvent(e) {
+    var r = scene.getBoundingClientRect();
+    var nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    var ny = ((e.clientY - r.top) / r.height) * 2 - 1;
+    return [clamp(nx, -1, 1), clamp(ny, -1, 1)];
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var p = pointFromEvent(e);
+    targetNX = p[0]; targetNY = p[1];
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetNX = 0; targetNY = 0;
+  });
+  btn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    targetNX = 0.9; targetNY = 0.9;
+    if (reduce) { render(targetNX, targetNY); }
+    setTimeout(function () { if (!hasPointer) { targetNX = 0; targetNY = 0; if (reduce) { render(targetNX, targetNY); } } }, 240);
+  });
+  btn.addEventListener('keydown', function (e) {
+    var step = 0.24;
+    var moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    var m = moves[e.key];
+    if (!m) return;
+    e.preventDefault();
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    targetNX = clamp(targetNX + m[0], -1, 1);
+    targetNY = clamp(targetNY + m[1], -1, 1);
+    if (reduce) { render(targetNX, targetNY); }
+  });
+
+  if (reduce) {
+    render(0.5, 0.5);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

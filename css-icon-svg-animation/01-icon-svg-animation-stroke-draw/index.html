@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stroke draw — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <p class="badge">
+    <svg class="badge__icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path class="badge__trail" pathLength="100" d="M12 2l2.9 6.9L22 9.3l-5.5 4.8 1.6 7.1L12 17.5 5.9 21.2l1.6-7.1L2 9.3l7.1-.4z"/>
+      <path class="badge__star" pathLength="100" d="M12 2l2.9 6.9L22 9.3l-5.5 4.8 1.6 7.1L12 17.5 5.9 21.2l1.6-7.1L2 9.3l7.1-.4z"/>
+      <circle class="badge__spark" r="1" cx="0" cy="0"/>
+      <circle class="badge__bit" r=".55" cx="12" cy="2" style="--dx:0px;--dy:-2.6px"/>
+      <circle class="badge__bit" r=".5" cx="12" cy="2" style="--dx:2.1px;--dy:-1.4px"/>
+      <circle class="badge__bit" r=".5" cx="12" cy="2" style="--dx:-2.1px;--dy:-1.4px"/>
+    </svg>
+    새 기능
+  </p>
+</main>
+<script>
+// 스로브 드로잉 선 끝 스파크 — 선이 아니라 '펜 끝'이 움직인다. path.getTotalLength() 로 경로의
+// 실측 길이를 얻어 getPointAtLength() 로 펜 끝 좌표를 계산해 스파크 <circle> 을 옮긴다.
+// 방출 각도는 이전 좌표와의 차분으로 계산 — 애니메이션 타이밍을 하드코딩하지 않고
+// getComputedStyle() 로 현재 stroke-dashoffset 실측값을 읽어 그려진 길이를 구한다.
+(function () {
+  var icon = document.querySelector('.badge__icon');
+  if (!icon) return;
+  var star = icon.querySelector('.badge__star');
+  var spark = icon.querySelector('.badge__spark');
+  var bits = [].slice.call(icon.querySelectorAll('.badge__bit'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !spark || !star.getTotalLength) { if (spark) spark.style.display = 'none'; return; }
+
+  var L = star.getTotalLength();
+  // dasharray:100 + pathLength:100 → offset 0..-100 (그리기), 0..-100 (지우기: 시작점부터 지워진다).
+  // 그리기 중 펜 끝 = 그려진 길이(100-off), 지우기 중 움직이는 경계 = 시작점부터(-off). 둘 다 pen 위치.
+  function penPos() {
+    var off = parseFloat(getComputedStyle(star).strokeDashoffset) || 0;
+    var at = off >= 0 ? 100 - off : -off; // 지워지는 동안 경계는 시작점 쪽으로 되돌아온다
+    return star.getPointAtLength(Math.max(0, Math.min(100, at)) / 100 * L);
+  }
+
+  var prev = null, lastEmit = 0, emitIdx = 0;
+  function frame(t) {
+    var p = penPos();
+    if (prev && (Math.abs(p.x - prev.x) + Math.abs(p.y - prev.y)) > .05) {
+      spark.setAttribute('cx', p.x);
+      spark.setAttribute('cy', p.y);
+      spark.style.opacity = 1;            // 펜이 움직이는 동안만 스파크가 켜진다
+      // 이동 방향의 뒤쪽으로 찌꺼기 스파크 방출 (초당 최대 20개)
+      if (t - lastEmit > 50) {
+        lastEmit = t;
+        var ang = Math.atan2(p.y - prev.y, p.x - prev.x) + Math.PI; // 진행 반대 = 미광 잔상 쪽
+        var sp = .4 + Math.random() * .5;
+        var b = bits[emitIdx++ % bits.length];
+        b.setAttribute('cx', p.x);
+        b.setAttribute('cy', p.y);
+        b.style.setProperty('--dx', (Math.cos(ang) * sp * 6).toFixed(2) + 'px');
+        b.style.setProperty('--dy', (Math.sin(ang) * sp * 6).toFixed(2) + 'px');
+        b.style.animation = 'none';
+        void b.getBBox; // 재배치 확정 — 같은 프레임 재시작 보장
+        b.style.animation = '';
+        b.style.animationName = 'bit-fly';
+      }
+      prev = p;
+    } else {
+      if (prev) spark.style.opacity = 0;  // 멈춤 구간(55~80%)엔 펜도 쉰다
+      if (!prev) prev = p;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

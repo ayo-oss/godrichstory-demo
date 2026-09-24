@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>関節値がつながって揺れる紙人形 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">関節値がつながって揺れる紙人形</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var SCENE_BG = '#17141a';
+  var PAPER = '#fff7e6';
+  var ANCHOR = { x: 160, y: 26 };
+  var FK_DELAY_RAD = 0.7;
+  var SWING_PERIOD_MS = 900;
+  var SWING_AMP_DEG = 34;
+  var FLOOR_Y = 184;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(41308);
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function deg(r) { return r * 180 / Math.PI; }
+  function rad(d) { return d * Math.PI / 180; }
+
+  var ARM_L = [ { seg: [22, 20], base: rad(150), delay: FK_DELAY_RAD * 0 },
+                { seg: [22, 20], base: rad(150), delay: FK_DELAY_RAD * 1 } ];
+  var ARM_R = [ { seg: [22, 20], base: rad(30), delay: FK_DELAY_RAD * 0.6 },
+                { seg: [22, 20], base: rad(30), delay: FK_DELAY_RAD * 1.6 } ];
+  var LEG_L = [ { seg: [24, 22], base: rad(100), delay: FK_DELAY_RAD * 0.4 } ];
+  var LEG_R = [ { seg: [24, 22], base: rad(80), delay: FK_DELAY_RAD * 1.2 } ];
+
+  function jointAngle(t, def, chainIndex) {
+    var w = Math.PI * 2 * t;
+    var sway = Math.sin(w - chainIndex * FK_DELAY_RAD) * rad(SWING_AMP_DEG) * Math.pow(0.82, chainIndex);
+    return def.base + sway;
+  }
+
+  function swayFactor(t) { return Math.sin(Math.PI * 2 * t); }
+
+  function fkChain(originX, originY, segs, t) {
+    var x = originX, y = originY, cum = 0;
+    var pts = [{ x: x, y: y }];
+    for (var i = 0; i < segs.length; i += 1) {
+      cum += jointAngle(t, segs[i], i);
+      x += Math.cos(cum) * segs[i].seg[0];
+      y += Math.sin(cum) * segs[i].seg[0];
+      pts.push({ x: x, y: y });
+    }
+    return pts;
+  }
+
+  function strokeChain(pts, w) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = PAPER;
+    for (var i = 0; i < pts.length - 1; i += 1) {
+      ctx.lineWidth = w - i * 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[i].x, pts[i].y);
+      ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+      ctx.stroke();
+    }
+    for (var j = 1; j < pts.length; j += 1) {
+      ctx.fillStyle = 'rgba(23,20,26,.35)';
+      ctx.beginPath(); ctx.arc(pts[j].x, pts[j].y, 15, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawLimbShadow(pts) {
+    var tip = pts[pts.length - 1];
+    var diff = Math.abs(tip.x - ANCHOR.x);
+    var rx = clamp(18 + diff * 0.26, 18, 40);
+    var alpha = clamp(0.2 + diff * 0.006, 0.18, 0.45);
+    ctx.fillStyle = 'rgba(10,8,12,' + alpha + ')';
+    ctx.beginPath();
+    ctx.ellipse(tip.x, FLOOR_Y, rx, rx * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  var tNow = 0;
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+
+    var sway = swayFactor(tNow);
+    var glowAlpha = clamp(0.1 + Math.abs(sway) * 0.1, 0.1, 0.22);
+    var glow = ctx.createRadialGradient(ANCHOR.x, ANCHOR.y + 74, 10, ANCHOR.x, ANCHOR.y + 74, 170);
+    glow.addColorStop(0, 'rgba(255,247,230,' + glowAlpha + ')');
+    glow.addColorStop(1, 'rgba(255,247,230,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, LW, LH);
+
+    ctx.strokeStyle = 'rgba(255,247,230,.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ANCHOR.x, 4); ctx.lineTo(ANCHOR.x, ANCHOR.y); ctx.stroke();
+
+    var shoulderY = ANCHOR.y + 44;
+    var hipY = ANCHOR.y + 92;
+
+    ctx.fillStyle = 'rgba(0,0,0,.28)';
+    ctx.beginPath(); ctx.ellipse(ANCHOR.x + sway * 10, FLOOR_Y, 82 + Math.abs(sway) * 16, 17, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = PAPER;
+    ctx.beginPath(); ctx.arc(ANCHOR.x, ANCHOR.y + 18, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(ANCHOR.x - 31, shoulderY - 6, 62, hipY - shoulderY + 6);
+
+    var armL = fkChain(ANCHOR.x - 24, shoulderY, ARM_L, tNow);
+    var armR = fkChain(ANCHOR.x + 24, shoulderY, ARM_R, tNow);
+    var legL = fkChain(ANCHOR.x - 12, hipY, LEG_L, tNow);
+    var legR = fkChain(ANCHOR.x + 12, hipY, LEG_R, tNow);
+    drawLimbShadow(armL); drawLimbShadow(armR); drawLimbShadow(legL); drawLimbShadow(legR);
+    strokeChain(armL, 34);
+    strokeChain(armR, 34);
+    strokeChain(legL, 40);
+    strokeChain(legR, 40);
+  }
+
+  function update(dt, tMs) {
+    if (reduce) return;
+    tNow = (tMs % SWING_PERIOD_MS) / SWING_PERIOD_MS;
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); tNow = 0.25; }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

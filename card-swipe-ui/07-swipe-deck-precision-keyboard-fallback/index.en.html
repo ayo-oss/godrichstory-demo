@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboard swipe charged by how long you hold the key — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kf is-demo" id="kf">
+  <p class="kf__caption">Keyboard swipe charged by how long you hold the key</p>
+  <div class="kf__scene" id="kfScene">
+    <div class="kf__card" id="kfCard" tabindex="0" role="group" aria-roledescription="Swipe card">
+      <p class="kf__label" id="kfLabel">Reading list</p>
+      <div class="kf__meter" aria-hidden="true"><span class="kf__meter-fill" id="kfMeterFill"></span></div>
+    </div>
+    <button class="kf__btn kf__btn--nope" id="kfNope" type="button" aria-label="Dislike">✕</button>
+    <button class="kf__btn kf__btn--like" id="kfLike" type="button" aria-label="Like">♥</button>
+  </div>
+  <p class="kf__status" id="kfStatus" aria-live="polite">Focus the card and hold an arrow key to charge</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 값 하나: 방향키를 누르고 있는 시간만큼 CHARGE_RATE 로 힘이 쌓이고(적분), 떼는 순간
+  // 그 값이 CHARGE_RELEASE_MIN 을 넘었는지로 판정한다 — 드래그의 Speed 판정과 같은 judge() 를 공유한다.
+  var CHARGE_RATE = 1.6;      // 초당 쌓이는 양
+  var CHARGE_DECAY = 3.2;     // 떼면 초당 줄어드는 양
+  var CHARGE_RELEASE_MIN = 0.55;
+  var CHARGE_MAX = 1;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("kf");
+  var card = document.getElementById("kfCard");
+  var label = document.getElementById("kfLabel");
+  var meterFill = document.getElementById("kfMeterFill");
+  var status = document.getElementById("kfStatus");
+  var btnLike = document.getElementById("kfLike");
+  var btnNope = document.getElementById("kfNope");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["Reading list", "Travel notes", "Morning routine", "Evening walk", "Weekend café", "Home workout log"];
+  var rand = seedRand(90);
+  var idx = Math.floor(rand() * CARDS.length);
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vx = 0;
+  var x = 0, phase = "idle", exitDir = 1;
+  var charge = 0, chargingDir = 0, keyDown = { left: false, right: false };
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  function render() {
+    var rot = clamp(x * 0.08, -20, 20);
+    card.style.transform = "translateX(" + x.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
+    meterFill.style.width = (clamp(charge, 0, CHARGE_MAX) * 100).toFixed(0) + "%";
+    meterFill.style.left = chargingDir < 0 ? (50 - clamp(charge, 0, CHARGE_MAX) * 50).toFixed(1) + "%" : "50%";
+  }
+
+  function nextCard() {
+    idx += 1; setCard();
+    x = 0; vx = 0; phase = "idle"; charge = 0; chargingDir = 0;
+    render();
+  }
+
+  // 드래그 Speed(px/ms)든 키보드 충전량(0~1)이든 같은 judge() 로 들어와 하나의 규칙으로 판정한다.
+  function judge(strength, dir, releaseMin) {
+    root.classList.remove("is-demo");
+    var flung = Math.abs(strength) >= releaseMin;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; nextCard(); }
+      else { x = 0; charge = 0; render(); status.textContent = "Not enough charge — snapped back"; phase = "idle"; }
+      return;
+    }
+    if (flung) { phase = "exit"; exitDir = dir; status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; }
+    else { phase = "settle"; status.textContent = "Not enough charge — snapped back"; }
+  }
+
+  function startDrag(clientX) {
+    root.classList.remove("is-demo");
+    dragging = true; phase = "idle";
+    startX = clientX; lastX = clientX; lastT = performance.now(); vx = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vx = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    x = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vx, x >= 0 ? 1 : -1, 0.38);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function clickVerdict(dir) {
+    root.classList.remove("is-demo");
+    x = dir * 60; render();
+    judge(0.7, dir, CHARGE_RELEASE_MIN);
+  }
+  btnLike.addEventListener("click", function () { clickVerdict(1); });
+  btnNope.addEventListener("click", function () { clickVerdict(-1); });
+
+  card.addEventListener("keydown", function (e) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    if (phase !== "idle" && phase !== "charging") return;
+    root.classList.remove("is-demo");
+    var dir = e.key === "ArrowRight" ? 1 : -1;
+    if (chargingDir !== 0 && chargingDir !== dir) { charge = 0; }
+    chargingDir = dir; phase = "charging";
+    (dir > 0 ? keyDown : keyDown).right = e.key === "ArrowRight";
+    keyDown.left = e.key === "ArrowLeft";
+    keyDown.right = e.key === "ArrowRight";
+    status.textContent = "Charging";
+  });
+  card.addEventListener("keyup", function (e) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (e.key === "ArrowLeft") keyDown.left = false;
+    if (e.key === "ArrowRight") keyDown.right = false;
+    if (phase === "charging") {
+      x = chargingDir * charge * 90; render();
+      judge(charge, chargingDir, CHARGE_RELEASE_MIN);
+    }
+  });
+
+  function step(dt) {
+    var dtS = dt / 1000;
+    if (phase === "charging") {
+      var held = chargingDir > 0 ? keyDown.right : keyDown.left;
+      charge = clamp(charge + (held ? CHARGE_RATE : -CHARGE_DECAY) * dtS, 0, CHARGE_MAX);
+      x = chargingDir * charge * 90;
+      render();
+    } else if (phase === "exit") {
+      x += exitDir * Math.max(Math.abs(vx) || 0.6, 0.6) * dt;
+      render();
+      if (Math.abs(x) > EXIT_PX) nextCard();
+    } else if (phase === "settle") {
+      x += (0 - x) * Math.min(dtS * 6, 1);
+      charge += (0 - charge) * Math.min(dtS * 5, 1);
+      render();
+      if (Math.abs(x) < 0.4) { x = 0; charge = 0; phase = "idle"; render(); }
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 keydown/keyup 없이 charge·judge() 를 같은 경로로 호출한다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.35 && t < 0.55 && synthPhase === "wait") { synthPhase = "weak"; }
+    if (synthPhase === "weak") {
+      var p = clamp((t - 0.35) / 0.2, 0, 1);
+      charge = p * 0.35; x = charge * 90; render();
+      if (t >= 0.55) { synthPhase = "afterWeak"; judge(charge, 1, CHARGE_RELEASE_MIN); }
+    }
+    if (t > 1.1 && t < 1.5 && synthPhase === "afterWeak") synthPhase = "strong";
+    if (synthPhase === "strong") {
+      var q = clamp((t - 1.1) / 0.4, 0, 1);
+      charge = q; x = -charge * 90; render();
+      if (t >= 1.5) { synthPhase = "done"; judge(charge, -1, CHARGE_RELEASE_MIN); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스크롤 값이 커질수록 연기 발생량과 확산 범위가 함께 늘어나 화면 전체 밀도가 짙어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot" tabindex="0">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">스크롤 값이 커질수록 연기 발생량과 확산 범위가 함께 늘어나 화면 전체 밀도가 짙어진다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 훅 06·09 합성: 스크롤 진행값(scrollProgress)이 항목 03 의 발생량(emissionRate) 계산과
+  // 항목 06 의 포인터-소용돌이 계산을 동시에 키운다 — 스크롤이 늘수록 입자가 더 많이
+  // 태어나고(발생량) 포인터가 지나는 자리의 소용돌이 반경도 커져(확산 범위) 화면 전체
+  // 밀도가 짙어지는 것을 한 값(scrollProgress)으로 함께 구동한다. 실제 스크롤 입력이
+  // 없을 때는 triangleWave() 로 진행값을 왕복시켜 같은 계산 경로를 그대로 탄다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_RISE_SPEED_PX = 14;
+  var BASE_EMISSION_PER_S = 6;
+  var EMISSION_RANGE_PER_S = 24;
+  var SMOKE_SWIRL_RADIUS_BASE = 16;
+  var SMOKE_SWIRL_RADIUS_RANGE = 30;
+  var SMOKE_SWIRL_STRENGTH = 60;
+  var PLUME_LIFE_MS = 2200;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423090);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  var pRand = seedRand(423091);
+  var particles = [];
+  var spawnAcc = 0;
+  var scrollProgress = 0.15;
+
+  function spawn(bornMs) {
+    particles.push({
+      x: CALC_W * 0.5 + (pRand() - 0.5) * 16,
+      y: CALC_H - 6,
+      born: bornMs,
+      wSeed: pRand() * 1000
+    });
+  }
+
+  var pointerX = CALC_W * 0.5, pointerY = CALC_H * 0.4;
+  var pointerActive = false;
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    var emissionRate = BASE_EMISSION_PER_S + scrollProgress * EMISSION_RANGE_PER_S;
+    var swirlRadius = SMOKE_SWIRL_RADIUS_BASE + scrollProgress * SMOKE_SWIRL_RADIUS_RANGE;
+    spawnAcc += dtMs * emissionRate / 1000;
+    var cap = 260;
+    while (spawnAcc >= 1) {
+      if (particles.length < cap) spawn(nowMs);
+      spawnAcc -= 1;
+    }
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var turb = (valueNoise2D(p.wSeed * 0.03, nowMs * 0.0017) - 0.5) * 2;
+      p.x += turb * 10 * dtS;
+      p.y -= SMOKE_RISE_SPEED_PX * dtS;
+      var rx = p.x - pointerX, ry = p.y - pointerY;
+      var dist = Math.hypot(rx, ry);
+      if (dist < swirlRadius && dist > 0.5) {
+        var push = (1 - dist / swirlRadius) * SMOKE_SWIRL_STRENGTH;
+        var tx = -ry / dist, ty = rx / dist;
+        p.x += tx * push * dtS;
+        p.y += ty * push * dtS;
+      }
+      if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    var densityAlpha = 0.34 + scrollProgress * 0.18;
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var r = 6 + f * 15;
+      var alpha = Math.sin(f * Math.PI) * densityAlpha;
+      if (alpha <= 0.01) continue;
+      var dx = p.x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(232,226,240,' + alpha + ')');
+      g.addColorStop(1, 'rgba(232,226,240,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  var userDriven = false;
+  function applyScroll(delta) {
+    userDriven = true;
+    scrollProgress = Math.max(0, Math.min(1, scrollProgress + delta));
+    if (reduce) { stepSim(16, elapsed); drawSmoke(elapsed); }
+  }
+  wrap.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    applyScroll(e.deltaY * 0.0025);
+  }, { passive: false });
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown' || e.key === 'PageDown') { e.preventDefault(); applyScroll(0.08); }
+    else if (e.key === 'ArrowUp' || e.key === 'PageUp') { e.preventDefault(); applyScroll(-0.08); }
+  });
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    var r = wrap.getBoundingClientRect();
+    pointerX = (e.clientX - r.left) / r.width * CALC_W;
+    pointerY = (e.clientY - r.top) / r.height * CALC_H;
+    if (reduce) { stepSim(16, elapsed); drawSmoke(elapsed); }
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+
+  function triangleWave(t, period) {
+    var phase = (t % period) / period;
+    return phase < 0.5 ? phase * 2 : 2 - phase * 2;
+  }
+  function virtualPointerOrbit(t) {
+    return {
+      x: CALC_W * (0.35 + 0.3 * ((Math.sin(t * 0.0012) + 1) / 2)),
+      y: CALC_H * (0.3 + 0.4 * ((Math.cos(t * 0.0015) + 1) / 2))
+    };
+  }
+
+  var SCROLL_AUTO_PERIOD_MS = 3400;
+  var warmSteps = reduce ? 160 : 130;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      if (!userDriven && root.classList.contains('is-demo')) {
+        scrollProgress = triangleWave(elapsed, SCROLL_AUTO_PERIOD_MS);
+      }
+      if (!pointerActive) {
+        var v = virtualPointerOrbit(elapsed);
+        pointerX = v.x; pointerY = v.y;
+      }
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stained-glass Panel Where Each Cell Carries Its Own Light-transmission Value — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">Stained-glass Panel Where Each Cell Carries Its Own Light-transmission Value</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var GLASS_BORDER_PX = 1.8;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(409031);
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function hexToRgb(hex) {
+    var v = parseInt(hex.slice(1), 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+
+  var NEI = -1, ND = 0, ND2 = 0;
+  function nearestTwo(px, py, arr) {
+    var bd = Infinity, bd2 = Infinity, bi = -1;
+    for (var i = 0; i < arr.length; i += 1) {
+      var dx = px - arr[i].x, dy = py - arr[i].y, d = dx * dx + dy * dy;
+      if (d < bd) { bd2 = bd; bd = d; bi = i; } else if (d < bd2) { bd2 = d; }
+    }
+    NEI = bi; ND = Math.sqrt(bd); ND2 = Math.sqrt(bd2);
+  }
+
+  var stainedPalette = ['#2f6df6', '#ff9ebb', '#4cd4a6', '#b9a0ff', '#6ec8ff'];
+  var paletteRgb = {};
+  stainedPalette.forEach(function (h) { paletteRgb[h] = hexToRgb(h); });
+  var SEED_COUNT03 = 20;
+  var seeds = [];
+  for (var i2 = 0; i2 < SEED_COUNT03; i2 += 1) {
+    seeds.push({ x: rand() * CALC_W, y: rand() * CALC_H, c: stainedPalette[i2 % stainedPalette.length] });
+  }
+  var cellIdx = new Int16Array(CALC_W * CALC_H);
+  var edgeVal = new Float32Array(CALC_W * CALC_H);
+  (function precompute() {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        nearestTwo(x + 0.5, y + 0.5, seeds);
+        cellIdx[idx] = NEI;
+        edgeVal[idx] = ND2 - ND;
+        idx += 1;
+      }
+    }
+  })();
+  var lightSweepAngle = 0.62;
+  var cosA = Math.cos(lightSweepAngle), sinA = Math.sin(lightSweepAngle);
+  var projSpan = Math.abs(CALC_W * cosA) + Math.abs(CALC_H * sinA);
+
+  function renderField(t) {
+    var bandCenter = ((t / LOOP_MS) * (projSpan * 1.6)) - projSpan * 0.3;
+    var idx4 = 0, idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var ni = cellIdx[idx];
+        var rgb = paletteRgb[seeds[ni].c];
+        var proj = x * cosA + y * sinA;
+        var glow = Math.exp(-Math.pow((proj - bandCenter) / 14, 2)) * 0.6;
+        var e = edgeVal[idx];
+        var borderMix = e < GLASS_BORDER_PX ? 0.35 : 0;
+        var r = rgb[0] * (1 - borderMix) * (1 + glow);
+        var g = rgb[1] * (1 - borderMix) * (1 + glow);
+        var b = rgb[2] * (1 - borderMix) * (1 + glow);
+        offBuf[idx4] = Math.min(255, r);
+        offBuf[idx4 + 1] = Math.min(255, g);
+        offBuf[idx4 + 2] = Math.min(255, b);
+        offBuf[idx4 + 3] = 255;
+        idx += 1; idx4 += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

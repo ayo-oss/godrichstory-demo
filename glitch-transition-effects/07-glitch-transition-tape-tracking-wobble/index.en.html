@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intro Transition Where Tape-Tracking Wobble Value Settles Down — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tw is-demo" id="tw">
+  <p class="tw__hint"><span>Click or press Enter and the tracking-wobble value swings widely then settles as the screen steadies</span></p>
+  <div class="tw__panel" id="panel" tabindex="0" role="button" aria-label="Replay intro transition where tape-tracking wobble value settles down">
+    <canvas class="tw__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('tw');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var TILE1 = tok('--scene-tile1', '#f4a340');
+  var TILE2 = tok('--scene-tile2', '#fff7e6');
+  var TILE3 = tok('--scene-tile3', '#2f6df6');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(레트로 인트로 타이틀 카드 자리) — 격자 타일로 가로·세로 흔들림이 모두 드러나게 한다.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    var cols = 8, rows = 6;
+    var tw = w / cols, th = h / rows;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var v = rng();
+        bc.fillStyle = v < 0.34 ? TILE1 : (v < 0.67 ? TILE2 : TILE3);
+        bc.fillRect(c * tw, r * th, tw + 1, th + 1);
+      }
+    }
+  }
+
+  var SEED = 919;
+  var TAPE_WOBBLE_AMPLITUDE = 40;
+  var TAPE_JITTER_AMPLITUDE = 16;
+  var data, outImg, iw, ih;
+
+  function PRECOMPUTE() {
+    iw = cv.width; ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+  }
+
+  function hash01(n) {
+    n = (n ^ 61) ^ (n >>> 16);
+    n = (n + (n << 3)) | 0;
+    n = n ^ (n >>> 4);
+    n = Math.imul(n, 0x27d4eb2d);
+    n = n ^ (n >>> 15);
+    return (n >>> 0) / 4294967295;
+  }
+
+  function clampI(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function wrap(v, m) { var r = v % m; return r < 0 ? r + m : r; }
+
+  var PLAY_MS = 640;
+  var phaseRoll = 0;
+  var frameCounter = 0;
+
+  function RENDER(p) {
+    phaseRoll += 0.33;
+    frameCounter = (frameCounter + 1) >>> 0;
+    var rollY = Math.round(TAPE_WOBBLE_AMPLITUDE * dpr * p * Math.sin(phaseRoll));
+    var fSalt = Math.imul(frameCounter, 2246822519) >>> 0;
+    var o = outImg.data;
+    for (var y = 0; y < ih; y++) {
+      var srcY = wrap(y - rollY, ih);
+      var jh = hash01((Math.imul(srcY, 668265263) ^ fSalt) >>> 0);
+      var jitterX = Math.round(TAPE_JITTER_AMPLITUDE * dpr * p * (jh * 2 - 1));
+      var base = y * iw;
+      var srcBase = srcY * iw;
+      for (var x = 0; x < iw; x++) {
+        var sx = clampI(x - jitterX, 0, iw - 1);
+        var k = (base + x) * 4;
+        var sk = (srcBase + sx) * 4;
+        o[k] = data[sk]; o[k + 1] = data[sk + 1]; o[k + 2] = data[sk + 2]; o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    buf.width = cv.width; buf.height = cv.height;
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

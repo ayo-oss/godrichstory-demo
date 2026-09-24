@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>뒤쪽 레이어일수록 입자가 더 느리고 흐릿하게 움직여 앞쪽 레이어와 속도 차이가 깊이감을 만든다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">뒤쪽 레이어일수록 입자가 더 느리고 흐릿하게 움직여 앞쪽 레이어와 속도 차이가 깊이감을 만든다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 같은 상승·난류 계산을 레이어 배열(LAYER)에 담긴 서로 다른 속도·반경 배율·
+  // 알파로 3번 반복한다. 뒤 레이어일수록 속도를 낮추고 반경을 키우고 알파를 낮춰 흐릿하게
+  // 그린다 — 원근에 따른 대기 산란(aerial perspective) 근사를 계산으로 만든다. 뒤에서
+  // 앞 순서로 그려 앞 레이어가 항상 위에 겹치게 한다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LAYERS = [
+    { speed: 6,  radiusMul: 1.7, alphaMul: 0.20, bx: CALC_W * 0.30, spawnPerS: 11, seed: 423081 },
+    { speed: 13, radiusMul: 1.15, alphaMul: 0.32, bx: CALC_W * 0.52, spawnPerS: 15, seed: 423082 },
+    { speed: 22, radiusMul: 0.8, alphaMul: 0.46, bx: CALC_W * 0.72, spawnPerS: 19, seed: 423083 }
+  ];
+  var PLUME_LIFE_MS = 2400;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423080);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  for (var li = 0; li < LAYERS.length; li += 1) {
+    LAYERS[li].rand = seedRand(LAYERS[li].seed);
+    LAYERS[li].particles = [];
+    LAYERS[li].spawnAcc = 0;
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    for (var li = 0; li < LAYERS.length; li += 1) {
+      var L = LAYERS[li];
+      L.spawnAcc += dtMs * L.spawnPerS / 1000;
+      while (L.spawnAcc >= 1) {
+        L.particles.push({
+          bx: L.bx + (L.rand() - 0.5) * 10,
+          y: CALC_H - 6,
+          born: nowMs,
+          wSeed: L.rand() * 1000
+        });
+        L.spawnAcc -= 1;
+      }
+      var alive = [];
+      for (var i = 0; i < L.particles.length; i += 1) {
+        var p = L.particles[i];
+        p.y -= L.speed * dtS;
+        if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+      }
+      L.particles = alive;
+    }
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var li = 0; li < LAYERS.length; li += 1) {
+      var L = LAYERS[li];
+      for (var i = 0; i < L.particles.length; i += 1) {
+        var p = L.particles[i];
+        var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+        var turb = (valueNoise2D(p.wSeed * 0.03, nowMs * 0.0016) - 0.5) * 2;
+        var x = p.bx + turb * 14 * f;
+        var r = (6 + f * 16) * L.radiusMul;
+        var alpha = Math.sin(f * Math.PI) * L.alphaMul;
+        if (alpha <= 0.01) continue;
+        var dx = x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+        var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+        g.addColorStop(0, 'rgba(30,28,34,' + alpha + ')');
+        g.addColorStop(1, 'rgba(30,28,34,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 160 : 130;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Globular cluster — n-body gravity — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gx is-demo" id="gxRoot">
+  <p class="gx__hint">
+    <span>Stars scattered in a sphere orbit the common center at their own angles — unlike a disk, they never collapse inward</span>
+  </p>
+  <div class="gx__field" id="gxField" role="application" aria-label="Globular cluster lab" tabindex="0">
+    <canvas class="gx__cv" id="gxCv"></canvas>
+  </div>
+  <div class="gx__bar">
+    <span class="gx__meta">280 stars · live center of mass</span>
+    <span class="gx__meta gx__meta--dim">canvas · center of mass · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 구상 성단 공전(03) — 원반이 아닌 구면 분포가 어떻게 도는지 보는 장면.
+// 별 280개를 3차원 구(시선 방향 z 를 원근 스케일로 투영)로 흩뿌리고 전 쌍 O(N²) 중력을 적분한다.
+// 은하 원반(02)과 달리 각도가 제각각이라 차등회전이 나선을 만들지 못하고,
+// 별 각각은 매 프레임 다시 계산한 무게중심(com) 주위를 제각각의 궤도면으로 돈다 —
+// 성단 전체가 느리게 뒤집히는 관측 성질이 그대로 드러난다.
+// z 투영은 원근(가까운 별 크게)뿐 아니라 계산도 3차원으로 한다 — 화면은 그 투영일 뿐.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NSTARS = 280;   // 성단 별 수
+  var SPIN = 0.55;    // 초기 집단 회전(전체 궤도면 기울기 스케일)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('gxRoot');
+  var field = document.getElementById('gxField');
+  var cv = document.getElementById('gxCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--gx-ink');
+  var C_GLOW = tokRGB('--gx-glow');
+  var C_HOT  = tokRGB('--gx-hot');
+  var C_TAIL = tokRGB('--gx-tail');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var chainCv, chainCtx;
+
+  // 3차원 상태 — 화면은 (x, y) 투영. z 는 원근 스케일에만 쓰지 않고 계산에 그대로 들어간다
+  var N = 0, X = [], Y = [], Z = [], VX = [], VY = [], VZ = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    chainCv = document.createElement('canvas');
+    chainCv.width = W * dpr; chainCv.height = H * dpr;
+    chainCtx = chainCv.getContext('2d');
+    chainCtx.scale(dpr, dpr);
+  }
+
+  // G·질량은 캔버스 픽셀 단위 시뮬레이션 값(물리 상수 아님 — 글에서 설명)
+  var G = 26.0, SOFT2 = 60;
+  var DT = 1 / 60;
+  var FOCAL = 420;    // 투영 초점거리 — z 깊이에 비례해 화면 좌표를 확대/축소
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function com() {
+    // 무게중심 — 매 스텝 다시 계산한다(별이 날아가도 성단이 따라간다).
+    // 계산 자체가 데모의 주제: 중심을 고정하지 않고 합이 0이 되게 두면 성단 전체가 유영한다
+    var cx = 0, cy = 0, cz = 0;
+    for (var i = 0; i < N; i++) { cx += X[i]; cy += Y[i]; cz += Z[i]; }
+    return [cx / N, cy / N, cz / N];
+  }
+
+  function seed() {
+    // 구면 등밀도 흩뿌리기 + 완만한 집단 회전. 궤도 속도는 구 대신 접선 방향 랜덤 —
+    // 각자의 궤도면이 달라 원반처럼 정렬되지 않는다(구상 성단의 핵심 성질)
+    X = []; Y = []; Z = []; VX = []; VY = []; VZ = []; N = 0;
+    var rnd = mulberry32(33);
+    var R = Math.min(W, H) * 0.78;
+    for (var i = 0; i < NSTARS; i++) {
+      var u = rnd() * 2 - 1, ph = rnd() * Math.PI * 2;
+      var sq = Math.sqrt(1 - u * u);
+      var rr = R * 0.94 * Math.cbrt(rnd());          // 구 등밀도 — r³ 균등
+      var dx = sq * Math.cos(ph), dy = sq * Math.sin(ph), dz = u;
+      X.push(W * 0.5 + dx * rr);
+      Y.push(H * 0.5 + dy * rr * 0.92);
+      Z.push(dz * rr);
+      // 접선 속도 — 위치와 수직인 방향 중 하나를 골라 원궤도 스케일로. 궤도면 제각각
+      var tx = -dy, ty = dx, tz = 0;
+      var tl = Math.hypot(tx, ty) || 1;
+      var vv = Math.sqrt(G * NSTARS / Math.max(rr, 12)) * (0.55 + rnd() * 0.5);
+      VX.push((tx / tl) * vv + SPIN * 14 * dy + (rnd() - 0.5) * 6);
+      VY.push((ty / tl) * vv + SPIN * 14 * dx + (rnd() - 0.5) * 6);
+      VZ.push((rnd() - 0.5) * vv * 1.2);
+      N++;
+    }
+  }
+
+  var AX = [], AY = [], AZ = [];
+  function step() {
+    // 전 쌍 O(N²) 3차원 중력 — a_i = Σ G·(x_j - x_i)/(|d|²+ε²)^1.5 (근사 아님)
+    var i, j, dx, dy, dz, d2, inv, f;
+    for (i = 0; i < N; i++) { AX[i] = 0; AY[i] = 0; AZ[i] = 0; }
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        dx = X[j] - X[i]; dy = Y[j] - Y[i]; dz = Z[j] - Z[i];
+        d2 = dx * dx + dy * dy + dz * dz + SOFT2;
+        inv = 1 / Math.sqrt(d2);
+        f = G * inv * inv * inv;
+        AX[i] += dx * f; AY[i] += dy * f; AZ[i] += dz * f;
+        AX[j] -= dx * f; AY[j] -= dy * f; AZ[j] -= dz * f;
+      }
+    }
+    for (i = 0; i < N; i++) {
+      VX[i] += AX[i] * DT; VY[i] += AY[i] * DT; VZ[i] += AZ[i] * DT;
+      X[i] += VX[i] * DT;  Y[i] += VY[i] * DT;  Z[i] += VZ[i] * DT;
+    }
+  }
+
+  function project(i) {
+    // 3D → 2D 투영. 초점거리로 원근(가까운 별이 크고 빠르다)
+    var s = FOCAL / (FOCAL + Z[i]);
+    return [W * 0.5 + (X[i] - W * 0.5) * s, H * 0.5 + (Y[i] - H * 0.5) * s, s];
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function decay() {
+    chainCtx.setTransform(1, 0, 0, 1, 0, 0);
+    chainCtx.globalCompositeOperation = 'destination-out';
+    chainCtx.fillStyle = 'rgba(0,0,0,0.013)';
+    chainCtx.fillRect(0, 0, W * dpr, H * dpr);
+    chainCtx.globalCompositeOperation = 'source-over';
+    chainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var prev = null;
+  function stamp() {
+    // 잔상 — 투영 좌표로 궤도를 남긴다(궤도면이 제각각이라 곡선 뭉치가 쌓인다)
+    if (prev) {
+      for (var i = 0; i < N; i++) {
+        var p = project(i);
+        chainCtx.strokeStyle = rgba(C_GLOW, 0.26);
+        chainCtx.lineWidth = 1.7;
+        chainCtx.beginPath();
+        chainCtx.moveTo(prev[0][i], prev[1][i]);
+        chainCtx.lineTo(p[0], p[1]);
+        chainCtx.stroke();
+      }
+    }
+    if (!prev) { prev = [[], []]; }
+    prev[0].length = 0; prev[1].length = 0;
+    for (var i = 0; i < N; i++) { var p = project(i); prev[0].push(p[0]); prev[1].push(p[1]); }
+  }
+
+  function draw() {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+    // 배경 별밭(정적·시드 고정)
+    var rnd = mulberry32(44);
+    for (var k = 0; k < 40; k++) {
+      ctx.globalAlpha = 0.10 + rnd() * 0.20;
+      ctx.fillStyle = rgba(C_GLOW, 0.6);
+      ctx.beginPath(); ctx.arc(rnd() * W, rnd() * H, rnd() * 0.7 + 0.3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(chainCv, 0, 0, W, H);
+    // 무게중심 표식 — 매 프레임 계산한 com 을 앰버 십자로 찍는다(성단이 유영하는 게 보인다)
+    var c = com();
+    var cz = FOCAL / (FOCAL + c[2]);
+    var mx = W * 0.5 + (c[0] - W * 0.5) * cz, my = H * 0.5 + (c[1] - H * 0.5) * cz;
+    // 별 — 원근 스케일로 크기·밝기 변화. z 가 가까울수록 크고 밝다
+    for (var i = 0; i < N; i++) {
+      var p = project(i);
+      var s = p[2];
+      var col = s > 1.06 ? C_HOT : C_GLOW;           // 앞쪽 별은 앰버, 뒷쪽은 페리윙클
+      ctx.fillStyle = rgba(col, 0.12 * s);
+      ctx.beginPath(); ctx.arc(p[0], p[1], 4.0 * s, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(col, 0.66 * s);
+      ctx.beginPath(); ctx.arc(p[0], p[1], (1.4 + 1.1 * s) * s, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.strokeStyle = rgba(C_HOT, 0.85);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx - 5, my); ctx.lineTo(mx + 5, my);
+    ctx.moveTo(mx, my - 5); ctx.lineTo(mx, my + 5);
+    ctx.stroke();
+  }
+
+  function rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  var simSteps = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 3.0;
+    var target = Math.floor(loop / DT);
+    while (simSteps < target) { step(); simSteps++; stamp(); }
+    if (target < simSteps - 3) { seed(); simSteps = 0; prev = null; chainCtx.clearRect(0, 0, W, H); }
+    decay();
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 궤도 뭉치가 쌓인 장면까지 적분한 뒤 한 장 고정
+    for (var s = 0; s < 200; s++) { step(); stamp(); }
+    draw();
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); seed(); simSteps = 0; prev = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  seed();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

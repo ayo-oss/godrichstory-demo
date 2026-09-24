@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>花火の爆発 — 重力と残り火の算数 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fw is-demo" id="fwRoot">
+  <p class="fw__hint">
+    <svg class="fw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>破片が重力で放物線を描き、色温度の階段を下って消えます — クリックで自分で打ち上げます</span>
+  </p>
+  <div class="fw__field" id="fwField" role="application" aria-label="花火の爆発実験盤" tabindex="0">
+    <canvas class="fw__cv" id="fwCv"></canvas>
+  </div>
+  <div class="fw__bar">
+    <span class="fw__meta"><b class="fw__val" id="fwN">0</b> 生きている破片・g 34px/s²</span>
+    <span class="fw__meta fw__meta--dim">lighter合成・色温度ラダー</span>
+  </div>
+</div>
+</main>
+<script>
+// 불꽃놀이 폭발(06). 폭발 하나 = 한 점에서 방사형으로 튀어나간 파편 다발.
+// 각 파편은 오직 4개의 규칙을 따른다:
+//   ① vy += g * dt        — 중력(포물선의 전부)
+//   ② v *= drag           — 공기 저항(끝에서 뭉개지는 이유)
+//   ③ k -= burn * dt      — 연료 소모 → 색온도 사다리(흰→gold→amber→빨강→잔불)를 내려간다
+//   ④ k <= 0 이면 죽는다   — 잔불이 어둠 속으로 녹아 없어진다
+// 발사 스케줄은 시드 고정 PRNG 로 정해 미리보기가 항상 같은 순서로 터진다.
+// 포인터로 궤적을 기울이고(風), 클릭/스페이스로 그 자리에서 직접 터뜨린다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var PER_BURST = 170;   // 폭발당 파편 수 — 변형 "파편 수" 축(45 → 180). 재튜닝(2026-09-15): 90→170
+  var GRAV = 34;         // 중력 가속도(px/s²) — 변형 "중력" 축(18 → 60)
+  var PERIOD = 0.85;     // 자동 발사 주기(s) — 변형 "주기" 축(0.9 → 2.6). 재튜닝: 1.5→0.85 — 발사 빈도↑
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('fwRoot');
+  var field = document.getElementById('fwField');
+  var cv = document.getElementById('fwCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('fwN');
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x5eed06;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+  // 색온도 사다리 최상단 — 흰 코어(터진 직후 0.1초의 섬광)
+  var C_WHITE = [255, 250, 244];
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+
+  var BURN = 0.34;        // 연료 소모율 (1/s) — 재튜닝(2026-09-15): 0.62→0.34, 잔불 수명↑(궤적이 프레임 사이에 끊기지 않게)
+  var DRAG = 0.985;       // 매 프레임 속도 유지율(공기 저항)
+  var nextLaunch = 0.62;  // 다음 자동 발사 시각(s). 재튜닝: 0.8→0.62 — 첫 프레임부터 궤적이 살아 있게(오프닝 폭발과 이어짐)
+
+  // 파편 풀 — 객체 생성을 프레임마다 하지 않기 위해 미리 만들어 재활용한다
+  var MAXP = PER_BURST * 10;   // 재튜닝: 동시 다발 폭발 대비 풀 여유(6→10)
+  var pool = [];
+  for (var i = 0; i < MAXP; i++) {
+    pool.push({ live: false, x: 0, y: 0, vx: 0, vy: 0, k: 0, tone: 0 });
+  }
+  var alive = 0;
+
+  // 폭발 — (x, y) 에서 파편 PER_BURST 개를 방사형으로 뿌린다.
+  // 속도는 균등 각도 + 시드 지터, 크기는 안팎 두 겹(껍질이 먼저 뭉개지는 이중 꽃).
+  // tone: 0 = gold 계열, 1 = rose 계열(변형 "색" 축) — 편당 두 계열이 섞여 나온다
+  function burst(x, y, tone) {
+    var n = PER_BURST;
+    var placed = 0;
+    for (var i = 0; i < MAXP && placed < n; i++) {
+      var p = pool[i];
+      if (p.live) continue;
+      var ang = (placed / n) * TAU + (rand() - 0.5) * 0.22;
+      var shell = placed % 5 === 0 ? 0.62 : 1.0;   // 안쪽 겹(느린 파편)
+      var sp = (46 + rand() * 58) * shell;
+      p.live = true;
+      p.x = x; p.y = y;
+      p.vx = Math.cos(ang) * sp;
+      p.vy = Math.sin(ang) * sp - 12;              // 살짝 위로 — 포물선 정점이 보이게
+      p.k = 0.85 + rand() * 0.3;
+      p.tone = tone;
+      placed++;
+    }
+  }
+
+  // ── 색온도 사다리 — k(연료)를 색에 대응시킨다 ──
+  // k > 0.92 : 흰 섬광(터진 직후)
+  // 0.92..0.64 : gold → amber (활활)
+  // 0.64..0.34 : amber → ember (식어가는 주황)
+  // 0.34..0.12 : ember → ink+연기 (잔불 — 어둠에 가까운 불씨)
+  // 0.12..0 : 잔불 깜빡임(시위상 깜박거림) 뒤 소멸
+  function fragColor(k, tone, tSec, ph) {
+    var r, g, b;
+    if (k > 0.92) {
+      var m0 = (k - 0.92) / 0.2;
+      r = C_GOLD[0] + (C_WHITE[0] - C_GOLD[0]) * m0;
+      g = C_GOLD[1] + (C_WHITE[1] - C_GOLD[1]) * m0;
+      b = C_GOLD[2] + (C_WHITE[2] - C_GOLD[2]) * m0;
+    } else if (k > 0.64) {
+      var m1 = (k - 0.64) / 0.28;
+      var lo = tone ? C_ROSE : C_GOLD, hi = tone ? C_GOLD : C_AMBER;
+      r = lo[0] + (hi[0] - lo[0]) * m1;
+      g = lo[1] + (hi[1] - lo[1]) * m1;
+      b = lo[2] + (hi[2] - lo[2]) * m1;
+    } else if (k > 0.34) {
+      var m2 = (k - 0.34) / 0.30;
+      var lo2 = tone ? C_ROSE : C_AMBER;
+      r = lo2[0] + (C_EMBER[0] - lo2[0]) * m2;
+      g = lo2[1] + (C_EMBER[1] - lo2[1]) * m2;
+      b = lo2[2] + (C_EMBER[2] - lo2[2]) * m2;
+    } else {
+      // 잔불 — 어둠으로 가라앉으며 시위상으로 깜빡인다
+      var m3 = k / 0.34;
+      var tw = 0.55 + 0.45 * Math.sin(tSec * 9 + ph);
+      r = C_INK[0] + (C_EMBER[0] - C_INK[0]) * m3 * tw;
+      g = C_INK[1] + (C_EMBER[1] - C_INK[1]) * m3 * tw;
+      b = C_INK[2] + (C_EMBER[2] - C_INK[2]) * m3 * tw;
+    }
+    return [r, g, b];
+  }
+
+  function draw(tSec, dt) {
+    // 1) 밤하늘 — 잉크에 가까운 배경. 위쪽으로 살짝 밝아지는 대기광
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, 'rgba(' + C_SMOKE[0] + ',' + C_SMOKE[1] + ',' + C_SMOKE[2] + ',0.05)');
+    sky.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    var wind = (px01 - 0.5) * 14;   // 포인터 x → 風(궤적 기울기)
+
+    // 2) 파편 — lighter 로 겹쳐 화면이 차오르게 한다
+    ctx.globalCompositeOperation = 'lighter';
+    alive = 0;
+    for (var i = 0; i < MAXP; i++) {
+      var p = pool[i];
+      if (!p.live) continue;
+      // 물리: 중력 → 항력 → 이동
+      p.vy += GRAV * dt;
+      p.vx = p.vx * DRAG + wind * dt;
+      p.vy *= DRAG;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.k -= BURN * dt;
+      if (p.k <= 0 || p.y > H + 6 || p.x < -6 || p.x > W + 6) { p.live = false; continue; }
+      alive++;
+
+      var col = fragColor(p.k, p.tone, tSec, i * 1.7);
+      // 잔불 단계에선 반경이 줄고, 활활 단계에선 연료가 크기다
+      var rad = 0.9 + p.k * 1.5;
+      var a = p.k > 0.34 ? 0.85 : 0.35 + p.k * 1.5;   // 잔불은 어둡게
+      ctx.fillStyle = 'rgba(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ',' + Math.min(1, a).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, rad, 0, TAU);
+      ctx.fill();
+      // 꼬리 — 속도 방향으로 짧은 선(속도 벡터 자체가 꼬리의 방향이다)
+      if (p.k > 0.5) {
+        ctx.strokeStyle = 'rgba(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ',0.25)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 0.08, p.y - p.vy * 0.08);
+        ctx.stroke();
+      }
+    }
+    nOut.textContent = String(alive);
+
+    // 3) 지평선 — 받아주는 어두운 땅(면 계산)
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ',0.9)';
+    ctx.fillRect(0, H * 0.94, W, H * 0.06 + 1);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    // 시드 기반 주기 발사 — 위치도 시드로 뽑아 미리보기가 항상 같은 안무가 되게 한다
+    // 재튜닝(2026-09-15): 한 번에 2~3발 동시 발사 — 밤하늘에 여러 궤적이 함께 살아 있게
+    if (t >= nextLaunch) {
+      var nBursts = rand() < 0.4 ? 2 : 3;
+      for (var b = 0; b < nBursts; b++) {
+        var lx = W * (0.12 + rand() * 0.76);
+        var ly = H * (0.12 + rand() * 0.42);
+        burst(lx, ly, rand() < 0.4 ? 1 : 0);
+      }
+      nextLaunch = t + PERIOD * (0.7 + rand() * 0.6);
+    }
+    if (!manual) {
+      // 가상 風 — Lissajous(시드 고정)
+      var ph = t * TAU / 3.6;
+      px01 = 0.5 + 0.4 * Math.sin(ph + 0.3);
+      py01 = 0.5 + 0.3 * Math.sin(2 * ph + 1.1);
+    }
+    draw(t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointerdown', function (e) {
+    var r = field.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    burst(x, y, (x / Math.max(1, r.width)) < 0.5 ? 0 : 1);
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(2.4, 0.016);
+  });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+  });
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      burst(W * (0.3 + rand() * 0.4), H * (0.2 + rand() * 0.3), rand() < 0.5 ? 1 : 0);
+      if (!manual) { manual = true; root.classList.remove('is-demo'); }
+      if (reduce) draw(2.4, 0.016);
+      return;
+    }
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(2.4, 0.016); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 없이 폭발 세 개가 하늘에 걸린 대표 프레임 한 장만 그린다(재튜닝: 2→3발)
+    var lx1 = W * 0.28, ly1 = H * 0.30, lx2 = W * 0.70, ly2 = H * 0.20, lx3 = W * 0.5, ly3 = H * 0.42;
+    // 시간을 진행시켜 포물선이 벌어진 순간을 만든 다음 멈춘다
+    burst(lx1, ly1, 0);
+    burst(lx2, ly2, 1);
+    burst(lx3, ly3, 0);
+    for (var s = 0; s < 46; s++) draw(2.4 + s * 0.016, 0.016);
+    draw(2.4, 0);
+    root.classList.add('is-still');
+  } else {
+    // 오프닝 폭발 — 첫 프레임부터 하늘에 궤적이 살아 있게(재튜닝: 정적 오프닝 제거)
+    burst(W * 0.30, H * 0.30, 0);
+    burst(W * 0.68, H * 0.22, 1);
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

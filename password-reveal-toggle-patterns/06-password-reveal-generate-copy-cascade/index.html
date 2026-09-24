@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>생성 버튼을 누르면 한 글자씩 나타나는 캐스케이드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="gcc is-demo">
+    <label class="gcc__label" for="gcc-display">생성된 비밀번호</label>
+    <div class="gcc__frame">
+      <div class="gcc__display" id="gccDisplay" aria-live="polite"></div>
+      <span class="gcc__status" aria-hidden="true">
+        <svg class="gcc__icon gcc__icon--copy" viewBox="0 0 256 256" width="22" height="22"><g fill="currentColor"><path d="M216 40v128h-48V88H88V40Z" opacity=".2"/><path d="M216 32H88a8 8 0 0 0-8 8v40H40a8 8 0 0 0-8 8v128a8 8 0 0 0 8 8h128a8 8 0 0 0 8-8v-40h40a8 8 0 0 0 8-8V40a8 8 0 0 0-8-8m-56 176H48V96h112Zm48-48h-32V88a8 8 0 0 0-8-8H96V48h112Z"/></g></svg>
+        <span class="gcc__check">
+          <span class="gcc__checkBar gcc__checkBar--short"></span>
+          <span class="gcc__checkBar gcc__checkBar--long"></span>
+        </span>
+      </span>
+    </div>
+    <button type="button" class="gcc__gen" id="gccGenBtn">생성</button>
+  </div>
+</main>
+<script>
+(function () {
+  // 기법: 후보 문자열은 seedRand 로 모듈 초기화 시 미리 만든다(클릭마다 인덱스만 순환 — 결정적).
+  // 표시는 spawnAcc 류 rAF 누적 타이머로 한 글자씩 채우고, 다 채워지면 복사→체크 아이콘을
+  // opacity 크로스페이드로 모프한다. clipboard API 호출은 없다(시각 전용).
+  var GENERATE_CASCADE_STEP_MS = 60;
+  var COPY_MORPH_MS = 220;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var root = document.querySelector('.gcc');
+  var display = document.getElementById('gccDisplay');
+  var genBtn = document.getElementById('gccGenBtn');
+
+  var candRand = seedRand(426061);
+  var pool = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$';
+  var CANDIDATES = [];
+  for (var c = 0; c < 4; c += 1) {
+    var len = 8 + Math.floor(candRand() * 3);
+    var s = '';
+    for (var j = 0; j < len; j += 1) s += pool[Math.floor(candRand() * pool.length)];
+    CANDIDATES.push(s);
+  }
+
+  var candIndex = -1;
+  var cascade = { target: '', revealed: 0, acc: 0, active: false, morphing: false, morphAcc: 0 };
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function generatePassword() {
+    candIndex = (candIndex + 1) % CANDIDATES.length;
+    var target = CANDIDATES[candIndex];
+    cascade.target = target;
+    cascade.acc = 0;
+    cascade.morphAcc = 0;
+    root.style.setProperty('--copyMorph', '0');
+    root.classList.remove('is-copied');
+    if (reduce) {
+      cascade.revealed = target.length;
+      cascade.active = false;
+      cascade.morphing = false;
+      display.textContent = target;
+      root.style.setProperty('--copyMorph', '1');
+      root.classList.add('is-copied');
+      return;
+    }
+    cascade.revealed = 0;
+    cascade.active = true;
+    cascade.morphing = false;
+    display.textContent = '';
+  }
+
+  function stepCascade(dtMs) {
+    if (cascade.active) {
+      cascade.acc += dtMs;
+      while (cascade.acc >= GENERATE_CASCADE_STEP_MS && cascade.revealed < cascade.target.length) {
+        cascade.acc -= GENERATE_CASCADE_STEP_MS;
+        cascade.revealed += 1;
+        display.textContent = cascade.target.slice(0, cascade.revealed);
+      }
+      if (cascade.revealed >= cascade.target.length) {
+        cascade.active = false;
+        cascade.morphing = true;
+        cascade.morphAcc = 0;
+      }
+    } else if (cascade.morphing) {
+      cascade.morphAcc += dtMs;
+      var p = Math.min(1, cascade.morphAcc / COPY_MORPH_MS);
+      root.style.setProperty('--copyMorph', String(p));
+      if (p >= 1) {
+        cascade.morphing = false;
+        root.classList.add('is-copied');
+      }
+    }
+  }
+
+  genBtn.addEventListener('click', generatePassword);
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) stepCascade(dt);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  if (reduce) root.classList.remove('is-demo');
+  if (root.classList.contains('is-demo')) {
+    setTimeout(function () {
+      generatePassword();
+      setInterval(generatePassword, 2000);
+    }, 200);
+  }
+})();
+</script>
+</body>
+</html>

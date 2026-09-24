@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Infinite scroll that appends without a spinner — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="isc is-demo" id="isc">
+  <div class="isc__view" id="iscView">
+    <ul class="isc__track" id="iscTrack">
+      <li class="isc__sentinel" id="iscSentinel" aria-hidden="true"></li>
+    </ul>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var SCROLL_APPEND_STAGGER_MS = 40; // 변형 01 대상 — 새 행 등장 사이 간격
+  var MIN_BATCH = 2;
+  var MAX_BATCH = 6;
+  var MAX_ROWS = 40;
+  var RESET_DELAY_MS = 700;
+  var AUTO_STEP_PX = 6;
+  var AUTO_TICK_MS = 55;
+  var LOAD_COOLDOWN_MS = 260;
+
+  var root = document.getElementById('isc');
+  var view = document.getElementById('iscView');
+  var track = document.getElementById('iscTrack');
+  var sentinel = document.getElementById('iscSentinel');
+  var rowSeq = 0;
+  var loading = false;
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  function addRow(delayMs) {
+    var li = document.createElement('li');
+    li.className = 'isc__row';
+    li.style.animationDelay = delayMs + 'ms';
+    li.textContent = 'Feed item ' + String(rowSeq + 1).padStart(2, '0');
+    track.insertBefore(li, sentinel);
+    rowSeq += 1;
+    return li;
+  }
+
+  function resetList() {
+    while (track.firstChild !== sentinel) { track.removeChild(track.firstChild); }
+    rowSeq = 0;
+    for (var i = 0; i < 6; i += 1) { addRow(0); }
+  }
+  resetList();
+
+  // 계산 겹: 센티널이 뷰포트와 겹친 비율(intersectionRatio)이 클수록 한 번에 더 많은 행을 붙인다 —
+  // 화면 끝에 살짝 걸리면 조금만, 깊이 들어오면 한 번에 크게 이어붙인다.
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting && !loading && rowSeq < MAX_ROWS) {
+        loading = true;
+        var batch = Math.round(MIN_BATCH + (MAX_BATCH - MIN_BATCH) * clamp(entry.intersectionRatio, 0, 1));
+        for (var j = 0; j < batch; j += 1) { addRow(j * SCROLL_APPEND_STAGGER_MS); }
+        window.setTimeout(function () { loading = false; }, LOAD_COOLDOWN_MS);
+      }
+    });
+  }, { root: view, threshold: [0, 0.2, 0.4, 0.6, 0.8, 1] });
+  io.observe(sentinel);
+
+  var timer = null;
+  var dir = 1;
+
+  function human() {
+    if (root.classList.contains('is-demo')) {
+      root.classList.remove('is-demo');
+      if (timer) { window.clearInterval(timer); timer = null; }
+    }
+  }
+  view.addEventListener('wheel', human, { passive: true });
+  view.addEventListener('touchstart', human, { passive: true });
+
+  function tick() {
+    var max = view.scrollHeight - view.clientHeight;
+    if (view.scrollTop >= max - 1 && dir !== 0) {
+      dir = 0;
+      window.setTimeout(function () {
+        resetList();
+        view.scrollTop = 0;
+        dir = 1;
+      }, RESET_DELAY_MS);
+      return;
+    }
+    if (dir === 0) { return; }
+    view.scrollTop = Math.min(view.scrollTop + AUTO_STEP_PX, max);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    timer = window.setInterval(tick, AUTO_TICK_MS);
+  }
+  // reduce: 실사용 경로 적용 — 자동 스크롤과 등장 트윈만 멈춘다. IntersectionObserver 는 그대로 살아 있어
+  // 사람이 실제로 스크롤하면 다음 배치가 애니메이션 없이 즉시 붙는다(scss 의 reduce 블록이 animation:none 처리)
+})();
+</script>
+</body>
+</html>

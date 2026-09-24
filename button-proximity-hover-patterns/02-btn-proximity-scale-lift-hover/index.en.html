@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Button that grows slowly as the distance value shrinks — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sl is-demo" id="sl">
+  <p class="sl__badge" id="slBadge">Distance value 100%</p>
+  <div class="sl__scene" id="slScene">
+    <button class="sl__btn" id="slBtn" type="button">Add</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var PROX_RADIUS_PX = 170;
+  var SL_SCALE_MAX = 0.08;
+  var SL_LIFT_MAX_PX = 6;
+  // 스프링 방정식(강성·감쇠) — lerp 보다 한 겹 더한 관성: 목표를 살짝 넘겼다가 정착한다.
+  var STIFFNESS = 0.22;
+  var DAMPING = 0.72;
+
+  var root = document.getElementById('sl');
+  var scene = document.getElementById('slScene');
+  var btn = document.getElementById('slBtn');
+  var badge = document.getElementById('slBadge');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var targetP = 0;
+  var pos = 0;
+  var vel = 0;
+  var hasPointer = false;
+
+  function distanceToButton(x, y) {
+    var r = btn.getBoundingClientRect();
+    var cx = r.left + r.width / 2;
+    var cy = r.top + r.height / 2;
+    return Math.hypot(x - cx, y - cy);
+  }
+
+  function render(p) {
+    var scale = 1 + p * SL_SCALE_MAX;
+    var lift = p * SL_LIFT_MAX_PX;
+    var depth = 8 + p * 18;
+    btn.style.transform = 'translateY(' + (-lift).toFixed(2) + 'px) scale(' + scale.toFixed(4) + ')';
+    btn.style.boxShadow = '0 ' + depth.toFixed(1) + 'px ' + (depth * 1.6).toFixed(1) + 'px rgba(23,20,26,' + (0.18 + p * 0.18).toFixed(2) + ')';
+    // 계산 레이어: 스프링 오버슛(p) 을 배경 톤(그림자 뒤 글로우)에도 같은 값으로 전파한다.
+    var tone = clamp(p, 0, 1.15);
+    scene.style.setProperty('--tone-p', tone.toFixed(3));
+    badge.textContent = 'Distance value ' + Math.round((1 - clamp(p, 0, 1)) * 100) + '%';
+  }
+
+  function springStep(target) {
+    var force = (target - pos) * STIFFNESS;
+    vel = (vel + force) * DAMPING;
+    pos += vel;
+  }
+
+  function syntheticOffset(t) {
+    var ang = t * 1.4 + 0.6;
+    var rad = 110 * (1 + Math.cos(t * Math.PI));
+    return [Math.cos(ang) * rad, Math.sin(ang) * rad];
+  }
+
+  var startTime = null;
+  function loop(now) {
+    if (startTime === null) { startTime = now; }
+    var t = (now - startTime) / 1000;
+    if (!hasPointer && !reduce) {
+      var off = syntheticOffset(t);
+      var d = Math.hypot(off[0], off[1]);
+      targetP = clamp(1 - d / PROX_RADIUS_PX, 0, 1);
+    }
+    springStep(targetP);
+    render(clamp(pos, -0.2, 1.2));
+    requestAnimationFrame(loop);
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var d = distanceToButton(e.clientX, e.clientY);
+    targetP = clamp(1 - d / PROX_RADIUS_PX, 0, 1);
+    if (reduce) { pos = targetP; render(pos); }
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetP = 0;
+    if (reduce) { pos = 0; render(0); }
+  });
+  btn.addEventListener('focus', function () {
+    hasPointer = true;
+    targetP = 1;
+    if (reduce) { pos = 1; render(1); }
+  });
+  btn.addEventListener('blur', function () {
+    hasPointer = false;
+    targetP = 0;
+    if (reduce) { pos = 0; render(0); }
+  });
+
+  if (reduce) {
+    render(0);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

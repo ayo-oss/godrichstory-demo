@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An arrow flashes and scales with the score change — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbf is-demo" id="lbf">
+  <ul class="lbf__list" id="lbfList" role="list"></ul>
+  <p class="lbf__sr" id="lbfSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_DELTA_DECAY_TAU_MS = 260;
+  var LEADERBOARD_DELTA_FLOOR = 0.03;
+  var LEADERBOARD_DELTA_MAX_REF = 40;
+  // 시연 스케줄: 2초 구간 안에서 여러 행의 순위 변동이 겹쳐 일어나게 하는 고정 시각표.
+  // rAF 타임스탬프 차이(dt)만 쓴다 — new Date·Date.now·Math.random 없음.
+  var DEMO_SCHEDULE = [
+    { t: 0, id: "p2" }, { t: 220, id: "p4" }, { t: 460, id: "p1" }, { t: 740, id: "p3" },
+    { t: 1000, id: "p5" }, { t: 1280, id: "p2" }, { t: 1560, id: "p4" }, { t: 1840, id: "p1" }
+  ];
+  var DEMO_LOOP_MS = 2000;
+  var UP_RGB = "91,140,255";   // $subject-blue-light 와 맞춘다(html 스크립트는 scss 토큰을 못 읽는다)
+  var DOWN_RGB = "194,54,26";  // $error
+  var INK_HEX = "#17141a";    // $subject-ink — 플래시 겹칠 때도 바탕을 유지
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbf");
+  var list = document.getElementById("lbfList");
+  var sr = document.getElementById("lbfSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "ONYX_4", score: 860 },
+    { id: "p2", name: "LUMEN7", score: 828 },
+    { id: "p3", name: "BASIN2", score: 796 },
+    { id: "p4", name: "HAZE_9", score: 764 },
+    { id: "p5", name: "VOLT_5", score: 732 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  // 계산 겹: 변화량(delta)의 부호로 화살표 방향을, 크기 비율로 화살표 배율을 정하고
+  // 지수감쇠(e^-t/tau)로 알파를 매 프레임 계산해 반짝임을 만든다 — 클수록 크고 오래 남는다.
+  // 같은 알파·부호를 행 배경 그라디언트·행 그림자에도 전파해(계산 겹) 반짝임이 행 전체로 보이게 한다.
+  function flashArrow(row, delta) {
+    var el = row.arrow;
+    var mag = Math.min(1, Math.abs(delta) / LEADERBOARD_DELTA_MAX_REF);
+    var scale = 0.7 + mag * 0.7;
+    var up = delta >= 0;
+    var rgb = up ? UP_RGB : DOWN_RGB;
+    el.classList.toggle("lbf__arrow--down", !up);
+    el.style.transform = "translateY(-50%) scale(" + scale.toFixed(2) + ") rotate(" + (up ? 0 : 180) + "deg)";
+    if (reduce) {
+      el.style.opacity = "0";
+      row.li.style.background = "";
+      row.li.style.boxShadow = "";
+      return;
+    }
+    var start = null;
+    el.style.opacity = "1";
+    function frame(now) {
+      if (start === null) start = now;
+      var t = now - start;
+      var alpha = Math.exp(-t / LEADERBOARD_DELTA_DECAY_TAU_MS);
+      if (alpha < LEADERBOARD_DELTA_FLOOR) {
+        el.style.opacity = "0";
+        row.li.style.background = "";
+        row.li.style.boxShadow = "";
+        return;
+      }
+      el.style.opacity = alpha.toFixed(3);
+      var a = alpha * mag;
+      row.li.style.background = "linear-gradient(90deg, rgba(" + rgb + "," + (a * 0.55).toFixed(3) + "), rgba(" + rgb + ",0) 78%), " + INK_HEX;
+      row.li.style.boxShadow = "0 " + (2 + a * 6).toFixed(1) + "px " + (10 + a * 16).toFixed(1) + "px -4px rgba(" + rgb + "," + (a * 0.5).toFixed(3) + ")";
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function updateRow(id, delta) {
+    var row = nodes[id];
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    row.score.textContent = String(p.score);
+    flashArrow(row, delta);
+    sr.textContent = p.name + " score " + (delta >= 0 ? "+" : "") + delta + ", now " + p.score;
+  }
+
+  function bump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    var delta = 8 + Math.floor(rand() * 30);
+    p.score += delta;
+    updateRow(id, delta);
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbf__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var name = document.createElement("span");
+    name.className = "lbf__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbf__score";
+    score.textContent = String(p.score);
+    var arrow = document.createElement("span");
+    arrow.className = "lbf__arrow";
+    arrow.setAttribute("aria-hidden", "true");
+
+    li.appendChild(name);
+    li.appendChild(score);
+    li.appendChild(arrow);
+
+    nodes[p.id] = { li: li, score: score, arrow: arrow };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+
+    list.appendChild(li);
+  });
+
+  function scheduledBump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    var down = rand() < 0.35;
+    var delta = (10 + Math.floor(rand() * 30)) * (down ? -1 : 1);
+    p.score = Math.max(0, p.score + delta);
+    updateRow(id, delta);
+  }
+
+  if (!reduce) {
+    var demoElapsed = 0, demoLast = null, demoIdx = 0, demoLap = 0;
+    function demoLoop(ts) {
+      if (root.classList.contains("is-demo")) {
+        if (demoLast === null) demoLast = ts;
+        demoElapsed += ts - demoLast;
+        demoLast = ts;
+        while (true) {
+          var entry = DEMO_SCHEDULE[demoIdx];
+          var target = demoLap * DEMO_LOOP_MS + entry.t;
+          if (demoElapsed < target) break;
+          scheduledBump(entry.id);
+          demoIdx++;
+          if (demoIdx >= DEMO_SCHEDULE.length) { demoIdx = 0; demoLap++; }
+        }
+      } else {
+        demoLast = null;
+      }
+      requestAnimationFrame(demoLoop);
+    }
+    requestAnimationFrame(demoLoop);
+  }
+})();
+</script>
+</body>
+</html>

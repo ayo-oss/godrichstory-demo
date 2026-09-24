@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>흩어진 오브젝트를 한 번에 격자로 자동 정렬 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="frame" id="frame">
+    <div class="chip" data-i="0"><span class="chipGlyph"></span></div>
+    <div class="chip" data-i="1"><span class="chipGlyph"></span></div>
+    <div class="chip" data-i="2"><span class="chipGlyph"></span></div>
+    <div class="chip" data-i="3"><span class="chipGlyph"></span></div>
+    <div class="chip" data-i="4"><span class="chipGlyph"></span></div>
+    <div class="chip" data-i="5"><span class="chipGlyph"></span></div>
+  </div>
+  <button type="button" class="arrangeBtn" id="arrangeBtn">정렬</button>
+  <div class="status" id="status" aria-live="polite">흩어짐</div>
+</div>
+</main>
+<script>
+(function () {
+  var GRID_COLS = 3;
+  var CELL_W = 58;
+  var CELL_H = 46;
+  var ORIGIN_X = 10;
+  var ORIGIN_Y = 12;
+  var HOP_MS = 480;
+  var HOLD_MS = 900;
+
+  var SCATTER = [
+    { x: 6, y: 6 }, { x: 138, y: 16 }, { x: 62, y: 66 },
+    { x: 168, y: 58 }, { x: 24, y: 100 }, { x: 150, y: 104 }
+  ];
+
+  var scene = document.getElementById('scene');
+  var frame = document.getElementById('frame');
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip'));
+  var btn = document.getElementById('arrangeBtn');
+  var status = document.getElementById('status');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var arranged = false;
+  var current = SCATTER.map(function (p) { return { x: p.x, y: p.y }; });
+  var timers = [];
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  // 격자 인덱스 → 좌표: col = i % GRID_COLS, row = floor(i / GRID_COLS), 그 위치에
+  // ORIGIN + col*CELL_W / row*CELL_H 를 더해 칩 하나하나의 목표 좌표를 산술로 얻는다.
+  function gridTarget(i) {
+    var col = i % GRID_COLS;
+    var row = Math.floor(i / GRID_COLS);
+    return { x: ORIGIN_X + col * CELL_W, y: ORIGIN_Y + row * CELL_H };
+  }
+
+  function paint() {
+    chips.forEach(function (chip, i) {
+      chip.style.transform = 'matrix(1,0,0,1,' + current[i].x.toFixed(1) + ',' + current[i].y.toFixed(1) + ')';
+    });
+  }
+
+  function animateTo(targets, onDone) {
+    var from = current.map(function (p) { return { x: p.x, y: p.y }; });
+    var start = performance.now();
+    function step(now) {
+      var p = Math.min(1, (now - start) / HOP_MS);
+      var e = easeOutCubic(p);
+      for (var i = 0; i < chips.length; i++) {
+        current[i].x = from[i].x + (targets[i].x - from[i].x) * e;
+        current[i].y = from[i].y + (targets[i].y - from[i].y) * e;
+      }
+      paint();
+      if (p < 1) requestAnimationFrame(step);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(step);
+  }
+
+  function toggleArrange() {
+    arranged = !arranged;
+    var targets = arranged ? chips.map(function (_, i) { return gridTarget(i); }) : SCATTER;
+    status.textContent = arranged ? '정렬됨' : '흩어짐';
+    btn.setAttribute('aria-pressed', String(arranged));
+    animateTo(targets);
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  btn.setAttribute('aria-pressed', 'false');
+  btn.addEventListener('click', function () {
+    human();
+    toggleArrange();
+  });
+
+  paint();
+
+  // reduce: 실사용 경로 적용 — 버튼 클릭은 위 toggleArrange() 가 트윈으로 즉시 목표 좌표까지 움직인다.
+  // 아래 자동 루프는 시연 게이트만 — 흩어짐↔정렬을 스스로 반복하며 reduce 에서는 돌지 않는다.
+  function loop() {
+    if (!scene.classList.contains('is-demo')) return;
+    toggleArrange();
+    timers.push(setTimeout(loop, HOP_MS + HOLD_MS));
+  }
+
+  if (!reduce) {
+    timers.push(setTimeout(loop, HOLD_MS));
+  }
+})();
+</script>
+</body>
+</html>

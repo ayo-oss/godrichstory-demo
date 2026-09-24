@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위험 구간 박동 전환 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gb">
+  <div class="gb__head">
+    <span class="gb__label">HP</span>
+    <span class="gb__value" id="gbValue">70 / 100</span>
+  </div>
+  <div class="gb__track" role="progressbar" aria-label="HP" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70" id="gbTrack">
+    <div class="gb__fill" id="gbFill"></div>
+  </div>
+  <button type="button" class="gb__hit" id="gbHit">피해 입기</button>
+</div>
+<script>
+(function () {
+  var HP_MAX = 100;
+  var THRESHOLD = 30; // 계산 겹 상수: 위험 구간 진입 기준
+  var START = 70;
+  var EVENTS = [[400, -20], [1400, -15], [2200, -10], [3000, -15]]; // ms, 값 변화
+  var PERIOD_MAX = 900; // ms, 임계 진입 직후(잔량 많음) 박동 주기
+  var PERIOD_MIN = 280; // ms, 잔량 0 에 가까울 때 박동 주기
+  var AMP_MIN = 0.12; // 임계 진입 직후 박동 진폭
+  var AMP_MAX = 0.5; // 잔량 0 에 가까울 때 박동 진폭
+  var HIT_LIST = [20, 15, 10, 15, 20];
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gb = document.getElementById('gb');
+  var track = document.getElementById('gbTrack');
+  var fill = document.getElementById('gbFill');
+  var valueEl = document.getElementById('gbValue');
+  var hitBtn = document.getElementById('gbHit');
+
+  var isDemo = true;
+  var value = START;
+  var appliedIdx = 0;
+  var cycleStart = 0;
+  var hitIdx = 0;
+
+  function pulseFor(v, ts) {
+    if (v >= THRESHOLD) return { brightness: 1, glow: 0 };
+    // 계산 겹: 잔량이 낮을수록 박동 주기는 짧아지고 진폭은 커진다(반비례) — 매 프레임 v 에서 다시 계산
+    var ratio = (THRESHOLD - v) / THRESHOLD; // 0..1
+    var period = PERIOD_MAX - (PERIOD_MAX - PERIOD_MIN) * ratio;
+    var amp = AMP_MIN + (AMP_MAX - AMP_MIN) * ratio;
+    var phase = (ts % period) / period * Math.PI * 2;
+    var osc = Math.sin(phase);
+    return { brightness: 1 + amp * osc, glow: Math.max(0, osc) * amp };
+  }
+
+  function render(ts) {
+    var v = Math.max(0, Math.min(HP_MAX, value));
+    fill.style.width = v.toFixed(2) + '%';
+    var p = pulseFor(v, ts);
+    fill.style.filter = 'brightness(' + p.brightness.toFixed(3) + ')';
+    fill.style.boxShadow = p.glow > 0.02
+      ? '0 0 ' + (6 + p.glow * 18).toFixed(1) + 'px ' + (p.glow * 6).toFixed(1) + 'px rgba(255,120,90,' + p.glow.toFixed(3) + ')'
+      : 'none';
+    track.setAttribute('aria-valuenow', String(Math.round(v)));
+    valueEl.textContent = Math.round(v) + ' / ' + HP_MAX;
+  }
+
+  function human() {
+    if (isDemo) { gb.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  hitBtn.addEventListener('click', function () {
+    human();
+    if (value <= 0) { value = START; }
+    else { value = Math.max(0, value - HIT_LIST[hitIdx % HIT_LIST.length]); hitIdx++; }
+    render(performance.now());
+  });
+  hitBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    hitBtn.click();
+  });
+
+  function loop(ts) {
+    if (!cycleStart) cycleStart = ts;
+    var elapsed = ts - cycleStart;
+
+    if (isDemo) {
+      if (elapsed >= EVENTS[EVENTS.length - 1][0] + 1000) {
+        cycleStart = ts; elapsed = 0; appliedIdx = 0; value = START;
+      }
+      while (appliedIdx < EVENTS.length && elapsed >= EVENTS[appliedIdx][0]) {
+        value = Math.max(0, Math.min(HP_MAX, value + EVENTS[appliedIdx][1]));
+        appliedIdx++;
+      }
+    }
+
+    render(ts);
+    requestAnimationFrame(loop);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  } else {
+    render(0);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D 회전 투영 — 로렌츠 어트랙터 카오스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lz is-demo" id="lzRoot">
+  <p class="lz__hint">
+    <span>Rotate xyz by an angle and project obliquely to screen coordinates — the butterfly turns in space and gains depth</span>
+  </p>
+  <div class="lz__field" role="application" aria-label="3D rotation playground" tabindex="0">
+    <canvas class="lz__cv" id="lzCv"></canvas>
+  </div>
+  <div class="lz__bar">
+    <span class="lz__meta">2s rotation · two pairs of sin and cos · no matrices</span>
+    <span class="lz__meta lz__meta--dim">canvas · depth shading · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 3D 회전 투영(02) — 로렌츠 어트랙터를 입체로 돌아 보게 만든다.
+// 사전 적분한 2,600걸음을 회전각 t 에 맞춰 사선 투영(xy 회전 + z 를 세로·y 를 깊이로)하고
+// 깊이(y)로 색·두께·밝기를 음영한다. 행렬 곱 없이 sin·cos 두 쌍의 회전식만으로 3D 를 만든다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var DT     = 0.01;    // 오일러 걸음
+  var STEPS  = 2600;    // 사전 적분 걸음 수
+  var SPIN_S = 2.0;     // 화면 가로축 회전 주기(초) — 설정 초(2s)와 같다
+  var SPIN_L = 14.0;    // 관찰축(깊이) 회전 주기(초) — 느리게 도는 두 번째 축
+  // ────────────────────────────────────────────────────
+  var SIG = 10, RHO = 28, BETA = 8 / 3;
+
+  var root = document.getElementById('lzRoot');
+  var cvEl = document.getElementById('lzCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C0    = tokRGB('--lz-c0');    // 먼 궤적 — 얼음 파스텔
+  var C1    = tokRGB('--lz-c1');    // 가까운 궤적 — 복숭아 파스텔
+  var HEAD  = tokRGB('--lz-head');  // 머리 점 — 크림(토큰)
+  var PANEL = tokRGB('--lz-panel'); // 관측창 바닥
+
+  function rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+  function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+
+  function deriv(x, y, z) {
+    return [SIG * (y - x), x * (RHO - z) - y, x * y - BETA * z];
+  }
+
+  // 사전 적분 — 과도기 200걸음 건너뛰기
+  var xs = new Float32Array(STEPS), ys = new Float32Array(STEPS), zs = new Float32Array(STEPS);
+  var x = 0.6, y = 0.7, z = 21, i;
+  for (i = 0; i < 200; i++) {
+    var d0 = deriv(x, y, z);
+    x += d0[0] * DT; y += d0[1] * DT; z += d0[2] * DT;
+  }
+  for (i = 0; i < STEPS; i++) {
+    xs[i] = x; ys[i] = y; zs[i] = z;
+    var d1 = deriv(x, y, z);
+    x += d1[0] * DT; y += d1[1] * DT; z += d1[2] * DT;
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0;
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  }
+
+  var CH = 26;
+  function draw(tSec) {
+    ctx.fillStyle = rgba(PANEL, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var a1 = tSec / SPIN_S * 6.2832;    // z축 회전각(라디안) — 나비가 도는 빠른 축(2초)
+    var a2 = Math.sin(tSec / SPIN_L * 6.2832) * 0.45 + 0.55;  // 시야 기울기(0.10~1.00rad 왕복, 14초) — 0 을 지나지 않는다
+    var ca1 = Math.cos(a1), sa1 = Math.sin(a1);
+    var ca2 = Math.cos(a2), sa2 = Math.sin(a2);
+
+    // 이방 스케일 — 캔버스는 2.4:1 넓은 창, 어트랙터는 1:1 에 가까워 한 변으로 묶으면
+    // 가로가 절반 이상 비는 것을 막는다. 가로 W/57 · 세로 H/37.5 로 각 변을 채운다.
+    var sx = W / 57, sy = H / 37.5;
+    var ox = W / 2, oy = H / 2;
+
+    // 사선 투영 — z축 회전(u, w) 뒤 기울기 a2 로 z 를 가로에도 섞는다.
+    // 가로 성분이 두 축에 걸려 있어 어떤 회전각에서도 궤적이 실 한 줄로 무너지지 않는다.
+    function pr(i) {
+      var u = xs[i] * ca1 - ys[i] * sa1;
+      var w = xs[i] * sa1 + ys[i] * ca1;
+      var zv = zs[i] - 25;
+      return [ox + (u * ca2 + zv * sa2) * sx, oy - (zv * ca2 * 0.66 + w * 0.40) * sy];
+    }
+
+    var k, a, b, ci, ny, col, t, P;
+    for (k = 0; k < CH; k++) {
+      a = Math.floor(k * STEPS / CH);
+      b = Math.floor((k + 1) * STEPS / CH);
+      if (b - a < 2) continue;
+      t = (k + 0.5) / CH;
+      ctx.beginPath();
+      var sum = 0;
+      P = pr(a);
+      ctx.moveTo(P[0], P[1]);
+      for (ci = a + 1; ci < b; ci++) {
+        P = pr(ci);
+        ctx.lineTo(P[0], P[1]);
+        sum += ys[ci];
+      }
+      ny = (sum / (b - a - 1) + 27) / 57;
+      ny = Math.max(0, Math.min(1, ny));
+      col = mix(C0, C1, ny);
+      ctx.strokeStyle = rgba(col, 0.20 + 0.62 * ny);
+      ctx.lineWidth = 1.2 + 1.8 * ny;
+      ctx.stroke();
+    }
+
+    // 머리 — 현재 프레임의 회전각에 맞춘 위치
+    var m = STEPS - 1;
+    P = pr(m);
+    var hx = P[0], hy = P[1];
+    ctx.fillStyle = rgba(HEAD, 0.25);
+    ctx.beginPath(); ctx.arc(hx, hy, 6, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = rgba(HEAD, 1);
+    ctx.beginPath(); ctx.arc(hx, hy, 2.2, 0, 6.2832); ctx.fill();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000 % SPIN_S + 0.4);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.4);
+  });
+  fit();
+  if (reduce) {
+    draw(0.4);                                 // reduce — 한 회전각만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

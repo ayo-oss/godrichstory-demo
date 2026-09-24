@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>전송 속도 라벨 — 파일 업로드 진행률 로더 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sl is-demo" id="slRoot" role="group" tabindex="0" aria-label="File upload transfer speed">
+  <div class="sl__row">
+    <span class="sl__speed" id="slSpeed" aria-hidden="true"><b class="sl__n"></b><i>KB/s</i></span>
+    <span class="sl__label">Sending</span>
+  </div>
+  <div class="sl__track">
+    <span class="sl__fill" id="slFill"></span>
+  </div>
+  <div class="sl__bar">
+    <span class="sl__meta">performance.now · ProgressEvent</span>
+  </div>
+</div>
+</main>
+<script>
+// 전송 속도 라벨 — 실제 XHR 대신 ProgressEvent 를 직접 만들어 같은 파이프라인을 태운다.
+// progress 가 올 때마다 이전 시점과의 바이트 차를 시간 차로 나눠 KB/s 를 다시 계산하고,
+// 최근 5개 표본의 평균을 취해 순간 값이 튀어도 라벨이 덜컹이지 않게 만든다.
+(function () {
+  var SEED = 0x51a3c9;
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = mulberry32(SEED);
+  var TOTAL = 8_400_000;
+
+  var root  = document.getElementById('slRoot');
+  var speed = document.getElementById('slSpeed');
+  var fill  = document.getElementById('slFill');
+  if (!root || !speed || !fill) return;
+
+  var bus = new EventTarget();
+  var loaded = 0, lastLoaded = 0, lastT = 0;
+  var samples = [];
+  var shownKbps = 0, timer = null, raf = null;
+
+  bus.addEventListener('progress', function (e) {
+    var now = performance.now();
+    var dt = (now - lastT) / 1000;
+    var db = e.loaded - lastLoaded;
+    var kbps = dt > 0 ? (db / 1024) / dt : 0;
+    samples.push(kbps);
+    if (samples.length > 5) samples.shift();
+    var sum = 0;
+    for (var i = 0; i < samples.length; i++) sum += samples[i];
+    var target = sum / samples.length;
+    lastT = now; lastLoaded = e.loaded;
+    fill.style.transform = 'scaleX(' + (e.loaded / e.total) + ')';
+    if (!raf) tick(target);
+  });
+
+  function tick(target) {
+    shownKbps += (target - shownKbps) * 0.3;
+    speed.style.setProperty('--n', Math.round(shownKbps));
+    if (Math.abs(target - shownKbps) > 0.5) {
+      raf = requestAnimationFrame(function () { tick(target); });
+    } else {
+      raf = null;
+    }
+  }
+
+  function pump() {
+    if (root.classList.contains('is-demo')) return;
+    var chunk = 60000 + rand() * 140000;
+    loaded = Math.min(TOTAL, loaded + chunk);
+    bus.dispatchEvent(new ProgressEvent('progress', { lengthComputable: true, loaded: loaded, total: TOTAL }));
+    if (loaded >= TOTAL) clearInterval(timer);
+  }
+
+  function live() {
+    if (!root.classList.contains('is-demo')) return;
+    root.classList.remove('is-demo');
+    lastT = performance.now();
+    timer = setInterval(pump, 260);
+  }
+  ['pointerdown', 'focusin'].forEach(function (ev) { root.addEventListener(ev, live); });
+})();
+</script>
+</body>
+</html>

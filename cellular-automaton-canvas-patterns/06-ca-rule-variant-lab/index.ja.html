@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>ルール表の値を変えると模様が変わるルール実験オートマトン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="ルール実験進行中 — クリックまたはスペースキーで停止、R で再シード">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">クリックまたはスペースキーで停止、R で再シード</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(진행률 채움 로더)와 다른 축: 규칙표 값 자체를 통째로 바꿔치기하는 계산이 주인공.
+  // 같은 시작 배치를 규칙표 값만 바꿔가며 다시 계산해 fillRect 로 그린다 — 속성 트윈 없음.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const CELL = 10, COLS = W / CELL, ROWS = H / CELL;
+  const YELLOW = '#d2c7a4';
+  const ALIVE_COLOR = '#93a4ca';
+  let SEED = 60601;
+  let rnd = makeLcg(SEED);
+
+  // 규칙표 값 4 세트 — 통째로 바꿔치기 대상(생존 이웃 수 집합 · 탄생 이웃 수 집합)
+  const RULESETS = [
+    { born: [3], survive: [2, 3] },        // Life
+    { born: [3, 6], survive: [2, 3] },     // HighLife
+    { born: [2], survive: [] },            // Seeds
+    { born: [1, 3, 5, 7], survive: [1, 3, 5, 7] } // Replicator
+  ];
+  let ruleIndex = 0;
+  const CYCLE_GENERATIONS = 26;
+  let genCount = 0;
+
+  let grid = new Uint8Array(COLS * ROWS);
+  let next = new Uint8Array(COLS * ROWS);
+
+  function idx(x, y){ return y * COLS + x; }
+
+  function seedGrid(){
+    for (let i = 0; i < grid.length; i++) grid[i] = rnd() < 0.24 ? 1 : 0;
+    genCount = 0;
+    ruleIndex = 0;
+  }
+
+  function neighborCount(x, y){
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dx = -1; dx <= 1; dx++){
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+        n += grid[idx(nx, ny)];
+      }
+    }
+    return n;
+  }
+
+  function step(){
+    const rule = RULESETS[ruleIndex];
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        const alive = grid[idx(x, y)] === 1;
+        const n = neighborCount(x, y);
+        const willLive = alive ? rule.survive.indexOf(n) !== -1 : rule.born.indexOf(n) !== -1;
+        next[idx(x, y)] = willLive ? 1 : 0;
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+    genCount++;
+    if (genCount >= CYCLE_GENERATIONS){
+      genCount = 0;
+      ruleIndex = (ruleIndex + 1) % RULESETS.length;
+      seedSame();
+    }
+  }
+
+  let baseSeedSnapshot = null;
+
+  function seedSame(){
+    if (!baseSeedSnapshot) return;
+    grid.set(baseSeedSnapshot);
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function render(){
+    ctx.fillStyle = YELLOW;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = ALIVE_COLOR;
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 1, CELL - 1);
+        }
+      }
+    }
+  }
+
+  const ARIA_PLAY = 'ルール実験進行中 — クリックまたはスペースキーで停止、R で再シード';
+  const ARIA_PAUSE = 'ルール実験停止中 — クリックまたはスペースキーで再生、R で再シード';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', paused ? ARIA_PAUSE : ARIA_PLAY);
+  }
+
+  let paused = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){ rootEl.classList.remove('is-demo'); }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    seedGrid();
+    baseSeedSnapshot = grid.slice();
+  }
+
+  function togglePause(){
+    paused = !paused;
+    updateAria();
+  }
+
+  function onActivate(e){
+    if (e.type === 'keydown'){
+      if (e.key === 'r' || e.key === 'R'){
+        human();
+        reseed();
+        render();
+        return;
+      }
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      togglePause();
+    }
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R' || e.key === 'Enter' || e.key === ' '){
+      onActivate(e);
+    }
+  }
+
+  const GEN_INTERVAL_MS = 70;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('click', onActivate);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  seedGrid();
+  baseSeedSnapshot = grid.slice();
+  updateAria();
+  render();
+  if (!reduceMQ.matches){
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

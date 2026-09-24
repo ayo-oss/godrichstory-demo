@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drag-following tab indicator — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sf is-demo" id="sf">
+  <div class="sf__phone">
+    <div class="sf__track" id="sfTrack">
+      <div class="sf__indicator" id="sfIndicator"></div>
+      <button type="button" class="sf__tab is-active" data-idx="0">
+        <svg class="sf__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 120v96h-64v-64h-48v64H40v-96a8 8 0 0 1 2.34-5.66l80-80a8 8 0 0 1 11.32 0l80 80A8 8 0 0 1 216 120" opacity=".2"/><path d="m219.31 108.68l-80-80a16 16 0 0 0-22.62 0l-80 80A15.87 15.87 0 0 0 32 120v96a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-56h32v56a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-96a15.87 15.87 0 0 0-4.69-11.32M208 208h-48v-56a8 8 0 0 0-8-8h-48a8 8 0 0 0-8 8v56H48v-88l80-80l80 80Z"/></g></svg>
+        <span class="sf__label">Home</span>
+      </button>
+      <button type="button" class="sf__tab" data-idx="1">
+        <svg class="sf__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 80v120a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8V80a8 8 0 0 1 8-8h176a8 8 0 0 1 8 8" opacity=".2"/><path d="M216 64h-40a48 48 0 0 0-96 0H40a16 16 0 0 0-16 16v120a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V80a16 16 0 0 0-16-16m-88-32a32 32 0 0 1 32 32H96a32 32 0 0 1 32-32m88 168H40V80h176Z"/></g></svg>
+        <span class="sf__label">Shopping</span>
+      </button>
+      <button type="button" class="sf__tab" data-idx="2">
+        <svg class="sf__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 192H48a8 8 0 0 1-6.88-12C47.71 168.6 56 139.81 56 104a72 72 0 0 1 144 0c0 35.82 8.3 64.6 14.9 76a8 8 0 0 1-6.9 12" opacity=".2"/><path d="M221.8 175.94c-5.55-9.56-13.8-36.61-13.8-71.94a80 80 0 1 0-160 0c0 35.34-8.26 62.38-13.81 71.94A16 16 0 0 0 48 200h40.81a40 40 0 0 0 78.38 0H208a16 16 0 0 0 13.8-24.06M128 216a24 24 0 0 1-22.62-16h45.24A24 24 0 0 1 128 216m-80-32c7.7-13.24 16-43.92 16-80a64 64 0 1 1 128 0c0 36.05 8.28 66.73 16 80Z"/></g></svg>
+        <span class="sf__label">Notifications</span>
+      </button>
+      <button type="button" class="sf__tab" data-idx="3">
+        <svg class="sf__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 96a64 64 0 1 1-64-64a64 64 0 0 1 64 64" opacity=".2"/><path d="M230.92 212c-15.23-26.33-38.7-45.21-66.09-54.16a72 72 0 1 0-73.66 0c-27.39 8.94-50.86 27.82-66.09 54.16a8 8 0 1 0 13.85 8c18.84-32.56 52.14-52 89.07-52s70.23 19.44 89.07 52a8 8 0 1 0 13.85-8M72 96a56 56 0 1 1 56 56a56.06 56.06 0 0 1-56-56"/></g></svg>
+        <span class="sf__label">Profile</span>
+      </button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var SPRING_K = 240; // 계산 겹: 정착(settle) 스프링 상수 — 드래그를 놓은 뒤 가장 가까운 탭으로 당긴다
+  var SPRING_C = 20; // 감쇠 상수
+  var DRAG_MS = 520; // 자동 루프에서 가상 손가락이 다음 탭까지 이동하는 시간
+  var WAIT_MS = 700; // 정착 뒤 머무는 시간
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var sf = document.getElementById('sf');
+  var track = document.getElementById('sfTrack');
+  var indicator = document.getElementById('sfIndicator');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.sf__tab'));
+
+  var isDemo = true;
+  var geo = []; // 계산 겹: 탭마다 실제 렌더 폭·left 오프셋(getBoundingClientRect 실측)
+  var maxX = 0;
+  var indW = 0, indH = 0;
+  var activeIdx = 0;
+  var posX = 0; // 인디케이터 현재 x(px)
+  var vel = 0; // 정착 스프링 속도
+  var settling = false;
+  var settleTarget = 0;
+  var dragging = false;
+  var dragStartClientX = 0;
+  var dragStartX = 0;
+  var lastTs = 0;
+
+  function measure() {
+    var trackRect = track.getBoundingClientRect();
+    geo = tabs.map(function (t) {
+      var r = t.getBoundingClientRect();
+      return { left: r.left - trackRect.left, width: r.width, height: r.height };
+    });
+    var first = geo[0];
+    indW = first.width; indH = first.height;
+    indicator.style.width = indW + 'px';
+    indicator.style.height = indH + 'px';
+    maxX = geo[geo.length - 1].left;
+    posX = geo[activeIdx].left;
+    indicator.style.transform = 'translateX(' + posX.toFixed(1) + 'px)';
+  }
+
+  function human() {
+    if (isDemo) { sf.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function nearestIndex(centerX) {
+    var best = 0, bestDist = Infinity;
+    geo.forEach(function (g, i) {
+      var c = g.left + g.width / 2;
+      var d = Math.abs(c - centerX);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    return best;
+  }
+
+  function setActive(idx) {
+    activeIdx = idx;
+    tabs.forEach(function (t, i) { t.classList.toggle('is-active', i === idx); });
+  }
+
+  function onPointerDown(e) {
+    human();
+    dragging = true;
+    settling = false;
+    dragStartClientX = e.clientX;
+    dragStartX = posX;
+    track.setPointerCapture && e.pointerId != null && track.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (!dragging) return;
+    var dx = e.clientX - dragStartClientX;
+    posX = Math.max(0, Math.min(maxX, dragStartX + dx));
+    indicator.style.transform = 'translateX(' + posX.toFixed(1) + 'px)';
+  }
+  function onPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    var idx = nearestIndex(posX + indW / 2);
+    setActive(idx);
+    settling = true;
+    settleTarget = geo[idx].left;
+    vel = 0;
+  }
+
+  track.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
+
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () {
+      human();
+      if (dragging) return;
+      setActive(i);
+      settling = true;
+      settleTarget = geo[i].left;
+      vel = 0;
+    });
+  });
+
+  var demoOrder = [2, 1, 3, 0]; // 자동 루프가 방문할 탭 순서
+  var demoStep = 0;
+  var demoPhase = 'wait'; // 'drag' | 'settle' | 'wait'
+  var demoElapsed = 0;
+  var demoFromIdx = 0;
+
+  function tick(ts) {
+    if (!lastTs) { lastTs = ts; }
+    var dt = Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+
+    if (isDemo && !reduce && !dragging) {
+      demoElapsed += dt * 1000;
+      if (demoPhase === 'drag') {
+        var t = Math.min(1, demoElapsed / DRAG_MS);
+        var toIdx = demoOrder[demoStep];
+        var fromCenter = geo[demoFromIdx].left + indW / 2;
+        var toCenter = geo[toIdx].left + indW / 2;
+        var virtualCenter = fromCenter + (toCenter - fromCenter) * t;
+        posX = Math.max(0, Math.min(maxX, virtualCenter - indW / 2));
+        indicator.style.transform = 'translateX(' + posX.toFixed(1) + 'px)';
+        if (t >= 1) {
+          setActive(toIdx);
+          settling = true; settleTarget = geo[toIdx].left; vel = 0;
+          demoPhase = 'settle'; demoElapsed = 0;
+        }
+      } else if (demoPhase === 'settle') {
+        if (!settling) {
+          demoPhase = 'wait'; demoElapsed = 0;
+        }
+      } else if (demoPhase === 'wait') {
+        if (demoElapsed >= WAIT_MS) {
+          demoFromIdx = demoOrder[demoStep];
+          demoStep = (demoStep + 1) % demoOrder.length;
+          demoPhase = 'drag'; demoElapsed = 0;
+        }
+      }
+    }
+
+    if (settling) {
+      var acc = (settleTarget - posX) * SPRING_K - vel * SPRING_C;
+      vel += acc * dt;
+      posX += vel * dt;
+      if (Math.abs(settleTarget - posX) < 0.4 && Math.abs(vel) < 4) {
+        posX = settleTarget; vel = 0; settling = false;
+      }
+      indicator.style.transform = 'translateX(' + posX.toFixed(1) + 'px)';
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  measure();
+  window.addEventListener('resize', measure);
+  requestAnimationFrame(tick);
+})();
+</script>
+</main>
+</body>
+</html>

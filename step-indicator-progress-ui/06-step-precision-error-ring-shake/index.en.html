@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step Indicator With an Error Ring Shake — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="er is-demo" id="er">
+  <span class="er__glow" id="erGlow" aria-hidden="true"></span>
+  <ol class="er__row" id="erRow" role="list" aria-label="Required input steps">
+    <li class="er__node" data-i="0"><span class="er__ring" id="ring0"></span><span class="er__circle is-active" id="n0">1</span><span class="er__label">Name</span></li>
+    <li class="er__connector"></li>
+    <li class="er__node" data-i="1"><span class="er__ring" id="ring1"></span><span class="er__circle" id="n1">2</span><span class="er__label">Contact</span></li>
+    <li class="er__connector"></li>
+    <li class="er__node" data-i="2"><span class="er__ring" id="ring2"></span><span class="er__circle" id="n2">3</span><span class="er__label">Done</span></li>
+  </ol>
+  <label class="er__field">
+    <span class="er__fieldLabel">Name (required)</span>
+    <input type="text" id="erInput" class="er__input" autocomplete="off">
+  </label>
+  <p class="er__status" id="erStatus" aria-live="assertive"></p>
+  <div class="er__controls">
+    <button type="button" class="er__btn er__btn--primary" id="erNext">Next</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_ERROR_SHAKE_DECAY = 5.5;
+  var STEP_ERROR_SHAKE_FREQ = 26;
+  var STEP_ERROR_SHAKE_AMPLITUDE_PX = 6;
+  var STEP_ERROR_RING_CONTRACT_PX = 6;
+  var SHAKE_DURATION_S = 0.6;
+  var STEP_COUNT = 3;
+  var RING_BASE_PX = 64;
+  var NEIGHBOR_SHAKE_RATIO = 0.3; // 인접 노드 미세 흔들림 — 같은 감쇠 함수의 축소판
+
+  var root = document.getElementById('er');
+  var glow = document.getElementById('erGlow');
+  var input = document.getElementById('erInput');
+  var status = document.getElementById('erStatus');
+  var nextBtn = document.getElementById('erNext');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var circles = [0, 1, 2].map(function (i) { return document.getElementById('n' + i); });
+  var rings = [0, 1, 2].map(function (i) { return document.getElementById('ring' + i); });
+
+  var current = 0;
+  var errorAt = null;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function render() {
+    circles.forEach(function (el, i) {
+      el.classList.toggle('is-active', i === current);
+      el.classList.toggle('is-done', i < current);
+    });
+  }
+
+  function clearShakeVisuals() {
+    circles[current].style.transform = '';
+    rings[current].style.boxShadow = 'none';
+    glow.style.opacity = '0';
+    [current - 1, current + 1].forEach(function (idx) {
+      if (idx >= 0 && idx < STEP_COUNT) circles[idx].style.transform = '';
+    });
+  }
+
+  function triggerError() {
+    errorAt = performance.now();
+    status.textContent = 'Enter a name to move to the next step';
+    if (reduce) {
+      circles[current].classList.add('is-error');
+      rings[current].classList.add('is-error');
+    }
+  }
+
+  function advance() {
+    if (current === 0 && input.value.trim() === '') { triggerError(); return; }
+    circles[current].classList.remove('is-error');
+    rings[current].classList.remove('is-error');
+    current = clamp(current + 1, 0, STEP_COUNT - 1);
+    status.textContent = current === STEP_COUNT - 1 ? 'Entered' : '';
+    render();
+  }
+
+  nextBtn.addEventListener('click', function () { root.classList.remove('is-demo'); advance(); });
+  input.addEventListener('input', function () {
+    if (input.value.trim() !== '') { errorAt = null; circles[0].classList.remove('is-error'); rings[0].classList.remove('is-error'); status.textContent = ''; clearShakeVisuals(); }
+  });
+
+  var startTime = null;
+  var phase = 0;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2;
+    if (root.classList.contains('is-demo')) {
+      if (t < 0.05 && phase !== 0) phase = 0;
+      if (phase === 0 && t > 0.20) { triggerError(); phase = 1; }
+      if (phase === 1 && t > 1.10) { input.value = ''; errorAt = null; circles[0].classList.remove('is-error'); rings[0].classList.remove('is-error'); triggerError(); phase = 2; }
+    }
+    if (!reduce && errorAt !== null) {
+      var tt = (now - errorAt) / 1000;
+      if (tt <= SHAKE_DURATION_S) {
+        var envelope = Math.exp(-STEP_ERROR_SHAKE_DECAY * tt);
+        var x = STEP_ERROR_SHAKE_AMPLITUDE_PX * envelope * Math.sin(STEP_ERROR_SHAKE_FREQ * tt);
+        circles[current].style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+        circles[current].classList.add('is-error');
+        var contract = STEP_ERROR_RING_CONTRACT_PX * (1 - envelope);
+        var ringSize = RING_BASE_PX - contract;
+        rings[current].style.width = ringSize.toFixed(1) + 'px';
+        rings[current].style.height = ringSize.toFixed(1) + 'px';
+        rings[current].style.marginLeft = (-ringSize / 2).toFixed(1) + 'px';
+        rings[current].style.opacity = String(envelope);
+        rings[current].style.boxShadow = '0 0 ' + (envelope * 22).toFixed(1) + 'px ' + (envelope * 8).toFixed(1) + 'px rgba(194, 54, 26, ' + (envelope * 0.55).toFixed(2) + ')';
+        rings[current].classList.add('is-error');
+        glow.style.opacity = (envelope * 0.4).toFixed(2);
+        [current - 1, current + 1].forEach(function (idx) {
+          if (idx >= 0 && idx < STEP_COUNT) circles[idx].style.transform = 'translateX(' + (x * NEIGHBOR_SHAKE_RATIO).toFixed(2) + 'px)';
+        });
+      } else {
+        clearShakeVisuals();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

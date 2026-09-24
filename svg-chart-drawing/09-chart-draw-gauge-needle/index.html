@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>숫자를 넣으면 바늘이 도는 반원 게이지 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cg is-demo" id="cg">
+  <div class="cg__card">
+    <div class="cg__head">
+      <p class="cg__title">이번 분기 목표 달성률</p>
+      <span class="cg__chip">실시간 반영</span>
+    </div>
+    <div class="cg__plot">
+      <svg class="cg__svg" id="gauge" viewBox="0 0 440 176" role="img" aria-label="목표 달성률 반원 게이지, 현재 68%">
+        <!-- 눈금 라벨 5개 — 반원 둘레 바깥(반경 106)의 수학 각도 좌표 -->
+        <g class="cg__scale">
+          <text x="114" y="129">0</text>
+          <text x="145" y="54">25</text>
+          <text x="220" y="23">50</text>
+          <text x="295" y="54">75</text>
+          <text x="326" y="129">100</text>
+        </g>
+        <!-- 트랙(연한 반원) + 값 호. 둘 다 pathLength=100 이라 값% 가 곧 dashoffset -->
+        <path class="cg__track" d="M132,126 A88,88 0 0 1 308,126" pathLength="100"></path>
+        <path class="cg__arc" id="arc" d="M132,126 A88,88 0 0 1 308,126" pathLength="100"></path>
+        <!-- 구간별 투명한 호 — hover 툴팁의 당김줄 (pointer-events: stroke) -->
+        <g class="cg__hits" id="hits"></g>
+        <!-- 바늘 — 기본 모양은 12시 방향, rotate 로 각도를 잡는다. 원점은 게이지 중심 -->
+        <g class="cg__needle" id="needle">
+          <path class="cg__pin" d="M220,126 L220,50"></path>
+          <circle class="cg__hub" cx="220" cy="126" r="7"></circle>
+        </g>
+        <!-- 값 라벨 — 미리보기에선 두 장을 steps 로 갈아 끼운다 -->
+        <text class="cg__val cg__val--zero" x="220" y="160" aria-hidden="true">0%</text>
+        <text class="cg__val cg__val--full" x="220" y="160" aria-hidden="true">68%</text>
+        <text class="cg__liveVal" id="liveVal" x="220" y="160">68%</text>
+      </svg>
+      <div class="cg__tip" id="tip" aria-hidden="true"><strong id="tipRange">60~80%</strong><span id="tipName">순항 구간</span></div>
+      <table class="cg__sr">
+        <caption>목표 달성률 구간</caption>
+        <thead><tr><th>구간</th><th>의미</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">0~20%</th><td>시작 구간</td></tr>
+          <tr><th scope="row">20~40%</th><td>가속 구간</td></tr>
+          <tr><th scope="row">40~60%</th><td>중간 체크</td></tr>
+          <tr><th scope="row">60~80%</th><td>순항 구간</td></tr>
+          <tr><th scope="row">80~100%</th><td>목표 직전</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="cg__inputRow">
+      <label class="cg__lab" for="valInput">목표 달성률 입력</label>
+      <input class="cg__input" id="valInput" type="number" min="0" max="100" step="1" value="68">
+      <span class="cg__unit">%</span>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+var SECTIONS = [
+  { lo: 0, hi: 20, name: '시작 구간' },
+  { lo: 20, hi: 40, name: '가속 구간' },
+  { lo: 40, hi: 60, name: '중간 체크' },
+  { lo: 60, hi: 80, name: '순항 구간' },
+  { lo: 80, hi: 100, name: '목표 직전' }
+];
+var CX = 220, CY = 126, R = 88;
+var cg = document.getElementById('cg');
+var gauge = document.getElementById('gauge');
+var arc = document.getElementById('arc');
+var needle = document.getElementById('needle');
+var liveVal = document.getElementById('liveVal');
+var input = document.getElementById('valInput');
+var tip = document.getElementById('tip');
+var tipRange = document.getElementById('tipRange');
+var tipName = document.getElementById('tipName');
+
+// 값 → 바늘 회전각(도). 바늘 기본 모양이 12시라 0% 에서 -90(왼쪽 끝), 100% 에서 +90(오른쪽 끝)
+function angleFor(v) { return v * 1.8 - 90; }
+// 값 → 반원 위의 수학 각도(도). 0% 가 180(왼쪽), 100% 가 0(오른쪽) — 회전각과 다른 값이라는 점이 함정
+function degreeFor(v) { return 180 - v * 1.8; }
+// 수학 각도 → viewBox 좌표. SVG 는 y 가 아래로 자라므로 sin 을 **빼야** 위쪽 반원이 나온다.
+// 더하면 반원이 통째로 아래로 뒤집혀 눈금 라벨과 어긋난다
+function pointAt(deg, radius) {
+  var rad = deg * Math.PI / 180;
+  return [CX + radius * Math.cos(rad), CY - radius * Math.sin(rad)];
+}
+
+// 툴팁을 한 구간 위에 놓는다 — 호버와 미리보기가 같은 코드를 쓴다.
+// 반경은 호 위(R) — 더 안쪽에 두면 바늘을 가린다 (R-32 로 놓았더니 poster 에서 바늘 끝이 덮였다)
+function placeTip(sec) {
+  var mid = pointAt((degreeFor(sec.lo) + degreeFor(sec.hi)) / 2, R);
+  tip.style.left = (mid[0] / 440 * 100) + '%';
+  tip.style.top = (mid[1] / 176 * 100) + '%';
+  tipRange.textContent = sec.lo + '~' + sec.hi + '%';
+  tipName.textContent = sec.name;
+}
+
+// 구간 호 5개를 만들어 깐다 — 투명하지만 stroke 위에서 pointer 이벤트를 받는다
+var SVGNS = 'http://www.w3.org/2000/svg';
+var hits = document.getElementById('hits');
+SECTIONS.forEach(function (sec) {
+  var p0 = pointAt(degreeFor(sec.lo), R), p1 = pointAt(degreeFor(sec.hi), R);
+  var path = document.createElementNS(SVGNS, 'path');
+  path.setAttribute('d', 'M' + p0[0].toFixed(1) + ',' + p0[1].toFixed(1) + ' A' + R + ',' + R + ' 0 0 1 ' + p1[0].toFixed(1) + ',' + p1[1].toFixed(1));
+  path.setAttribute('class', 'cg__hit');
+  hits.appendChild(path);
+  path.addEventListener('pointerenter', function () {
+    cg.classList.remove('is-demo');
+    placeTip(sec);
+    tip.classList.add('is-on');
+  });
+});
+hits.addEventListener('pointerleave', function () { tip.classList.remove('is-on'); });
+placeTip(SECTIONS[3]);   // 미리보기에선 68% 가 속한 순항 구간 위에 미리 놓는다
+
+// 값 하나에 호·바늘·라벨을 맞춘다 — 실사용 경로 (입력 → 즉시 반영)
+function applyValue(v) {
+  v = Math.max(0, Math.min(100, v));
+  arc.style.strokeDashoffset = String(100 - v);
+  needle.style.transform = 'rotate(' + angleFor(v).toFixed(1) + 'deg)';
+  liveVal.textContent = v + '%';
+  gauge.setAttribute('aria-label', '목표 달성률 반원 게이지, 현재 ' + v + '%');
+}
+input.addEventListener('input', function () { cg.classList.remove('is-demo'); applyValue(Number(input.value)); });
+input.addEventListener('focus', function () { cg.classList.remove('is-demo'); });
+applyValue(68);
+</script>
+</body>
+</html>

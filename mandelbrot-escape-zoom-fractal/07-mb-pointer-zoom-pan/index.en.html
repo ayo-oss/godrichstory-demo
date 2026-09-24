@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pointer zoom and pan — Mandelbrot escape-time fractal — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>The wheel dives into the point under the pointer, dragging pans — the preview stands in for a human hand and alternates both moves</span>
+  </p>
+  <div class="mb__field" role="application" aria-label="Pointer zoom-pan explorer" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+    <span class="mb__zoom" id="mbZoom">x1</span>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta">wheel zoom · drag pan · iterations 96 to 400</span>
+    <span class="mb__meta mb__meta--dim">canvas · pointerdown · wheel</span>
+  </div>
+</div>
+</main>
+<script>
+// 포인터 줌·팬(07) — 탐험 사이트의 조작 레이어.
+// 줌의 핵심 불변식: 휠 이벤트가 일어난 화면 좌표가 나타내는 복소평면 점이 줌 뒤에도
+// 같은 화면 좌표에 남아야 한다(포인터 아래가 팽창한다). scale 갱신과 center 갱신을
+// 한 식으로 묶는다: center = point - (point - center) * (oldScale / newScale).
+// 드래그 팬은 center 를 이동 델타만큼 평행이동. 최대 반복은 log(배율)에 비례해 올라간다.
+// 미리보기(.is-demo)는 이 조작을 시뮬레이션한다 — 실제 wheel·pointer 이벤트를
+// 디스패치하는 게 아니라 같은 공개 함수(zoomAt·panBy)를 시나리오 순서로 부른다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var MAXIT0 = 96;    // 배율 1 최대 반복
+  var MAXIT1 = 400;   // 심층 최대 반복
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var cv = document.getElementById('mbCv');
+  var field = cv.parentElement;
+  var zoomEl = document.getElementById('mbZoom');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = ['--mb-c0', '--mb-c1', '--mb-c2', '--mb-c3', '--mb-c4'].map(tokRGB);
+  var C_SET = tokRGB('--mb-set');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, IRES = 240;
+  var ov, octx;
+
+  // 뷰 상태 — 줌·팬이 이 넷을 바꾼다
+  var view = { cx: -0.75, cy: 0, scale: 2.9 };
+  var startScale = 2.9;
+  var drag = null;    // 드래그 중 {x0, y0, cx0, cy0}
+
+  function maxIter() {
+    var k = startScale / view.scale;
+    return Math.round(MAXIT0 + (MAXIT1 - MAXIT0) * Math.min(1, Math.log(k) / Math.log(150)));
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ov = document.createElement('canvas');
+    ov.width = IRES; ov.height = Math.max(2, Math.round(IRES * H / W));
+    octx = ov.getContext('2d');
+  }
+
+  // 화면 좌표 → 복소평면
+  function toPlane(x, y) {
+    var dx = view.scale / W;
+    return {
+      x: view.cx - view.scale / 2 + x * dx,
+      y: view.cy - (H * dx) / 2 + y * dx
+    };
+  }
+
+  function render() {
+    var iw = ov.width, ih = ov.height;
+    var maxit = maxIter();
+    var img = octx.createImageData(iw, ih);
+    var px = img.data;
+    var dx = view.scale / iw, dy = view.scale / iw;
+    var oy0 = view.cy - (ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var ci = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var cr = view.cx - view.scale / 2 + i * dx;
+        var zr = 0, zi = 0, n = 0;
+        while (n < maxit && zr * zr + zi * zi <= 4) {
+          var t = zr * zr - zi * zi + cr;
+          zi = 2 * zr * zi + ci;
+          zr = t; n++;
+        }
+        var r, g, b;
+        if (n >= maxit) {
+          r = C_SET[0]; g = C_SET[1]; b = C_SET[2];
+        } else {
+          var u = (n / maxit) * 4;
+          var seg = u - Math.floor(u / 4) * 4;
+          var a = PAL[Math.floor(seg) % 4], bb = PAL[(Math.floor(seg) + 1) % 4];
+          var f = seg - Math.floor(seg);
+          r = a[0] + (bb[0] - a[0]) * f;
+          g = a[1] + (bb[1] - a[1]) * f;
+          b = a[2] + (bb[2] - a[2]) * f;
+        }
+        px[k++] = r; px[k++] = g; px[k++] = b; px[k++] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    cv.getContext('2d').drawImage(ov, 0, 0, W, H);
+    var kk = Math.round(startScale / view.scale);
+    zoomEl.textContent = kk >= 1000 ? 'x' + Math.round(kk / 100) / 10 + 'k' : 'x' + kk;
+  }
+
+  // ── 공개 조작 — 사람 이벤트와 미리보기 시나리오가 같은 길을 쓴다 ──
+  function zoomAt(px_, py_, factor) {
+    // (px_, py_) 화면 좌표의 복소평면 점이 줌 뒤에도 그 자리에 남게 center 보정
+    var p = toPlane(px_, py_);
+    view.scale /= factor;
+    view.cx = p.x + (view.cx - p.x) / factor;
+    view.cy = p.y + (view.cy - p.y) / factor;
+  }
+  function panBy(dxPx, dyPx) {
+    var dx = view.scale / W;
+    view.cx -= dxPx * dx;
+    view.cy += dyPx * dx;
+  }
+
+  // 사람 조작 — 휠(포인터 아래 줌)·드래그(팬)
+  field.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    var r = cv.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.18 : 1 / 1.18);
+    render();
+  }, { passive: false });
+  field.addEventListener('pointerdown', function (e) {
+    field.setPointerCapture(e.pointerId);
+    drag = { x0: e.clientX, y0: e.clientY, cx0: view.cx, cy0: view.cy };
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    view.cx = drag.cx0; view.cy = drag.cy0;
+    panBy(e.clientX - drag.x0, e.clientY - drag.y0);
+    render();
+  });
+  field.addEventListener('pointerup', function () { drag = null; });
+
+  // ── 미리보기 시나리오 — 사람의 손을 대신하는 시각화 루프 ──
+  // 2초를 4막으로: ① 명치 오른쪽 전구로 줌인(0~0.5) ② 위쪽으로 팬(0.5~0.7)
+  // ③ 다시 줌인(0.7~0.85) ④ 줌 아웃으로 복귀(0.85~1). 매 스텝마다 render.
+  function previewState(t) {
+    // 기본 뷰에서 시작해 시나리오를 t 에 맞춰 처음부터 재생한다(결정론)
+    var v = { cx: -0.75, cy: 0, scale: 2.9 };
+    var k1 = Math.pow(9, Math.min(1, t / 0.5));         // 막1 — x9 까지
+    v.scale = 2.9 / k1;
+    var p = { x: -0.16, y: -0.84 };                      // 전구 아래 안테나 근처 목표
+    v.cx = -0.75 + (p.x + 0.75) * Math.min(1, t / 0.5) * 0.42;
+    v.cy = 0 + (p.y) * Math.min(1, t / 0.5) * 0.42;
+    if (t > 0.5) {                                       // 막2 — 팬 위로
+      var up = Math.min(1, (t - 0.5) / 0.2);
+      v.cy += -0.34 * up * v.scale * 0.5;
+      v.cx += 0.10 * up * v.scale * 0.5;
+    }
+    if (t > 0.7) {                                       // 막3 — 더 줌
+      var k2 = Math.pow(4, Math.min(1, (t - 0.7) / 0.15));
+      v.scale /= k2;
+    }
+    if (t > 0.85) {                                      // 막4 — 원경 복귀
+      var back = (t - 0.85) / 0.15;
+      var ks = Math.pow(2.9 / v.scale, back);
+      v.scale *= ks;
+      v.cx = -0.16 + (-0.75 + 0.16) * back * 0 + v.cx * (1 - back) + (-0.75) * back;
+      v.cx = v.cx * (1 - back) + (-0.75) * back;
+      v.cy = v.cy * (1 - back) + 0 * back;
+    }
+    return v;
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 2.0;
+    var v = previewState(loop / 2.0);
+    view.cx = v.cx; view.cy = v.cy; view.scale = v.scale;
+    render();
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); render(); });
+
+  fit();
+  if (reduce) {
+    view = { cx: -0.24, cy: -0.62, scale: 0.9 };   // reduce — 전구 클로즈업 한 장 고정
+    render();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

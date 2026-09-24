@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loader a Seed-count Value Expands into Voronoi Cells — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld" id="ld">
+  <p class="ld__hint">
+    <svg class="ld__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 56v56a8 8 0 0 1-16 0V91.3l-25.6 25.7A80 80 0 1 1 174 60a8 8 0 1 1-9 13.2A64 64 0 1 0 179.7 128H216a8 8 0 0 1 0 16h-56a8 8 0 0 1-8-8V80a8 8 0 0 1 16 0v20.7L192.7 76A80.1 80.1 0 0 0 64 128a8 8 0 0 1-16 0a96 96 0 0 1 163.6-68.3L224 71.3V56a8 8 0 0 1 8 8" opacity=".2"/><path d="M224 48a8 8 0 0 0-8 8v15.3l-11.7-11.6a96 96 0 1 0 27.6 51.6a8 8 0 0 0-15.8 2.5a80 80 0 1 1-23-43l-25.7 25.7A8 8 0 0 0 173 112h56a8 8 0 0 0 8-8V56a8 8 0 0 0-13-8"/></g></svg>
+    <span>Click or press the space bar to pause or restart</span>
+  </p>
+  <div class="ld__field" id="field" role="application" aria-label="Voronoi cell growth test panel" tabindex="0">
+    <canvas class="ld__cv" id="cv"></canvas>
+    <b class="ld__badge" aria-hidden="true"><span class="ld__badgeNum" id="pct">0%</span><span class="ld__badgeUnit">Seeds</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 보로노이 셀 로더 — 씨앗점 개수를 진행률에 비례해 늘려 매 프레임 보로노이 다이어그램을
+// (격자 표본에서 가장 가까운 씨앗 찾기) 다시 계산한다. 셀이 촘촘해질수록 모자이크가 채워진다.
+var root = document.getElementById('ld');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var pctEl = document.getElementById('pct');
+
+var css = getComputedStyle(root);
+var PAPER = css.getPropertyValue('--paper').trim();
+var C1 = css.getPropertyValue('--c1').trim();
+var C2 = css.getPropertyValue('--c2').trim();
+var C3 = css.getPropertyValue('--c3').trim();
+var C4 = css.getPropertyValue('--c4').trim();
+var SEEDPT = css.getPropertyValue('--seedpt').trim();
+var PALETTE = [C1, C2, C3, C4];
+
+function makeRng(seed) {
+  var s = seed >>> 0;
+  return function () {
+    s = (1103515245 * s + 12345) >>> 0;
+    return (s >>> 8) / 16777216;
+  };
+}
+
+var MAXSEEDS = 16;
+var LOOP = 2.0;
+var CELL = 9;                        // 격자 표본 한 칸(px) — 작을수록 더 매끄러운 다이어그램
+var rng = makeRng(20260924);
+var seeds = [];
+for (var i = 0; i < MAXSEEDS; i++) {
+  seeds.push({
+    hx: 0.08 + rng() * 0.84, hy: 0.1 + rng() * 0.8, px: 0, py: 0,
+    wf: 0.7 + rng() * 1.1, wp: rng() * Math.PI * 2          // 개별 흔들림 진동수·위상(LCG 고정) — 씨앗 수가 그대로여도 경계선이 계속 움직인다
+  });
+}
+
+var W = 0, H = 0, dpr = 1, cols = 0, rows = 0, wobbleR = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cols = Math.ceil(W / CELL);
+  rows = Math.ceil(H / CELL);
+  wobbleR = Math.min(W, H) * 0.035;
+  for (var i = 0; i < MAXSEEDS; i++) { seeds[i].hx0 = seeds[i].hx * W; seeds[i].hy0 = seeds[i].hy * H; }
+}
+
+function draw(sec) {
+  var t = sec % LOOP;
+  var p = t / LOOP;                                    // 0→1 진행률 — 활성 씨앗 개수의 목표값
+  var count = Math.max(2, 2 + Math.floor(p * (MAXSEEDS - 2)));
+
+  for (var i = 0; i < MAXSEEDS; i++) {
+    seeds[i].px = seeds[i].hx0 + Math.sin(sec * seeds[i].wf + seeds[i].wp) * wobbleR;
+    seeds[i].py = seeds[i].hy0 + Math.cos(sec * seeds[i].wf * 0.86 + seeds[i].wp) * wobbleR;
+  }
+
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  for (var r = 0; r < rows; r++) {
+    var cy = r * CELL + CELL / 2;
+    for (var c = 0; c < cols; c++) {
+      var cx = c * CELL + CELL / 2;
+      var best = 0, bestD = Infinity;
+      for (var s = 0; s < count; s++) {
+        var dx = cx - seeds[s].px, dy = cy - seeds[s].py;
+        var d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      ctx.fillStyle = PALETTE[best % PALETTE.length];
+      ctx.globalAlpha = 0.55;
+      ctx.fillRect(c * CELL, r * CELL, CELL - 1, CELL - 1);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  for (var k = 0; k < count; k++) {
+    ctx.fillStyle = SEEDPT;
+    ctx.beginPath();
+    ctx.arc(seeds[k].px, seeds[k].py, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  var pct = Math.round((count - 2) / (MAXSEEDS - 2) * 100);
+  pctEl.textContent = pct + '%';
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var paused = false;
+var t0 = 0;
+var raf = 0;
+
+function togglePause() {
+  paused = !paused;
+  root.classList.toggle('is-paused', paused);
+}
+function restart() {
+  t0 = performance.now();
+  draw(0);
+}
+
+field.addEventListener('click', function () { togglePause(); });
+field.addEventListener('keydown', function (e) {
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePause(); }
+  else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+});
+window.addEventListener('resize', function () {
+  fit();
+  if (paused || reduce) draw(((performance.now() - t0) / 1000));
+});
+
+function frame(now) {
+  if (!paused) draw((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+t0 = performance.now();
+fit();
+if (reduce) {
+  root.classList.add('is-still');
+  draw(LOOP * 0.62);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

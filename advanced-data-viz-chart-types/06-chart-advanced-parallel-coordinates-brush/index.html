@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>항목 하나의 여러 값을 각 세로축 위 좌표로 계산해 선분으로 잇고, 축 하나를 드래그로 훑으면 그 구간을 지나는 선만 강조된다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pcb is-demo" id="pcbRoot">
+  <canvas class="pcb__canvas" id="pcbCanvas" width="480" height="300"></canvas>
+  <div class="pcb__kbd" id="pcbKbd" tabindex="0" aria-label="브러시 이동"></div>
+  <p class="pcb__caption">항목 하나의 여러 값을 각 세로축 위 좌표로 계산해 선분으로 잇고, 축 하나를 드래그로 훑으면 그 구간을 지나는 선만 강조된다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 축마다 0~1 로 정규화된 값을 세로 좌표로 계산해 인접 축을 선분으로 이어 병렬좌표를
+  // 그리고, 가운데 축 위의 브러시 구간(포인터 드래그 · 화살표 키)에 걸리는 값을 가진 선만
+  // 강조 색으로 두껍게, 그렇지 않은 선은 흐리게 그린다. 매 프레임 전체 데이터를 다시 그리는
+  // 방식이라 별도의 상태 저장 없이 브러시 위치 하나만 갱신하면 된다.
+  var root = document.getElementById('pcbRoot');
+  var canvas = document.getElementById('pcbCanvas');
+  var kbdEl = document.getElementById('pcbKbd');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var rand = seedRand(425061);
+  var AXIS_COUNT = 5, ITEM_COUNT = 6;
+  var DATA = [];
+  for (var di = 0; di < ITEM_COUNT; di += 1) {
+    var row = [];
+    for (var da = 0; da < AXIS_COUNT; da += 1) row.push(rand());
+    DATA.push(row);
+  }
+  var BRUSH_AXIS_INDEX = 2;
+  var BRUSH_HALF = 0.09;
+  var brushCenter = 0.5;
+  var dragging = false;
+  var lastUserInputAt = -9999;
+
+  var LOOP_MS = 2000;
+  var T0 = 200;
+  var cw = 480, ch = 300;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function axisX(a) {
+    var padX = cw * 0.09;
+    return padX + (cw - padX * 2) * (a / (AXIS_COUNT - 1));
+  }
+  function valueY(v) {
+    var padY = ch * 0.14;
+    return ch - padY - (ch - padY * 2) * v;
+  }
+  function yToValue(y) {
+    var padY = ch * 0.14;
+    return clamp(1 - (y - padY) / (ch - padY * 2), 0, 1);
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.strokeStyle = 'rgba(23,20,26,.22)';
+    ctx.lineWidth = 1;
+    for (var a = 0; a < AXIS_COUNT; a += 1) {
+      var x = axisX(a);
+      ctx.beginPath();
+      ctx.moveTo(x, valueY(0));
+      ctx.lineTo(x, valueY(1));
+      ctx.stroke();
+    }
+    var lo = brushCenter - BRUSH_HALF, hi = brushCenter + BRUSH_HALF;
+    var yLo = valueY(lo), yHi = valueY(hi);
+    ctx.fillStyle = 'rgba(91,140,248,.16)';
+    ctx.fillRect(0, yHi, cw, yLo - yHi);
+    for (var it = 0; it < ITEM_COUNT; it += 1) {
+      var v = DATA[it][BRUSH_AXIS_INDEX];
+      var inBand = v >= lo && v <= hi;
+      ctx.strokeStyle = inBand ? '#2f6df6' : 'rgba(23,20,26,.22)';
+      ctx.lineWidth = inBand ? 2.5 : 1;
+      ctx.beginPath();
+      for (var a2 = 0; a2 < AXIS_COUNT; a2 += 1) {
+        var px = axisX(a2), py = valueY(DATA[it][a2]);
+        if (a2 === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+  }
+
+  function setBrushCenter(v) {
+    brushCenter = clamp(v, BRUSH_HALF, 1 - BRUSH_HALF);
+    render();
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) * (cw / rect.width);
+    var axisPx = axisX(BRUSH_AXIS_INDEX);
+    if (Math.abs(x - axisPx) < cw * 0.14) {
+      dragging = true;
+      var y = (e.clientY - rect.top) * (ch / rect.height);
+      lastUserInputAt = elapsed;
+      setBrushCenter(yToValue(y));
+    }
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var rect = canvas.getBoundingClientRect();
+    var y = (e.clientY - rect.top) * (ch / rect.height);
+    lastUserInputAt = elapsed;
+    setBrushCenter(yToValue(y));
+  });
+  canvas.addEventListener('pointerup', function () { dragging = false; });
+  canvas.addEventListener('pointerleave', function () { dragging = false; });
+
+  kbdEl.addEventListener('keydown', function (e) {
+    e.preventDefault();
+    if (e.key === 'ArrowUp') { lastUserInputAt = elapsed; setBrushCenter(brushCenter + 0.04); }
+    else if (e.key === 'ArrowDown') { lastUserInputAt = elapsed; setBrushCenter(brushCenter - 0.04); }
+  });
+
+  function autoDemoStep(elapsedMs) {
+    if (elapsedMs < T0) return;
+    if (elapsedMs - lastUserInputAt < 800) return;
+    var t = elapsedMs % LOOP_MS;
+    setBrushCenter(0.5 + Math.sin((t - T0) / LOOP_MS * Math.PI * 2) * 0.35);
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    render();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      autoDemoStep(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

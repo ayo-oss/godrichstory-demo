@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carousel Where Multiple Codes Turn Over With Perspective — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mcc is-demo" id="mccRoot">
+  <div class="mcc__badge" id="mccBadge">1 / 5</div>
+  <button class="mcc__ctrl" id="mccCtrl" type="button">Pause</button>
+  <div class="mcc__canvas-wrap">
+    <canvas class="mcc__canvas" id="mccCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // MULTI_CODE_CAROUSEL_STEP_MS — 변형 1: 650 → 1000 으로 늘리면 코드가 더 느긋하게 넘어간다.
+  var MULTI_CODE_CAROUSEL_STEP_MS = 650;
+  var COUNT = 5;
+  var LOOP_MS = MULTI_CODE_CAROUSEL_STEP_MS * COUNT;
+
+  var canvas = document.getElementById('mccCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var badge = document.getElementById('mccBadge');
+  var ctrl = document.getElementById('mccCtrl');
+  var root = document.getElementById('mccRoot');
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var grids = [];
+  for (var g = 0; g < COUNT; g += 1) {
+    var rand = seedRand(407090 + g * 17);
+    var dots = [];
+    for (var y = 0; y < 7; y += 1) {
+      for (var x = 0; x < 7; x += 1) {
+        if (rand() < 0.44) dots.push({ x: x, y: y });
+      }
+    }
+    grids.push(dots);
+  }
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  // 계산된 시각 레이어: 캔버스 크기가 바뀌면 카드 간격·크기를 다시 잰다 —
+  // 카드 이동·원근 스케일이 스테이지를 채우도록(278px 캡 없이 반응형).
+  var dpr = 1, cw = 240, ch = 200, cy = 100, stepX = 74, boxBase = 60;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    cw = r.width; ch = r.height;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cy = ch / 2;
+    stepX = cw * 0.31;
+    boxBase = Math.min(cw * 0.24, ch * 0.5);
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    ctx.clearRect(0, 0, cw, ch);
+
+    var raw = elapsed / MULTI_CODE_CAROUSEL_STEP_MS;
+    var index = Math.floor(raw) % COUNT;
+    var localT = raw - Math.floor(raw);
+    var eased = easeInOut(localT);
+    var pos = index + eased;
+
+    for (var i = 0; i < COUNT; i += 1) {
+      // 계산 한 겹: 현재 위치와의 거리 → 원근 스케일·투명도·좌우 이동량을 함께 구한다.
+      var diff = i - pos;
+      while (diff > COUNT / 2) diff -= COUNT;
+      while (diff < -COUNT / 2) diff += COUNT;
+      var dist = Math.abs(diff);
+      if (dist > 1.8) continue;
+      var scale = Math.max(0.35, 1 - dist * 0.42);
+      var alpha = Math.max(0, 1 - dist * 0.55);
+      var cx = cw / 2 + diff * stepX;
+
+      var box = boxBase * scale;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'rgba(20,26,38,.92)';
+      ctx.fillRect(cx - box / 2, cy - box / 2, box, box);
+      var cell = box / 7;
+      ctx.fillStyle = 'rgb(255,247,230)';
+      grids[i].forEach(function (d) {
+        var s = cell * 0.62;
+        ctx.fillRect(cx - box / 2 + d.x * cell + (cell - s) / 2, cy - box / 2 + d.y * cell + (cell - s) / 2, s, s);
+      });
+    }
+    ctx.globalAlpha = 1;
+
+    badge.textContent = (index + 1) + ' / ' + COUNT;
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? 0 : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? 'Pause' : 'Play';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = 'Pause';
+    }
+  });
+})();
+</script>
+</body>
+</html>

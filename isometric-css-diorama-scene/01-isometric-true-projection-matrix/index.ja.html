@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本物の等角 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ip" id="ip">
+  <p class="ip__hint">近似のrotateX(-30°)とmatrix3dの正確な等角(35.264°)を同じ速度で回し、縦横比の差を見ます</p>
+  <div class="ip__row" role="img" aria-label="近似等角と正確な等角の立方体を同じ速度で回して比較する場面" id="scene">
+    <div class="ip__col">
+      <div class="ip__field"><div class="ip__cube3d" id="cubeApprox"></div></div>
+      <div class="ip__stat"><b class="ip__tag">rotateX(-30deg)</b><span class="ip__ratio" id="ratioApprox">0.000</span></div>
+    </div>
+    <div class="ip__col">
+      <div class="ip__field"><div class="ip__cube3d" id="cubeExact"></div></div>
+      <div class="ip__stat"><b class="ip__tag">matrix3d(-35.264°)</b><span class="ip__ratio" id="ratioExact">0.000</span></div>
+    </div>
+  </div>
+  <p class="ip__meta"><b class="ip__deg" id="deg">0</b><span class="ip__metaUnit">° ターンテーブル回転 · 縦/横比</span></p>
+</div>
+</main>
+<script>
+// 진짜 등각(01) — 흔히 쓰는 rotateX(-30deg) rotateZ(45deg) 조합은 근사값이다. 정확한 등각
+// 각도는 -arctan(1/sqrt(2)) = -35.264deg. 두 각도로 만든 회전 행렬을 JS 로 직접 곱해
+// matrix3d 에 넣고, 같은 턴테이블 회전(spin)을 매 프레임 다시 곱해 큐브를 돌린다.
+// CSS @keyframes 는 없다 — 움직임은 전부 계산된 matrix3d 값이다.
+(function () {
+  var root = document.getElementById('ip');
+  var cubeApprox = document.getElementById('cubeApprox');
+  var cubeExact = document.getElementById('cubeExact');
+  var degEl = document.getElementById('deg');
+  var ratioApproxEl = document.getElementById('ratioApprox');
+  var ratioExactEl = document.getElementById('ratioExact');
+  if (!root || !cubeApprox || !cubeExact || !degEl || !ratioApproxEl || !ratioExactEl) return;
+
+  function mat4RotateX(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  }
+  function mat4RotateZ(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+  function mat4Mul(a, b) {
+    var out = new Array(16);
+    for (var col = 0; col < 4; col++) {
+      for (var row = 0; row < 4; row++) {
+        var sum = 0;
+        for (var k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+  function mat4ToCss(m) {
+    var s = '';
+    for (var i = 0; i < m.length; i++) s += (i ? ',' : '') + m[i].toFixed(6);
+    return 'matrix3d(' + s + ')';
+  }
+
+  // 큐브 한 개를 세 면(top·right·front) div 로 짓는다 — backface-visibility 로 뒷면을 지운다
+  function buildCube(mount, size) {
+    var defs = [
+      { cls: 'ip__face ip__face--top', t: 'rotateX(90deg) translateZ(' + (size / 2) + 'px)' },
+      { cls: 'ip__face ip__face--right', t: 'rotateY(90deg) translateZ(' + (size / 2) + 'px)' },
+      { cls: 'ip__face ip__face--front', t: 'translateZ(' + (size / 2) + 'px)' }
+    ];
+    for (var i = 0; i < defs.length; i++) {
+      var f = document.createElement('div');
+      f.className = defs[i].cls;
+      f.style.width = size + 'px'; f.style.height = size + 'px';
+      f.style.transform = defs[i].t;
+      mount.appendChild(f);
+    }
+  }
+
+  var mm = window.matchMedia('(max-width: 340px)').matches;
+  var SIZE = mm ? 52 : 76;
+  buildCube(cubeApprox, SIZE);
+  buildCube(cubeExact, SIZE);
+
+  var TILT_APPROX = -30;      // 흔한 근사값 — 수학적 등각이 아니다
+  var TILT_EXACT = -35.264;   // 정확한 등각 각도 = -arctan(1/sqrt(2))
+
+  ratioApproxEl.textContent = Math.cos(TILT_APPROX * Math.PI / 180).toFixed(3);
+  ratioExactEl.textContent = Math.cos(TILT_EXACT * Math.PI / 180).toFixed(3);
+
+  function norm360(a) { a %= 360; return a < 0 ? a + 360 : a; }
+
+  function paint(spinDeg) {
+    var mA = mat4Mul(mat4RotateX(TILT_APPROX), mat4RotateZ(45 + spinDeg));
+    var mE = mat4Mul(mat4RotateX(TILT_EXACT), mat4RotateZ(45 + spinDeg));
+    cubeApprox.style.transform = mat4ToCss(mA);
+    cubeExact.style.transform = mat4ToCss(mE);
+    degEl.textContent = String(Math.round(norm360(spinDeg)));
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    paint(20);
+    root.classList.add('is-still');
+  } else {
+    var start = performance.now();
+    (function step(now) {
+      var t = (now - start) / 1000;
+      paint((t * 24) % 360);   // 초당 24도 — 15초에 한 바퀴, 두 큐브가 같은 속도로 돈다
+      requestAnimationFrame(step);
+    })(start);
+  }
+})();
+</script>
+</body>
+</html>

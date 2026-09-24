@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>격자 눈금 캔버스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gs is-demo" id="gs">
+  <div class="gs__card">
+    <div class="gs__bar">
+      <button type="button" class="gs__snap" id="snapBtn" aria-pressed="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" class="gs__ico" aria-hidden="true"><path d="M208,56V200a8,8,0,0,1-8,8H56a8,8,0,0,1-8-8V56a8,8,0,0,1,8-8H200A8,8,0,0,1,208,56Z" opacity="0.2"/><path d="M200,40H56A16,16,0,0,0,40,56V200a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V56A16,16,0,0,0,200,40Zm0,80H136V56h64ZM120,56v64H56V56ZM56,136h64v64H56Zm144,64H136V136h64v64Z"/></svg><span>눈금에 맞추기</span><span class="gs__pill" aria-hidden="true"><span class="gs__knob"></span></span></button>
+      <button type="button" class="gs__btn" id="clearBtn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" class="gs__ico" aria-hidden="true"><path d="M160,168l-48,48H66.75L36.69,185.94a16,16,0,0,1,0-22.63L96,104Z" opacity="0.2"/><path d="M225,80.4,183.6,39a24,24,0,0,0-33.94,0L31,157.66a24,24,0,0,0,0,33.94l30.06,30.06A8,8,0,0,0,66.74,224H216a8,8,0,0,0,0-16h-84.7L225,114.34A24,24,0,0,0,225,80.4ZM108.68,208H70.05L42.33,180.28a8,8,0,0,1,0-11.31L96,115.31,148.69,168Zm105-105L160,156.69,107.31,104,161,50.34a8,8,0,0,1,11.32,0l41.38,41.38a8,8,0,0,1,0,11.31Z"/></svg><span>판 비우기</span></button>
+    </div>
+    <div class="gs__board" id="board">
+      <canvas class="gs__ink" id="ink" role="img" aria-label="배치도 칸, 점 0개"></canvas>
+      <svg class="gs__ghost" viewBox="0 0 300 104" preserveAspectRatio="none" aria-hidden="true">
+        <path class="gs__line" pathLength="100" d="M50,78 L50,26 L125,26 L125,52 L200,52 L200,78 L250,78"/>
+        <path class="gs__diag" pathLength="100" d="M25,78 L275,26"/>
+        <circle class="gs__ring gs__ring--1" cx="50" cy="78" r="5"/>
+        <circle class="gs__ring gs__ring--2" cx="50" cy="26" r="5"/>
+        <circle class="gs__ring gs__ring--3" cx="125" cy="26" r="5"/>
+        <circle class="gs__ring gs__ring--4" cx="125" cy="52" r="5"/>
+        <circle class="gs__ring gs__ring--5" cx="200" cy="52" r="5"/>
+        <circle class="gs__ring gs__ring--6" cx="200" cy="78" r="5"/>
+        <circle class="gs__ring gs__ring--7" cx="250" cy="78" r="5"/>
+      </svg>
+    </div>
+    <p class="gs__live">
+      <span class="gs__liveReal" id="live" aria-live="polite">눈금에 맞추기 켬, 점 0개</span>
+      <span class="gs__liveDemo gs__liveDemo--off" aria-hidden="true">눈금에 맞추기 끔</span>
+      <span class="gs__liveDemo gs__liveDemo--on" aria-hidden="true">눈금에 맞추기 켬</span>
+    </p>
+  </div>
+</div>
+</main>
+<script>
+var gs = document.getElementById('gs');
+var board = document.getElementById('board');
+var ink = document.getElementById('ink');
+var live = document.getElementById('live');
+var snapBtn = document.getElementById('snapBtn');
+var ctx = ink.getContext('2d');
+var COLS = 12, ROWS = 4;          // 판을 가로 12칸 · 세로 4칸으로 나눈 눈금 (CSS 눈금과 같은 수)
+var points = [], snap = true;
+var PAD_LABEL = '배치도 칸, 점 %d개';
+var LIVE_LABEL = '눈금에 맞추기 %s, 점 %d개';
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function resize() {
+  var r = board.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  ink.width = Math.round(r.width * dpr);
+  ink.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  repaint();
+}
+
+// 눈금 한 칸은 판 크기의 1/12 · 1/4 다 — 판이 줄어도 CSS 눈금과 같은 자리에 떨어진다
+function stepSize() {
+  var r = board.getBoundingClientRect();
+  return { x: r.width / COLS, y: r.height / ROWS };
+}
+
+// 스냅이 켜져 있으면 가장 가까운 교차점으로 붙인다 — 반올림 한 번이 전부다
+function snapPoint(p) {
+  if (!snap) { return p; }
+  var s = stepSize();
+  return { x: Math.round(p.x / s.x) * s.x, y: Math.round(p.y / s.y) * s.y };
+}
+
+function repaint() {
+  ctx.clearRect(0, 0, ink.width, ink.height);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#17141a';
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  for (var i = 0; i < points.length; i++) {
+    if (i === 0) { ctx.moveTo(points[i].x, points[i].y); } else { ctx.lineTo(points[i].x, points[i].y); }
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#2f6df6';
+  ctx.lineWidth = 1.6;
+  for (var k = 0; k < points.length; k++) {   // 붙은 자리마다 작은 표식
+    ctx.beginPath();
+    ctx.arc(points[k].x, points[k].y, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ink.setAttribute('aria-label', PAD_LABEL.replace('%d', points.length));
+  live.textContent = LIVE_LABEL.replace('%s', snap ? '켬' : '끔').replace('%d', points.length);
+}
+
+board.addEventListener('pointerdown', function (e) {
+  gs.classList.remove('is-demo');
+  var r = ink.getBoundingClientRect();
+  points.push(snapPoint({ x: e.clientX - r.left, y: e.clientY - r.top }));
+  repaint();
+});
+snapBtn.addEventListener('click', function () {
+  gs.classList.remove('is-demo');
+  snap = !snap;
+  snapBtn.setAttribute('aria-pressed', snap ? 'true' : 'false');
+  repaint();
+});
+document.getElementById('clearBtn').addEventListener('click', function () { points = []; repaint(); });
+window.addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>

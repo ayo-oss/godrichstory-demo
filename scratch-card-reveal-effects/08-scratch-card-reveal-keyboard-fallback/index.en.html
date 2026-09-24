@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arrow keys move the cursor and space scratches — the same calculation path as a mouse, with no mouse needed — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">Scratch card</p>
+    <div class="scv__zone" id="zone" tabindex="0" role="application" aria-label="Scratch card, move with arrow keys then scratch with space">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">Shipping fee coupon</p>
+        <p class="scv__prizeSub">You can also scratch with arrow keys + space</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+      <div class="scv__cursor" id="cursor" aria-hidden="true"></div>
+    </div>
+    <button type="button" class="scv__reveal" id="revealBtn">Reveal instantly</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 키보드로 이동하는 가상 커서(cursorX, cursorY)를 두고 Enter/Space 가 포인터 드래그와
+  // 완전히 같은 scratchAt()/clearedRatio() 경로를 호출한다 — 별도의 "키보드용 처리"가 없다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var cursorEl = document.getElementById('cursor');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var FW = foil.width, FH = foil.height;
+  var SCRATCH_BRUSH_R = 16;
+  var KEY_STEP = 22;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424081);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, FW, FH);
+    var grad = ctx.createLinearGradient(0, 0, FW, FH);
+    grad.addColorStop(0, '#dfe3ea');
+    grad.addColorStop(.5, '#f4f6f9');
+    grad.addColorStop(1, '#c9ced8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.strokeStyle = 'rgba(23,20,26,.14)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 18; i += 1) {
+      var x = foilRand() * FW, y = foilRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 20 - 10), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  // 실제 긁기 경로 — 포인터도 키보드도 이 함수 하나만 호출한다
+  function scratchAt(x, y) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function clearedRatio() {
+    var data = ctx.getImageData(0, 0, FW, FH).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  var opened = false;
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = 'The shipping fee coupon is revealed';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  paintFoil();
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dragging = false;
+  var cursor = { x: FW / 2, y: FH / 2 };
+
+  function placeCursor() {
+    var r = foil.getBoundingClientRect();
+    var scaleX = r.width / FW, scaleY = r.height / FH;
+    cursorEl.style.left = (cursor.x * scaleX) + 'px';
+    cursorEl.style.top = (cursor.y * scaleY) + 'px';
+  }
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    dragging = true;
+    var p = pos(e);
+    cursor.x = p.x; cursor.y = p.y;
+    scratchAt(p.x, p.y);
+    placeCursor();
+    if (clearedRatio() > .82) openCard();
+    if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!dragging || opened) return;
+    var p = pos(e);
+    cursor.x = p.x; cursor.y = p.y;
+    scratchAt(p.x, p.y);
+    placeCursor();
+    if (clearedRatio() > .82) openCard();
+  });
+  window.addEventListener('pointerup', function () { dragging = false; });
+
+  // 키보드 경로 — 빈 핸들러 없음. 실제로 커서를 옮기고(state 변화) preventDefault 로 스크롤을 막는다.
+  zone.addEventListener('keydown', function (e) {
+    if (opened) return;
+    var moved = false;
+    if (e.key === 'ArrowUp') { cursor.y = Math.max(6, cursor.y - KEY_STEP); moved = true; }
+    else if (e.key === 'ArrowDown') { cursor.y = Math.min(FH - 6, cursor.y + KEY_STEP); moved = true; }
+    else if (e.key === 'ArrowLeft') { cursor.x = Math.max(6, cursor.x - KEY_STEP); moved = true; }
+    else if (e.key === 'ArrowRight') { cursor.x = Math.min(FW - 6, cursor.x + KEY_STEP); moved = true; }
+    else if (e.key === 'Enter' || e.key === ' ') {
+      root.classList.remove('is-demo');
+      scratchAt(cursor.x, cursor.y);
+      var ratio = clearedRatio();
+      live.textContent = Math.round(ratio * 100) + '% scratched';
+      if (ratio > .82) openCard();
+      e.preventDefault();
+      return;
+    } else { return; }
+    root.classList.remove('is-demo');
+    placeCursor();
+    e.preventDefault();
+  });
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+
+  // 자동 재생도 같은 scratchAt() 를 호출 — 키보드 시뮬레이션과 같은 경로
+  var demoRand = seedRand(424082);
+  var demoPath = [];
+  (function buildDemoPath() {
+    for (var i = 0; i < 20; i += 1) {
+      demoPath.push({
+        t: 220 + i * 90,
+        x: (FW * 0.14) + (i % 5) * (FW * 0.18) + (demoRand() - .5) * 6,
+        y: (FH * 0.22) + Math.floor(i / 5) * (FH * 0.28) + (demoRand() - .5) * 6
+      });
+    }
+  })();
+  var DEMO_LOOP_MS = 3800;
+  var demoStep = 0;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+    demoStep = 0;
+  }
+  function runDemo(tMod) {
+    while (demoStep < demoPath.length && demoPath[demoStep].t <= tMod) {
+      var p = demoPath[demoStep];
+      cursor.x = p.x; cursor.y = p.y;
+      scratchAt(p.x, p.y);
+      placeCursor();
+      demoStep += 1;
+      if (clearedRatio() > .82) openCard();
+    }
+  }
+
+  placeCursor();
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

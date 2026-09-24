@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スプリングオーバーシュートで戻るカード — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="es is-demo" id="es">
+  <p class="es__caption">スプリングオーバーシュートで戻るカード</p>
+  <div class="es__scene" id="esScene">
+    <div class="es__peek" id="esPeek" aria-hidden="true"></div>
+    <div class="es__card" id="esCard" tabindex="0" role="group" aria-roledescription="スワイプカード">
+      <p class="es__label" id="esLabel">週末のカフェ</p>
+    </div>
+    <button class="es__btn es__btn--nope" id="esNope" type="button" aria-label="いいえ">✕</button>
+    <button class="es__btn es__btn--like" id="esLike" type="button" aria-label="いいね">♥</button>
+  </div>
+  <p class="es__status" id="esStatus" aria-live="polite">待機中</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 변형 3: 03 폴더에 SWIPE_STACK_DEPTH_SCALE 를 실재시킨다 — 뒤 카드 한 장을 이 비율만큼 줄여 살짝 비친다.
+  var SWIPE_STACK_DEPTH_SCALE = 0.04;
+  // 값 하나: 해제 속도가 이 값에 못 미치면 스프링(강성·감쇠)을 적분해 오버슛하며 되돌아온다.
+  var SPRING_FLING_VELOCITY_MIN = 0.5;
+  var SPRING_STIFFNESS = 120;
+  var SPRING_DAMPING = 14;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("es");
+  var card = document.getElementById("esCard");
+  var peek = document.getElementById("esPeek");
+  var label = document.getElementById("esLabel");
+  var status = document.getElementById("esStatus");
+  var btnLike = document.getElementById("esLike");
+  var btnNope = document.getElementById("esNope");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  peek.style.transform = "translateY(" + (SWIPE_STACK_DEPTH_SCALE * 100).toFixed(1) + "%) scale(" + (1 - SWIPE_STACK_DEPTH_SCALE).toFixed(3) + ")";
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["週末のカフェ", "宅トレ記録", "読書リスト", "旅行メモ", "朝のルーティン", "夕方の散歩"];
+  var rand = seedRand(37);
+  var idx = Math.floor(rand() * CARDS.length);
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vxRaw = 0;
+  var pos = 0, vel = 0, phase = "idle", exitDir = 1;
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  function render() {
+    var rot = clamp(pos * 0.06, -18, 18);
+    card.style.transform = "translateX(" + pos.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
+  }
+
+  function nextCard() {
+    idx += 1; setCard();
+    pos = 0; vel = 0; phase = "idle";
+    render();
+    status.textContent = "待機中";
+  }
+
+  function judge(velocityPxMs, dir) {
+    root.classList.remove("is-demo");
+    var flung = Math.abs(velocityPxMs) >= SPRING_FLING_VELOCITY_MIN;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "「いいね」処理済み" : "「いいえ」処理済み"; nextCard(); }
+      else { pos = 0; vel = 0; render(); status.textContent = "スプリングで弾んで戻った"; phase = "idle"; }
+      return;
+    }
+    if (flung) {
+      phase = "exit"; exitDir = dir;
+      status.textContent = dir > 0 ? "「いいね」処理済み" : "「いいえ」処理済み";
+    } else {
+      phase = "spring";
+      vel = velocityPxMs * 1000; // px/ms → px/s, 관성을 스프링에 넘긴다
+      status.textContent = "スプリングで弾んで戻った";
+    }
+  }
+
+  function startDrag(clientX) {
+    root.classList.remove("is-demo");
+    dragging = true; phase = "idle";
+    startX = clientX; lastX = clientX; lastT = performance.now(); vxRaw = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vxRaw = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    pos = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vxRaw, pos >= 0 ? 1 : -1);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function keyVerdict(dir, weak) {
+    root.classList.remove("is-demo");
+    pos = dir * (weak ? 34 : 70); render();
+    judge(dir * (weak ? 0.1 : SPRING_FLING_VELOCITY_MIN + 0.4), dir);
+  }
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { e.preventDefault(); keyVerdict(1, false); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); keyVerdict(-1, false); }
+  });
+  btnLike.addEventListener("click", function () { keyVerdict(1, false); });
+  btnNope.addEventListener("click", function () { keyVerdict(-1, false); });
+
+  // 스프링 방정식(강성 SPRING_STIFFNESS·감쇠 SPRING_DAMPING)을 매 프레임 적분한다 — 목표(0)를 넘겼다가 되돌아온다.
+  function integrate(dt) {
+    var accel = SPRING_STIFFNESS * (0 - pos) - SPRING_DAMPING * vel;
+    vel += accel * dt;
+    pos += vel * dt;
+    if (Math.abs(pos) < 0.4 && Math.abs(vel) < 4) { pos = 0; vel = 0; phase = "idle"; }
+  }
+
+  function step(dt) {
+    var dtS = Math.min(dt / 1000, 0.032);
+    if (phase === "exit") {
+      pos += exitDir * Math.max(Math.abs(vel) / 1000, SPRING_FLING_VELOCITY_MIN * 1.3) * dt;
+      render();
+      if (Math.abs(pos) > EXIT_PX) nextCard();
+    } else if (phase === "spring") {
+      integrate(dtS);
+      render();
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 pointer 없이 pos·judge() 를 같은 경로로 호출한다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.4 && t < 0.65 && synthPhase === "wait") synthPhase = "pull";
+    if (synthPhase === "pull") {
+      var p = clamp((t - 0.4) / 0.25, 0, 1);
+      pos = p * 60; render();
+      if (t >= 0.65) { synthPhase = "afterPull"; judge(0.08, 1); }
+    }
+    if (t > 1.3 && t < 1.55 && synthPhase === "afterPull") synthPhase = "throw";
+    if (synthPhase === "throw") {
+      var q = clamp((t - 1.3) / 0.25, 0, 1);
+      pos = -q * 140; render();
+      if (t >= 1.55) { synthPhase = "done"; judge(-(SPRING_FLING_VELOCITY_MIN + 0.4), -1); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

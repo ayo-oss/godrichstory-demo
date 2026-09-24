@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>생태계 장면 — 모래·물·불·식물이 같은 격자에서 돌아가는 통합 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint"><span>비·불·물·풀이 한 격자에서 순환합니다</span></p>
+  <div class="cd__field" id="cdField" role="application" aria-label="생태계 통합 셀 오토마타 데모" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">6</b>종 재료 · 생태계 순환</span>
+    <span class="cd__meta cd__meta--dim">canvas · ImageData putImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 생태계 장면(09) — 편의 대표. 재료 코드: 0 빈칸 1 모래 2 물 4 나무 5 불 6 재 7 연기 8 씨앗 9 식물 10 흙 11 돌.
+// 규칙 통합:
+//   물(03) — 아래→대각→좌우 유동. 불을 만나면 불을 재로 끄고 확률로 자신 소모.
+//   불(04) — 풀(식물·씨앗·나무)로 번지고 태운 자리에 재를 남긴다. 수명이 다하면 연기로.
+//   성장(05) — 씨앗은 아래가 흙/돌/재/식물이면 확률로 식물로 자라고, 식물은 위로 자라 나무가 된다.
+//   빗물 스포너 — 상단 성긴 드리즐(RAIN_P). 번개 점화기 — STRIKE_T 초마다 무작위 풀 칸에 불 1점.
+//   재·씨앗은 물길 닿으면 확률(REGROW_P)로 다시 발아한다. 재 → 씨앗 → 식물 → 불 → 재 로 순환.
+(function () {
+  // ── 변형 상수 블록 ──
+  var RAIN_P = 0.015;    // 상단 빗물 드리즐 확률(칸당 틱) — 늘리면 불이 금방 꺼진다
+  var STRIKE_T = 1.2;    // 번개 점화 주기(초) — 짧으면 산불이 잦는다
+  var REGROW_P = 0.05;   // 물길 닿은 재·씨앗 발아 확률 — 생태 회복 속도
+  // ────────────────────────────
+
+  var EMPTY = 0, SAND = 1, WATER = 2, WOOD = 4, FIRE = 5, ASH = 6, SMOKE = 7, SEED = 8, PLANT = 9, DIRT = 10, STONE = 11;
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A09);
+
+  function hexToRgb(hex) {
+    hex = hex.trim();
+    if (hex.length === 4) hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var cols = 0, rows = 0, grid = null, life = null; // life = 불·연기 수명
+  var COL = {};
+  // 지형 연출 — 프레임0 은 빈 무대에서 시작해 TERRAIN_TICKS 틱에 걸쳐 분지 지형·호수·풀이 차오른다.
+  var TERRAIN_TICKS = 95;
+
+  function readColors() {
+    var css = getComputedStyle(root);
+    COL.night = hexToRgb(css.getPropertyValue('--sand-night'));
+    COL.stone = hexToRgb(css.getPropertyValue('--sand-stone'));
+    COL.dirt = hexToRgb(css.getPropertyValue('--sand-wood'));
+    COL.sandA = hexToRgb(css.getPropertyValue('--sand-grain'));
+    COL.sandB = hexToRgb(css.getPropertyValue('--sand-gold'));
+    COL.water = hexToRgb(css.getPropertyValue('--sand-water'));
+    COL.ice = hexToRgb(css.getPropertyValue('--sand-ice'));
+    COL.fire = hexToRgb(css.getPropertyValue('--sand-fire'));
+    COL.flame = hexToRgb(css.getPropertyValue('--sand-flame'));
+    COL.ash = hexToRgb(css.getPropertyValue('--sand-ash'));
+    COL.smoke = hexToRgb(css.getPropertyValue('--sand-smoke'));
+    COL.plant = hexToRgb(css.getPropertyValue('--sand-plant'));
+    COL.leaf = hexToRgb(css.getPropertyValue('--sand-leaf'));
+    COL.glow = hexToRgb(css.getPropertyValue('--sand-glow'));
+  }
+
+  function idx(x, y) { return y * cols + x; }
+  function get(x, y) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return STONE;
+    return grid[idx(x, y)];
+  }
+  function set(x, y, v) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+    grid[idx(x, y)] = v;
+    if (v !== FIRE && v !== SMOKE) life[idx(x, y)] = 0;
+  }
+
+  // ── 초기 지형: 좌측 분지(오목한 그릇)에 호수, 우측은 완만한 언덕. 지형 위 풀 초기 배치 ──
+  function terrainHeight(x) {
+    var u = x / cols;
+    // 좌측 분지 — 완만한 U자. 우측으로 갈수록 낮은 언덕.
+    var basin = Math.pow(Math.max(0, (0.55 - u) / 0.55), 1.4);
+    var hill = 0.18 * Math.sin(u * 9.0) * u;
+    return Math.floor(rows * (0.68 - 0.26 * basin + hill));
+  }
+
+  // 굳는 시각표 — 각 칸에 '이 틱에 채워진다' 예약. 가장자리·얕은 쪽부터, 중앙 심부가 마지막.
+  var solidAt = null;
+  function buildSceneStagger() {
+    solidAt = new Float32Array(cols * rows);
+    for (var x = 0; x < cols; x++) {
+      var top = terrainHeight(x);
+      var edgeDist = Math.min(x, cols - 1 - x) / (cols / 2);
+      for (var y = top; y < rows; y++) {
+        var depthFrac = (y - top) / Math.max(1, rows - top);
+        solidAt[idx(x, y)] = TERRAIN_TICKS * (0.1 + 0.5 * edgeDist + 0.4 * depthFrac) * (0.85 + 0.3 * rand());
+      }
+      // 호수 물 — 지형이 굳은 뒤에 차오른다
+      var lakeLevel = Math.floor(rows * 0.58);
+      for (var wy = terrainHeight(x) - 1; wy >= lakeLevel; wy--) {
+        if (x / cols < 0.42) solidAt[idx(x, wy)] = TERRAIN_TICKS * (0.85 + 0.25 * rand()) * (0.5 + 0.5 * (wy - lakeLevel + 1) / Math.max(1, terrainHeight(x) - lakeLevel));
+      }
+      // 풀 — 제일 마지막에 돋는다
+      if (rand() < 0.42) {
+        var ty = terrainHeight(x) - 1;
+        if (ty >= 0 && x / cols >= 0.42) solidAt[idx(x, ty)] = TERRAIN_TICKS * (1.05 + 0.35 * rand());
+      }
+    }
+  }
+
+  function buildSceneFull() {
+    for (var x = 0; x < cols; x++) {
+      var top = terrainHeight(x);
+      for (var y = top; y < rows; y++) {
+        var depth = y - top;
+        var m = depth < 3 ? DIRT : STONE;
+        if (depth >= 3 && ((x * 13 + y * 7) % 23 === 0)) m = SAND;
+        grid[idx(x, y)] = m;
+      }
+    }
+    var lakeLevel = Math.floor(rows * 0.58);
+    for (var x2 = 0; x2 < cols; x2++) {
+      for (var y2 = terrainHeight(x2) - 1; y2 >= lakeLevel; y2--) {
+        if (x2 / cols < 0.42) grid[idx(x2, y2)] = WATER;
+      }
+    }
+    for (var x3 = 0; x3 < cols; x3++) {
+      if (rand() < 0.42) {
+        var ty2 = terrainHeight(x3) - 1;
+        if (ty2 >= 0 && grid[idx(x3, ty2)] === EMPTY) grid[idx(x3, ty2)] = rand() < 0.7 ? PLANT : SEED;
+      }
+    }
+  }
+
+  function resolveSolid(tick) {
+    if (!solidAt) return;
+    var lakeLevel = Math.floor(rows * 0.58);
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (solidAt[i] > 0 && solidAt[i] <= tick && grid[i] === EMPTY) {
+          if (y >= lakeLevel && x / cols < 0.42 && y < terrainHeight(x)) {
+            grid[i] = WATER; // 호수
+          } else if (y >= terrainHeight(x)) {
+            var depth = y - terrainHeight(x);
+            grid[i] = depth < 3 ? DIRT : (((x * 13 + y * 7) % 23 === 0) ? SAND : STONE);
+          } else {
+            grid[i] = rand() < 0.7 ? PLANT : SEED; // 풀
+          }
+          solidAt[i] = 0;
+        }
+      }
+    }
+  }
+
+  function resetGrid() {
+    grid = new Uint8Array(cols * rows);
+    life = new Uint8Array(cols * rows);
+    buildSceneStagger();
+  }
+
+  function isFlammable(m) { return m === PLANT || m === SEED || m === WOOD; }
+
+  function moveInto(x, y, nx, ny, m) {
+    if (get(nx, ny) !== EMPTY) return false;
+    var l = life[idx(x, y)];
+    set(x, y, EMPTY);
+    grid[idx(nx, ny)] = m;
+    life[idx(nx, ny)] = l;
+    return true;
+  }
+
+  function updateWater(x, y, dir) {
+    if (get(x, y) !== WATER) return;
+    // 불 끄기 — 이웃에 불이 있으면 재로, 자신은 확률 소모
+    var douses = [[0, 1], [-1, 0], [1, 0], [0, -1]];
+    for (var i = 0; i < douses.length; i++) {
+      if (get(x + douses[i][0], y + douses[i][1]) === FIRE) {
+        set(x + douses[i][0], y + douses[i][1], ASH);
+        if (rand() < 0.6) { set(x, y, EMPTY); return; }
+      }
+    }
+    // 발아 돕기 — 이웃 재·씨앗에 물길이 닿으면 확률로 발아
+    for (var j = 0; j < douses.length; j++) {
+      var nx0 = x + douses[j][0], ny0 = y + douses[j][1];
+      var m0 = get(nx0, ny0);
+      if ((m0 === ASH || m0 === SEED) && rand() < REGROW_P) set(nx0, ny0, PLANT);
+    }
+    if (moveInto(x, y, x, y + 1, WATER)) return;
+    var first = dir > 0 ? -1 : 1;
+    if (moveInto(x, y, x + first, y + 1, WATER)) return;
+    if (moveInto(x, y, x - first, y + 1, WATER)) return;
+    if (moveInto(x, y, x + first, y, WATER)) return;
+    moveInto(x, y, x - first, y, WATER);
+  }
+
+  function updateFire(x, y) {
+    if (get(x, y) !== FIRE) return;
+    life[idx(x, y)]++;
+    if (life[idx(x, y)] > 46) { set(x, y, rand() < 0.5 ? SMOKE : ASH); return; }
+    var around = [[0, 1], [0, -1], [-1, 0], [1, 0], [-1, -1], [1, 1], [-1, 1], [1, -1]];
+    var burned = false;
+    for (var i = 0; i < around.length; i++) {
+      var nx = x + around[i][0], ny = y + around[i][1];
+      var m = get(nx, ny);
+      if (isFlammable(m) && rand() < 0.34) { set(nx, ny, FIRE); burned = true; }
+      else if (m === WATER) { set(x, y, ASH); return; } // 물 만난 불은 재로 소화
+    }
+    if (burned) set(x, y, ASH); // 태우고 나면 자리에 재
+  }
+
+  function updateSmoke(x, y) {
+    if (get(x, y) !== SMOKE) return;
+    life[idx(x, y)]++;
+    if (life[idx(x, y)] > 30) { set(x, y, EMPTY); return; }
+    var bias = rand() < 0.6 ? -1 : 1;
+    if (moveInto(x, y, x + (rand() < 0.3 ? bias : 0), y - 1, SMOKE)) return;
+    moveInto(x, y, x + bias, y, SMOKE);
+  }
+
+  function updateSand(x, y, dir) {
+    if (get(x, y) !== SAND) return;
+    // 아래가 물이면 스왑(가라앉기)
+    if (get(x, y + 1) === WATER) {
+      grid[idx(x, y)] = WATER;
+      grid[idx(x, y + 1)] = SAND;
+      return;
+    }
+    if (moveInto(x, y, x, y + 1, SAND)) return;
+    var first = dir > 0 ? -1 : 1;
+    if (moveInto(x, y, x + first, y + 1, SAND)) return;
+    moveInto(x, y, x - first, y + 1, SAND);
+  }
+
+  function updatePlant(x, y) {
+    var m = get(x, y);
+    if (m !== PLANT && m !== SEED) return;
+    if (m === SEED) {
+      // 씨앗 — 아래가 흙·돌·재·식물이면 확률로 발아
+      var below = get(x, y + 1);
+      if ((below === DIRT || below === STONE || below === ASH || below === PLANT || below === WOOD) && rand() < 0.08) {
+        set(x, y, PLANT);
+      }
+      return;
+    }
+    // 식물 — 위로 자란다(3칸 넘으면 나무로 간주·색만 구분). 자랄 자리가 없으면 그대로.
+    if (get(x, y - 1) === EMPTY && rand() < 0.02) {
+      set(x, y - 1, PLANT);
+      life[idx(x, y - 1)] = life[idx(x, y)] + 1;
+    }
+  }
+
+  var tick = 0;
+  var nextStrike = 72; // 첫 번개(틱) — 1.2초
+  function update() {
+    tick++;
+    resolveSolid(tick);
+    // 빗물 드리즐 — 상단 몇 칸에서 성기게
+    for (var rx = 0; rx < cols; rx++) {
+      if (rand() < RAIN_P && get(rx, 0) === EMPTY) set(rx, 0, WATER);
+    }
+    // 번개 점화기 — 주기마다 무작위 풀 칸에 불 1점
+    if (tick >= nextStrike) {
+      nextStrike = tick + Math.round(STRIKE_T * 60);
+      for (var tries = 0; tries < 60; tries++) {
+        var sx = Math.floor(rand() * cols);
+        var sy = Math.floor(rand() * rows);
+        var m = get(sx, sy);
+        if (isFlammable(m)) { set(sx, sy, FIRE); break; }
+      }
+    }
+    var dir = (tick % 2 === 0) ? 1 : -1;
+    for (var y = rows - 1; y >= 0; y--) {
+      if (dir > 0) {
+        for (var x = 0; x < cols; x++) {
+          var c = get(x, y);
+          if (c === SAND) updateSand(x, y, dir);
+          else if (c === WATER) updateWater(x, y, dir);
+          else if (c === FIRE) updateFire(x, y);
+          else if (c === SMOKE) updateSmoke(x, y);
+          else if (c === PLANT || c === SEED) updatePlant(x, y);
+        }
+      } else {
+        for (var x2 = cols - 1; x2 >= 0; x2--) {
+          var c2 = get(x2, y);
+          if (c2 === SAND) updateSand(x2, y, dir);
+          else if (c2 === WATER) updateWater(x2, y, dir);
+          else if (c2 === FIRE) updateFire(x2, y);
+          else if (c2 === SMOKE) updateSmoke(x2, y);
+          else if (c2 === PLANT || c2 === SEED) updatePlant(x2, y);
+        }
+      }
+    }
+  }
+
+  var buf = null, imgData = null;
+  function ensureBuf() {
+    imgData = ctx.createImageData(cv.width, cv.height);
+    buf = imgData.data;
+  }
+
+  function shade(c, amt) {
+    return [
+      Math.max(0, Math.min(255, c[0] + amt)),
+      Math.max(0, Math.min(255, c[1] + amt)),
+      Math.max(0, Math.min(255, c[2] + amt))
+    ];
+  }
+
+  function draw(t) {
+    if (!buf) ensureBuf();
+    var W = cv.width, H = cv.height;
+    var wave = Math.sin(t * 0.00055) * 0.5 + 0.5;
+    var cx = W * (0.5 + 0.34 * Math.sin(t * 0.00042));
+    var cy = H * (0.5 + 0.34 * Math.cos(t * 0.00036));
+    var maxD = Math.hypot(W, H) * 0.6;
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var m = grid[idx(x, y)];
+        var px0 = x * CELL, py0 = y * CELL;
+        var d = Math.hypot(px0 - cx, py0 - cy) / maxD;
+        var glow = Math.max(0, 1 - d) * (0.08 + 0.05 * wave);
+        var col;
+        if (m === EMPTY) col = shade(COL.night, Math.round(glow * 40));
+        else if (m === DIRT) col = shade(COL.dirt, ((x * 7 + y * 13) % 5) - 2 + Math.round(glow * 14));
+        else if (m === STONE) col = shade(COL.stone, ((x * 11 + y * 5) % 5) - 2 + Math.round(glow * 10));
+        else if (m === SAND) col = ((x + y) % 3 === 0) ? shade(COL.sandA, Math.round(glow * 18)) : shade(COL.sandB, Math.round(glow * 18));
+        else if (m === WATER) {
+          var shimmer = Math.sin(t * 0.004 + x * 0.6 + y * 0.3) * 0.5 + 0.5;
+          col = shade(shimmer > 0.5 ? COL.ice : COL.water, Math.round(glow * 12));
+        } else if (m === FIRE) {
+          var flick = Math.sin(t * 0.03 + x * 0.9 + y * 0.7) * 0.5 + 0.5;
+          col = shade(flick > 0.5 ? COL.flame : COL.fire, Math.round(glow * 20));
+        } else if (m === SMOKE) col = shade(COL.smoke, ((x + y * 3) % 7) - 3 + Math.round(glow * 12));
+        else if (m === ASH) col = shade(COL.ash, ((x * 5 + y * 3) % 5) - 2 + Math.round(glow * 12));
+        else if (m === SEED) col = shade(COL.plant, -20 + Math.round(glow * 12));
+        else if (m === PLANT || m === WOOD) col = ((x + y) % 4 === 0) ? shade(COL.leaf, Math.round(glow * 14)) : shade(COL.plant, Math.round(glow * 14));
+        else col = COL.night;
+        for (var cyi = 0; cyi < CELL; cyi++) {
+          var rowOff = ((py0 + cyi) * W + px0) * 4;
+          for (var cxi = 0; cxi < CELL; cxi++) {
+            var o = rowOff + cxi * 4;
+            buf[o] = col[0]; buf[o + 1] = col[1]; buf[o + 2] = col[2]; buf[o + 3] = 255;
+          }
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  function fit() {
+    readColors();
+    var r = field.getBoundingClientRect();
+    cv.width = Math.max(1, Math.round(r.width));
+    cv.height = Math.max(1, Math.round(r.height));
+    cols = Math.max(1, Math.floor(cv.width / CELL));
+    rows = Math.max(1, Math.floor(cv.height / CELL));
+    buf = null;
+    resetGrid();
+  }
+
+  function stillFrame() {
+    buildSceneFull();
+    solidAt = null;
+    for (var i = 0; i < 110; i++) update();
+    draw(1800);
+    root.classList.add('is-still');
+  }
+
+  var last = 0, acc = 0;
+  var STEP = 1000 / 60;
+  function frame(now) {
+    if (!last) last = now;
+    acc += now - last;
+    last = now;
+    var guard = 0;
+    while (acc >= STEP && guard < 6) { update(); acc -= STEP; guard++; }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+  if (reduce) { stillFrame(); } else { requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

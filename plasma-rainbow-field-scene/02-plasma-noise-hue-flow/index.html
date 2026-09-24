@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>노이즈 스케일 값이 색을 구름처럼 흘려보내는 배경 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">노이즈 스케일 값이 색을 구름처럼 흘려보내는 배경</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 2차원 값 노이즈(격자 난수 + 이중선형 보간) 를 색상(hue)으로 바꾼다.
+  // PLASMA_NOISE_SCALE 이 격자 한 칸의 픽셀 크기 — 값이 작을수록 알갱이가 촘촘해진다.
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_NOISE_SCALE = 40;
+  var PLASMA_FLOW_SPEED = 0.55;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(417021);
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+
+  var NOISE_DIM = 34;
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) { noiseTable[ni] = rand(); }
+  function noiseAt(gx, gy) {
+    var m = NOISE_DIM - 1;
+    gx = ((gx % m) + m) % m;
+    gy = ((gy % m) + m) % m;
+    return noiseTable[gy * NOISE_DIM + gx];
+  }
+  function smoothstep(v) { return v * v * (3 - 2 * v); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var fx = smoothstep(x - x0), fy = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * fx;
+    var b = v01 + (v11 - v01) * fx;
+    return a + (b - a) * fy;
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function renderField(t) {
+    var tt = t / 1000;
+    var ox = tt * PLASMA_FLOW_SPEED, oy = tt * PLASMA_FLOW_SPEED * 0.6;
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var n1 = valueNoise2D(x / PLASMA_NOISE_SCALE + ox, y / PLASMA_NOISE_SCALE * 0.8 + oy);
+        var n2 = valueNoise2D(x / PLASMA_NOISE_SCALE * 2.3 - oy, y / PLASMA_NOISE_SCALE * 2.3 + ox);
+        var hue = (n1 * 0.7 + n2 * 0.3) * 360 + tt * 30;
+        var light = 0.4 + n2 * 0.2;
+        var rgb = hslToRgb(hue, 0.6, light);
+        offBuf[idx] = rgb[0]; offBuf[idx + 1] = rgb[1]; offBuf[idx + 2] = rgb[2]; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

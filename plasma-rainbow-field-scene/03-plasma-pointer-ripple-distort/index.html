@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터를 중심으로 색 파동이 퍼지며 화면을 일그러뜨리는 배경 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">포인터를 중심으로 색 파동이 퍼지며 화면을 일그러뜨리는 배경</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 대각선 무지개 그라데이션의 샘플 좌표를 포인터에서 퍼지는 사인파동만큼 밀어(distort)
+  // 그 밀린 좌표로 색을 계산한다 — 파동이 지나간 자리의 색이 일그러져 보인다.
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_RIPPLE_SPEED = 0.09;
+  var PLASMA_RIPPLE_FREQ = 0.35;
+  var PLASMA_RIPPLE_DECAY = 0.014;
+  var PLASMA_RIPPLE_AMP = 7;
+  var ORBIT_FREQ = Math.PI * 2 / LOOP_MS;
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  var pointerActive = false;
+  var realPointer = { x: CALC_W / 2, y: CALC_H / 2 };
+  function virtualPointerOrbit(t) {
+    var cx = CALC_W / 2, cy = CALC_H / 2;
+    var orbR = Math.min(CALC_W, CALC_H) * 0.4;
+    return { x: cx + Math.cos(t * ORBIT_FREQ) * orbR, y: cy + Math.sin(t * ORBIT_FREQ * 1.3) * orbR * 0.7 };
+  }
+
+  function renderField(t) {
+    var p = pointerActive ? realPointer : (reduce ? { x: -999, y: -999 } : virtualPointerOrbit(t));
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var dx = x - p.x, dy = y - p.y;
+        var dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+        var wave = Math.sin(dist * PLASMA_RIPPLE_FREQ - t * PLASMA_RIPPLE_SPEED);
+        var atten = Math.exp(-dist * PLASMA_RIPPLE_DECAY);
+        var disp = wave * atten * PLASMA_RIPPLE_AMP;
+        var bx = x + (dx / dist) * disp, by = y + (dy / dist) * disp;
+        var hue = bx * 1.6 + by * 1.6;
+        var light = 0.48 + wave * atten * 0.16;
+        var rgb = hslToRgb(hue, 0.64, light);
+        offBuf[idx] = rgb[0]; offBuf[idx + 1] = rgb[1]; offBuf[idx + 2] = rgb[2]; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? 0 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function calcFromEvent(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    var relX = (t0.clientX - r.left) / r.width * cw;
+    var relY = (t0.clientY - r.top) / r.height * ch;
+    realPointer.x = relX * (CALC_W / cw);
+    realPointer.y = relY * (CALC_H / ch);
+  }
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    calcFromEvent(e);
+    draw(lastElapsed);
+  });
+  wrap.addEventListener('pointerleave', function () {
+    pointerActive = false;
+    draw(lastElapsed);
+  });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

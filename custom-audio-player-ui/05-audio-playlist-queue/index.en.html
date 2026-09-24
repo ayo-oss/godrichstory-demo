@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Queue Reorder That Recomputes an Order Value on Drag — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-grip" viewBox="0 0 256 256"><g fill="currentColor"><path d="M208 32v192a16 16 0 0 1-16 16H64a16 16 0 0 1-16-16V32a16 16 0 0 1 16-16h128a16 16 0 0 1 16 16" opacity=".2"/><path d="M104 60a12 12 0 1 1-12-12a12 12 0 0 1 12 12m60 12a12 12 0 1 0-12-12a12 12 0 0 0 12 12m-72 44a12 12 0 1 0 12 12a12 12 0 0 0-12-12m72 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12m-72 68a12 12 0 1 0 12 12a12 12 0 0 0-12-12m72 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="pl is-demo" id="pl">
+  <p class="pl__hint"><span>Drag an item or press the arrow keys and the order value is renumbered.</span></p>
+  <ul class="pl__list" id="list" aria-label="Queue, drag to reorder">
+    <li class="pl__row" data-i="0" tabindex="0" aria-label="Track 01, drag to reorder">
+      <svg class="pl__handle" aria-hidden="true"><use href="#ico-grip"></use></svg>
+      <span class="pl__label">Track 01</span>
+    </li>
+    <li class="pl__row" data-i="1" tabindex="0" aria-label="Track 02, drag to reorder">
+      <svg class="pl__handle" aria-hidden="true"><use href="#ico-grip"></use></svg>
+      <span class="pl__label">Track 02</span>
+    </li>
+    <li class="pl__row" data-i="2" tabindex="0" aria-label="Track 03, drag to reorder">
+      <svg class="pl__handle" aria-hidden="true"><use href="#ico-grip"></use></svg>
+      <span class="pl__label">Track 03</span>
+    </li>
+    <li class="pl__row" data-i="3" tabindex="0" aria-label="Track 04, drag to reorder">
+      <svg class="pl__handle" aria-hidden="true"><use href="#ico-grip"></use></svg>
+      <span class="pl__label">Track 04</span>
+    </li>
+    <li class="pl__row" data-i="4" tabindex="0" aria-label="Track 05, drag to reorder">
+      <svg class="pl__handle" aria-hidden="true"><use href="#ico-grip"></use></svg>
+      <span class="pl__label">Track 05</span>
+    </li>
+  </ul>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('pl');
+  var list = document.getElementById('list');
+  var rows = Array.prototype.slice.call(list.children);
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  var ROW_H = 24; // 슬롯 간격(행 높이 + 사이 간격)
+  var SETTLE_RATE = 0.22; // 목표 위치로 매 프레임 다가가는 비율 — 관성 lerp 한 겹
+  var order = rows.map(function (_, i) { return i; }); // order[슬롯] = 행 인덱스
+  var y = rows.map(function (_, i) { return slotOf(i) * ROW_H; }); // 각 행의 현재(보간 중) y값
+  list.style.height = (rows.length * ROW_H) + 'px';
+
+  function slotOf(rowIndex) { return order.indexOf(rowIndex); }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; rows[DEMO_ROW].classList.remove('is-dragging'); } }
+
+  var dragIndex = -1, startClientY = 0, startSlotY = 0, dragY = 0;
+
+  function onPointerDown(e, i) {
+    human();
+    dragIndex = i;
+    startClientY = e.clientY;
+    startSlotY = slotOf(i) * ROW_H;
+    dragY = startSlotY;
+    rows[i].classList.add('is-dragging');
+    rows[i].setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (dragIndex < 0) return;
+    dragY = startSlotY + (e.clientY - startClientY);
+    var toSlot = Math.max(0, Math.min(rows.length - 1, Math.round(dragY / ROW_H)));
+    var fromSlot = slotOf(dragIndex);
+    if (toSlot !== fromSlot) {
+      order.splice(fromSlot, 1);
+      order.splice(toSlot, 0, dragIndex);
+    }
+  }
+  function onPointerUp(e) {
+    if (dragIndex < 0) return;
+    rows[dragIndex].classList.remove('is-dragging');
+    try { rows[dragIndex].releasePointerCapture(e.pointerId); } catch (err) {}
+    dragIndex = -1;
+  }
+
+  var grabbedIndex = -1;
+  function onRowKeydown(e, i) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); human();
+      if (grabbedIndex === i) {
+        grabbedIndex = -1; rows[i].classList.remove('is-dragging');
+      } else {
+        if (grabbedIndex >= 0) rows[grabbedIndex].classList.remove('is-dragging');
+        grabbedIndex = i; rows[i].classList.add('is-dragging');
+      }
+    } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && grabbedIndex === i) {
+      e.preventDefault(); human();
+      var slot = slotOf(i);
+      var next = Math.max(0, Math.min(rows.length - 1, slot + (e.key === 'ArrowDown' ? 1 : -1)));
+      if (next !== slot) { order.splice(slot, 1); order.splice(next, 0, i); }
+    }
+  }
+
+  rows.forEach(function (row, i) {
+    row.addEventListener('pointerdown', function (e) { onPointerDown(e, i); });
+    row.addEventListener('keydown', function (e) { onRowKeydown(e, i); });
+  });
+  list.addEventListener('pointermove', onPointerMove);
+  list.addEventListener('pointerup', onPointerUp);
+
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  var driveStart = 0, DEMO_ROW = 0;
+
+  function frame(now) {
+    if (isDemo) {
+      if (!driveStart) driveStart = now;
+      var DRIVE_PERIOD_MS = 2000; // 렌더 캐처 창(설정 초=2.0)과 같은 주기 — 시연 전용
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      dragY = triangle(frac) * (rows.length - 1) * ROW_H;
+      var toSlot = Math.max(0, Math.min(rows.length - 1, Math.round(dragY / ROW_H)));
+      var fromSlot = slotOf(DEMO_ROW);
+      if (toSlot !== fromSlot) { order.splice(fromSlot, 1); order.splice(toSlot, 0, DEMO_ROW); }
+    }
+    var activeDrag = isDemo ? DEMO_ROW : dragIndex;
+    rows.forEach(function (row, i) {
+      if (i === activeDrag) {
+        y[i] = dragY; // 잡은 항목은 lerp 없이 포인터를 그대로 따라간다
+      } else {
+        var target = slotOf(i) * ROW_H;
+        y[i] += (target - y[i]) * SETTLE_RATE; // 나머지 항목은 목표 자리로 관성 있게 다가간다
+      }
+      row.style.transform = 'translateY(' + y[i].toFixed(2) + 'px)';
+    });
+    requestAnimationFrame(frame);
+  }
+
+  if (reduce) {
+    root.classList.add('is-still');
+    rows.forEach(function (row, i) { row.style.transform = 'translateY(' + (slotOf(i) * ROW_H) + 'px)'; });
+  } else {
+    rows[DEMO_ROW].classList.add('is-dragging');
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

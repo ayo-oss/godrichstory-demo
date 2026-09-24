@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pointer ripples, ambient waves, and a reflection below all combine into one scene. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rvRoot" tabindex="0">
+  <canvas class="rv__canvas" id="rvCanvas" width="480" height="300"></canvas>
+  <p class="rv__caption">Pointer ripples, ambient waves, and a reflection below all combine into one scene.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 히어로 장면: 01(포인터 스플래시 2버퍼 파동식) + 02(사인파 잔물결 높이 필드) + 05(하단 반전 반사·sway) 세 기법을 한 캔버스에 합성한다.
+  // 01: 포인터/가상 궤도가 splashAt 으로 grid 에 임펄스를 찍고 stepWave 로 전파한다.
+  // 02: ambientHeight 다중 사인파가 배경 전체에 잔잔한 굴절을 계속 더한다.
+  // 05: 수평선 아래는 위쪽을 상하 반전해 sway 오프셋과 알파 감쇠로 반사처럼 그린다.
+  var root = document.getElementById('rvRoot');
+  var canvas = document.getElementById('rvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawPhotoBase(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#ffb877');
+    sky.addColorStop(1, '#ffe9c2');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.5, sunY = h * 0.28, sunR = h * 0.16;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.8);
+    glow.addColorStop(0, 'rgba(255,240,210,.9)');
+    glow.addColorStop(1, 'rgba(255,240,210,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#fff2d0';
+    pctx.fill();
+    var hillColors = ['#e08a4f', '#a5542c', '#5c2c16'];
+    for (var i = 0; i < hillColors.length; i += 1) {
+      var baseY = h * (0.42 + i * 0.05);
+      pctx.beginPath();
+      pctx.moveTo(0, h * 0.5);
+      var step = Math.max(2, w / 24);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.06 + i * 2 + seed * 0.0003) * h * 0.03;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h * 0.5);
+      pctx.closePath();
+      pctx.fillStyle = hillColors[i];
+      pctx.fill();
+    }
+    for (var k = 0; k < 40; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.45, r = rand() * 1.1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.1 + rand() * 0.2) + ')';
+      pctx.fill();
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var HORIZON = Math.round(CALC_H * 0.5);
+  var RIPPLE_AMBIENT_WAVE_COUNT = 2;
+  var HERO_SPLASH_DECAY_MS = 420;
+  var SPLASH_AMP = -420;
+
+  var gridA = new Float32Array(CALC_W * CALC_H);
+  var gridB = new Float32Array(CALC_W * CALC_H);
+  var damping = Math.pow(0.02, 16 / HERO_SPLASH_DECAY_MS);
+
+  function cellIndex(x, y) { return y * CALC_W + x; }
+  function splashAt(gx, gy) {
+    gx = Math.round(gx); gy = Math.round(gy);
+    for (var dy = -1; dy <= 1; dy += 1) {
+      for (var dx = -1; dx <= 1; dx += 1) {
+        var x = gx + dx, y = gy + dy;
+        if (x > 0 && x < CALC_W - 1 && y > 0 && y < HORIZON - 1) {
+          gridA[cellIndex(x, y)] += SPLASH_AMP * (dx === 0 && dy === 0 ? 1 : 0.45);
+        }
+      }
+    }
+  }
+  function stepWave() {
+    for (var y = 1; y < HORIZON - 1; y += 1) {
+      var row = y * CALC_W;
+      for (var x = 1; x < CALC_W - 1; x += 1) {
+        var i = row + x;
+        var next = (gridA[i - 1] + gridA[i + 1] + gridA[i - CALC_W] + gridA[i + CALC_W]) / 2 - gridB[i];
+        gridB[i] = next * damping;
+      }
+    }
+    var t = gridA; gridA = gridB; gridB = t;
+  }
+
+  function ambientHeight(x, y, t) {
+    var h = 0;
+    for (var i = 0; i < RIPPLE_AMBIENT_WAVE_COUNT; i += 1) {
+      var ang = (i / RIPPLE_AMBIENT_WAVE_COUNT) * Math.PI + 0.5;
+      var freq = 0.05 + i * 0.021;
+      var speed = 0.0017 + i * 0.0009;
+      var amp = 4.5 / (i + 1);
+      var dir = (i % 2 === 0) ? 1 : -1;
+      h += amp * Math.sin(x * Math.cos(ang) * freq + y * Math.sin(ang) * freq + t * speed * dir);
+    }
+    return h;
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawPhotoBase(octx, CALC_W, CALC_H, 419091);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function sampleBase(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > HORIZON - 1 ? HORIZON - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [baseBuf[i], baseBuf[i + 1], baseBuf[i + 2]];
+  }
+
+  function upperRGB(x, y, t) {
+    var i = y * CALC_W + x;
+    var hl = x > 0 ? gridA[i - 1] : gridA[i];
+    var hr = x < CALC_W - 1 ? gridA[i + 1] : gridA[i];
+    var hu = y > 0 ? gridA[i - CALC_W] : gridA[i];
+    var hd = y < HORIZON - 1 ? gridA[i + CALC_W] : gridA[i];
+    var amb = ambientHeight(x, y, t);
+    var ambX = ambientHeight(x + 1, y, t) - ambientHeight(x - 1, y, t);
+    var ambY = ambientHeight(x, y + 1, t) - ambientHeight(x, y - 1, t);
+    var dx = (hr - hl) * 0.85 + ambX * 1.1;
+    var dy = (hd - hu) * 0.85 + ambY * 1.1;
+    var rgb = sampleBase(x + dx, y + dy);
+    var shine = Math.max(-30, Math.min(55, (hu - hd) * 0.5 + amb * 4));
+    return [
+      Math.max(0, Math.min(255, rgb[0] + shine)),
+      Math.max(0, Math.min(255, rgb[1] + shine)),
+      Math.max(0, Math.min(255, rgb[2] + shine))
+    ];
+  }
+
+  function renderFrame(t) {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        if (y < HORIZON) {
+          rgb = upperRGB(x, y, t);
+        } else {
+          var depth = y - HORIZON;
+          var srcY = Math.max(0, HORIZON - 1 - depth);
+          var sway = Math.sin(depth * 0.5 - t * 0.006) * 2.2 * (depth / (CALC_H - HORIZON));
+          var refl = upperRGB(Math.max(0, Math.min(CALC_W - 1, Math.round(x + sway))), srcY, t);
+          var alpha = Math.max(0.15, 1 - depth / (CALC_H - HORIZON) * 0.75);
+          rgb = [refl[0] * alpha, refl[1] * alpha, refl[2] * alpha];
+        }
+        outBuf[idx] = rgb[0];
+        outBuf[idx + 1] = rgb[1];
+        outBuf[idx + 2] = rgb[2];
+        outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var pointerActive = false;
+  var lastSplashMs = -9999;
+  function toGrid(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return {
+      x: (t0.clientX - r.left) / r.width * CALC_W,
+      y: (t0.clientY - r.top) / r.height * HORIZON
+    };
+  }
+  wrap.addEventListener('pointerdown', function (e) {
+    pointerActive = true;
+    var g = toGrid(e);
+    splashAt(g.x, g.y);
+    lastSplashMs = performance.now();
+    if (reduce) draw(lastElapsed);
+  });
+  wrap.addEventListener('pointermove', function (e) {
+    var g = toGrid(e);
+    var now = performance.now();
+    if (now - lastSplashMs > 100) {
+      splashAt(g.x, g.y);
+      lastSplashMs = now;
+      if (reduce) draw(lastElapsed);
+    }
+  });
+  wrap.addEventListener('pointerup', function () { pointerActive = false; });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      splashAt(CALC_W / 2, HORIZON * 0.5);
+      if (reduce) draw(lastElapsed);
+    }
+  });
+  wrap.tabIndex = 0;
+
+  var VIRTUAL_INTERVAL_MS = 520;
+  var lastVirtualMs = -9999;
+  function virtualPointerOrbit(t) {
+    return {
+      x: CALC_W * (0.28 + 0.44 * ((Math.sin(t * 0.0012) + 1) / 2)),
+      y: HORIZON * (0.25 + 0.5 * ((Math.cos(t * 0.0017) + 1) / 2))
+    };
+  }
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (!pointerActive && elapsed - lastVirtualMs > VIRTUAL_INTERVAL_MS) {
+        var p = virtualPointerOrbit(elapsed);
+        splashAt(p.x, p.y);
+        lastVirtualMs = elapsed;
+      }
+      stepWave();
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  splashAt(CALC_W * 0.5, HORIZON * 0.4);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

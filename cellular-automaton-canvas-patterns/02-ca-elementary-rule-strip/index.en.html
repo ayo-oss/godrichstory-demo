@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>A One-row Rule-number Value Decides the Next Row in a Strip Automaton — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="Rule strip running -- click or press space to pause, R to reseed">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">Click or press space to pause, R to reseed</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(진행률 채움 로더)와 다른 축: 규칙 번호 값이 다음 줄 무늬를 직접 결정하는 계산이 주인공.
+  // 매 세대 한 줄을 규칙표와 대조해 계산하고 화면 전체를 아래로 밀어 fillRect 로 다시 그린다.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const CELL = 5, COLS = W / CELL, ROWS = H / CELL;
+  const YELLOW = '#d2c7a4';
+  const ALIVE_COLOR = '#93a4ca';
+  let SEED = 30071;
+  let rnd = makeLcg(SEED);
+
+  const RULE = 30; // 울프럼 초등 오토마타 규칙 번호(이진 8비트) — 왼쪽·자신·오른쪽 조합마다 생사 결정
+  const ruleBits = new Uint8Array(8);
+  for (let p = 0; p < 8; p++) ruleBits[p] = (RULE >> p) & 1;
+
+  let grid = new Uint8Array(COLS * ROWS);
+
+  function idx(x, y){ return y * COLS + x; }
+
+  function clearGrid(){
+    grid.fill(0);
+  }
+
+  function seedRow(seedX){
+    grid[idx(seedX, ROWS - 1)] = 1;
+  }
+
+  function step(){
+    grid.copyWithin(0, COLS, ROWS * COLS);
+    const base = (ROWS - 2) * COLS;
+    const outBase = (ROWS - 1) * COLS;
+    for (let x = 0; x < COLS; x++){
+      const l = grid[base + ((x - 1 + COLS) % COLS)];
+      const m = grid[base + x];
+      const r = grid[base + ((x + 1) % COLS)];
+      const pattern = l * 4 + m * 2 + r;
+      grid[outBase + x] = ruleBits[pattern];
+    }
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function render(){
+    ctx.fillStyle = YELLOW;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = ALIVE_COLOR;
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          ctx.fillRect(x * CELL, y * CELL, CELL - 1, CELL - 1);
+        }
+      }
+    }
+  }
+
+  const ARIA_PLAY = 'Rule strip running -- click or press space to pause, R to reseed';
+  const ARIA_PAUSE = 'Rule strip paused -- click or press space to resume, R to reseed';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', paused ? ARIA_PAUSE : ARIA_PLAY);
+  }
+
+  let paused = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){ rootEl.classList.remove('is-demo'); }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    clearGrid();
+    const seedX = Math.floor(rnd() * COLS);
+    seedRow(seedX);
+  }
+
+  function togglePause(){
+    paused = !paused;
+    updateAria();
+  }
+
+  function onActivate(e){
+    if (e.type === 'keydown'){
+      if (e.key === 'r' || e.key === 'R'){
+        human();
+        reseed();
+        render();
+        return;
+      }
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      togglePause();
+    }
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R' || e.key === 'Enter' || e.key === ' '){
+      onActivate(e);
+    }
+  }
+
+  const GEN_INTERVAL_MS = 32;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('click', onActivate);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  clearGrid();
+  seedRow(Math.floor(COLS / 2));
+  updateAria();
+  render();
+  if (!reduceMQ.matches){
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

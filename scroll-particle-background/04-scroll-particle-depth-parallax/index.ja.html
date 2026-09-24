@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>奥行きパララックス — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>スクロール位置がカメラの奥行きを押し込む値になります。</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="パーティクル奥行き スクロール領域">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">0%</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(15485863);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#17141a';
+
+  // 계산 겹: 원근 투영(perspective projection) + 화가 알고리즘(painter's algorithm) —
+  // 입자마다 3D 깊이(z)를 갖고, 스크롤 위치가 카메라 깊이(cameraZ)를 정한다.
+  // 화면 좌표는 FOV/(FOV+상대깊이) 배율로 투영하고, 매 프레임 깊이가 먼 것부터 가까운 순으로 다시 그린다.
+  var FOV = 130;          // 시야 거리 상수 — 클수록 투영 왜곡이 완만하다
+  var DOLLY_RANGE = 520;  // 스크롤 0→100% 가 카메라를 밀어 넣는 깊이 범위 (world 단위)
+  var Z_FAR = 560;
+  var NEAR = 6;
+  var COUNT = 70;
+
+  var W = 0, H = 0, dpr = 1;
+  var particles = [];
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function spawnAt(p, first) {
+    p.wx = (rng() - 0.5) * 260;
+    p.wy = (rng() - 0.5) * 160;
+    p.z = first ? rng() * Z_FAR : Z_FAR - 4 + rng() * 40;
+    p.r = 1.1 + rng() * 1.6;
+  }
+
+  function initParticles() {
+    particles = [];
+    for (var i = 0; i < COUNT; i++) { var p = {}; spawnAt(p, true); particles.push(p); }
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, idleMs = 0, lastTop = 0, lastT = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.3;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; idleMs = 0; } else { idleMs += dt; }
+    lastTop = top; lastT = now;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function cameraZ() { return scrollPos * DOLLY_RANGE; }
+
+  function project(p, camZ) {
+    var depth = p.z - camZ;
+    var scale = FOV / (FOV + Math.max(depth, NEAR));
+    return { sx: W / 2 + p.wx * scale, sy: H / 2 + p.wy * scale, scale: scale, depth: depth };
+  }
+
+  function step(dtSec) {
+    var camZ = cameraZ();
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      if (p.z - camZ < NEAR) spawnAt(p, false); // 카메라를 지나친 입자는 가장 먼 자리로 재배치한다
+    }
+  }
+
+  function paint() {
+    var camZ = cameraZ();
+    ctx.clearRect(0, 0, W, H);
+    // 화가 알고리즘: 깊이가 먼 것부터 그린다 — 가까운(큰) 입자가 항상 먼 입자를 덮는다
+    var order = particles.slice().sort(function (a, b) { return (b.z - camZ) - (a.z - camZ); });
+    for (var i = 0; i < order.length; i++) {
+      var p = order[i];
+      var pr = project(p, camZ);
+      var a = Math.max(0, Math.min(1, pr.scale * 1.1));
+      ctx.globalAlpha = a;
+      ctx.fillStyle = PARTICLE_COLOR;
+      ctx.beginPath(); ctx.arc(pr.sx, pr.sy, Math.max(0.4, p.r * pr.scale * 5), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateVal() { val.textContent = Math.round(scrollPos * 100) + '%'; }
+
+  function paintStatic() {
+    var camZ = cameraZ();
+    ctx.clearRect(0, 0, W, H);
+    var order = particles.slice().sort(function (a, b) { return (b.z - camZ) - (a.z - camZ); });
+    for (var i = 0; i < order.length; i++) {
+      var p = order[i];
+      var pr = project(p, camZ);
+      var a = Math.max(0, Math.min(1, pr.scale * 1.1));
+      ctx.globalAlpha = a;
+      ctx.fillStyle = PARTICLE_COLOR;
+      ctx.beginPath(); ctx.arc(pr.sx, pr.sy, Math.max(0.4, p.r * pr.scale * 5), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(dtSec);
+    paint();
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = triangle(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+  initParticles();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

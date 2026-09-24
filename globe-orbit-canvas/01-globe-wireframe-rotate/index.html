@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위경도 선 회전 지구본 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gw" id="gw">
+  <p class="gw__hint">
+    <svg class="gw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a104 104 0 1 0 104 104A104.12 104.12 0 0 0 128 24" opacity=".2"/><path d="M128 32a96 96 0 1 1-96 96a96.1 96.1 0 0 1 96-96m0-16a112 112 0 1 0 112 112A112.12 112.12 0 0 0 128 16"/><path d="M128 152a24 24 0 1 1 24-24a24 24 0 0 1-24 24m8-24a8 8 0 1 0-8 8a8 8 0 0 0 8-8" fill-rule="evenodd"/></g></svg>
+    <span>마우스를 판 위에 놓으면 축이 기울고 판을 벗어나면 제자리로 돌아옵니다</span>
+  </p>
+  <div class="gw__field" id="field" role="application" aria-label="위경도 지구본 실험판" tabindex="0">
+    <canvas class="gw__cv" id="cv"></canvas>
+  </div>
+</div>
+</main>
+<script>
+// 위경도 선 회전 지구본 — 경위선 교차점을 구면 좌표(세타·파이)로 계산해 정사도(orthographic)로 눌러 그린다.
+// 뒷면 감춤(backface culling)은 z&lt;0 점을 선에서 잘라내는 게 아니라, 세그먼트를 쪼개 앞면 세그먼트만 잇는다.
+// sin·cos 테이블은 프레임마다 같은 각도가 반복 계산되므로 미리 심어 둔다.
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var TAU = Math.PI * 2;
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+
+// 계층 — 적도·본초자오선 같은 큰 선은 굵게, 촘촘한 눈금은 가늘게
+var LATS = [];          // 위도선: { lat, segs }
+(function () {
+  for (var lat = -60; lat <= 60; lat += 15) LATS.push(lat * Math.PI / 180);
+})();
+var LONS = [];          // 경도선: { lon }
+for (var lon = 0; lon < 180; lon += 15) LONS.push(lon * Math.PI / 180);
+
+var SEG = 96;           // 한 원을 쪼개는 세그먼트 수 — 5도 미만이면 곡선이 각진다
+var rotY = 0;           // 자전 각도(rad)
+var tiltAim = -0.42;    // 목표 축 기울기
+var tilt = -0.42;       // 현재 축 기울기 — 매 프레임 목표에 12%씩 다가간다
+var last = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 구면 → 화면. 축 기울기(tilt)로 z축 회전을 먼저, 자전(rotY)을 y축 회전으로 그 다음에.
+// cs·sn 은 그 세그먼트의 cos(세타), sin(세타) 다.
+function project(sph, cs, sn) {
+  var lx = sph.x * cs + sph.z * sn;             // y축 회전 (자전)
+  var lz = -sph.x * sn + sph.z * cs;
+  var ly = sph.y;
+  var ty = ly * Math.cos(tilt) - lz * Math.sin(tilt);   // z축 회전 (기울기)
+  var tz = ly * Math.sin(tilt) + lz * Math.cos(tilt);
+  return { x: lx, y: ty, z: tz };
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  var cx = W / 2, cy = H / 2;
+  var R = Math.min(W, H) * 0.40;
+
+  // 톤은 CSS 변수(scss 토큰)로 받는다 — 색이 어디서 오는지 한 곳에 둔다
+  var cs = getComputedStyle(document.getElementById('gw'));
+  var C_sphere = cs.getPropertyValue('--gw-sphere').trim();
+  var C_deep = cs.getPropertyValue('--gw-deep').trim();
+  var C_line = cs.getPropertyValue('--gw-line').trim();
+  var C_dim = cs.getPropertyValue('--gw-dim').trim();
+  var C_pole = cs.getPropertyValue('--gw-pole').trim();
+  var C_ring = cs.getPropertyValue('--gw-ring').trim();
+
+  // 구 바닥 — 뒷선이 비쳐 보이지 않게 먼저 불투명 원을 깐다
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TAU);
+  ctx.fillStyle = C_sphere;
+  ctx.fill();
+
+  // 가장자리 림 — 원일구의 horizon. 안 깔면 선이 배경에 뜬다
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TAU);
+  ctx.strokeStyle = C_ring;
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+
+  // 앞면만 그리는 폴리라인 — z&lt;0 구간은 건너뛴다(backface culling)
+  function polyline(pts, style, width) {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    var pen = false;
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
+      if (p.z >= 0) {
+        var x = cx + p.x * R, y = cy - p.y * R;
+        if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+      } else {
+        pen = false;   // 뒤로 넘어가는 지점에서 펜을 든다
+      }
+    }
+    ctx.stroke();
+  }
+
+  var cyT = Math.cos(tilt), syT = Math.sin(tilt);
+
+  // 위도선 — 각 선을 SEG 조각으로 쪼개 앞면 조각만 잇는다
+  for (var li = 0; li < LATS.length; li++) {
+    var lat = LATS[li];
+    var cLat = Math.cos(lat), sLat = Math.sin(lat);
+    var pts = [];
+    for (var s = 0; s <= SEG; s++) {
+      var phi = (s / SEG) * TAU;
+      var sph = { x: cLat * Math.sin(phi), y: sLat, z: cLat * Math.cos(phi) };
+      pts.push(project(sph, Math.cos(rotY), Math.sin(rotY)));
+    }
+    var major = lat === 0;
+    polyline(pts, major ? C_line : C_dim, major ? 1.5 : 1);
+  }
+
+  // 경도선 — 반원(앞뒤 세그먼트가 섞인다)을 쪼개 같은 방식으로
+  for (var gi = 0; gi < LONS.length; gi++) {
+    var lon = LONS[gi] + rotY;
+    var pts2 = [];
+    for (var s2 = 0; s2 <= SEG; s2++) {
+      var th = (s2 / SEG) * Math.PI;             // 0..PI 반원
+      var sph2 = { x: Math.sin(th) * Math.cos(lon), y: Math.cos(th), z: Math.sin(th) * Math.sin(lon) };
+      pts2.push(project(sph2, 1, 0));
+    }
+    var major2 = Math.abs(((LONS[gi] / Math.PI * 180) % 180)) < 0.01 && false;
+    polyline(pts2, C_dim, 1);
+  }
+
+  // 본초자오선 — lon=rotY 인 선이 항상 중앙 세로선이 되게 자전각을 더해 그린다
+  var ptsM = [];
+  for (var s3 = 0; s3 <= SEG; s3++) {
+    var th3 = (s3 / SEG) * Math.PI;
+    var lonM = Math.PI / 2;                       // 화면 중앙면
+    var sph3 = { x: Math.sin(th3) * Math.cos(lonM), y: Math.cos(th3), z: Math.sin(th3) * Math.sin(lonM) };
+    var p3 = project(sph3, Math.cos(0), Math.sin(0));
+    ptsM.push(p3);
+  }
+  polyline(ptsM, C_line, 1.5);
+
+  // 극점 — 축이 기울어진 만큼 북극이 보인다
+  var north = project({ x: 0, y: 1, z: 0 }, 1, 0);
+  var south = project({ x: 0, y: -1, z: 0 }, 1, 0);
+  ctx.fillStyle = C_pole;
+  if (north.z >= 0) { ctx.beginPath(); ctx.arc(cx + north.x * R, cy - north.y * R, 2.2, 0, TAU); ctx.fill(); }
+  if (south.z >= 0) { ctx.beginPath(); ctx.arc(cx + south.x * R, cy - south.y * R, 2.2, 0, TAU); ctx.fill(); }
+}
+
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  rotY += dt * 0.5;                    // 12.5초에 한 바퀴 — 천천히
+  tilt += (tiltAim - tilt) * 0.12;     // 목표 기울기로 부드럽게
+  draw();
+  raf = requestAnimationFrame(frame);
+}
+
+// 포인터가 판의 좌우 어디에 있느냐로 목표 기울기를 정한다 — 0.42rad(약 24도) 범위
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  var t = (e.clientX - r.left) / r.width - 0.5;
+  tiltAim = -0.42 + t * 0.84;
+});
+field.addEventListener('pointerleave', function () { tiltAim = -0.42; });
+
+window.addEventListener('resize', function () { fit(); draw(); });
+
+fit();
+if (reduce) {
+  // reduce — 루프 없이 기울어진 한 장만 그린다
+  draw();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

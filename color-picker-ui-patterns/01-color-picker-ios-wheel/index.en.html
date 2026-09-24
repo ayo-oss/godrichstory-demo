@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iOS 휠 컬러피커 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel">
+  <div class="wheelWrap">
+    <div class="wheel" id="wheel" role="slider" aria-label="Color wheel" aria-valuemin="0" aria-valuemax="360" aria-valuenow="0" aria-valuetext="">
+      <div class="handle" id="handle"></div>
+    </div>
+  </div>
+  <div class="readout" id="readout">
+    <span class="readoutLabel">Selected color</span>
+    <span class="readoutHex" id="hex">#000000</span>
+  </div>
+</section>
+</main>
+<script>
+// iOS 휠(01) — 손잡이의 중심 기준 각도를 라디안으로 다시 구해 색조로,
+// 중심에서의 거리를 반지름 비율로 다시 구해 채도로 바꾸는 원형 컬러피커.
+// 실키·실서버 요청 없음 — 좌표 궤적은 고정 시나리오로 자동 재생한다.
+(function () {
+  var wheelEl = document.getElementById('wheel');
+  var handleEl = document.getElementById('handle');
+  var hexEl = document.getElementById('hex');
+  var readoutEl = document.getElementById('readout');
+  if (!wheelEl || !handleEl || !hexEl || !readoutEl) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var RADIUS = 60;
+  var LIGHTNESS = 55;
+  var CYCLE_MS = 2000;
+  // 드래그 궤적 — 반지름이 계속 바뀌는 여섯 지점을 순서대로 지난다 (286 의 단순 회전과 다른 시연)
+  var WAYPOINTS = [
+    { x: 52, y: 4 },
+    { x: 24, y: 44 },
+    { x: -30, y: 41 },
+    { x: -56, y: -6 },
+    { x: -9, y: -53 },
+    { x: 36, y: -39 },
+    { x: 52, y: 4 }
+  ];
+  var SEG_MS = CYCLE_MS / (WAYPOINTS.length - 1);
+
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    var k = function (n) { return (n + h / 30) % 12; };
+    var a = s * Math.min(l, 1 - l);
+    var f = function (n) { return l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); };
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  function toHex(n) { return n.toString(16).padStart(2, '0'); }
+
+  function pointAt(t) {
+    var idx = Math.min(WAYPOINTS.length - 2, Math.floor(t / SEG_MS));
+    var frac = (t % SEG_MS) / SEG_MS;
+    var a = WAYPOINTS[idx];
+    var b = WAYPOINTS[idx + 1];
+    return { x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac };
+  }
+
+  function apply(t) {
+    var p = pointAt(t);
+    var angle = Math.atan2(p.y, p.x);
+    var hue = ((angle * 180 / Math.PI) + 360) % 360;
+    var dist = Math.min(1, Math.hypot(p.x, p.y) / RADIUS);
+    var sat = dist * 100;
+    var rgb = hslToRgb(hue, sat, LIGHTNESS);
+    var hex = '#' + toHex(rgb[0]) + toHex(rgb[1]) + toHex(rgb[2]);
+    var brightness = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000;
+    var ink = brightness > 150;
+
+    handleEl.style.transform = 'translate(-50%, -50%) translate(' + p.x.toFixed(2) + 'px, ' + p.y.toFixed(2) + 'px)';
+    handleEl.style.background = hex;
+    readoutEl.style.background = hex;
+    readoutEl.classList.toggle('is-ink', ink);
+    hexEl.textContent = hex;
+    wheelEl.setAttribute('aria-valuenow', Math.round(hue));
+    wheelEl.setAttribute('aria-valuetext', hex);
+  }
+
+  if (reduce) {
+    apply(0);
+    return;
+  }
+
+  var start = null;
+  function loop(ts) {
+    if (start === null) start = ts;
+    var t = (ts - start) % CYCLE_MS;
+    apply(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

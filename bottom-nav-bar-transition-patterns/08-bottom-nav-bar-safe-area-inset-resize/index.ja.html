@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>セーフエリアインセットに合わせて再計算されるバー高さ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ai is-demo" id="ai">
+  <div class="ai__phone">
+    <div class="ai__screen">
+      <div class="ai__row"></div>
+      <div class="ai__row"></div>
+      <div class="ai__row"></div>
+    </div>
+    <div class="ai__nav" id="aiNav">
+      <button type="button" class="ai__tab is-active" data-idx="0">
+        <svg class="ai__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 120v96h-64v-64h-48v64H40v-96a8 8 0 0 1 2.34-5.66l80-80a8 8 0 0 1 11.32 0l80 80A8 8 0 0 1 216 120" opacity=".2"/><path d="m219.31 108.68l-80-80a16 16 0 0 0-22.62 0l-80 80A15.87 15.87 0 0 0 32 120v96a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-56h32v56a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-96a15.87 15.87 0 0 0-4.69-11.32M208 208h-48v-56a8 8 0 0 0-8-8h-48a8 8 0 0 0-8 8v56H48v-88l80-80l80 80Z"/></g></svg>
+        <span class="ai__label">ホーム</span>
+      </button>
+      <button type="button" class="ai__tab" data-idx="1">
+        <svg class="ai__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 80v120a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8V80a8 8 0 0 1 8-8h176a8 8 0 0 1 8 8" opacity=".2"/><path d="M216 64h-40a48 48 0 0 0-96 0H40a16 16 0 0 0-16 16v120a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V80a16 16 0 0 0-16-16m-88-32a32 32 0 0 1 32 32H96a32 32 0 0 1 32-32m88 168H40V80h176Z"/></g></svg>
+        <span class="ai__label">ショッピング</span>
+      </button>
+      <button type="button" class="ai__tab" data-idx="2">
+        <svg class="ai__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 96a64 64 0 1 1-64-64a64 64 0 0 1 64 64" opacity=".2"/><path d="M230.92 212c-15.23-26.33-38.7-45.21-66.09-54.16a72 72 0 1 0-73.66 0c-27.39 8.94-50.86 27.82-66.09 54.16a8 8 0 1 0 13.85 8c18.84-32.56 52.14-52 89.07-52s70.23 19.44 89.07 52a8 8 0 1 0 13.85-8M72 96a56 56 0 1 1 56 56a56.06 56.06 0 0 1-56-56"/></g></svg>
+        <span class="ai__label">プロフィール</span>
+      </button>
+      <div class="ai__inset" id="aiInset">
+        <span class="ai__homeIndicator" id="aiIndicator"></span>
+      </div>
+    </div>
+  </div>
+  <div class="ai__info">
+    <span id="aiReadout">インセット0px・バー高さ58px</span>
+    <button type="button" class="ai__toggle" id="aiToggle">ホームインジケーター機器に切り替え</button>
+  </div>
+</div>
+<script>
+(function () {
+  var BASE_H = 58; // px, インセット 0일 때 바 콘텐츠 높이 — 계산 겹의 기준값
+  var INSET_ON = 34; // px, 계산 겹: ホーム 인디케이터가 있는 기기의 안전영역 インセット(데모용 가정값)
+  var LERP_RATE = 10; // インセット 값이 목표로 지수 평활되는 속도(1/s)
+  var CYCLE_MS = 2600; // 자동 루프 왕복 주기
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var ai = document.getElementById('ai');
+  var nav = document.getElementById('aiNav');
+  var inset = document.getElementById('aiInset');
+  var indicator = document.getElementById('aiIndicator');
+  var readout = document.getElementById('aiReadout');
+  var toggle = document.getElementById('aiToggle');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.ai__tab'));
+
+  var isDemo = true;
+  var manualOn = false;
+  var insetTarget = 0;
+  var insetPx = 0;
+  var lastTs = 0;
+  var cycleStart = 0;
+
+  function human() {
+    if (isDemo) { ai.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function render() {
+    // 계산 겹: 바 전체 높이는 콘텐츠 높이(BASE_H) + 실시간 インセット 값을 더해 매번 다시 계산한다
+    var totalH = BASE_H + insetPx;
+    nav.style.height = totalH.toFixed(1) + 'px';
+    inset.style.height = insetPx.toFixed(1) + 'px';
+    var t = insetPx / INSET_ON;
+    indicator.style.opacity = t.toFixed(3);
+    indicator.style.transform = 'translateY(' + ((1 - t) * 6).toFixed(1) + 'px) scaleX(' + (0.6 + 0.4 * t).toFixed(3) + ')';
+    readout.textContent = 'インセット ' + Math.round(insetPx) + 'px・バー高さ ' + Math.round(totalH) + 'px';
+  }
+
+  toggle.addEventListener('click', function () {
+    human();
+    manualOn = !manualOn;
+    insetTarget = manualOn ? INSET_ON : 0;
+    toggle.textContent = manualOn ? 'ホームボタン機器に切り替え' : 'ホームインジケーター機器に切り替え';
+  });
+  toggle.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle.click(); }
+  });
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      human();
+      tabs.forEach(function (o) { o.classList.remove('is-active'); });
+      t.classList.add('is-active');
+    });
+  });
+
+  function tick(ts) {
+    if (!lastTs) { lastTs = ts; cycleStart = ts; }
+    var dt = Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+
+    if (isDemo && !reduce) {
+      var cycleT = (ts - cycleStart) % CYCLE_MS;
+      insetTarget = cycleT < CYCLE_MS / 2 ? INSET_ON : 0;
+    }
+
+    insetPx += (insetTarget - insetPx) * (1 - Math.exp(-LERP_RATE * dt));
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</main>
+</body>
+</html>

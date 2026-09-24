@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>下部スピナーフェード — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bsf is-demo" id="bsf">
+  <div class="bsf__view" id="bsfView" tabindex="0">
+    <ul class="bsf__track" id="bsfTrack" aria-live="polite">
+      <li class="bsf__sentinel" id="bsfSentinel" aria-hidden="true">
+        <span class="bsf__ring" id="bsfRing"></span>
+      </li>
+    </ul>
+  </div>
+  <p class="bsf__hint" id="bsfHint">一番下までスクロールすると次のかたまりを読み込みます</p>
+</div>
+</main>
+<script>
+(function () {
+  var view = document.getElementById('bsfView');
+  var track = document.getElementById('bsfTrack');
+  var sentinel = document.getElementById('bsfSentinel');
+  var ring = document.getElementById('bsfRing');
+  var hint = document.getElementById('bsfHint');
+  var root = document.getElementById('bsf');
+
+  var TOPICS = ['通知', 'メモ', '写真', '曲', '予定', '文書'];
+  var THRESHOLD_PX = 96;   // 계산에 쓰는 임계 거리(스피너가 서서히 짙어지는 구간의 폭)
+  var LOAD_DELAY_MS = 620;
+  var BATCH_SIZE = 3;
+  var MAX_ROWS = 21;
+  var AUTOPLAY_STEP_PX = 6;
+
+  var rowCount = 0;
+  var loading = false;
+  var spinAngle = 0;
+  var spinRaf = null;
+  var autoplayTimer = null;
+  var dir = 1;
+
+  function addRow() {
+    var li = document.createElement('li');
+    li.className = 'bsf__row';
+    var topic = TOPICS[rowCount % TOPICS.length];
+    li.textContent = topic + ' ' + String(rowCount + 1).padStart(2, '0');
+    track.insertBefore(li, sentinel);
+    rowCount += 1;
+  }
+
+  for (var i = 0; i < 6; i += 1) { addRow(); }
+
+  function spinTick() {
+    spinAngle = (spinAngle + 9) % 360;
+    ring.style.transform = 'rotate(' + spinAngle + 'deg)';
+    if (loading) { spinRaf = requestAnimationFrame(spinTick); }
+  }
+
+  // 계산 겹: 스피너(sentinel) 상단과 스크롤 뷰 하단 사이의 실측 거리 값을 임계 거리로 나눠
+  // 0~1 진행값을 만들고, 그 값을 그대로 스피너 불투명도로 쓴다 — scrollTop 이 아니라
+  // getBoundingClientRect 로 잰 실제 화면 위 거리이므로 패딩·보더가 바뀌어도 계산이 맞는다.
+  function recomputeFade() {
+    var viewBottom = view.getBoundingClientRect().bottom;
+    var sentinelTop = sentinel.getBoundingClientRect().top;
+    var remaining = sentinelTop - viewBottom;
+    var progress = 1 - Math.min(Math.max(remaining / THRESHOLD_PX, 0), 1);
+    ring.style.opacity = String(progress);
+    if (remaining <= 0 && !loading && rowCount < MAX_ROWS) {
+      startLoad();
+    }
+    hint.textContent = (remaining <= 0 && rowCount >= MAX_ROWS)
+      ? 'さらにスクロールすると最初に戻ります'
+      : '一番下までスクロールすると次のかたまりを読み込みます';
+  }
+
+  function startLoad() {
+    loading = true;
+    spinRaf = requestAnimationFrame(spinTick);
+    setTimeout(function () {
+      for (var n = 0; n < BATCH_SIZE && rowCount < MAX_ROWS; n += 1) { addRow(); }
+      loading = false;
+      cancelAnimationFrame(spinRaf);
+      recomputeFade();
+    }, LOAD_DELAY_MS);
+  }
+
+  view.addEventListener('scroll', recomputeFade);
+
+  function userTakesOver() {
+    if (!root.classList.contains('is-demo')) { return; }
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  view.addEventListener('wheel', userTakesOver, { passive: true });
+  view.addEventListener('touchstart', userTakesOver, { passive: true });
+
+  function autoplayTick() {
+    var max = view.scrollHeight - view.clientHeight;
+    if (rowCount >= MAX_ROWS && view.scrollTop >= max - 1 && dir !== 0) {
+      dir = 0;
+      setTimeout(function () {
+        while (track.firstChild !== sentinel) { track.removeChild(track.firstChild); }
+        rowCount = 0;
+        for (var i = 0; i < 6; i += 1) { addRow(); }
+        view.scrollTop = 0;
+        dir = 1;
+        recomputeFade();
+      }, 500);
+      return;
+    }
+    if (dir === 0) { return; }
+    view.scrollTop = Math.min(view.scrollTop + AUTOPLAY_STEP_PX * dir, max);
+    recomputeFade();
+  }
+
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(autoplayTick, 60);
+  }
+  recomputeFade();
+})();
+</script>
+</body>
+</html>

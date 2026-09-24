@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skeleton row append — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sra is-demo" id="sra">
+  <div class="sra__view" id="sraView">
+    <ul class="sra__track" id="sraTrack" aria-busy="false">
+      <li class="sra__sentinel" id="sraSentinel" aria-hidden="true"></li>
+    </ul>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var view = document.getElementById('sraView');
+  var track = document.getElementById('sraTrack');
+  var sentinel = document.getElementById('sraSentinel');
+  var root = document.getElementById('sra');
+
+  var ROW_H = 40;   // Row 하나의 높이 값 — 미리보기 Row 개수 계산의 분모
+  var TITLES = ['Morning brief', 'Weekly top', 'Suggested channels', 'New comments', 'Reading list', 'Bookmarks'];
+  var LOAD_DELAY_MS = 680;
+  var MAX_BATCHES = 4;
+
+  var rowSeq = 0;
+  var batches = 0;
+  var loading = false;
+  var dir = 1;
+  var autoplayTimer = null;
+
+  function realRow(n) {
+    var li = document.createElement('li');
+    li.className = 'sra__row';
+    li.textContent = TITLES[n % TITLES.length] + ' ' + String(n + 1).padStart(2, '0');
+    return li;
+  }
+
+  function fillInitial() {
+    var need = Math.ceil(view.clientHeight / ROW_H);
+    for (var i = 0; i < need; i += 1) {
+      track.insertBefore(realRow(rowSeq), sentinel);
+      rowSeq += 1;
+    }
+  }
+  fillInitial();
+
+  // 계산 겹: 지금 남아 있는 화면 높이 값을 Row 하나의 높이 값으로 나눠 미리 보여줄
+  // 스켈레톤 Row 개수를 구한다 — 화면이 클수록, 스크롤 여유가 클수록 더 많이 깜빡인다.
+  function skeletonCountFor() {
+    var remainingViewport = view.getBoundingClientRect().bottom - sentinel.getBoundingClientRect().top;
+    var visible = Math.max(remainingViewport, view.clientHeight);
+    return Math.max(2, Math.ceil(visible / ROW_H));
+  }
+
+  function startLoad() {
+    if (loading || batches >= MAX_BATCHES) { return; }
+    loading = true;
+    track.setAttribute('aria-busy', 'true');
+    var count = skeletonCountFor();
+    var skeletons = [];
+    for (var i = 0; i < count; i += 1) {
+      var li = document.createElement('li');
+      li.className = 'sra__row sra__row--skeleton';
+      li.style.setProperty('--stagger', String(i));
+      track.insertBefore(li, sentinel);
+      skeletons.push(li);
+    }
+    setTimeout(function () {
+      skeletons.forEach(function (sk, i) {
+        var real = realRow(rowSeq);
+        rowSeq += 1;
+        track.replaceChild(real, sk);
+      });
+      loading = false;
+      batches += 1;
+      track.setAttribute('aria-busy', 'false');
+      recompute();
+    }, LOAD_DELAY_MS);
+  }
+
+  function recompute() {
+    var remaining = sentinel.getBoundingClientRect().top - view.getBoundingClientRect().bottom;
+    if (remaining <= 24 && !loading) { startLoad(); }
+  }
+
+  view.addEventListener('scroll', recompute);
+
+  function userTakesOver() {
+    if (!root.classList.contains('is-demo')) { return; }
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  view.addEventListener('wheel', userTakesOver, { passive: true });
+  view.addEventListener('touchstart', userTakesOver, { passive: true });
+
+  function autoplayTick() {
+    var max = view.scrollHeight - view.clientHeight;
+    if (batches >= MAX_BATCHES && view.scrollTop >= max - 1 && dir !== 0) {
+      dir = 0;
+      setTimeout(function () {
+        while (track.firstChild !== sentinel) { track.removeChild(track.firstChild); }
+        rowSeq = 0; batches = 0;
+        fillInitial();
+        view.scrollTop = 0;
+        dir = 1;
+      }, 600);
+      return;
+    }
+    if (dir === 0) { return; }
+    view.scrollTop = Math.min(view.scrollTop + 6, max);
+    recompute();
+  }
+
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(autoplayTick, 60);
+  }
+})();
+</script>
+</body>
+</html>

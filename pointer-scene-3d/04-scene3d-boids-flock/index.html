@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>새떼 보이드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bd is-demo" id="bdRoot">
+  <p class="bd__hint">
+    <svg class="bd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path opacity=".2" d="M28 206h200L128 78z"/><path transform="translate(72 102) scale(1.2)" d="M-22 4Q-12 -10 0 -2Q12 -10 22 4Q10 -2 0 4Q-10 -2 -22 4Z"/><path transform="translate(158 66)" d="M-22 4Q-12 -10 0 -2Q12 -10 22 4Q10 -2 0 4Q-10 -2 -22 4Z"/><path transform="translate(196 148) scale(0.85)" d="M-22 4Q-12 -10 0 -2Q12 -10 22 4Q10 -2 0 4Q-10 -2 -22 4Z"/></g></svg>
+    <span>포인터가 먹이점이 됩니다 — 40마리가 분리·정렬·결합 세 규칙으로 무리를 짓고 먹이 주위로 모입니다</span>
+  </p>
+  <div class="bd__field" id="bdField" role="application" aria-label="새떼 원근 실험판" tabindex="0">
+    <canvas class="bd__cv" id="bdCv"></canvas>
+  </div>
+  <div class="bd__bar">
+    <label class="bd__dial">결합력
+      <input type="range" id="bdCoh" min="0.2" max="1.4" step="0.05" value="0.8" aria-label="결합력">
+      <b class="bd__val" id="bdCohVal">0.80</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 새떼 보이드 — 새 40마리의 3D 위치에서 매 프레임 분리·정렬·결합 세 규칙을 직접 계산한다.
+// 포인터는 씬 한 점의 먹이 — 떼가 그 주위로 유인된다. z 는 원근 스케일(s = focal/(focal+z))로만 들어온다.
+// 새는 채워진 삼각형 세 개(몸통+날개 두 짝) — 날개 각도가 매 프레임 펄럭인다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var COUNT = 40;        // 새 마릿수
+  var TILT = 0.34;       // 카메라 x축 기울기 — 지면이 살짝 보여 깊이가 읽힌다
+  var FOOD_GAIN = 0.6;   // 먹이 유인 배율
+  var LOOP_MS = 2600;    // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('bdRoot');
+  var field = document.getElementById('bdField');
+  var cv = document.getElementById('bdCv');
+  var ctx = cv.getContext('2d');
+  var cohIn = document.getElementById('bdCoh');
+  var cohOut = document.getElementById('bdCohVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var PAL = [tok('--bd-cream'), tok('--bd-mint'), tok('--bd-sky')];   // 새 깃 색 순환
+  var PINK = tok('--bd-pink');
+  var LILAC_RGB = [185, 160, 255];
+  var PINK_RGB = [255, 158, 187];
+  var SHADOW = tok('--bd-shadow');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var FOCAL = 300;
+  var BX = 190, BY = 90, BZ = 116;         // 떼가 도는 상자의 절반 폭
+  var GROUND = -BY - 16;                   // 지면 높이(월드)
+  var VIEW = 34, SEP = 15;                 // 시야 반경 · 밀림 반경
+  var VR2 = VIEW * VIEW, SR2 = SEP * SEP;
+  var SPD_MIN = 34, SPD_MAX = 62;          // 속도 하한·상한(px/s) — 하한이 있어 떼는 절대 멈추지 않는다
+  var FX = 118, FY = 60;                   // 먹이점이 도는 범위
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+  var food = { x: 0, y: 0, z: 0 };
+
+  // 시드 고정 난수 — 포스터가 매번 같은 떼에서 출발한다
+  var seed = 30704;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+  var birds = [];
+  for (var i = 0; i < COUNT; i++) {
+    var a = rnd() * TAU, b2 = (rnd() - 0.5) * Math.PI;
+    birds.push({
+      x: (rnd() * 2 - 1) * BX * 0.8, y: (rnd() * 2 - 1) * BY * 0.8, z: (rnd() * 2 - 1) * BZ * 0.8,
+      vx: Math.cos(a) * Math.cos(b2) * 46, vy: Math.sin(b2) * 46, vz: Math.sin(a) * Math.cos(b2) * 46,
+      ph: rnd() * TAU, sz: 0.78 + 0.5 * rnd(), col: i % 3
+    });
+  }
+
+  var ct = Math.cos(TILT), st = Math.sin(TILT);
+  function camRot(p) { return { x: p.x, y: p.y * ct - p.z * st, z: p.y * st + p.z * ct }; }
+  function project(p) { var s = FOCAL / (FOCAL + p.z); return { sx: W * 0.5 + p.x * s, sy: H * 0.52 - p.y * s, s: s }; }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function step(dt, now) {
+    var coh = Number(cohIn.value);
+    food.x = (px01 - 0.5) * 2 * FX;
+    food.y = (0.5 - py01) * 2 * FY;
+    food.z = Math.sin(now / 1200) * 24;
+    for (var k = 0; k < COUNT; k++) {
+      var b = birds[k];
+      var ax = 0, ay = 0, az = 0;
+      var cn = 0, cxs = 0, cys = 0, czs = 0, vxs = 0, vys = 0, vzs = 0, sxs = 0, sys = 0, szs = 0;
+      for (var j = 0; j < COUNT; j++) {
+        if (j === k) continue;
+        var o = birds[j];
+        var dx = o.x - b.x, dy = o.y - b.y, dz = o.z - b.z;
+        var d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > VR2) continue;
+        cn++; cxs += o.x; cys += o.y; czs += o.z; vxs += o.vx; vys += o.vy; vzs += o.vz;
+        if (d2 < SR2 && d2 > 0.01) { var inv = 1 / d2; sxs -= dx * inv; sys -= dy * inv; szs -= dz * inv; }
+      }
+      if (cn > 0) {
+        ax += (cxs / cn - b.x) * coh * 1.1; ay += (cys / cn - b.y) * coh * 1.1; az += (czs / cn - b.z) * coh * 1.1;  // 결합
+        ax += (vxs / cn - b.vx) * 1.1; ay += (vys / cn - b.vy) * 1.1; az += (vzs / cn - b.vz) * 1.1;                  // 정렬
+      }
+      ax += sxs * 260; ay += sys * 260; az += szs * 260;                                                              // 분리
+      ax += (food.x - b.x) * FOOD_GAIN * coh; ay += (food.y - b.y) * FOOD_GAIN * coh; az += (food.z - b.z) * FOOD_GAIN * coh;  // 먹이 유인
+      if (b.x < -BX) ax += (-BX - b.x) * 2.4; if (b.x > BX) ax += (BX - b.x) * 2.4;
+      if (b.y < -BY) ay += (-BY - b.y) * 2.4; if (b.y > BY) ay += (BY - b.y) * 2.4;
+      if (b.z < -BZ) az += (-BZ - b.z) * 2.4; if (b.z > BZ) az += (BZ - b.z) * 2.4;
+      b.vx += ax * dt; b.vy += ay * dt; b.vz += az * dt;
+      var sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy + b.vz * b.vz) || 1;
+      var cl = sp > SPD_MAX ? SPD_MAX / sp : (sp < SPD_MIN ? SPD_MIN / sp : 1);
+      b.vx *= cl; b.vy *= cl; b.vz *= cl;
+      b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
+      b.ph += (6.2 + sp * 0.05) * dt;
+    }
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+
+    // 지면 안개 — 아래쪽 라일락빛 깊이 단서
+    var haze = ctx.createRadialGradient(W * 0.5, H * 0.94, 8, W * 0.5, H * 0.94, W * 0.55);
+    haze.addColorStop(0, 'rgba(' + LILAC_RGB[0] + ',' + LILAC_RGB[1] + ',' + LILAC_RGB[2] + ',0.16)');
+    haze.addColorStop(1, 'rgba(' + LILAC_RGB[0] + ',' + LILAC_RGB[1] + ',' + LILAC_RGB[2] + ',0)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, 0, W, H);
+
+    // 지면 그림자 — 높이가 높으면 작아지고 옅어진다
+    for (var k = 0; k < COUNT; k++) {
+      var b = birds[k];
+      var g = project(camRot({ x: b.x, y: GROUND, z: b.z }));
+      var hgt = (b.y - GROUND) / 160;
+      var kk = Math.max(0.2, 1 - hgt);
+      ctx.globalAlpha = 0.24 * kk;
+      ctx.fillStyle = SHADOW;
+      ctx.beginPath();
+      ctx.ellipse(g.sx, g.sy + 2, 15 * g.s * kk + 2, 5.2 * g.s * kk + 1, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // 새 — z 내림차순(화가 알고리즘). 몸통+날개는 전부 채워진 삼각형
+    var order = [];
+    for (var q = 0; q < COUNT; q++) order.push({ b: birds[q], z: camRot(birds[q]).z });
+    order.sort(function (a, b2) { return b2.z - a.z; });
+    for (var w = 0; w < order.length; w++) {
+      b = order[w].b;
+      var p = camRot(b);
+      var sc0 = project(p);
+      var sc1 = project(camRot({ x: b.x + b.vx * 0.1, y: b.y + b.vy * 0.1, z: b.z + b.vz * 0.1 }));
+      var ang = Math.atan2(sc1.sy - sc0.sy, sc1.sx - sc0.sx);
+      var sc = sc0.s * b.sz;
+      var L = 16 * sc, Wd = 6 * sc, Wl = 21 * sc;
+      var wa = 0.36 + 0.52 * (0.5 + 0.5 * Math.sin(b.ph));   // 날개 펄럭임 각도
+      var tx = -L * 0.1 + Math.cos(wa) * Wl, ty = Math.sin(wa) * Wl;
+      ctx.save();
+      ctx.translate(sc0.sx, sc0.sy);
+      ctx.rotate(ang);
+      ctx.fillStyle = PAL[b.col];
+      ctx.globalAlpha = 0.88;
+      ctx.beginPath();
+      ctx.moveTo(-L * 0.1, 0); ctx.lineTo(-L * 0.55, -Wd * 0.4); ctx.lineTo(tx, -ty); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-L * 0.1, 0); ctx.lineTo(-L * 0.55, Wd * 0.4); ctx.lineTo(tx, ty); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.moveTo(L, 0); ctx.lineTo(-L * 0.8, Wd); ctx.lineTo(-L * 0.8, -Wd); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    // 먹이점 — 핑크 맥동 고리 + 빛 무리 + 크림 씨앗
+    var fp = project(camRot(food));
+    var pulse = 0.5 + 0.5 * Math.sin(now / 240);
+    var glowR = 15 + 7 * pulse;
+    var glow = ctx.createRadialGradient(fp.sx, fp.sy, 0, fp.sx, fp.sy, glowR);
+    glow.addColorStop(0, 'rgba(' + PINK_RGB[0] + ',' + PINK_RGB[1] + ',' + PINK_RGB[2] + ',0.30)');
+    glow.addColorStop(1, 'rgba(' + PINK_RGB[0] + ',' + PINK_RGB[1] + ',' + PINK_RGB[2] + ',0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(fp.sx, fp.sy, glowR, 0, TAU); ctx.fill();
+    ctx.strokeStyle = PINK;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(fp.sx, fp.sy, 7 + 3 * pulse, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = PAL[0];
+    ctx.beginPath(); ctx.arc(fp.sx, fp.sy, 2.6, 0, TAU); ctx.fill();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt, now);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setCoh(v) { cohOut.textContent = Number(v).toFixed(2); }
+
+  cohIn.addEventListener('input', function () { setCoh(cohIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0.016, last); draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0.016, last); draw(last); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 먹이 주위에 떼가 둘러앉은 한 장만 남는다
+    px01 = 0.6; py01 = 0.42;
+    for (var warm = 0; warm < 240; warm++) step(0.016, warm * 16);
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

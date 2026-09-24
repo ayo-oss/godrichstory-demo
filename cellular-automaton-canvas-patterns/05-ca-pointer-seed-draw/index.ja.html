@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>カーソル座標の値でマスを直接オン・オフする描画オートマトン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="シード描画進行中 — ポインターでマスを描くか、スペースキーで停止、R で再シード">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">ポインターで描画・スペースキーで停止・R で再シード</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(진행률 채움 로더)와 다른 축: 포인터 좌표 값이 칸의 생사를 직접 뒤집는 계산이 주인공.
+  // 항목 05 는 click 대신 pointerdown·pointermove 로 씨앗을 그린다 — 손을 떼면 규칙표로 자동 진행.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const CELL = 10, COLS = W / CELL, ROWS = H / CELL;
+  const INK = '#17141a';
+  const ALIVE_COLOR = '#93a4ca';
+  let SEED = 50501;
+  let rnd = makeLcg(SEED);
+
+  const SURVIVE_MIN = 2, SURVIVE_MAX = 3, BIRTH_COUNT = 3;
+
+  let grid = new Uint8Array(COLS * ROWS);
+  let next = new Uint8Array(COLS * ROWS);
+
+  function idx(x, y){ return y * COLS + x; }
+
+  function autoSeed(){
+    grid.fill(0);
+    for (let y = 8; y <= 21; y++){
+      for (let x = 14; x <= 33; x++){
+        if (rnd() < 0.34) grid[idx(x, y)] = 1;
+      }
+    }
+  }
+
+  function neighborCount(x, y){
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dx = -1; dx <= 1; dx++){
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+        n += grid[idx(nx, ny)];
+      }
+    }
+    return n;
+  }
+
+  function step(){
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        const alive = grid[idx(x, y)] === 1;
+        const n = neighborCount(x, y);
+        let willLive = 0;
+        if (alive){
+          willLive = (n >= SURVIVE_MIN && n <= SURVIVE_MAX) ? 1 : 0;
+        } else {
+          willLive = (n === BIRTH_COUNT) ? 1 : 0;
+        }
+        next[idx(x, y)] = willLive;
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function render(){
+    ctx.fillStyle = INK;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = ALIVE_COLOR;
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 1, CELL - 1);
+        }
+      }
+    }
+  }
+
+  const ARIA_PLAY = 'シード描画進行中 — ポインターでマスを描くか、スペースキーで停止、R で再シード';
+  const ARIA_DRAW = 'シード描画中 — 手を離すとルール表で自動進行';
+  const ARIA_PAUSE = 'シード描画停止中 — ポインターでマスを描くか、スペースキーで再生、R で再シード';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', isDrawing ? ARIA_DRAW : (paused ? ARIA_PAUSE : ARIA_PLAY));
+  }
+
+  let paused = false;
+  let isDrawing = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){
+    if (rootEl.classList.contains('is-demo')){
+      rootEl.classList.remove('is-demo');
+      grid.fill(0);
+    }
+  }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    autoSeed();
+    paused = false;
+  }
+
+  function cellFromEvent(e){
+    const rect = cvEl.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (W / rect.width);
+    const py = (e.clientY - rect.top) * (H / rect.height);
+    const cx = Math.max(0, Math.min(COLS - 1, Math.floor(px / CELL)));
+    const cy = Math.max(0, Math.min(ROWS - 1, Math.floor(py / CELL)));
+    return [cx, cy];
+  }
+
+  function paintAt(e){
+    const c = cellFromEvent(e);
+    grid[idx(c[0], c[1])] = 1;
+    render();
+  }
+
+  function onPointerDown(e){
+    human();
+    isDrawing = true;
+    paused = true;
+    updateAria();
+    paintAt(e);
+  }
+
+  function onPointerMove(e){
+    if (!isDrawing) return;
+    paintAt(e);
+  }
+
+  function onPointerUp(){
+    if (!isDrawing) return;
+    isDrawing = false;
+    paused = false;
+    updateAria();
+    render();
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R'){
+      human();
+      reseed();
+      render();
+      updateAria();
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      paused = !paused;
+      updateAria();
+    }
+  }
+
+  const GEN_INTERVAL_MS = 85;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused && !isDrawing){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('pointerdown', onPointerDown);
+  rootEl.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  autoSeed();
+  updateAria();
+  render();
+  if (!reduceMQ.matches){
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

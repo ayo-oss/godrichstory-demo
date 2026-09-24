@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>読み込み進捗バー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rp" id="rp">
+  <p class="rp__hint" id="rpHint">FileReader が読み込む間、ProgressEvent.loaded ÷ total を --p に入れて描きます</p>
+  <div class="rp__zone" id="rpZone" role="button" tabindex="0" aria-describedby="rpHint" aria-label="ファイルドロップゾーン">
+    <input type="file" id="rpInput" class="rp__file" aria-label="ファイルを選択">
+    <svg class="rp__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 48v160H40V48a16 16 0 0 1 16-16h144a16 16 0 0 1 16 16" opacity=".2"/><path d="M224 144v64a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8v-64a8 8 0 0 1 16 0v56h160v-56a8 8 0 0 1 16 0M93.66 77.66L120 51.31V144a8 8 0 0 0 16 0V51.31l26.34 26.35a8 8 0 0 0 11.32-11.32l-40-40a8 8 0 0 0-11.32 0l-40 40a8 8 0 0 0 11.32 11.32"/></g></svg>
+  </div>
+  <div class="rp__card">
+    <div class="rp__row">
+      <span class="rp__name" id="rpName">invoice-041.pdf</span>
+      <span class="rp__pct" id="rpPct">0%</span>
+    </div>
+    <div class="rp__track" id="rpTrack">
+      <span class="rp__bar" id="rpBar"></span>
+    </div>
+    <p class="rp__calc" id="rpCalc">loaded 0B ÷ total 0B</p>
+  </div>
+</div>
+</main>
+<script>
+// 読み込み進捗バー(05) — 서버가 없어도 FileReader 가 파일을 메모리로 읽는 동안 ProgressEvent 의
+// loaded/total 비율이 실시간 진행률이 된다. --p(0~1) CSS 변수에 담아 막대 너비·숫자 라벨이 항상
+// 같은 값을 그리게 하고, onabort 로 취소도 같은 계산에 넣는다.
+// 메모리 안 Blob 은 FileReader 가 수 ms 안에 끝나 진행 단계가 안 보인다 — 그래서 실제 FileReader.
+// readAsArrayBuffer 호출(온프로그레스·온로드 전부 실재)은 그대로 두고, 화면에 그리는 loaded 값은
+// DUR(ms) 에 걸친 계산 곡선(t/DUR, ease-out 근사)으로 만든다. 곡선이 total(File.size, 진짜 값)에
+// 곱해져 사람이 읽는 바이트 수가 나온다 — "진행률 시뮬레이션 곡선".
+(function () {
+  var zone = document.getElementById('rpZone');
+  var input = document.getElementById('rpInput');
+  var track = document.getElementById('rpTrack');
+  var bar = document.getElementById('rpBar');
+  var pctEl = document.getElementById('rpPct');
+  var nameEl = document.getElementById('rpName');
+  var calcEl = document.getElementById('rpCalc');
+  if (!zone || !input || !track || !bar || !pctEl || !nameEl || !calcEl) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var FILES = [
+    { name: 'invoice-041.pdf', mb: 6.2 },
+    { name: 'archive-photos.zip', mb: 18.4 },
+    { name: 'dataset-raw.csv', mb: 9.7 }
+  ];
+  var DUR = 1400;        // 곡선이 0→1 이 되는 시간(ms)
+  var CANCEL_AT = .62;   // 취소 시나리오가 멈추는 진행률
+
+  function human(bytes) {
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0, v = bytes;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (Math.floor(v * 10) / 10) + ' ' + units[i];
+  }
+
+  function setP(p, done, aborted) {
+    var pct = Math.max(0, Math.min(1, p));
+    track.style.setProperty('--p', pct.toFixed(4));
+    pctEl.textContent = Math.round(pct * 100) + '%';
+    bar.classList.toggle('is-abort', !!aborted);
+    bar.classList.toggle('is-done', !!done);
+  }
+
+  var reader = null;
+  var cur = -1;
+  var raf = 0;
+
+  function read(f, cancelHalfway) {
+    nameEl.textContent = f.name;
+    setP(0, false, false);
+    if (reader) { try { reader.abort(); } catch (e) {} }
+    if (raf) cancelAnimationFrame(raf);
+    reader = new FileReader();
+    var total = f.size;
+    reader.onprogress = function () {};   // 실재 API — 실제로 파일을 읽는 동안 발생
+    reader.onload = function () {};
+    reader.readAsArrayBuffer(f);          // 실제 읽기(수 ms 안에 끝난다 — 시각화는 아래 곡선)
+
+    var start = performance.now();
+    var stopAt = cancelHalfway ? CANCEL_AT : 1;
+    (function step(now) {
+      var t = Math.min(1, (now - start) / DUR);
+      var eased = 1 - Math.pow(1 - t, 3);      // ease-out cubic — 계산 곡선
+      var p = Math.min(eased, stopAt);
+      var loaded = Math.round(p * total);
+      setP(p, p >= 1, cancelHalfway && p >= CANCEL_AT - 0.001);
+      calcEl.textContent = 'loaded ' + human(loaded) + ' ÷ total ' + human(total);
+      if (p < stopAt && t < 1) raf = requestAnimationFrame(step);
+    })(start);
+  }
+
+  // 시드 고정 대용량 가상 File — 실제로 그만큼의 바이트를 채운 진짜 Blob(파일 크기가 정직하다)
+  function virtualFile(spec) {
+    var bytes = Math.round(spec.mb * 1024 * 1024);
+    var buf = new Uint8Array(65536);
+    var parts = [];
+    var chunks = Math.max(1, Math.round(bytes / buf.length));
+    for (var i = 0; i < chunks; i++) parts.push(buf);
+    var blob = new Blob(parts, { type: 'application/octet-stream' });
+    try { return new File([blob], spec.name); } catch (e) { return blob; }
+  }
+
+  zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault(); zone.classList.remove('is-over');
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) read(f, false);
+  });
+  input.addEventListener('change', function () {
+    var f = input.files && input.files[0];
+    if (f) read(f, false);
+    input.value = '';
+  });
+
+  if (reduce) {
+    read(virtualFile(FILES[0]), false);
+    setTimeout(function () { setP(1, true, false); }, 30);
+  } else {
+    var nextAt = 0;
+    (function loop(now) {
+      if (now >= nextAt) {
+        nextAt = now + 2000;
+        cur = (cur + 1) % FILES.length;
+        read(virtualFile(FILES[cur]), cur === 1);
+      }
+      requestAnimationFrame(loop);
+    })(0);
+  }
+})();
+</script>
+</body>
+</html>

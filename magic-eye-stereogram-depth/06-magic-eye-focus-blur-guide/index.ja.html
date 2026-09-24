@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>見方ガイド — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>見方ガイド</span>
+    <span class="me__desc">上の2点が重なるまで目を緩めると、下の盤の円盤が浮かびます</span>
+  </p>
+  <div class="me__field" role="application" aria-label="見方練習盤" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <button class="me__btn" id="meBtn" type="button">解答マップを見る</button>
+    <span class="me__meta">手がかり2点 間隔100px · 解答マップ1秒点灯</span>
+  </div>
+</div>
+</main>
+<script>
+// 見方ガイド(06) — 안 되는 사람을 10초 안에 보게 만드는 접근성 항목.
+// ① 手がかり 두 점: 판 위에 스테레오 시차(100px)만큼 벌어진 같은 점을 띄운다 —
+//    두 점이 하나로 겹치는 순간 눈이 평행이 되고, 그 상태로 판을 보면 도넛이 떠오른다.
+//    격자 미리보기(.is-demo)에서 점이 천천히 벌어졋다 모이며 그 각을 연습시킨다.
+// ② 풀이 지도: 같은 깊이 지도를 회색 농담으로 캔버스에 겹쳐 그린다 — 노이즈로는 안 보이는
+//    사람에게 "무엇이 어디에" 있는지 확정해 주고, 다시 숨기면 노이즈가 이해된다.
+// 모든 움직임(점 벌림·지도 점등)을 rAF 캔버스로 그린다 — CSS 애니메이션은 캡처 시계와 어긋난다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var SEP    = 100;   // 手がかり 두 점 벌림(px) — 눈이 늦춰야 할 시차
+  var MAXSHIFT = 10;   // 도넛 깊이(px)
+  var CYCLE  = 2.0;    // 手がかり 벌림 주기(초)
+  // ─────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  var btnEl = document.getElementById('meBtn');
+  if (!root || !cvEl || !btnEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = [];
+  for (var i = 0; i < 5; i++) PAL.push(tokRGB('--me-p' + i));
+  var DOT = tokRGB('--me-dot');
+
+  function baseIdx(x, y) {
+    var h = (Math.imul(x + 11, 374761393) + Math.imul(y + 7, 668265263)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return ((h % PAL.length) + PAL.length) % PAL.length;
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null;
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    img = ctx.createImageData(W, H);
+  }
+
+  // 깊이 — 중앙 도넛(안쪽 구멍이 낮다). 풀이 지도와 같은 식을 공유한다.
+  // 도넛은 천천히 떠오랐다 가라앉으며(bob) 깊이도 맥동한다 — 노이즈 판이 쉬지 않고 재엮긴다.
+  function depthAt(x, y, t) {
+    var ph = t / CYCLE * Math.PI * 2;
+    var cy = H * 0.54 + Math.sin(ph) * H * 0.08;              // 수직 bob
+    var cx = W * 0.5;
+    var rad = Math.min(W, H) * 0.36;
+    var dx = (x - cx) / rad, dy = (y - cy) / rad;
+    var d2 = dx * dx + dy * dy;
+    if (d2 >= 1) return 0;
+    var ring = Math.sqrt(d2);
+    var hole = ring < 0.36 ? 0.22 : 1;   // 안쪽 구멍은 낮게 — 입체로 읽으면 도넛
+    var pulse = 0.55 + 0.45 * (Math.sin(ph - Math.PI / 2) * .5 + .5);   // 깊이 맥동
+    return Math.sqrt(1 - d2 * 0.25) * 0.92 * hole * pulse;
+  }
+
+  // 풀이 지도 알파 — 사람 토글(showMap) 또는 격자 주기 뒤 30% 점등
+  var showMap = false;
+  btnEl.addEventListener('click', function () {
+    showMap = !showMap;
+    btnEl.textContent = showMap ? '解答マップを隠す' : '解答マップを見る';
+    root.classList.remove('is-demo');
+  });
+
+  function draw(t) {
+    var ph = t / CYCLE * Math.PI * 2;
+    var d = img.data, x, y, di;
+    var col = new Int32Array(W);
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        var s = Math.round(depthAt(x, y, t) * MAXSHIFT);
+        if (s <= 0) {
+          col[x] = baseIdx(x, y);
+        } else {
+          var from = x - s;
+          col[x] = from >= 0 ? col[from] : baseIdx(from + W, y);
+        }
+      }
+      for (x = 0; x < W; x++) {
+        var c = PAL[col[x]];
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // ── 격자 미리보기 연출(.is-demo 가 있을 때만) ──
+    if (root.classList.contains('is-demo')) {
+      // 手がかり 두 점 — 천천히 벌어졋다 모인다
+      var open = Math.max(0, Math.sin(ph - Math.PI / 2) * .5 + .5);
+      var px = open * SEP / 2;
+      ctx.fillStyle = 'rgba(' + DOT[0] + ',' + DOT[1] + ',' + DOT[2] + ',0.92)';
+      ctx.beginPath(); ctx.arc(W / 2 - px, 14, 3.5, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(W / 2 + px, 14, 3.5, 0, 6.2832); ctx.fill();
+
+      // 풀이 지도 — 주기 뒤 절반(1초) 동안 농담으로 겹쳐 그렷다 지운다
+      var litPhase = ph % (Math.PI * 2);
+      if (litPhase > Math.PI) {
+        var a = Math.min(1, (litPhase - Math.PI) / (Math.PI * 0.15));
+        var fade = Math.max(0, (Math.PI * 1.92 - litPhase) / (Math.PI * 0.08));
+        var alpha = Math.min(a, fade) * 0.9;
+        ctx.fillStyle = 'rgba(24, 20, 30, ' + alpha.toFixed(3) + ')';
+        ctx.fillRect(0, 0, W, H);
+        // 도넛을 밝은 농담으로 — 깊이를 그대로 밝기로 보여준다
+        var gy, gx;
+        for (gy = 0; gy < H; gy += 2) {
+          for (gx = 0; gx < W; gx += 2) {
+            var dp = depthAt(gx, gy, t);
+            if (dp <= 0) continue;
+            var v = Math.round(dp * 255 * alpha);
+            ctx.fillStyle = 'rgba(' + v + ',' + v + ',' + v + ',' + (0.9 * alpha).toFixed(3) + ')';
+            ctx.fillRect(gx, gy, 2, 2);
+          }
+        }
+      }
+    } else if (showMap) {
+      // 사람 토글 상태 — 지도를 계속 띄운다
+      var gy2, gx2;
+      ctx.fillStyle = 'rgba(24, 20, 30, 0.9)';
+      ctx.fillRect(0, 0, W, H);
+      for (gy2 = 0; gy2 < H; gy2 += 2) {
+        for (gx2 = 0; gx2 < W; gx2 += 2) {
+          var dp2 = depthAt(gx2, gy2, t);
+          if (dp2 <= 0) continue;
+          var v2 = Math.round(dp2 * 255);
+          ctx.fillStyle = 'rgba(' + v2 + ',' + v2 + ',' + v2 + ',0.9)';
+          ctx.fillRect(gx2, gy2, 2, 2);
+        }
+      }
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(CYCLE / 2);
+  });
+  fit();
+  if (reduce) {
+    draw(CYCLE / 2);   // reduce — 완전히 벌어진 단서와 판 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Amount Display That Rolls With a Per-digit Offset — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ars is-demo" id="arsRoot">
+  <div class="ars__badge" id="arsBadge">Payment amount</div>
+  <button class="ars__ctrl" id="arsCtrl" type="button">Pause</button>
+  <div class="ars__panel">
+    <div class="ars__sweep" id="arsSweep" aria-hidden="true"></div>
+    <div class="ars__digits" id="arsDigits"></div>
+    <span class="ars__unit">won</span>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // AMOUNT_ROLL_DIGIT_STAGGER_MS — 변형 1: 60 → 110 으로 늘리면 자릿수가 더 크게 어긋나며 굴러간다.
+  var AMOUNT_ROLL_DIGIT_STAGGER_MS = 60;
+  var LOOP_MS = 2000;
+  var ROLL_MS = 480;
+  var FROM = '08,000';
+  var TO = '12,400';
+  // 시연 스케줄: 2초 루프 안에 굴러가는 방향을 두 번 넣는다(증가 → 감소) — 로직·상수는 그대로,
+  // 두 번째 구간은 같은 트랙(FROM/TO 두 자릿수)을 반대로 재생해 되돌아가는 롤을 보여준다.
+  var SEG_DURATION = (TO.length - 1) * AMOUNT_ROLL_DIGIT_STAGGER_MS + ROLL_MS;
+  var SEG2_START = 1050;
+
+  var root = document.getElementById('arsRoot');
+  var badge = document.getElementById('arsBadge');
+  var ctrl = document.getElementById('arsCtrl');
+  var digitsEl = document.getElementById('arsDigits');
+  var sweepEl = document.getElementById('arsSweep');
+
+  var cols = [];
+  for (var i = 0; i < TO.length; i += 1) {
+    var col = document.createElement('span');
+    col.className = 'ars__col';
+    if (TO[i] === ',') col.classList.add('ars__col--comma');
+    var track = document.createElement('span');
+    track.className = 'ars__track';
+    var a = document.createElement('span'); a.className = 'ars__d'; a.textContent = FROM[i];
+    var b = document.createElement('span'); b.className = 'ars__d'; b.textContent = TO[i];
+    track.appendChild(a); track.appendChild(b);
+    col.appendChild(track);
+    digitsEl.appendChild(col);
+    // 계산 한 겹: 자릿수 인덱스(왼쪽부터)에 스태거를 곱해 각 컬럼의 시작 지연을 구한다.
+    cols.push({ track: track, delay: i * AMOUNT_ROLL_DIGIT_STAGGER_MS, isDigit: TO[i] !== ',' });
+  }
+  var maxDelay = (TO.length - 1) * AMOUNT_ROLL_DIGIT_STAGGER_MS;
+  var ROLL_END = maxDelay + ROLL_MS;
+
+  function easeOutBack(t) {
+    var c1 = 1.4, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }
+
+  function progressFor(elapsed, segStart, delay) {
+    var local = elapsed - segStart - delay;
+    if (local <= 0) return 0;
+    if (local >= ROLL_MS) return 1;
+    return local / ROLL_MS;
+  }
+
+  function render(elapsed) {
+    var anyMoving = false;
+
+    // 계산 한 겹: 두 번째 구간(감소 방향)이 시작됐는지는 컬럼별 지연 없이 구간 전체로 판정한다 —
+    // 첫 구간 꼬리와 겹치지 않도록 SEG2_START 를 첫 구간 최대 종료(ROLL_END)보다 뒤에 둔다.
+    var seg2Active = elapsed >= SEG2_START;
+
+    cols.forEach(function (c) {
+      var translateY, p;
+      if (seg2Active) {
+        var p2 = progressFor(elapsed, SEG2_START, c.delay);
+        var eased2 = easeOutBack(p2);
+        translateY = -(1 - eased2) * 50;
+        p = p2;
+      } else {
+        var p1 = progressFor(elapsed, 0, c.delay);
+        var eased1 = easeOutBack(p1);
+        translateY = -eased1 * 50;
+        p = p1;
+      }
+      if (p > 0 && p < 1) anyMoving = true;
+      c.track.style.transform = 'translateY(' + translateY.toFixed(2) + '%)';
+
+      // 계산 한 겹: 롤 속도(사인 피크, 구간 중앙에서 최대)에 비례한 잔상 톤 — 형태는 바꾸지 않는다.
+      var velocity = Math.sin(Math.min(1, Math.max(0, p)) * Math.PI);
+      c.track.style.filter = velocity > 0.01 ? 'blur(' + (velocity * 1.1).toFixed(2) + 'px)' : 'none';
+      c.track.style.boxShadow = velocity > 0.01
+        ? '0 0 ' + (velocity * 9).toFixed(1) + 'px rgba(91, 140, 248, ' + (velocity * 0.5).toFixed(2) + ')'
+        : 'none';
+    });
+
+    badge.textContent = anyMoving ? 'Updating' : 'Payment amount';
+
+    // 계산 한 겹: 카드 하이라이트 sweep — 롤 진행률(globalP)의 함수로 패널 전체를 가로지른다.
+    var globalP = -1;
+    if (elapsed >= 0 && elapsed < SEG_DURATION) {
+      globalP = elapsed / SEG_DURATION;
+    } else if (elapsed >= SEG2_START && elapsed < SEG2_START + SEG_DURATION) {
+      globalP = (elapsed - SEG2_START) / SEG_DURATION;
+    }
+    if (globalP >= 0) {
+      var sweepOpacity = Math.sin(globalP * Math.PI);
+      sweepEl.style.opacity = (sweepOpacity * 0.8).toFixed(2);
+      sweepEl.style.transform = 'translateX(' + (-120 + globalP * 240).toFixed(1) + '%)';
+    } else {
+      sweepEl.style.opacity = '0';
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? ROLL_END : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    render(elapsed);
+    requestAnimationFrame(tick);
+  }
+  render(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? 'Pause' : 'Play';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = 'Pause';
+    }
+  });
+})();
+</script>
+</body>
+</html>

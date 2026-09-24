@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구간마다 값 순서를 다시 매겨 순위를 세로 좌표로 계산해, 두 항목의 순위가 뒤바뀌는 지점에서 선이 서로 교차한다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bmp is-demo" id="bmpRoot">
+  <canvas class="bmp__canvas" id="bmpCanvas" width="480" height="300"></canvas>
+  <p class="bmp__caption">구간마다 값 순서를 다시 매겨 순위를 세로 좌표로 계산해, 두 항목의 순위가 뒤바뀌는 지점에서 선이 서로 교차한다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 기간마다 값을 다시 정렬해 순위(등수)를 매기고, 그 순위를 세로 좌표로 써서 항목별
+  // 꺾은선을 그린다. 두 항목의 순위가 인접 구간에서 뒤바뀌면 두 직선이 그 구간 안에서
+  // 반드시 교차하므로, 교차점을 대수적으로 계산해 순간적으로 강조한다. 왼쪽 구간부터
+  // 순서대로 공개(reveal)해 시간이 흐르며 그려지는 것처럼 보이게 한다.
+  var root = document.getElementById('bmpRoot');
+  var canvas = document.getElementById('bmpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var rand = seedRand(425081);
+  var ITEM_COUNT = 5, PERIOD_COUNT = 5;
+  var VALUES = [];
+  for (var p = 0; p < PERIOD_COUNT; p += 1) {
+    var row = [];
+    for (var i = 0; i < ITEM_COUNT; i += 1) row.push(10 + rand() * 90);
+    VALUES.push(row);
+  }
+  function ranksOf(row) {
+    var idx = row.map(function (v, i) { return i; });
+    idx.sort(function (a, b) { return row[b] - row[a]; });
+    var rank = new Array(row.length);
+    idx.forEach(function (itemI, pos) { rank[itemI] = pos; });
+    return rank;
+  }
+  var RANKS = VALUES.map(ranksOf);
+  var LINE_COLORS = ['#2f6df6', '#c2361a', '#2b9d74', '#8a5cd6', '#0a4fe8'];
+
+  var LOOP_MS = 2000;
+  var T0 = 200;
+  var SEG_MS = 300;
+  var SEG_DUR = 260;
+  var SEG_COUNT = PERIOD_COUNT - 1;
+  var cw = 480, ch = 300;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function periodX(p) {
+    var padX = cw * 0.08;
+    return padX + (cw - padX * 2) * (p / (PERIOD_COUNT - 1));
+  }
+  function rankY(r) {
+    var padY = ch * 0.14;
+    return padY + (ch - padY * 2) * (r / (ITEM_COUNT - 1));
+  }
+
+  function render(elapsedMs) {
+    var t = elapsedMs % LOOP_MS;
+    ctx.clearRect(0, 0, cw, ch);
+    var fadeAlpha = 1;
+    if (t >= 1750) fadeAlpha = clamp(1 - (t - 1750) / 200, 0, 1);
+    ctx.globalAlpha = fadeAlpha;
+
+    var rowH = (ch - ch * 0.28) / (ITEM_COUNT - 1);
+    var crossings = [];
+    for (var s = 0; s < SEG_COUNT; s += 1) {
+      var raw = (t - T0 - s * SEG_MS) / SEG_DUR;
+      if (raw < 0) continue;
+      var flashing = raw >= 0.9 && raw <= 1.2;
+      if (!flashing) continue;
+      for (var a = 0; a < ITEM_COUNT; a += 1) {
+        for (var b = a + 1; b < ITEM_COUNT; b += 1) {
+          var y1a = RANKS[s][a], y1b = RANKS[s + 1][a];
+          var y2a = RANKS[s][b], y2b = RANKS[s + 1][b];
+          var Da = y1a - y2a, Db = y1b - y2b;
+          if ((Da > 0) === (Db > 0)) continue;
+          var f = Da / (Da - Db);
+          if (f < 0 || f > 1) continue;
+          crossings.push({ s: s, f: f, rank: y1a + (y1b - y1a) * f });
+        }
+      }
+    }
+
+    for (var r = 0; r < ITEM_COUNT; r += 1) {
+      var boosted = crossings.some(function (c) { return Math.round(c.rank) === r; });
+      ctx.fillStyle = boosted ? 'rgba(23,20,26,.14)' : 'rgba(23,20,26,.05)';
+      var bandTop = Math.max(0, rankY(r) - rowH / 2);
+      var bandBottom = Math.min(ch, rankY(r) + rowH / 2);
+      ctx.fillRect(0, bandTop, cw, bandBottom - bandTop);
+    }
+
+    for (var it = 0; it < ITEM_COUNT; it += 1) {
+      ctx.strokeStyle = LINE_COLORS[it];
+      ctx.lineWidth = 2.5;
+      for (var s2 = 0; s2 < SEG_COUNT; s2 += 1) {
+        var raw2 = (t - T0 - s2 * SEG_MS) / SEG_DUR;
+        if (raw2 <= 0) break;
+        var frac2 = clamp(raw2, 0, 1);
+        var x0 = periodX(s2), x1 = periodX(s2 + 1);
+        var y0 = rankY(RANKS[s2][it]), y1v = rankY(RANKS[s2 + 1][it]);
+        var xEnd = x0 + (x1 - x0) * frac2;
+        var yEnd = y0 + (y1v - y0) * frac2;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(xEnd, yEnd);
+        ctx.stroke();
+      }
+      for (var pd = 0; pd < PERIOD_COUNT; pd += 1) {
+        var arrived = pd === 0 || clamp((t - T0 - (pd - 1) * SEG_MS) / SEG_DUR, 0, 1) >= 1;
+        if (!arrived) continue;
+        ctx.fillStyle = LINE_COLORS[it];
+        ctx.beginPath();
+        ctx.arc(periodX(pd), rankY(RANKS[pd][it]), 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    for (var ci = 0; ci < crossings.length; ci += 1) {
+      var c = crossings[ci];
+      var cx0 = periodX(c.s), cx1 = periodX(c.s + 1);
+      var xc = cx0 + (cx1 - cx0) * c.f;
+      var yc = rankY(c.rank);
+      ctx.strokeStyle = '#17141a';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(xc, yc, 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function autoDemoStep(elapsedMs) {
+    render(elapsedMs);
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    render(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = reduce ? 1500 : 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      autoDemoStep(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

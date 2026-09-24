@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboard Navigation Where an Arrow-Key Value Moves Focus Around a Grid — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kg is-demo" id="kg">
+  <div class="kg__grid" id="kgGrid" role="grid" aria-label="Emoji grid"></div>
+  <p class="kg__sr" role="status" aria-live="polite" id="kgLive"></p>
+</div>
+<script>
+(function () {
+  var EMOJIS = [
+    { ch: '\u{1F600}', name: 'Smile' }, { ch: '\u{1F602}', name: 'Laugh' }, { ch: '\u{1F60D}', name: 'Heart eyes' },
+    { ch: '\u{1F62E}', name: 'Surprised' }, { ch: '\u{1F622}', name: 'Crying' }, { ch: '\u{1F621}', name: 'Angry' },
+    { ch: '\u{1F44D}', name: 'Like' }, { ch: '\u{1F44E}', name: 'Dislike' }, { ch: '\u{1F44F}', name: 'Clap' },
+    { ch: '\u{270C}', name: 'Peace sign' }, { ch: '\u{1F64C}', name: 'Hooray' }, { ch: '\u{1F64F}', name: 'Pray' },
+    { ch: '\u{1F436}', name: 'Dog' }, { ch: '\u{1F431}', name: 'Cat' }, { ch: '\u{1F430}', name: 'Rabbit' },
+    { ch: '\u{1F984}', name: 'Unicorn' }, { ch: '\u{1F41D}', name: 'Bee' }, { ch: '\u{1F419}', name: 'Octopus' },
+    { ch: '\u{1F355}', name: 'Pizza' }, { ch: '\u{1F369}', name: 'Donut' }, { ch: '\u{1F368}', name: 'Ice cream' },
+    { ch: '\u{1F353}', name: 'Strawberry' }, { ch: '\u{1F34E}', name: 'Apple' }, { ch: '\u{1F34C}', name: 'Banana' }
+  ];
+
+  var root = document.getElementById('kg');
+  var grid = document.getElementById('kgGrid');
+  var live = document.getElementById('kgLive');
+
+  var synthetic = false;
+  function human() { if (synthetic) return; if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  var cells = [];
+  EMOJIS.forEach(function (e, i) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'kg__cell'; b.setAttribute('role', 'gridcell');
+    b.setAttribute('aria-label', e.name); b.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    b.tabIndex = i === 0 ? 0 : -1;
+    b.textContent = e.ch;
+    grid.appendChild(b);
+    cells.push(b);
+  });
+  cells[0].classList.add('kg__cell--active');
+
+  // 계산 겹: 방향키 하나가 옆 칸(±1)으로 갈지 줄(±열 수)로 건너뛸지는 격자의 실제 렌더 열 수에
+  // 달려 있다 — 열 수를 상수로 박아두지 않고, 첫 줄에 속한 칸들의 getBoundingClientRect().top 이
+  // 서로 같다는 사실로 지금 이 순간의 실제 열 수를 측정해서 그 값으로 이동 폭을 계산한다.
+  function measureCols() {
+    if (!cells.length) return 1;
+    var firstTop = cells[0].getBoundingClientRect().top;
+    var n = 0;
+    for (var i = 0; i < cells.length; i++) {
+      if (Math.abs(cells[i].getBoundingClientRect().top - firstTop) < 1) n++; else break;
+    }
+    return n || 1;
+  }
+
+  var focusIndex = 0;
+
+  function setFocus(i, announce) {
+    cells[focusIndex].tabIndex = -1;
+    cells[focusIndex].setAttribute('aria-selected', 'false');
+    cells[focusIndex].classList.remove('kg__cell--active');
+    focusIndex = i;
+    cells[focusIndex].tabIndex = 0;
+    cells[focusIndex].setAttribute('aria-selected', 'true');
+    cells[focusIndex].classList.add('kg__cell--active');
+    cells[focusIndex].focus({ preventScroll: true });
+    if (announce) {
+      var cols = measureCols();
+      var row = Math.floor(focusIndex / cols) + 1;
+      var col = (focusIndex % cols) + 1;
+      live.textContent = row + ' row ' + col + ' column, ' + EMOJIS[focusIndex].name;
+    }
+  }
+
+  function move(key) {
+    var cols = measureCols();
+    var next = focusIndex;
+    if (key === 'ArrowRight') next = focusIndex + 1;
+    else if (key === 'ArrowLeft') next = focusIndex - 1;
+    else if (key === 'ArrowDown') next = focusIndex + cols;
+    else if (key === 'ArrowUp') next = focusIndex - cols;
+    else if (key === 'Home') next = 0;
+    else if (key === 'End') next = cells.length - 1;
+    if (next < 0 || next >= cells.length) return;
+    setFocus(next, true);
+  }
+
+  var NAV_KEYS = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
+  grid.addEventListener('keydown', function (ev) {
+    if (NAV_KEYS.indexOf(ev.key) === -1) return;
+    ev.preventDefault();
+    human();
+    move(ev.key);
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var steps = ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];
+  var si = 0, loopTimer = 0;
+  function runStep() {
+    if (!root.classList.contains('is-demo')) return;
+    var key = steps[si % steps.length];
+    synthetic = true;
+    cells[focusIndex].dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
+    synthetic = false;
+    si++;
+    loopTimer = window.setTimeout(runStep, 640);
+  }
+  if (!reduce) { loopTimer = window.setTimeout(runStep, 500); }
+  else { root.classList.remove('is-demo'); }
+})();
+</script>
+</main>
+</body>
+</html>

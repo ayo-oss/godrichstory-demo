@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>자리 표시자 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dd">
+  <p class="dd__hint">들어올린 행의 높이를 변수에 담아 두었다가 자리 표시자 칸에 채웁니다</p>
+  <ul class="dd__list" id="ddList">
+    <li class="dd__row" data-id="0"><span class="dd__txt">배송 준비</span></li>
+    <li class="dd__row" data-id="1"><span class="dd__txt">배송 중</span></li>
+    <li class="dd__row" data-id="2"><span class="dd__txt">고객 인수</span></li>
+    <li class="dd__row" data-id="3"><span class="dd__txt">티켓 발급</span></li>
+  </ul>
+  <p class="dd__meta"><b class="dd__state" id="ddState">slot 1</b></p>
+</div>
+</main>
+<script>
+// 자리 표시자(09) — 든 행을 getBoundingClientRect 로 실측해 그 높이를 자리표시자의
+// --h 커스텀 프로퍼티에 담는다. 든 행은 목록에서 빼내 position:absolute 로 포인터를
+// 그대로 따라가고(transition 없음), 자리표시자만 목록의 정상 흐름 안에서 transform 이
+// transition 으로 부드럽게 옮겨간다.
+(function () {
+  var list = document.getElementById('ddList');
+  var stateEl = document.getElementById('ddState');
+  if (!list || !stateEl) return;
+
+  var placeholder = document.createElement('li');
+  placeholder.className = 'dd__placeholder';
+
+  var drag = null; // { row, offsetInRow, listRect }
+
+  function staticRows() {
+    return Array.prototype.slice.call(list.children).filter(function (r) {
+      return r !== placeholder && r !== (drag && drag.row);
+    });
+  }
+
+  function flipMovePlaceholder(target) {
+    var siblings = staticRows();
+    var first = siblings.map(function (s) { return s.getBoundingClientRect(); });
+    list.insertBefore(placeholder, target);
+    siblings.forEach(function (s, i) {
+      var r = s.getBoundingClientRect();
+      var dy = first[i].top - r.top;
+      if (dy !== 0) {
+        s.style.transition = 'none';
+        s.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(function () {
+          s.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+          s.style.transform = 'translateY(0)';
+        });
+      }
+    });
+  }
+
+  function reflow(pointerY) {
+    var siblings = staticRows();
+    var target = null;
+    for (var i = 0; i < siblings.length; i++) {
+      var r = siblings[i].getBoundingClientRect();
+      if (pointerY < r.top + r.height / 2) { target = siblings[i]; break; }
+    }
+    if (target === placeholder.nextElementSibling) return;
+    if (target === null && placeholder === list.lastElementChild) return;
+    flipMovePlaceholder(target);
+    var idx = Array.prototype.indexOf.call(list.children, placeholder);
+    stateEl.textContent = 'slot ' + (idx + 1);
+  }
+
+  function beginDrag(row, clientY) {
+    var r = row.getBoundingClientRect();
+    var listRect = list.getBoundingClientRect();
+    placeholder.style.setProperty('--h', r.height + 'px');
+    list.insertBefore(placeholder, row);
+    row.classList.add('dd__row--drag');
+    row.style.setProperty('--rowTop', (r.top - listRect.top) + 'px');
+    row.style.setProperty('--rowW', r.width + 'px');
+    row.style.setProperty('--ty', '0px');
+    drag = { row: row, offsetInRow: clientY - r.top, listRect: listRect };
+    var idx = Array.prototype.indexOf.call(list.children, placeholder);
+    stateEl.textContent = 'slot ' + (idx + 1);
+  }
+
+  function moveDrag(clientY) {
+    if (!drag) return;
+    var ty = clientY - drag.offsetInRow - drag.listRect.top - parseFloat(drag.row.style.getPropertyValue('--rowTop'));
+    drag.row.style.setProperty('--ty', ty.toFixed(1) + 'px');
+    reflow(clientY);
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    var row = drag.row;
+    drag = null;
+    list.insertBefore(row, placeholder);
+    placeholder.remove();
+    row.classList.remove('dd__row--drag');
+    row.style.transition = 'transform 200ms cubic-bezier(.2,.8,.2,1)';
+    row.style.setProperty('--ty', '0px');
+    setTimeout(function () {
+      row.style.transition = '';
+      row.style.removeProperty('--rowTop');
+      row.style.removeProperty('--rowW');
+    }, 210);
+  }
+
+  function onDown(e) {
+    var row = e.target.closest('.dd__row');
+    if (!row) return;
+    stop();
+    row.setPointerCapture(e.pointerId);
+    beginDrag(row, e.clientY);
+  }
+  function onMove(e) { moveDrag(e.clientY); }
+  function onUp() { endDrag(); }
+
+  list.addEventListener('pointerdown', onDown);
+  list.addEventListener('pointermove', onMove);
+  list.addEventListener('pointerup', onUp);
+  list.addEventListener('pointercancel', onUp);
+
+  // 자동 시연 — 같은 함수를 합성 좌표로 호출해 자리표시자가 두 칸을 오간다
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function loopOnce() {
+    var row = list.children[0];
+    var r = row.getBoundingClientRect();
+    beginDrag(row, r.top + r.height / 2);
+    var r3 = list.children[3] ? list.children[3].getBoundingClientRect() : r;
+    setTimeout(function () { if (drag) moveDrag(r3.top + r3.height / 2 + 6); }, 220);
+    var r1 = list.children[1] ? list.children[1].getBoundingClientRect() : r;
+    setTimeout(function () { if (drag) moveDrag(r1.top + r1.height / 2 - 4); }, 520);
+    setTimeout(function () { endDrag(); }, 860);
+  }
+
+  if (reduce) {
+    // 정지 상태 그대로 — 연출 없음
+  } else {
+    loopOnce();
+    setInterval(function () { if (playing) loopOnce(); }, 1700);
+  }
+})();
+</script>
+</body>
+</html>

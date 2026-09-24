@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>글리프 원 채우기 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gc" id="gc">
+  <p class="gc__hint">
+    <svg class="gc__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="70" cy="104" r="52" opacity=".9"/><circle cx="164" cy="70" r="30" opacity=".8"/><circle cx="186" cy="150" r="22" opacity=".7"/><circle cx="118" cy="196" r="16" opacity=".6"/><circle cx="212" cy="106" r="12" opacity=".55"/><circle cx="58" cy="196" r="10" opacity=".5"/></g></svg>
+    <span>단어를 바꾸면 원 배치가 다시 짜입니다</span>
+  </p>
+  <div class="gc__field" id="field" role="application" aria-label="원 채우기 실험판" tabindex="0">
+    <canvas class="gc__cv" id="cv"></canvas>
+    <b class="gc__badge" aria-hidden="true" id="badge">0 pts</b>
+  </div>
+  <div class="gc__bar">
+    <label class="gc__dial">단어
+      <input type="text" id="word" value="PACK" maxlength="12" spellcheck="false" aria-label="단어">
+    </label>
+    <label class="gc__dial">시드
+      <input type="number" id="seed" min="1" max="9999" value="7" aria-label="시드">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 원 채우기 — 글자를 픽셀로 뜯어 그 안에 최대한 많은 원을 탐욕적으로 놓는다.
+// 1) 오프스크린 캔버스에 fillText 로 단어를 그려 getImageData 로 알파 마스크를 뽑는다
+// 2) 지름을 10px 에서 1.4px 까지 줄여가며 무작위 위치에 원을 놓고, 마스크 밖이거나 겹치면 버린다
+// 3) 시드(mulberry32) 가 시도 순서를 정하므로 같은 단어+같은 시드는 항상 같은 배치가 나온다
+// 완성 뒤에는 원들이 제각각의 위상으로 맥동한다(반경 ±7%) — 판이 숨쉰다.
+var root = document.getElementById('gc');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var wordIn = document.getElementById('word');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+
+var SW = 252, SH = 108;          // 샘플 해상도 — 판 비율과 같다
+var DIAMS = [9.2, 7.2, 5.6, 4.4, 3.4, 2.6, 1.9, 1.4]; // 지름 단계 — 큰 원부터 채운다
+var TRIES = [1500, 2400, 3600, 5000, 6400, 7400, 8000, 8600]; // 단계별 시도 수
+var CELL = 12, GW = 24;          // 충돌 조회 격자(한 칸 12px — 최대 지름 10 보다 넉넉)
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0;
+var circles = [];
+var t0 = 0, raf = 0;
+
+// 색 — scss 가 파스텔 커스텀 프로퍼티(--g0..--g3)로 내려준 넉 색을 읽어 쓴다
+var css = getComputedStyle(root);
+function hexOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return '#' + v;
+}
+var cols = [hexOf('--g0'), hexOf('--g1'), hexOf('--g2'), hexOf('--g3')];
+
+// 결정적 난수 — 시드 하나가 시도 순서·원의 위상·색 전부를 정한다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── 1) 글자 → 알파 마스크 ────────────────────────────────────────
+function buildMask(word) {
+  var off = document.createElement('canvas');
+  off.width = SW; off.height = SH;
+  var oc = off.getContext('2d', { willReadFrequently: true });
+  oc.textAlign = 'center'; oc.textBaseline = 'middle';
+  var fs = 200;
+  oc.font = '900 ' + fs + 'px Arial';
+  var w = oc.measureText(word).width || 1;
+  fs = Math.min(fs * ((SW - 8) / w), SH - 6);       // 폭·높이 안에서 제일 큰 글자
+  oc.font = '900 ' + Math.round(fs) + 'px Arial';
+  oc.fillStyle = '#fff';
+  oc.fillText(word, SW / 2, SH / 2);
+  return oc.getImageData(0, 0, SW, SH).data;
+}
+
+function pickColor(r) {
+  if (r < 0.55) return 0;   // 잉크 다수
+  if (r < 0.73) return 1;   // 하늘
+  if (r < 0.88) return 2;   // 민트
+  return 3;                 // 복숭아
+}
+
+// ── 2) 탐욕 원 채우기 — 격자 조회로 충돌 검사를 O(1) 에 가깝게 ──
+// 각 원은 흩어진 시작 자리(sx,sy — 시드로 결정)를 함께 받는다. 등장 때 이 자리에서 목표로 날아든다.
+function packCircles(data, seed) {
+  var rnd = mulberry32(seed);
+  var out = [];
+  var grid = [];                                  // 칸 -> 원 인덱스 목록
+  function hits(x, y, r) {
+    var cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+    for (var gy = cy - 1; gy <= cy + 1; gy++) {
+      for (var gx = cx - 1; gx <= cx + 1; gx++) {
+        if (gx < 0 || gy < 0 || gx >= GW) continue;
+        var cell = grid[gy * GW + gx];
+        if (!cell) continue;
+        for (var k = 0; k < cell.length; k++) {
+          var c = out[cell[k]];
+          var dx = c.x - x, dy = c.y - y, rr = c.r + r + 0.25;
+          if (dx * dx + dy * dy < rr * rr) return true;
+        }
+      }
+    }
+    return false;
+  }
+  for (var d = 0; d < DIAMS.length; d++) {
+    var r = DIAMS[d] / 2;
+    for (var i = 0; i < TRIES[d]; i++) {
+      var x = rnd() * SW, y = rnd() * SH;
+      var xi = x | 0, yi = y | 0;
+      if (data[(yi * SW + xi) * 4 + 3] <= 128) continue;   // 마스크 밖 — 버린다
+      if (hits(x, y, r)) continue;                          // 겹침 — 버린다
+      var c = { x: x, y: y, r: r, ph: rnd() * 6.2832, ci: pickColor(rnd()), sx: rnd() * SW, sy: rnd() * SH };
+      var gi = (y / CELL | 0) * GW + (x / CELL | 0);
+      (grid[gi] || (grid[gi] = [])).push(out.length);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+// ── 3) 단어·시드가 바뀌면 배치를 다시 계산한다 ───────────────────
+var word = 'PACK', seed = 7;
+function resample(nextWord, nextSeed) {
+  var w = String(nextWord == null ? word : nextWord).trim().toUpperCase();
+  if (w) word = w;                                  // 빈 문자열이면 직전 값을 유지
+  var s = Math.floor(Number(nextSeed));
+  if (s >= 1) seed = s;
+  circles = packCircles(buildMask(word), seed);
+  window.__sampleInfo = { targets: circles.length, particles: circles.length };
+  badge.textContent = circles.length + ' pts';
+  if (reduce) {
+    paint(1);                                       // 완성 포즈 한 장 — k=1
+  } else {
+    t0 = performance.now();                         // 등장 연출을 처음부터 다시
+  }
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  var d = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+
+// 등장 — 원들이 흩어진 자리에서 채워진 배치로 날아든다(0.55 초, easeOutQuad).
+// 이후 2초 주기로 숨쉰다: 배치가 중심 쪽으로 0.78↔1.0 만큼 오그라들었다 펴진다.
+function posK(t) {
+  var cyc = Math.floor(t / 2) * 2;
+  var u = t - cyc;
+  if (u < 0.55) {
+    var q = u / 0.55;
+    return 1 - (1 - q) * (1 - q);          // 날아드는 중 — 목표를 향해 가속
+  }
+  var s = (u - 0.55) / 1.45;
+  return 0.78 + 0.22 * (0.5 - 0.5 * Math.cos(s * 6.2832));  // 정착부 — 호흡
+}
+
+function paint(t) {
+  ctx.clearRect(0, 0, W, H);
+  var sx = W / SW, sy = H / SH;
+  var k = reduce ? 1 : posK(t);
+  var ox = Math.sin(t * 0.8) * 1.2, oy = Math.cos(t * 0.6) * 1.0;  // 판 등록 미세 흔들림
+  for (var i = 0; i < circles.length; i++) {
+    var c = circles[i];
+    var x = c.sx + (c.x - c.sx) * k;                  // 흩어진 자리 → 채워진 자리
+    var y = c.sy + (c.y - c.sy) * k;
+    var pulse = 1 + 0.07 * Math.sin(t * 6.2832 + c.ph);            // 원마다 위상이 다른 맥동
+    ctx.fillStyle = cols[c.ci];
+    ctx.beginPath();
+    ctx.arc((x + ox) * sx, (y + oy) * sy, c.r * pulse * sx, 0, 6.2832);
+    ctx.fill();
+  }
+}
+
+function frame(now) {
+  paint((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+wordIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+seedIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(1); });
+
+fit();
+resample(wordIn.value, seedIn.value);
+if (reduce) {
+  root.classList.add('is-still');                    // 루프 없이 정지 한 장
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

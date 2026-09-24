@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>発生源からの距離に応じて不透明度が下がり、一定距離を超えると完全に消える。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">発生源からの距離に応じて不透明度が下がり、一定距離を超えると完全に消える。</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 발원지(원점) 좌표를 저장해두고, 매 프레임 입자와 원점 사이의 유클리드 거리를 계산한다.
+  // 거리를 SMOKE_DISSOLVE_MS(=이동 속도 x 시간으로 환산한 소멸 거리)로 나눈 비율만큼 알파를
+  // 선형으로 깎는다 — 나이가 아니라 "거리"가 직접 불투명도를 정한다. 거리가 소멸 거리를
+  // 넘어서면 배열에서 제거한다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_DISSOLVE_MS = 900;
+  var DRIFT_SPEED_PX_S = 30;
+  var DISSOLVE_DISTANCE = (SMOKE_DISSOLVE_MS / 1000) * DRIFT_SPEED_PX_S;
+  var SPAWN_PER_S = 30;
+  var SOURCE_X = CALC_W * 0.5, SOURCE_Y = CALC_H * 0.62;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423041);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  var pRand = seedRand(423042);
+  var particles = [];
+  var spawnAcc = 0;
+
+  function spawn() {
+    var ang = -Math.PI / 2 + (pRand() - 0.5) * Math.PI * 0.9;
+    particles.push({
+      x: SOURCE_X, y: SOURCE_Y,
+      vx: Math.cos(ang) * DRIFT_SPEED_PX_S,
+      vy: Math.sin(ang) * DRIFT_SPEED_PX_S,
+      wSeed: pRand() * 1000
+    });
+  }
+
+  function stepSim(dtMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * SPAWN_PER_S / 1000;
+    while (spawnAcc >= 1) { spawn(); spawnAcc -= 1; }
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      p.x += p.vx * dtS;
+      p.y += p.vy * dtS;
+      var dist = Math.hypot(p.x - SOURCE_X, p.y - SOURCE_Y);
+      if (dist < DISSOLVE_DISTANCE) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var dist = Math.hypot(p.x - SOURCE_X, p.y - SOURCE_Y);
+      var f = Math.max(0, 1 - dist / DISSOLVE_DISTANCE);
+      var turb = (valueNoise2D(p.wSeed * 0.04, nowMs * 0.0016) - 0.5) * 6;
+      var r = 6 + (1 - f) * 24;
+      var alpha = f * 0.6;
+      if (alpha <= 0.01) continue;
+      var dx = (p.x + turb) * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(35,32,40,' + alpha + ')');
+      g.addColorStop(1, 'rgba(35,32,40,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = 60;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

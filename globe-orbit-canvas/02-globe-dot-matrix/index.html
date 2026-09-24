@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>도트매트릭스 지구본 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gd" id="gd">
+  <p class="gd__hint">
+    <svg class="gd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a104 104 0 1 0 104 104A104.12 104.12 0 0 0 128 24" opacity=".2"/><path d="M228 96h-42.81a126 126 0 0 0-10.51-32h36.24a103.87 103.87 0 0 0-30-28H75.08a103.87 103.87 0 0 0-30 28h36.24a126 126 0 0 0-10.51 32H28v64h42.3a126 126 0 0 0 10.51 32H44.92a103.87 103.87 0 0 0 30 28h105.84a103.87 103.87 0 0 0 30-28h-35.89a126 126 0 0 0 10.51-32H228Zm-68.75 64h-62.5a102.26 102.26 0 0 1 0-64h62.5a102.26 102.26 0 0 1 0 64"/></g></svg>
+    <span>시드를 바꾸면 점 배치가 결정적으로 다시 뽑힙니다</span>
+  </p>
+  <div class="gd__field" id="field" role="application" aria-label="도트매트릭스 지구본 실험판" tabindex="0">
+    <canvas class="gd__cv" id="cv"></canvas>
+  </div>
+  <div class="gd__bar">
+    <label class="gd__dial">시드
+      <input type="number" id="seed" min="1" max="9999" step="1" value="42" aria-label="시드 번호">
+    </label>
+    <button class="gd__shuffle" id="shuffle" type="button">
+      <svg class="gd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M32 72h32l16 24-13 9-11-17H32a8 8 0 0 1 0-16" opacity=".2"/><path d="M237.66 178.34a8 8 0 0 1 0 11.32l-24 24A8 8 0 0 1 200 208V184h-29.41a40 40 0 0 1-33.94-18.75L102.71 115.5A24 24 0 0 0 82.75 104H32a8 8 0 0 1 0-16h50.75a40 40 0 0 1 33.94 18.75l33.94 49.75a24 24 0 0 0 19.96 11.5H200v-24a8 8 0 0 1 13.66-5.66ZM32 152h50.75a24 24 0 0 0 19.96-11.5l8.11-11.87 9.51 13.93-6.9 10.11a40 40 0 0 1-33.94 18.72H32a8 8 0 0 1 0-16m150.34-82.34a8 8 0 0 0 13.66 5.66V96h-34.46a40 40 0 0 1-33.94-18.75l-6.9-10.11 9.51-13.93 8.11 11.87A24 24 0 0 0 158.29 80H196V56a8 8 0 0 0-13.66-5.66" fill-rule="evenodd"/></g></svg>
+      <span>무작위</span>
+    </button>
+    <b class="gd__val" id="seedOut" aria-hidden="true">시드 <span class="gd__valNum" id="seedNum">42</span><span class="gd__valUnit"> · 점 850개</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 도트매트릭스 지구본 — Fibonacci sphere 로 구 표면에 점을 고르게 뿌린다.
+// Fibonacci sphere: i 번째 점의 위도는 acos(1 - 2(i+0.5)/N), 경도는 황금각(golden angle) 만큼씩 돈다.
+// 같은 시드 = 같은 그림. 시드는 난수 계열(mulberry32)을 고르고, 그 계열이 점의 반경·밝기·톤을 뽑는다.
+var root = document.getElementById('gd');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var shuffleBtn = document.getElementById('shuffle');
+var seedOut = document.getElementById('seedNum');
+
+var TAU = Math.PI * 2;
+var GOLDEN = Math.PI * (3 - Math.sqrt(5));   // 황금각 약 2.39996rad
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var N = 850;               // 점 개수
+var dots = [];             // { x,y,z(단위구), r(반경 배율), tone(0..1), jitter(위상) }
+var seedVal = 42;
+var rotY = 0;
+var last = 0, raf = 0;
+
+function buildDots() {
+  var rnd = mulberry32(seedVal);
+  dots = [];
+  for (var i = 0; i < N; i++) {
+    // Fibonacci sphere — 균등 분포. 황금각 회전이 나선 잎차례를 만든다
+    var y = 1 - 2 * (i + 0.5) / N;
+    var rLat = Math.sqrt(1 - y * y);
+    var phi = i * GOLDEN;
+    var jitterR = rnd();
+    dots.push({
+      x: Math.cos(phi) * rLat,
+      y: y,
+      z: Math.sin(phi) * rLat,
+      r: 0.6 + jitterR * 0.9,          // 반경 다양성도 시드가 정한다
+      tone: rnd(),
+      jt: rnd() * TAU                  // 반짝임 위상
+    });
+  }
+  seedOut.textContent = String(seedVal);
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function draw(now) {
+  ctx.clearRect(0, 0, W, H);
+  var cx = W / 2, cy = H / 2;
+  var R = Math.min(W, H) * 0.40;
+  var cs = getComputedStyle(root);
+  var C_hi = cs.getPropertyValue('--gd-hi').trim();
+  var C_mid = cs.getPropertyValue('--gd-mid').trim();
+  var C_lo = cs.getPropertyValue('--gd-lo').trim();
+  var C_core = cs.getPropertyValue('--gd-core').trim();
+
+  // 바닥 코어 — 점 구름의 중심을 은은히 밝힌다(구체가 아니라 점의 집단임을 읽게)
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TAU);
+  ctx.fillStyle = C_core;
+  ctx.fill();
+
+  var cyr = Math.cos(rotY), syr = Math.sin(rotY);
+  var t = now * 0.001;
+
+  // depth sort — 먼 점(z&lt;0, 뒤)부터 그려야 앞 점이 위에 얹힌다
+  var order = [];
+  for (var i = 0; i < N; i++) {
+    var d = dots[i];
+    var lx = d.x * cyr + d.z * syr;
+    var lz = -d.x * syr + d.z * cyr;
+    order.push({ p: d, lx: lx, lz: lz });
+  }
+  order.sort(function (a, b) { return a.lz - b.lz; });
+
+  for (var k = 0; k < N; k++) {
+    var o = order[k];
+    var depth = (o.lz + 1) / 2;                 // 0(뒤)..1(앞)
+    if (depth < 0.08) continue;                 // 맨 뒤는 림 바깥 실루엣만 남긴다
+    var px = cx + o.lx * R;
+    var py = cy - o.p.y * R;
+    // 원근 없는 정사도라 깊이는 크기가 아니라 밝기·알파로만 녹인다
+    var alpha = 0.16 + depth * 0.84;
+    var tw = 0.75 + 0.25 * Math.sin(t * 2 + o.p.jt);   // 반짝임 — 시간에 따라 살아 있는다
+    ctx.globalAlpha = alpha * tw;
+    ctx.fillStyle = o.p.tone > 0.82 ? C_hi : (o.p.tone > 0.45 ? C_mid : C_lo);
+    ctx.beginPath();
+    ctx.arc(px, py, o.p.r * (0.55 + depth * 0.5), 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  rotY += dt * 0.35;
+  draw(now);
+  raf = requestAnimationFrame(frame);
+}
+
+function applySeed(v) {
+  seedVal = Math.max(1, Math.min(9999, Math.floor(v) || 1));
+  seedIn.value = String(seedVal);
+  buildDots();
+  if (reduce) draw(0);
+}
+
+seedIn.addEventListener('input', function () { applySeed(Number(seedIn.value)); });
+shuffleBtn.addEventListener('click', function () {
+  applySeed(1 + Math.floor(Math.random() * 9999));
+});
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    applySeed(1 + Math.floor(Math.random() * 9999));
+  }
+});
+
+window.addEventListener('resize', function () { fit(); draw(0); });
+
+fit();
+buildDots();
+if (reduce) {
+  draw(0);       // reduce — 루프 없이 시드의 한 장만
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

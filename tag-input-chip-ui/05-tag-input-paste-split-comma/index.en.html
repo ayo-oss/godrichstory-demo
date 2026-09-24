@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Input that splits a pasted sentence into chips all at once — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tp is-demo" id="tp">
+  <div class="tp__row" id="tpRow">
+    <input type="text" class="tp__input" id="tpInput" aria-label="Tag input, pasted text splits on commas and line breaks" placeholder="Paste, split by comma/line break">
+  </div>
+  <p class="tp__meta">Tags <b id="tpCount">0</b> · split by paste <b id="tpSplit">0</b> times</p>
+  <p class="tp__sr" role="status" aria-live="polite" id="tpLive"></p>
+</div>
+<script>
+(function () {
+  var DELIM_PATTERN = /[,\n]+/; // 계산 겹 상수: 쉼표·줄바꿈을 구분자로 삼아 붙여넣은 글을 쪼갠다
+  var PASTES = ['translate,review\\ndeadline', 'cover,pages,color-correct'];
+  var HOLD_MS = 1100, PAUSE_MS = 900;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('tp');
+  var row = document.getElementById('tpRow');
+  var input = document.getElementById('tpInput');
+  var countEl = document.getElementById('tpCount');
+  var splitEl = document.getElementById('tpSplit');
+  var live = document.getElementById('tpLive');
+  var seq = 0, splitCount = 0;
+
+  function chips() { return row.querySelectorAll('.tp__chip').length; }
+  function render() { countEl.textContent = chips(); splitEl.textContent = splitCount; }
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  function addChip(text, stagger) {
+    seq++;
+    var chip = document.createElement('span');
+    chip.className = 'tp__chip tp__chip--enter';
+    chip.id = 'tpChip' + seq;
+    chip.style.setProperty('--i', stagger);
+    chip.innerHTML = '<span class="tp__chipText"></span><button type="button" class="tp__chipX">×</button>';
+    chip.querySelector('.tp__chipText').textContent = text;
+    chip.querySelector('.tp__chipX').setAttribute('aria-label', 'Remove tag: ' + text);
+    chip.querySelector('.tp__chipX').addEventListener('click', function () { human(); chip.remove(); render(); });
+    row.insertBefore(chip, input);
+  }
+
+  function handlePaste(e) {
+    // 계산 겹: paste 이벤트의 clipboardData 에서 글을 꺼내 구분자로 쪼갠다 — navigator.clipboard 를 읽지 않는다
+    // e.isTrusted 로 진짜 사용자 붙여넣기와 자동 데모의 흉내 이벤트(dispatchEvent)를 가른다
+    if (e.isTrusted) human();
+    e.preventDefault();
+    var text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    var parts = text.split(DELIM_PATTERN).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (parts.length > 1) splitCount++;
+    parts.forEach(function (p, i) { addChip(p, i); });
+    input.value = '';
+    render();
+    live.textContent = parts.length + ' tags split';
+  }
+  input.addEventListener('paste', handlePaste);
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && input.value.trim()) {
+      human();
+      addChip(input.value.trim(), 0);
+      input.value = '';
+      render();
+    }
+  });
+
+  function simulatePaste(text) {
+    // 자동 데모 전용: 실제 클립보드를 읽지 않고 DataTransfer 를 직접 만들어 진짜 paste 이벤트를 흉내낸다
+    // (human() 을 부르지 않는다 — 이건 사람의 입력이 아니라 자동 재생이다)
+    var dt = null;
+    try { dt = new DataTransfer(); dt.setData('text/plain', text); } catch (err) { dt = null; }
+    if (dt) {
+      var ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      input.dispatchEvent(ev);
+    } else {
+      handlePaste({ clipboardData: { getData: function () { return text; } }, preventDefault: function () {} });
+    }
+  }
+
+  var timer = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function loop(i) {
+    if (!root.classList.contains('is-demo')) return;
+    if (i < PASTES.length) {
+      simulatePaste(PASTES[i]);
+      schedule(function () { loop(i + 1); }, HOLD_MS);
+    } else {
+      row.querySelectorAll('.tp__chip').forEach(function (c) { c.remove(); });
+      splitCount = 0;
+      render();
+      schedule(function () { loop(0); }, PAUSE_MS);
+    }
+  }
+
+  render();
+  if (!reduce) {
+    schedule(function () { loop(0); }, 300);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card That Shakes and Asks for a Retry When Expired — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="esr is-demo" id="esrRoot">
+  <div class="esr__badge" id="esrBadge">Code valid</div>
+  <button class="esr__ctrl" id="esrCtrl" type="button">Pause</button>
+  <div class="esr__panel" id="esrPanel">
+    <div class="esr__code" id="esrCode">QR</div>
+    <div class="esr__msg" id="esrMsg">Please scan</div>
+    <button class="esr__retry" id="esrRetry" type="button">Get a new one</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // EXPIRED_SHAKE_AMPLITUDE_PX — 변형 1: 10 → 16 으로 늘리면 만료 시 흔들림 폭이 커진다.
+  var EXPIRED_SHAKE_AMPLITUDE_PX = 10;
+  var LOOP_MS = 2000;
+  var EXPIRE_AT = 250;
+  var SHAKE_MS = 700;
+  var SHAKE_FREQ = 5;
+  // 시연 스케줄: 2초 루프 안에 만료→흔들림→자동 재시도→만료→흔들림 을 두 번 넣는다.
+  // RETRY_AT(자동 재시도)·EXPIRE_AT2(두 번째 만료)만 새로 추가 — 진폭·진동수·감쇠 함수는 그대로.
+  var RETRY_AT = 1050;
+  var EXPIRE_AT2 = 1300;
+
+  var root = document.getElementById('esrRoot');
+  var badge = document.getElementById('esrBadge');
+  var ctrl = document.getElementById('esrCtrl');
+  var panel = document.getElementById('esrPanel');
+  var codeEl = document.getElementById('esrCode');
+  var msgEl = document.getElementById('esrMsg');
+  var retryBtn = document.getElementById('esrRetry');
+
+  // 계산 한 겹: 진동수(SHAKE_FREQ)와 지수 감쇠를 곱한 감쇠 사인파로 흔들림을 만든다.
+  function shakeOffset(t) {
+    if (t < 0 || t > SHAKE_MS) return 0;
+    var p = t / SHAKE_MS;
+    return Math.sin(p * Math.PI * 2 * SHAKE_FREQ) * EXPIRED_SHAKE_AMPLITUDE_PX * Math.exp(-3.2 * p);
+  }
+
+  // 자동 재생에서 만료 구간 판정: 첫 만료(EXPIRE_AT~RETRY_AT) · 두 번째 만료(EXPIRE_AT2~루프 끝) 두 번
+  function autoExpired(elapsed) {
+    return (elapsed >= EXPIRE_AT && elapsed < RETRY_AT) || elapsed >= EXPIRE_AT2;
+  }
+  function autoExpireStart(elapsed) {
+    return elapsed < RETRY_AT ? EXPIRE_AT : EXPIRE_AT2;
+  }
+
+  var manualRetryAt = -1;
+
+  function render(elapsed) {
+    var expired = manualRetryAt < 0 && autoExpired(elapsed);
+    var t = manualRetryAt >= 0 ? elapsed - manualRetryAt : elapsed - autoExpireStart(elapsed);
+    var offset = expired ? shakeOffset(t) : 0;
+    panel.style.transform = offset ? 'translateX(' + offset.toFixed(2) + 'px)' : 'none';
+
+    // 계산 한 겹: 같은 감쇠 사인파(shakeOffset)의 크기를 그림자·배경 톤·QR 격자 흐림에 그대로 전파한다.
+    var normOffset = Math.min(1, Math.abs(offset) / EXPIRED_SHAKE_AMPLITUDE_PX);
+    panel.style.boxShadow = '0 14px 24px rgba(23, 20, 26, .32), 0 0 ' +
+      (normOffset * 20).toFixed(1) + 'px rgba(233, 64, 64, ' + (normOffset * 0.55).toFixed(2) + ')';
+    codeEl.style.filter = normOffset > 0.02 ? 'blur(' + (normOffset * 1.2).toFixed(2) + 'px)' : 'none';
+
+    if (expired) {
+      panel.classList.add('esr__panel--expired');
+      panel.style.backgroundColor = 'rgba(255, 100, 100, ' + (0.08 + normOffset * 0.10).toFixed(3) + ')';
+      codeEl.textContent = '×';
+      msgEl.textContent = 'The code has expired';
+      badge.textContent = 'Code expired';
+    } else {
+      panel.classList.remove('esr__panel--expired');
+      panel.style.backgroundColor = '';
+      codeEl.textContent = 'QR';
+      msgEl.textContent = 'Please scan';
+      badge.textContent = 'Code valid';
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? EXPIRE_AT + SHAKE_MS : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) { elapsed -= LOOP_MS; manualRetryAt = -1; }
+    }
+    render(elapsed);
+    requestAnimationFrame(tick);
+  }
+  render(elapsed);
+  requestAnimationFrame(tick);
+
+  retryBtn.addEventListener('click', function () {
+    manualRetryAt = elapsed;
+  });
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? 'Pause' : 'Play';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      manualRetryAt = -1;
+      playing = true;
+      ctrl.textContent = 'Pause';
+    }
+  });
+})();
+</script>
+</body>
+</html>

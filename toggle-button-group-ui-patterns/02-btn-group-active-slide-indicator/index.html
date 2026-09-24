@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>활성 표시자 슬라이드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="asi-wrap">
+<div class="asi is-demo" id="asi" role="group" aria-label="정렬 기준">
+  <span class="asi__indicator" id="asiIndicator" aria-hidden="true"></span>
+  <button class="asi__btn asi__btn--on" data-i="0" aria-pressed="true">최신순</button>
+  <button class="asi__btn" data-i="1" aria-pressed="false">인기순</button>
+  <button class="asi__btn" data-i="2" aria-pressed="false">가격순</button>
+  <button class="asi__btn" data-i="3" aria-pressed="false">평점 높은순</button>
+</div>
+</div>
+<script>
+(function () {
+  var CYCLE_MS = 1100; // 자동 루프가 다음 버튼으로 넘어가는 간격
+  var STIFF = 210; // 계산 겹 상수: 스프링 강성(k) — 클수록 목표에 빨리 붙는다
+  var DAMP = 18; // 계산 겹 상수: 감쇠(c) — 작을수록 오버슛이 크게 남는다
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('asi');
+  var indicator = document.getElementById('asiIndicator');
+  var btns = Array.prototype.slice.call(root.querySelectorAll('.asi__btn'));
+  var isDemo = true;
+
+  // 계산 겹: 목표(버튼 실측 좌표)를 향해 감쇠 스프링 방정식으로 위치·폭 비율을 매 프레임 적분한다.
+  // x'' = STIFF*(target-x) - DAMP*x' — cubic-bezier 로는 못 만드는 오버슛 후 정착 곡선이다.
+  // 폭은 CSS width 가 아니라 scaleX(비율) 로만 바꿔 레이아웃을 다시 계산하지 않는다(transform 전용 규칙).
+  var x = 0, w = 0, vx = 0, vw = 0, targetX = 0, targetW = 0, last = 0, activeIdx = 0;
+  var maxW = 0;
+
+  function measure(idx) {
+    var rootRect = root.getBoundingClientRect();
+    var r = btns[idx].getBoundingClientRect();
+    return { x: r.left - rootRect.left, w: r.width };
+  }
+
+  // 시작 시 모든 버튼 폭을 실측해 인디케이터의 고정 기준 폭(maxW)을 정한다 — scaleX 는 이 기준에 대한 비율이다
+  btns.forEach(function (b) { maxW = Math.max(maxW, b.getBoundingClientRect().width); });
+  indicator.style.width = maxW + 'px';
+
+  function goTo(idx, ts) {
+    activeIdx = idx;
+    btns.forEach(function (b, i) {
+      b.classList.toggle('asi__btn--on', i === idx);
+      b.setAttribute('aria-pressed', String(i === idx));
+    });
+    var m = measure(idx);
+    targetX = m.x; targetW = m.w;
+    if (reduce) { x = targetX; w = targetW; vx = 0; vw = 0; }
+  }
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  btns.forEach(function (b, i) {
+    b.addEventListener('click', function () { human(); goTo(i, performance.now()); });
+  });
+
+  window.addEventListener('resize', function () { var m = measure(activeIdx); targetX = m.x; targetW = m.w; });
+
+  // 초기 위치를 즉시 실측값으로 놓는다
+  requestAnimationFrame(function () { var m = measure(0); x = targetX = m.x; w = targetW = m.w; render(); });
+
+  function render() {
+    var scale = maxW > 0 ? w / maxW : 1;
+    indicator.style.transform = 'translateX(' + x.toFixed(2) + 'px) scaleX(' + scale.toFixed(4) + ')';
+  }
+
+  var cycleStart = 0, lastIdx = -1;
+  function loop(ts) {
+    if (!last) last = ts;
+    var dt = Math.min(0.032, (ts - last) / 1000);
+    last = ts;
+
+    if (!cycleStart) cycleStart = ts;
+    if (isDemo && !reduce) {
+      var idx = Math.floor((ts - cycleStart) / CYCLE_MS) % btns.length;
+      if (idx !== lastIdx) { lastIdx = idx; goTo(idx, ts); }
+    }
+
+    var ax = STIFF * (targetX - x) - DAMP * vx;
+    var aw = STIFF * (targetW - w) - DAMP * vw;
+    vx += ax * dt; x += vx * dt;
+    vw += aw * dt; w += vw * dt;
+    render();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

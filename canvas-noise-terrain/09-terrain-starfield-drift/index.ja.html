@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星空デモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tsf" id="tsf">
+  <p class="tsf__hint">
+    <svg class="tsf__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 0 1-96 96v-56a40 40 0 0 0 0-80V32a96 96 0 0 1 96 96" opacity=".2"/><path d="M128 24a8 8 0 0 0-8 8v56a8 8 0 0 0 8 8a32 32 0 1 1-27.72 16a8 8 0 0 0-2.93-10.93l-48.5-28A8 8 0 0 0 37.92 76A104 104 0 1 0 128 24M48.09 91.1L83 111.26A48.1 48.1 0 0 0 80 128c0 1.53.08 3 .22 4.52L41.28 143a88.16 88.16 0 0 1 6.81-51.9m-2.67 67.31l39-10.44A48.1 48.1 0 0 0 120 175.32v40.31a88.2 88.2 0 0 1-74.58-57.22M136 215.63v-40.31a48 48 0 0 0 0-94.65V40.36a88 88 0 0 1 0 175.27"/></g></svg>
+    <span>fbm の模様がしきい値を超える場所にだけ星が生まれ、密度がノイズに従います</span>
+  </p>
+  <div class="tsf__field" id="field" role="img" aria-label="ノイズ密度で撒かれた星がまたたく夜空">
+    <canvas class="tsf__cv" id="cv"></canvas>
+    <b class="tsf__badge" id="badge">星 0個</b>
+  </div>
+  <div class="tsf__bar">
+    <label class="tsf__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="星野シード">
+    </label>
+    <b class="tsf__val" id="twinkleOut">またたき進行中</b>
+  </div>
+</div>
+</main>
+<script>
+// 星 하늘 — 2D fbm 값이 문턱을 넘는 자리에만 createImageData 픽셀로 별을 놓는다(밀도가
+// 노이즈 결을 따른다). 별의 밝기는 다른 위상(다른 오프셋 + 다른 시간 흐름)의 fbm 으로
+// 흔들어 반짝이게 한다. 배경(성운)도 같은 방식의 저주파 fbm 을 밴드로 나눠 칠해, 화면
+// 전체가 계산으로 살아 움직인다(077 기준선 — 속성 트윈이 아니라 노이즈 계산 한 겹).
+// 시간에는 밀도·성운 노이즈의 z 를 함께 흘려 별자리 결 자체가 은하수처럼 서서히 다시 태어난다.
+var root = document.getElementById('tsf');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+var twinkleOut = document.getElementById('twinkleOut');
+
+var MW = 160, MH = 100;                 // 星 버퍼 해상도 — 화면이 커져도 이 값은 그대로다
+var small = document.createElement('canvas');
+small.width = MW; small.height = MH;
+var sctx = small.getContext('2d');
+var buf = sctx.createImageData(MW, MH); // 한 번만 만들어 두고 프레임마다 같은 배열을 덮어쓴다
+var px = buf.data;
+
+// ── 결정적 난수 — mulberry32. シード 하나 → 같은 테이블 ────────────────────────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var PERM = new Uint8Array(512);
+var VAL = new Float32Array(256);
+function buildTables(seed) {
+  var rng = mulberry32(seed >>> 0);
+  var p = [], i, j, t;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) { j = (rng() * (i + 1)) | 0; t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  for (i = 0; i < 256; i++) VAL[i] = rng();
+}
+
+function fade(t) { return t * t * (3 - 2 * t); }   // 스무스스텝 — 격자 경계에서 각이 안 지게
+
+// 3차원 값 노이즈(x·y·z — z 가 시간축). 트리플린어 보간
+function vnoise(x, y, z) {
+  var xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  var xf = x - xi, yf = y - yi, zf = z - zi;
+  xi &= 255; yi &= 255; zi &= 255;
+  var u = fade(xf), v = fade(yf), w = fade(zf);
+  var a = PERM[xi] + yi, b = PERM[xi + 1] + yi;
+  var aa = PERM[a] + zi, ab = PERM[a + 1] + zi;
+  var ba = PERM[b] + zi, bb = PERM[b + 1] + zi;
+  var c000 = VAL[PERM[aa]], c100 = VAL[PERM[ba]];
+  var c010 = VAL[PERM[ab]], c110 = VAL[PERM[bb]];
+  var c001 = VAL[PERM[aa + 1]], c101 = VAL[PERM[ba + 1]];
+  var c011 = VAL[PERM[ab + 1]], c111 = VAL[PERM[bb + 1]];
+  var x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+  var x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+  var y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  return y0 + (y1 - y0) * w;
+}
+
+// fbm — 옥타브 적층. z 가 흐르면 결 전체가 서서히 다시 태어난다
+function fbm(x, y, z, oct) {
+  var sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (var i = 0; i < oct; i++) {
+    sum += vnoise(x * f, y * f, z * f) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+// ── 색 — 성운 밴드·星 색을 CSS 커스텀 프로퍼티(파스텔 토큰)에서 읽어 온다 ────────────
+var css = getComputedStyle(root);
+function rgbOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+var NEB_A = rgbOf('--nebula-a'), NEB_B = rgbOf('--nebula-b');
+var STAR = rgbOf('--star'), STAR_DIM = rgbOf('--star-dim');
+var NEB_BANDS = 22;   // 성운 밴드 수 — 촘촘할수록 경계가 자주 넘나들어 화면 전체가 계산으로 넘실댄다
+
+var D_SCALE = 0.09, D_FLOW = 0.32, D_THRESH = 0.60;    // 밀도 노이즈 — 별이 태어나는 문턱
+var N_SCALE = 0.018, N_FLOW = 0.5;                     // 성운 노이즈 — 저주파(굵은 결), 밴드 경계가 넘실댄다
+var T_SCALE = 0.35, T_FLOW = 1.7;                      // 반짝임 노이즈 — 별마다 다른 위상으로 흔들림
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function paint(sec) {
+  var zd = sec * D_FLOW, zn = sec * N_FLOW;
+  var i = 0, hi = 0, stars = 0;
+  for (var y = 0; y < MH; y++) {
+    var ny = y * N_SCALE, dy = y * D_SCALE;
+    for (var x = 0; x < MW; x++) {
+      // 성운 — 저주파 fbm 을 밴드로 나눠 두 색 사이를 계단식으로 칠한다(경계가 매 프레임 옮겨간다)
+      var neb = fbm(x * N_SCALE + 4.1, ny + 91.3, zn, 4);
+      var band = (neb * NEB_BANDS) | 0; if (band >= NEB_BANDS) band = NEB_BANDS - 1;
+      var t = band / (NEB_BANDS - 1);
+      var r = NEB_A[0] + (NEB_B[0] - NEB_A[0]) * t;
+      var g = NEB_A[1] + (NEB_B[1] - NEB_A[1]) * t;
+      var b = NEB_A[2] + (NEB_B[2] - NEB_A[2]) * t;
+      // 밀도 — 문턱을 넘는 칸에만 별을 얹는다(별의 자리 자체가 fbm 결을 따른다)
+      var d = fbm(x * D_SCALE + 500.7, dy + 233.9, zd, 3);
+      if (d > D_THRESH) {
+        // 반짝임 — 별마다 자기 좌표를 오프셋으로 쓰는 다른 위상 노이즈로 밝기를 흔든다
+        var tw = fbm(x * T_SCALE + 811.2, y * T_SCALE + 47.6, sec * T_FLOW, 2);
+        var edge = (d - D_THRESH) / (1 - D_THRESH);          // 문턱 위로 얼마나 솟았나(0..1)
+        var glow = Math.min(1, edge * 1.6 + tw * 0.6);
+        r = STAR_DIM[0] + (STAR[0] - STAR_DIM[0]) * glow;
+        g = STAR_DIM[1] + (STAR[1] - STAR_DIM[1]) * glow;
+        b = STAR_DIM[2] + (STAR[2] - STAR_DIM[2]) * glow;
+        stars++;
+      }
+      px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255;
+      i += 4;
+    }
+  }
+  sctx.putImageData(buf, 0, 0);
+  ctx.imageSmoothingEnabled = false;   // 별을 또렷한 점으로 — 흐린 보간 없이
+  ctx.drawImage(small, 0, 0, MW, MH, 0, 0, W, H);
+  badge.textContent = '星 ' + stars + '個';
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function applySeed(v) {
+  var s = Math.max(1, Math.min(9999, Math.floor(v) || 1));
+  seedIn.value = String(s);
+  buildTables(s);
+  if (reduce) paint(0);
+}
+
+seedIn.addEventListener('input', function () { applySeed(Number(seedIn.value)); });
+seedIn.addEventListener('change', function () { applySeed(Number(seedIn.value)); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+fit();
+applySeed(Number(seedIn.value));
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 시드가 정한 별자리 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>좌표 값이 두 표기법을 오가는 동기화 인풋 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gc is-demo" id="gc">
+  <div class="gc__fields">
+    <div class="gc__field">
+      <span class="gc__cap">도·분·초</span>
+      <div class="gc__dms">
+        <input class="gc__deg" id="gcDeg" type="number" step="1" min="-90" max="90" value="37" aria-label="도 값 — 분·초와 함께 십진수 좌표로 계산해 눈금 위치를 옮깁니다" aria-describedby="gcReadout">
+        <span aria-hidden="true">°</span>
+        <input class="gc__min" id="gcMin" type="number" step="1" min="0" max="59" value="33" aria-label="분 값 — 도·초와 함께 십진수 좌표로 계산해 눈금 위치를 옮깁니다" aria-describedby="gcReadout">
+        <span aria-hidden="true">'</span>
+        <input class="gc__sec" id="gcSec" type="number" step="0.1" min="0" max="59.9" value="12.0" aria-label="초 값 — 도·분과 함께 십진수 좌표로 계산해 눈금 위치를 옮깁니다" aria-describedby="gcReadout">
+        <span aria-hidden="true">"</span>
+      </div>
+    </div>
+    <div class="gc__field">
+      <span class="gc__cap">십진수</span>
+      <input class="gc__dec" id="gcDec" type="number" step="0.0001" min="-90" max="90" value="37.5533" aria-label="십진수 좌표 값을 입력하면 도·분·초로 함께 계산해 눈금 위치를 옮깁니다" aria-describedby="gcReadout">
+    </div>
+  </div>
+  <div class="gc__scale" aria-hidden="true">
+    <div class="gc__track"></div>
+    <div class="gc__marker" id="gcMarker"></div>
+  </div>
+  <p class="gc__readout" id="gcReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('gc');
+  var degInput = document.getElementById('gcDeg');
+  var minInput = document.getElementById('gcMin');
+  var secInput = document.getElementById('gcSec');
+  var decInput = document.getElementById('gcDec');
+  var marker = document.getElementById('gcMarker');
+  var track = marker.parentElement;
+  var readout = document.getElementById('gcReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var RANGE = 90;
+  // 계산 한 겹 — 도분초 <-> 십진수 상호 변환, 눈금 위 위치(0~1)
+  function dmsToDecimal(deg, min, sec) {
+    var sign = deg < 0 ? -1 : 1;
+    return sign * (Math.abs(deg) + min / 60 + sec / 3600);
+  }
+  function decimalToDms(dec) {
+    var sign = dec < 0 ? -1 : 1;
+    var abs = Math.abs(dec);
+    var deg = Math.floor(abs);
+    var minFull = (abs - deg) * 60;
+    var min = Math.floor(minFull);
+    var sec = (minFull - min) * 60;
+    return { deg: sign * deg, min: min, sec: sec };
+  }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  var SENT_PREFIX = '도분초 ', SENT_MID = '는 십진수로 ', SENT_SUFFIX = '도입니다';
+
+  var targetX = 0, renderedX = 0;
+  var LERP_RATE = 0.15;
+
+  function paintCommon(dec) {
+    targetX = clamp01((dec + RANGE) / (RANGE * 2));
+    if (reduce) { renderedX = targetX; paint(); }
+  }
+
+  function readSentence(deg, min, sec, dec) {
+    readout.textContent = SENT_PREFIX + deg + '°' + min + "'" + sec.toFixed(1) + '"' + SENT_MID + dec.toFixed(4) + SENT_SUFFIX;
+  }
+
+  function applyFromDms() {
+    var deg = parseFloat(degInput.value); if (isNaN(deg)) deg = 0;
+    var min = parseFloat(minInput.value); if (isNaN(min)) min = 0;
+    var sec = parseFloat(secInput.value); if (isNaN(sec)) sec = 0;
+    var dec = dmsToDecimal(deg, min, sec);
+    decInput.value = dec.toFixed(4);
+    readSentence(deg, min, sec, dec);
+    paintCommon(dec);
+  }
+
+  function applyFromDecimal() {
+    var dec = parseFloat(decInput.value); if (isNaN(dec)) dec = 0;
+    var dms = decimalToDms(dec);
+    degInput.value = dms.deg;
+    minInput.value = dms.min;
+    secInput.value = dms.sec.toFixed(1);
+    readSentence(dms.deg, dms.min, dms.sec, dec);
+    paintCommon(dec);
+  }
+
+  function paint() {
+    var trackW = track.clientWidth - marker.offsetWidth;
+    var x = renderedX * trackW;
+    marker.style.transform = 'translateX(' + x.toFixed(1) + 'px)';
+  }
+
+  function onDmsInput() { human(); applyFromDms(); }
+  function onDecInput() { human(); applyFromDecimal(); }
+  degInput.addEventListener('input', onDmsInput);
+  degInput.addEventListener('change', onDmsInput);
+  minInput.addEventListener('input', onDmsInput);
+  minInput.addEventListener('change', onDmsInput);
+  secInput.addEventListener('input', onDmsInput);
+  secInput.addEventListener('change', onDmsInput);
+  decInput.addEventListener('input', onDecInput);
+  decInput.addEventListener('change', onDecInput);
+
+  var DEMO_VALUES = [12.5, 45.75, -8.333, 63.104, -51.9, 29.7801];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_VALUES.length);
+      if (idx !== lastIdx) {
+        lastIdx = idx;
+        decInput.value = DEMO_VALUES[idx];
+        applyFromDecimal();
+      }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame() {
+    renderedX += (targetX - renderedX) * LERP_RATE;
+    paint();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', paint);
+  applyFromDecimal();
+
+  if (!reduce) {
+    requestAnimationFrame(driveTick);
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

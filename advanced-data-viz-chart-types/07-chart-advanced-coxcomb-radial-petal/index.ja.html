@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>項目数に応じて角度を分け扇形を描き、値の大きさを半径に換算することで、同じ幅でも値が大きいほど花びらが外側まで伸びる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cxc is-demo" id="cxcRoot">
+  <canvas class="cxc__canvas" id="cxcCanvas" width="480" height="300"></canvas>
+  <p class="cxc__caption">項目数に応じて角度を分け扇形を描き、値の大きさを半径に換算することで、同じ幅でも値が大きいほど花びらが外側まで伸びる。</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 항목 수만큼 중심각을 똑같이 나눠 부채꼴(꽃잎) 자리를 만들고, 값의 크기를
+  // 반지름 목표치로 환산한다. 매 프레임 꽃잎마다 다른 시작 지연을 둔 완화 곡선으로
+  // 반지름을 0에서 목표까지 실제로 다시 계산해 그려 순차로 자라나는 과정을 보여준다.
+  var root = document.getElementById('cxcRoot');
+  var canvas = document.getElementById('cxcCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 480, CALC_H = 300;
+  var LOOP_MS = 2000;
+
+  var rand = seedRand(425071);
+  var COUNT = 6;
+  var VALUES = [];
+  for (var vi = 0; vi < COUNT; vi += 1) VALUES.push(20 + rand() * 80);
+
+  var COXCOMB_PETAL_GAP_DEG = 2;
+  var anglePerPetal = (360 - COXCOMB_PETAL_GAP_DEG * COUNT) / COUNT;
+
+  var MIN_R = 18, MAX_R = 130;
+  var maxValue = Math.max.apply(null, VALUES);
+  var targetRadii = VALUES.map(function (v) { return MIN_R + (v / maxValue) * (MAX_R - MIN_R); });
+
+  function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+  function easeInCubic(x) { return x * x * x; }
+  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+  var CENTER_X = CALC_W * 0.5, CENTER_Y = CALC_H * 0.5;
+  var FILL_COLORS = ['47,109,246', '194,54,26', '43,157,116', '138,92,214'];
+  var INK_STROKE = '23,20,26';
+
+  function radiusAt(i, t) {
+    var target = targetRadii[i];
+    if (t < 1400) {
+      var growProgress = clamp01((t - i * 90) / 500);
+      return target * easeOutCubic(growProgress);
+    }
+    if (t < 1750) return target;
+    var shrinkProgress = clamp01((t - 1750) / 200);
+    return target * (1 - easeInCubic(shrinkProgress));
+  }
+
+  var cw = 480, ch = 300;
+  function draw(t) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var scale = (sx + sy) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+    var cx = CENTER_X * sx, cy = CENTER_Y * sy;
+    var startDeg = -90;
+    for (var i = 0; i < COUNT; i += 1) {
+      var r = radiusAt(i, t) * scale;
+      var a0 = startDeg * Math.PI / 180;
+      var a1 = (startDeg + anglePerPetal) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, r, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(' + FILL_COLORS[i % 4] + ',.75)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(' + INK_STROKE + ',.9)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      startDeg += anglePerPetal + COXCOMB_PETAL_GAP_DEG;
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  function phaseOf(ms) { return reduce ? LOOP_MS * 0.72 : (ms % LOOP_MS); }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(phaseOf(elapsed));
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) elapsed += dt;
+    draw(phaseOf(elapsed));
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(phaseOf(elapsed));
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>배음 슬라이더 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>사용할 원 개수를 슬라이더로 1부터 전체까지 움직이면 하트가 물방울에서 점점 또렷한 하트로 되살아나는데, 이것이 JPEG 음악 압축까지 같은 원리의 얼마나 줄여도 본떼가 남는가 실험입니다</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="배음 슬라이더 실험판" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <p class="fe__panel">
+    <label class="fe__label" for="feSlider">원 개수</label>
+    <input class="fe__slider" id="feSlider" type="range" min="1" max="64" step="1" value="1" aria-label="원 개수">
+  </p>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">1</b><span id="feUnit">개 사용 중 · 하트 재합성</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · truncated series · slider</span>
+  </div>
+</div>
+</main>
+<script>
+// 배음 슬라이더 실험(08). 몇 개의 원만 남겨도 본떼가 남는가 — 계수 절약(압축)의 실험판.
+//   ① 하트 곡선(04 와 동일)의 DFT 계수를 크기 순으로 준비한다.
+//   ② 슬라이더(1~64)가 체인에 얹을 계수 개수를 정한다. 1개면 원 하나 — 물방울 한 바퀴.
+//   ③ 늘릴수록 디테일이 되살아나 오목한 하트가 완성된다 — JPEG·MP3 의 "버려도 되는 계수"와 같은 원리.
+// 자동 모드(.is-demo)에서는 슬라이더 값이 스스로 1→64→1 로 왕복해 렌더·측정이 가능하다.
+// 사람이 직접 잡으면 자동 왕복을 멈춘다(pointerdown).
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 원 개수가 매 순간 변하므로 체인·궤적 전체가 매 프레임 다시 계산된다.
+//  · 밑바탕 방사 스윕·스포크가 매 프레임 재계산된다. 궤적은 투명 캔버스에 쌓이며 혜성 감쇠.
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 256;        // 경로 샘플 수
+  var MAXSHOW = 64;   // 슬라이더 최대(체인에 얹을 계수 수)
+  var SWEEP = 3.2;    // 자동 왕복 주기(초)
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var slider = document.getElementById('feSlider');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  function heartPath(u) {
+    var t = u * TAU;
+    var x = 16 * Math.pow(Math.sin(t), 3);
+    var y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+    return { x: x / 17, y: y / 17 };
+  }
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    if (!PATH.length) {
+      for (var i = 0; i < N; i++) PATH.push(heartPath(i / N));
+      COEF = dft(PATH);
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function chainAt(u, show) {
+    var base = Math.min(W, H) * 0.4;
+    var cx = W * 0.5, cy = H * 0.5;
+    var pts = [{ x: cx, y: cy }];
+    for (var i = 0; i < show && i < COEF.length; i++) {
+      var c = COEF[i];
+      var ph = Math.atan2(c.im, c.re);
+      var ang = c.freq * u * TAU + ph;
+      pts.push({
+        x: pts[i].x + Math.cos(ang) * c.amp * base,
+        y: pts[i].y + Math.sin(ang) * c.amp * base
+      });
+    }
+    return pts;
+  }
+
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.5, cy = H * 0.5;
+    var maxR = Math.sqrt(W * W + H * H) * 0.5;
+    var sweep = t * 0.85;
+    for (var b = 0; b < 18; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.095 * (1 - b / 18));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.055, sweep - b * 0.055);
+      ctx.closePath();
+      ctx.fill();
+    }
+    var spin = t * 0.28;
+    for (var i = 0; i < 16; i++) {
+      var a = spin + (i / 16) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.095 : 0.055);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+  }
+
+  function draw(u, pulse, show, gt) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+    var base = Math.min(W, H) * 0.4;
+
+    var pts = chainAt(u, show);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var r = COEF[i].amp * base;
+      if (r > 2) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.01 * i);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+        ctx.stroke();
+      }
+      if (i < 4 || r > 3) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.46);
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+        ctx.stroke();
+      }
+    }
+    var pen = pts[pts.length - 1];
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr, 0, TAU);
+    ctx.fill();
+    return pen;
+  }
+
+  var prevPen = null;
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    trailCtx.strokeStyle = rgba(C_HOT, 0.8);
+    trailCtx.lineWidth = 1.7;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.strokeStyle = rgba(C_HOT, 0.12);
+    trailCtx.lineWidth = 4.6;
+    trailCtx.stroke();
+    prevPen = pen;
+  }
+
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.03)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var autoMode = true;
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = (now - t0) / 1000;
+    var u = (lt * 0.55) % 1;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 8.0);
+
+    var show;
+    if (autoMode) {
+      // 자동 왕복 — 1→64→1. 사람이 잡으면 멈춘다
+      var tri = 0.5 - 0.5 * Math.cos(lt * TAU / SWEEP);
+      show = 1 + Math.round(tri * (MAXSHOW - 1));
+      if (slider && String(slider.value) !== String(show)) slider.value = String(show);
+    } else {
+      show = slider ? parseInt(slider.value, 10) : MAXSHOW;
+    }
+
+    decayTrail();
+    var pen = draw(u, pulse, show, lt * TAU);
+    stampTrail(pen);
+    if (nOut) nOut.textContent = String(show);
+    raf = requestAnimationFrame(frame);
+  }
+
+  if (slider) {
+    slider.addEventListener('pointerdown', function () { autoMode = false; });
+    slider.addEventListener('input', function () {
+      autoMode = false;
+      prevPen = null;
+      if (nOut) nOut.textContent = slider.value;
+    });
+    slider.addEventListener('keydown', function () { autoMode = false; });
+  }
+
+  function stillFrame() {
+    // reduce — 원 8개 궤적을 미리 쌓은 뒤 한 장 고정
+    var show = 8;
+    var prev = chainAt(0, show)[show];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200, show)[show];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(0.5, 0.5, show, 2.1);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>消したピクセル数をリアルタイムで数え、半分を超えると残りの銀箔が自動でめくれる — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">スクラッチカード</p>
+    <div class="scv__zone" id="zone">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">20%割引クーポン</p>
+        <p class="scv__prizeSub">こすって結果を確認しましょう</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+    </div>
+    <div class="scv__meter" aria-hidden="true"><div class="scv__meterFill" id="meterFill"></div></div>
+    <button type="button" class="scv__reveal" id="revealBtn">一気に見る</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 긁을 때마다 canvas getImageData 로 지워진 알파 픽셀 수를 세어 전체 대비 비율을
+  // 계산한다. 그 비율이 SCRATCH_REVEAL_THRESHOLD_PCT 를 넘으면 나머지 은박을 한 번에
+  // destination-out 으로 지워 자동으로 카드를 연다 — 픽셀 계산 하나가 판정을 만든다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var meterFill = document.getElementById('meterFill');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var SCRATCH_REVEAL_THRESHOLD_PCT = 50;
+  var SCRATCH_BRUSH_R = 15;
+  var opened = false;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424011);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, foil.width, foil.height);
+    var grad = ctx.createLinearGradient(0, 0, foil.width, foil.height);
+    grad.addColorStop(0, '#cfd3dd');
+    grad.addColorStop(.5, '#eef0f5');
+    grad.addColorStop(1, '#b9bdc9');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, foil.width, foil.height);
+    ctx.strokeStyle = 'rgba(23,20,26,.16)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 22; i += 1) {
+      var x = foilRand() * foil.width, y = foilRand() * foil.height;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 22 - 11), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  function scratchAt(x, y) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function clearedPixelRatio() {
+    var data = ctx.getImageData(0, 0, foil.width, foil.height).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  function updateMeter(ratio) {
+    meterFill.style.width = Math.round(ratio * 100) + '%';
+  }
+
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, foil.width, foil.height);
+    updateMeter(1);
+    root.classList.add('is-open');
+    live.textContent = '20%割引クーポンが開きました';
+  }
+
+  function autoPeelRemaining(ratio) {
+    if (ratio * 100 >= SCRATCH_REVEAL_THRESHOLD_PCT) openCard();
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (foil.width / r.width), y: (e.clientY - r.top) * (foil.height / r.height) };
+  }
+
+  paintFoil();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dragging = false;
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    dragging = true;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+    var ratio = clearedPixelRatio();
+    updateMeter(ratio);
+    autoPeelRemaining(ratio);
+    if (foil.setPointerCapture) foil.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!dragging || opened) return;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+    var ratio = clearedPixelRatio();
+    updateMeter(ratio);
+    autoPeelRemaining(ratio);
+  });
+  window.addEventListener('pointerup', function () { dragging = false; });
+
+  revealBtn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    openCard();
+  });
+
+  // 격자 미리보기 — 드래그 없이 같은 scratchAt·clearedPixelRatio 경로를 스케줄대로 호출한다
+  var demoRand = seedRand(424012);
+  var demoPath = [];
+  (function buildDemoPath() {
+    var n = 24;
+    for (var i = 0; i < n; i += 1) {
+      demoPath.push({
+        t: 220 + i * 78,
+        x: (foil.width * 0.16) + (i % 6) * (foil.width * 0.145) + (demoRand() - .5) * 8,
+        y: (foil.height * 0.26) + Math.floor(i / 6) * (foil.height * 0.24) + (demoRand() - .5) * 8
+      });
+    }
+  })();
+  var DEMO_LOOP_MS = 3600;
+  var demoStep = 0;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+    updateMeter(0);
+    demoStep = 0;
+  }
+
+  function runDemo(tMod) {
+    while (demoStep < demoPath.length && demoPath[demoStep].t <= tMod) {
+      var p = demoPath[demoStep];
+      scratchAt(p.x, p.y);
+      demoStep += 1;
+    }
+    var ratio = clearedPixelRatio();
+    updateMeter(ratio);
+    autoPeelRemaining(ratio);
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0;
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod);
+    }
+    requestAnimationFrame(tick);
+  }
+  updateMeter(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

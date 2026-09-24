@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>큰 것부터 자리 잡는 트리맵 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ct is-demo" id="ct">
+  <div class="ct__card">
+    <div class="ct__head">
+      <p class="ct__title">카테고리 매출 구성</p>
+      <span class="ct__chip">지난 30일</span>
+    </div>
+    <div class="ct__plot">
+      <svg class="ct__svg" id="chart" viewBox="0 0 440 216" role="img" aria-label="카테고리 매출 트리맵, 상의 26%가 가장 크고 다음은 하의 18%">
+        <!-- 칸 rect 와 라벨은 JS 가 squarified 분할 계산으로 채운다 -->
+        <g id="cells"></g>
+      </svg>
+      <div class="ct__tip" id="tip" aria-hidden="true"><strong id="tipName">상의</strong><span id="tipVal">26%</span></div>
+      <table class="ct__sr">
+        <caption>카테고리 매출 구성</caption>
+        <thead><tr><th>카테고리</th><th>비중</th></tr></thead>
+        <tbody id="srBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+var ITEMS = [
+  { name: '상의', v: 26 }, { name: '하의', v: 18 }, { name: '신발', v: 14 }, { name: '가방', v: 11 },
+  { name: '모자', v: 10 }, { name: '액세서리', v: 9 }, { name: '양말', v: 7 }, { name: '기타', v: 5 }
+];
+var SERIES = ['c1', 'c2', 'c3', 'c4'];   // 계열 색 순서 고정 — 칸 순서대로 돌린다
+var ct = document.getElementById('ct');
+var cells = document.getElementById('cells');
+var tip = document.getElementById('tip');
+var tipName = document.getElementById('tipName');
+var tipVal = document.getElementById('tipVal');
+
+// 간이 squarified 이진 분할 — 값 내림차순 목록을 남은 영역에서 절반 무게에 가장 가까운 지점으로 나누고
+// 종횡비가 1 에 가까워지는 방향(가로/세로)으로 재귀한다. 완전한 squarify 는 아니지만 정사각 비율이 잘 나온다
+function split(items, x, y, w, h, out) {
+  if (!items.length) { return; }
+  if (items.length === 1) { out.push({ item: items[0], x: x, y: y, w: w, h: h }); return; }
+  var total = 0;
+  for (var k = 0; k < items.length; k++) { total += items[k].v; }
+  var half = total / 2, acc = 0, i = 0;
+  while (i < items.length - 1 && Math.abs(acc + items[i].v - half) < Math.abs(acc - half)) { acc += items[i].v; i++; }
+  var ratio = acc / total;
+  if (w >= h) {
+    split(items.slice(0, i), x, y, w * ratio, h, out);
+    split(items.slice(i), x + w * ratio, y, w * (1 - ratio), h, out);
+  } else {
+    split(items.slice(0, i), x, y, w, h * ratio, out);
+    split(items.slice(i), x, y + h * ratio, w, h * (1 - ratio), out);
+  }
+}
+
+var laid = [];
+split(ITEMS, 2, 2, 436, 212, laid);   // 2px 여백을 두고 채운다
+
+var SVGNS = 'http://www.w3.org/2000/svg';
+laid.forEach(function (cell, idx) {
+  var g = document.createElementNS(SVGNS, 'g');
+  g.setAttribute('class', 'ct__group');
+  var rect = document.createElementNS(SVGNS, 'rect');
+  rect.setAttribute('x', cell.x); rect.setAttribute('y', cell.y);
+  rect.setAttribute('width', cell.w); rect.setAttribute('height', cell.h);
+  rect.setAttribute('rx', 8);
+  rect.setAttribute('class', 'ct__cell ct__cell--' + SERIES[idx % 4]);
+  rect.setAttribute('data-i', idx);
+  g.appendChild(rect);
+  // 라벨은 면적이 충분한 칸에만 — 작은 칸은 툴팁과 표가 값을 갖고 있다
+  if (cell.w * cell.h > 1500) {
+    var name = document.createElementNS(SVGNS, 'text');
+    name.setAttribute('x', cell.x + 10); name.setAttribute('y', cell.y + 26);
+    name.setAttribute('class', 'ct__name');
+    name.textContent = cell.item.name;
+    var val = document.createElementNS(SVGNS, 'text');
+    val.setAttribute('x', cell.x + 10); val.setAttribute('y', cell.y + 48);
+    val.setAttribute('class', 'ct__num');
+    val.textContent = cell.item.v + '%';
+    g.appendChild(name); g.appendChild(val);
+  }
+  g.style.setProperty('--d', (idx * 0.09) + 's');   // 큰 칸부터 순차 등장
+  cells.appendChild(g);
+});
+
+var srBody = document.getElementById('srBody');
+ITEMS.forEach(function (it) {
+  var tr = document.createElement('tr');
+  var th = document.createElement('th'); th.setAttribute('scope', 'row'); th.textContent = it.name;
+  var td = document.createElement('td'); td.textContent = it.v + '%';
+  tr.appendChild(th); tr.appendChild(td); srBody.appendChild(tr);
+});
+
+cells.addEventListener('pointermove', function (e) {
+  if (ct.classList.contains('is-demo')) { ct.classList.remove('is-demo'); }
+  var rect = e.target.closest('rect');
+  if (!rect) { return; }
+  var idx = Number(rect.getAttribute('data-i'));
+  var cell = laid[idx];
+  tipName.textContent = cell.item.name;
+  tipVal.textContent = cell.item.v + '%';
+  // 칸의 viewBox 중심을 plot 비율로 환산해 툴팁을 놓는다
+  tip.style.left = ((cell.x + cell.w / 2) / 440 * 100) + '%';
+  tip.style.top = ((cell.y / 216) * 100) + '%';
+  tip.classList.add('is-on');
+});
+cells.addEventListener('pointerleave', function () { tip.classList.remove('is-on'); });
+</script>
+</body>
+</html>

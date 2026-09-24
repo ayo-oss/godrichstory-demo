@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>バーニングシップ変種 — マンデルブロ脱出時間フラクタル — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>二乗の前に実部・虚部へ絶対値を1つかけるだけでマンデルブロが消え、炎を吹く船が現れます。絶対値が軌道を下半平面へ折り込んで炎の模様が生まれます</span>
+  </p>
+  <div class="mb__field" role="application" aria-label="バーニングシップ変種ラボ" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta">z = |z|² + c · 最大反復128</span>
+    <span class="mb__meta mb__meta--dim">canvas · Math.abs · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 버닝쉽 변형(06) — 식 한 줄의 힘.
+// 만델브로: z = z² + c. 버닝쉽: z = (|Re z| + i|Im z|)² + c — 제곱 전에 두 성분의 절댓값.
+// 절댓값이 위 반평면의 궤적을 아래로 접기 때문에 지수가 쌓이는 방향(아래)으로 "불꽃"이 뻗는다.
+// 뷰포트는 표준 버닝쉽 프레임(배 본체가 보이는 -1.8~-0.7 · -0.1~-0.9, y 뒤집기).
+// 움직임: 불꽃 발광 위상 순환(팔레트 순환과 유사하지만 불꽃 끝단이 위로 갈수록 밝아지는
+// 램프를 얹어 "타오르는" 느낌을 만든다) + 미세 확대 숨.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var MAXIT  = 128;   // 최대 반복
+  var POWER  = 2;     // 지수 — 변형 "식 바꾸기"가 2 → 3 (z³+c, 대칭 2회→3회)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var cv = document.getElementById('mbCv');
+  var field = cv.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  // 불 팔레트 — 짙은 밤청 → 보라 → 파스텔 골드 → 복숭아 (고명도 파스텔이라 vivid 아님)
+  var PAL = ['--mb-f0', '--mb-f1', '--mb-f2', '--mb-f3', '--mb-f4'].map(tokRGB);
+  var C_SET = tokRGB('--mb-set');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, IRES = 240;
+  var ov, octx;
+
+  // 버닝쉽 표준 뷰 — 본체(배)가 중앙, 불꽃이 아래로. y 축은 화면 좌표(위가 -)라 뒤집는다
+  var CX = -1.755, CY = -0.04, SPAN0 = 1.35;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ov = document.createElement('canvas');
+    ov.width = IRES; ov.height = Math.max(2, Math.round(IRES * H / W));
+  }
+
+  function render(phase, breath) {
+    var iw = ov.width, ih = ov.height;
+    var span = SPAN0 * breath;
+    var img = octx.createImageData(iw, ih);
+    var px = img.data;
+    var dx = span / iw, dy = span / iw;
+    var oy0 = CY - (ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var ci = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var cr = CX - span / 2 + i * dx;
+        var zr = 0, zi = 0, n = 0;
+        while (n < MAXIT && zr * zr + zi * zi <= 4) {
+          // ── 버닝쉽의 한 줄 — 제곱 전 절댓값 ──
+          var ar = Math.abs(zr), ai = Math.abs(zi);
+          if (POWER === 2) {
+            var t = ar * ar - ai * ai + cr;
+            zi = 2 * ar * ai + ci;
+          } else {
+            // 3차 변형 — (|z|)³: 데 무아브르 3배각
+            var t = ar * ar * ar - 3 * ar * ai * ai + cr;
+            zi = 3 * ar * ar * ai - ai * ai * ai + ci;
+          }
+          zr = t;
+          n++;
+        }
+        var r, g, b;
+        if (n >= MAXIT) {
+          r = C_SET[0]; g = C_SET[1]; b = C_SET[2];
+        } else {
+          // 불꽃 램프 — 화면 아래(불꽃 끝)로 갈수록 밝게. j 가 클수록 아래
+          var heat = (j / ih) * 0.7 + (n / MAXIT) * 0.3;
+          var u = heat * 3 + phase;
+          var seg = u - Math.floor(u / 4) * 4;
+          var a = PAL[Math.floor(seg) % 4], bb = PAL[(Math.floor(seg) + 1) % 4];
+          var f = seg - Math.floor(seg);
+          r = a[0] + (bb[0] - a[0]) * f;
+          g = a[1] + (bb[1] - a[1]) * f;
+          b = a[2] + (bb[2] - a[2]) * f;
+        }
+        px[k++] = r; px[k++] = g; px[k++] = b; px[k++] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    cv.getContext('2d').drawImage(ov, 0, 0, W, H);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 2.0;
+    var t = loop / 2.0;
+    var phase = t * 3;                        // 발광 위상 — 2초에 파장 3칸
+    var breath = 1 + 0.045 * Math.sin(t * Math.PI * 2);  // 미세 확대 숨(±4.5%)
+    render(phase, breath);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); render(reduce ? 0.5 : 0.5, 1); });
+
+  fit();
+  octx = ov.getContext('2d');
+  if (reduce) {
+    render(0.5, 1);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

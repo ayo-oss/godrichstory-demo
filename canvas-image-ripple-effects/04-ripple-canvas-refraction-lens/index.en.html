@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside a circular lens that follows the pointer, the image looks refracted as if seen through water. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rvRoot" tabindex="0">
+  <canvas class="rv__canvas" id="rvCanvas" width="480" height="300"></canvas>
+  <p class="rv__caption">Inside a circular lens that follows the pointer, the image looks refracted as if seen through water.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 렌즈 중심에서의 거리 기반 반경 변위 필드(스넬 굴절 근사)로 원 안쪽만 픽셀을 재배치한다.
+  // 렌즈 표면에는 sin 파동을 얹어 정적 돋보기가 아니라 물 렌즈처럼 표면이 흔들리게 한다.
+  var root = document.getElementById('rvRoot');
+  var canvas = document.getElementById('rvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawPhotoBase(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#d8e9ff');
+    sky.addColorStop(1, '#f6f2ff');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.3, sunY = h * 0.22, sunR = h * 0.14;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.6);
+    glow.addColorStop(0, 'rgba(255,255,255,.9)');
+    glow.addColorStop(1, 'rgba(255,255,255,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    var gridColors = ['#a9c9ff', '#6f97e0', '#3d5fa8'];
+    for (var i = 0; i < gridColors.length; i += 1) {
+      var baseY = h * (0.48 + i * 0.16);
+      pctx.beginPath();
+      pctx.moveTo(0, h);
+      var step = Math.max(2, w / 22);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.055 + i * 1.9 + seed * 0.00025) * h * 0.035;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h);
+      pctx.closePath();
+      pctx.fillStyle = gridColors[i];
+      pctx.fill();
+    }
+    for (var k = 0; k < 46; k += 1) {
+      var px = rand() * w, py = rand() * h, r = rand() * 1.1 + 0.4;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.12 + rand() * 0.2) + ')';
+      pctx.fill();
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var LENS_RADIUS = 26;
+  var LENS_REFRACT_K = 1.7;
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawPhotoBase(octx, CALC_W, CALC_H, 419041);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function sampleBase(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [baseBuf[i], baseBuf[i + 1], baseBuf[i + 2]];
+  }
+
+  var lens = { x: CALC_W * 0.5, y: CALC_H * 0.5 };
+
+  function renderFrame(t) {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var dxp = x - lens.x, dyp = y - lens.y;
+        var dist = Math.sqrt(dxp * dxp + dyp * dyp);
+        var rgb;
+        if (dist < LENS_RADIUS) {
+          var norm = dist / LENS_RADIUS;
+          var bulge = (1 - norm) * (1 - norm);
+          var ripple = Math.sin(dist * 0.9 - t * 0.012) * 0.6 * (1 - norm);
+          var factor = LENS_REFRACT_K * bulge + ripple;
+          var ux = dist > 0.0001 ? dxp / dist : 0;
+          var uy = dist > 0.0001 ? dyp / dist : 0;
+          var sx = x - ux * factor * 4;
+          var sy = y - uy * factor * 4;
+          rgb = sampleBase(sx, sy);
+          var shine = Math.max(-20, Math.min(50, (1 - norm) * 30 - ripple * 14));
+          rgb = [
+            Math.max(0, Math.min(255, rgb[0] + shine)),
+            Math.max(0, Math.min(255, rgb[1] + shine)),
+            Math.max(0, Math.min(255, rgb[2] + shine))
+          ];
+        } else {
+          rgb = sampleBase(x, y);
+        }
+        outBuf[idx] = rgb[0];
+        outBuf[idx + 1] = rgb[1];
+        outBuf[idx + 2] = rgb[2];
+        outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var pointerActive = false;
+  function toGrid(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return {
+      x: (t0.clientX - r.left) / r.width * CALC_W,
+      y: (t0.clientY - r.top) / r.height * CALC_H
+    };
+  }
+  wrap.addEventListener('pointerenter', function () { pointerActive = true; });
+  wrap.addEventListener('pointermove', function (e) {
+    pointerActive = true;
+    lens = toGrid(e);
+    if (reduce) draw(lastElapsed);
+  });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') lens.x = Math.max(0, lens.x - 6);
+    else if (e.key === 'ArrowRight') lens.x = Math.min(CALC_W, lens.x + 6);
+    else if (e.key === 'ArrowUp') lens.y = Math.max(0, lens.y - 6);
+    else if (e.key === 'ArrowDown') lens.y = Math.min(CALC_H, lens.y + 6);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      pointerActive = true;
+      if (reduce) draw(lastElapsed);
+    }
+  });
+  wrap.tabIndex = 0;
+
+  function virtualLens(t) {
+    return {
+      x: CALC_W * (0.5 + 0.32 * Math.sin(t * 0.0011)),
+      y: CALC_H * (0.5 + 0.3 * Math.cos(t * 0.0017))
+    };
+  }
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (!pointerActive) lens = virtualLens(elapsed);
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

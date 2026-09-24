@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The longer the smoke has been rising, the more its particle color drifts gradually between two set hues. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">The longer the smoke has been rising, the more its particle color drifts gradually between two set hues.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 씬이 시작된 뒤 흐른 시간(nowMs)에 사인파를 걸어 0~1 사이를 오가는 색 진행도
+  // colorT 를 만들고, 이 값으로 두 색(SMOKE_TINT_FROM/TO)의 R·G·B를 각각 선형보간(lerp)한다.
+  // 입자 개별 나이가 아니라 장면 전체의 경과 시간이 색을 바꾼다는 점이 이 항목의 계산 축이다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_RISE_SPEED_PX = 13;
+  var SMOKE_TINT_CYCLE_MS = 4200;
+  var SMOKE_TINT_FROM = [255, 158, 187];
+  var SMOKE_TINT_TO = [185, 160, 255];
+  var PLUME_SPAWN_PER_S = 50;
+  var PLUME_LIFE_MS = 2400;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423051);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  var pRand = seedRand(423052);
+  var particles = [];
+  var spawnAcc = 0;
+
+  function spawn(bornMs) {
+    particles.push({
+      bx: CALC_W * 0.5 + (pRand() - 0.5) * 10,
+      y: CALC_H - 6,
+      born: bornMs,
+      wSeed: pRand() * 1000,
+      sign: pRand() < 0.5 ? -1 : 1
+    });
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * PLUME_SPAWN_PER_S / 1000;
+    while (spawnAcc >= 1) { spawn(nowMs); spawnAcc -= 1; }
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      p.y -= SMOKE_RISE_SPEED_PX * dtS;
+      if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var colorT = 0.5 + 0.5 * Math.sin(nowMs / SMOKE_TINT_CYCLE_MS * Math.PI * 2);
+    var cr = Math.round(lerp(SMOKE_TINT_FROM[0], SMOKE_TINT_TO[0], colorT));
+    var cg = Math.round(lerp(SMOKE_TINT_FROM[1], SMOKE_TINT_TO[1], colorT));
+    var cb = Math.round(lerp(SMOKE_TINT_FROM[2], SMOKE_TINT_TO[2], colorT));
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var turb = (valueNoise2D(p.wSeed * 0.03, nowMs * 0.0018) - 0.5) * 2;
+      var x = p.bx + turb * 30 * f * p.sign;
+      var r = 7 + f * 32;
+      var alpha = Math.sin(f * Math.PI) * 0.6;
+      if (alpha <= 0.01) continue;
+      var dx = x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + alpha + ')');
+      g.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 160 : 120;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>여러 규칙 값이 한 화면에서 동시에 도는 히어로 장면 오토마타 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="히어로 장면 진행 중 — 클릭하거나 스페이스바로 정지, R 로 재시드">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">클릭·스페이스바로 정지, R 로 재시드</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(진행률 채움 로더)와 다른 축: 구역마다 다른 규칙 값이 동시에 계산되는 장면 자체가 주인공.
+  // 매 세대 구역별로 분리 계산해 fillRect 로 화면 전체를 다시 그린다 — 속성 트윈 없음.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const CELL = 10, COLS = W / CELL, ROWS = H / CELL;
+  const INK = '#17141a';
+  const QUAD_COLORS = ['#93a4ca', '#c89a8f', '#d2c7a4', '#b2bed9'];
+
+  let SEED = 90901;
+  let rnd = makeLcg(SEED);
+
+  // 규칙표 값 4 세트 — 구역마다 하나씩 배정해 동시에 돌린다(항목 06 규칙표 값 재사용, 값은 구역 전용)
+  const RULESETS = [
+    { born: [3], survive: [2, 3] },        // 좌상 Life
+    { born: [3, 6], survive: [2, 3] },     // 우상 HighLife
+    { born: [2], survive: [] },            // 좌하 Seeds
+    { born: [1, 3, 5, 7], survive: [1, 3, 5, 7] } // 우하 Replicator
+  ];
+
+  const HALF_C = COLS / 2, HALF_R = ROWS / 2;
+  const QUADS = [
+    { x0: 0, y0: 0, x1: HALF_C - 1, y1: HALF_R - 1 },
+    { x0: HALF_C, y0: 0, x1: COLS - 1, y1: HALF_R - 1 },
+    { x0: 0, y0: HALF_R, x1: HALF_C - 1, y1: ROWS - 1 },
+    { x0: HALF_C, y0: HALF_R, x1: COLS - 1, y1: ROWS - 1 }
+  ];
+
+  function quadIndex(x, y){
+    return (x < HALF_C ? 0 : 1) + (y < HALF_R ? 0 : 2);
+  }
+
+  let grid = new Uint8Array(COLS * ROWS);
+  let next = new Uint8Array(COLS * ROWS);
+
+  function idx(x, y){ return y * COLS + x; }
+
+  function seedGrid(){
+    for (let i = 0; i < grid.length; i++) grid[i] = rnd() < 0.3 ? 1 : 0;
+  }
+
+  function neighborCountInQuad(x, y, q){
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dx = -1; dx <= 1; dx++){
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < q.x0 || ny < q.y0 || nx > q.x1 || ny > q.y1) continue;
+        n += grid[idx(nx, ny)];
+      }
+    }
+    return n;
+  }
+
+  function step(){
+    for (let qi = 0; qi < 4; qi++){
+      const q = QUADS[qi];
+      const rule = RULESETS[qi];
+      for (let y = q.y0; y <= q.y1; y++){
+        for (let x = q.x0; x <= q.x1; x++){
+          const alive = grid[idx(x, y)] === 1;
+          const n = neighborCountInQuad(x, y, q);
+          const willLive = alive ? rule.survive.indexOf(n) !== -1 : rule.born.indexOf(n) !== -1;
+          next[idx(x, y)] = willLive ? 1 : 0;
+        }
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function render(){
+    ctx.fillStyle = INK;
+    ctx.fillRect(0, 0, W, H);
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          ctx.fillStyle = QUAD_COLORS[quadIndex(x, y)];
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 1, CELL - 1);
+        }
+      }
+    }
+    ctx.strokeStyle = 'rgba(255,247,230,.14)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(HALF_C * CELL, 0); ctx.lineTo(HALF_C * CELL, H);
+    ctx.moveTo(0, HALF_R * CELL); ctx.lineTo(W, HALF_R * CELL);
+    ctx.stroke();
+  }
+
+  const ARIA_PLAY = '히어로 장면 진행 중 — 클릭하거나 스페이스바로 정지, R 로 재시드';
+  const ARIA_PAUSE = '히어로 장면 정지됨 — 클릭하거나 스페이스바로 재생, R 로 재시드';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', paused ? ARIA_PAUSE : ARIA_PLAY);
+  }
+
+  let paused = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){ rootEl.classList.remove('is-demo'); }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    seedGrid();
+  }
+
+  function togglePause(){
+    paused = !paused;
+    updateAria();
+  }
+
+  function onActivate(e){
+    if (e.type === 'keydown'){
+      if (e.key === 'r' || e.key === 'R'){
+        human();
+        reseed();
+        render();
+        return;
+      }
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      togglePause();
+    }
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R' || e.key === 'Enter' || e.key === ' '){
+      onActivate(e);
+    }
+  }
+
+  const GEN_INTERVAL_MS = 70;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('click', onActivate);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  seedGrid();
+  updateAria();
+  render();
+  if (!reduceMQ.matches){
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

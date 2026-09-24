@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>밝기 값을 문자로 바꾸는 아스키 맵 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">밝기 값을 문자로 바꾸는 아스키 맵</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawScene(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#8fc7ff');
+    sky.addColorStop(1, '#fff2d6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.72, sunY = h * 0.28, sunR = h * 0.2;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.4);
+    glow.addColorStop(0, 'rgba(255,247,230,.9)');
+    glow.addColorStop(1, 'rgba(255,247,230,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#ffe27a';
+    pctx.fill();
+    var hillColors = ['#6ec8ff', '#2b9d74', '#17141a'];
+    for (var i = 0; i < 3; i += 1) {
+      var baseY = h * (0.48 + i * 0.16);
+      pctx.beginPath();
+      pctx.moveTo(0, h);
+      var step = Math.max(2, w / 24);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.06 + i * 2.4 + seed * 0.0003) * h * 0.05 + Math.sin(x * 0.17 + i) * h * 0.02;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h);
+      pctx.closePath();
+      pctx.fillStyle = hillColors[i];
+      pctx.fill();
+    }
+    var accent = ['#ff5c8a', '#2fe6c6', '#ffb703', '#8a5cd6', '#3ddc97', '#ff7a5e'];
+    for (var m = 0; m < 8; m += 1) {
+      var ax = rand() * w, ay = h * (0.56 + rand() * 0.38), ar = h * (0.025 + rand() * 0.05);
+      pctx.beginPath();
+      pctx.arc(ax, ay, ar, 0, Math.PI * 2);
+      pctx.fillStyle = accent[m % accent.length];
+      pctx.fill();
+    }
+    for (var k = 0; k < 60; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.5, r = rand() * 1.3 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.12 + rand() * 0.22) + ')';
+      pctx.fill();
+    }
+  }
+
+  var BRIGHTNESS_RAMP = ' .:-=+*#%@';
+  var ASCII_CELL_PX = 6;
+
+  function brightnessToChar(baseBuf, w, h, cellPx, ramp, outCtx) {
+    outCtx.fillStyle = '#0b0b10';
+    outCtx.fillRect(0, 0, w, h);
+    outCtx.font = Math.max(5, cellPx) + 'px monospace';
+    outCtx.textBaseline = 'top';
+    for (var by = 0; by < h; by += cellPx) {
+      var bh = Math.min(cellPx, h - by);
+      for (var bx = 0; bx < w; bx += cellPx) {
+        var bw = Math.min(cellPx, w - bx);
+        var rs = 0, gs = 0, bs = 0, count = 0;
+        for (var y = 0; y < bh; y += 1) {
+          for (var x = 0; x < bw; x += 1) {
+            var idx = ((by + y) * w + (bx + x)) * 4;
+            rs += baseBuf[idx]; gs += baseBuf[idx + 1]; bs += baseBuf[idx + 2]; count += 1;
+          }
+        }
+        var r = rs / count, g = gs / count, b = bs / count;
+        var lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        var ci = Math.min(ramp.length - 1, Math.floor(lum * ramp.length));
+        var ch = ramp.charAt(ci);
+        outCtx.fillStyle = 'rgb(' + Math.round(r) + ',' + Math.round(g) + ',' + Math.round(b) + ')';
+        outCtx.fillText(ch, bx, by);
+      }
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawScene(octx, CALC_W, CALC_H, 415081);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+
+  function renderFrame(t) {
+    var wave = Math.sin(t * Math.PI * 4 / LOOP_MS) * 3;
+    var cellPx = Math.max(3, Math.min(11, Math.round(ASCII_CELL_PX + wave)));
+    brightnessToChar(baseBuf, CALC_W, CALC_H, cellPx, BRIGHTNESS_RAMP, outCtx);
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderFrame(elapsed);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

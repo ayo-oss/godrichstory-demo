@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas minimap — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mm is-demo" id="mm">
+  <div class="mm__bar">
+    <span class="mm__ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 256 256"><g fill="currentColor"><path d="m240 128l-48 40H64l-48-40l48-40h128Z" opacity=".2"/><path d="M69.12 94.15L28.5 128l40.62 33.85a8 8 0 1 1-10.24 12.29l-48-40a8 8 0 0 1 0-12.29l48-40a8 8 0 0 1 10.24 12.3m176 27.7l-48-40a8 8 0 1 0-10.24 12.3L227.5 128l-40.62 33.85a8 8 0 1 0 10.24 12.29l48-40a8 8 0 0 0 0-12.29m-82.39-89.37a8 8 0 0 0-10.25 4.79l-64 176a8 8 0 0 0 4.79 10.26A8.1 8.1 0 0 0 96 224a8 8 0 0 0 7.52-5.27l64-176a8 8 0 0 0-4.79-10.25"/></g></svg></span>
+    <span class="mm__name">main.scss</span>
+    <span class="mm__status" id="status" data-t="viewing line {p}"><span class="mm__stTop">viewing line 1</span><span class="mm__stMid">The box and the text move together</span></span>
+    <span class="mm__count" id="count" data-t="{n} lines">30 lines</span>
+  </div>
+  <div class="mm__body">
+    <div class="mm__view" id="view" tabindex="0">
+      <pre class="mm__track" id="track"></pre>
+    </div>
+    <div class="mm__map" id="map" aria-label="Minimap: drag to move through the document">
+      <canvas class="mm__cv" id="cv"></canvas>
+      <span class="mm__box" id="box"></span>
+    </div>
+  </div>
+  <p class="mm__note">Drag the box and the text scrolls to that spot</p>
+</div>
+</main>
+<script>
+var mm = document.getElementById('mm');
+var view = document.getElementById('view');
+var track = document.getElementById('track');
+var map = document.getElementById('map');
+var box = document.getElementById('box');
+var cv = document.getElementById('cv');
+var statusEl = document.getElementById('status');
+var countEl = document.getElementById('count');
+var TPL_VIEW = statusEl.getAttribute('data-t');
+var TPL_LINES = countEl.getAttribute('data-t');
+
+// 문서 30 lines — 미니맵 띠와 본문이 같은 배열에서 나온다
+var LINES = [
+  '// layout tokens',
+  '$grid: 4px;',
+  '$radius: 12px;',
+  '',
+  '.panel {',
+  '  display: grid;',
+  '  grid-template-columns:',
+  '      1fr 1fr 1fr;',
+  '  gap: $grid * 2;',
+  '  padding: $grid * 3;',
+  '  border-radius: $radius;',
+  '}',
+  '',
+  '.panel__title {',
+  '  font-weight: 700;',
+  '  font-size: 15px;',
+  '  line-height: 20px;',
+  '}',
+  '',
+  '// motion',
+  '.panel__item {',
+  '  transition: transform',
+  '      220ms ease;',
+  '  transform: translateY(0);',
+  '}',
+  '.panel__item:hover {',
+  '  transform: translateY(-4px);',
+  '}',
+  '',
+  '// end of file'
+];
+
+function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function fillTrack() {
+  track.innerHTML = LINES.map(function (ln) {
+    var cls = ln.indexOf('//') === 0 ? ' mm__ln--dim' : (ln.trim().charAt(0) === '$' ? ' mm__ln--tok' : '');
+    return '<span class="mm__ln' + cls + '">' + esc(ln) + '</span>';
+  }).join('');
+  countEl.textContent = TPL_LINES.replace('{n}', LINES.length);
+}
+
+// 미니맵은 로드 시 한 번 그린다 — 렌더가 프레임을 뽑는 시계는 CSS 애니메이션이므로
+// 캔버스를 매 프레임 다시 그리는 연출은 측정에 잡히지 않는다 (지시 299).
+// devicePixelRatio 를 곱해 물리 픽셀에 맞춰 그려야 흐려지지 않는다.
+function drawMap() {
+  var ctx = cv.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var w = map.clientWidth, h = map.clientHeight;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  var maxLen = 1;
+  LINES.forEach(function (ln) { maxLen = Math.max(maxLen, ln.trim().length); });
+  var pitch = h / LINES.length;
+  var barH = Math.max(1.5, pitch - 1.5);
+  LINES.forEach(function (ln, i) {
+    var bw = Math.max(2, (ln.trim().length / maxLen) * (w - 6));
+    ctx.fillStyle = ln.indexOf('//') === 0 ? 'rgba(190,183,173,.40)' : 'rgba(255,247,230,.78)';
+    ctx.fillRect(3, i * pitch, bw, barH);
+  });
+}
+
+function lineHeightPx() { return parseFloat(getComputedStyle(track).lineHeight) || 20; }
+
+// 본문을 스크롤하면 상자가 따라온다 — 상자 위치는 scrollHeight 대비 비율로 계산한다
+function placeBox() {
+  // 미리보기 루프 중에는 상태 칸을 건드리지 않는다 — 겹쳐 둔 두 문장을 textContent 가 통째로 지운다
+  if (mm.classList.contains('is-demo')) return;
+  var total = view.scrollHeight;
+  var shown = view.clientHeight;
+  var ratio = total > shown ? view.scrollTop / (total - shown) : 0;
+  box.style.height = Math.max(16, (shown / total) * map.clientHeight) + 'px';
+  var travel = Math.max(0, map.clientHeight - box.offsetHeight);
+  box.style.transform = 'translateY(' + (ratio * travel).toFixed(1) + 'px)';
+  var line = Math.min(LINES.length, Math.round(view.scrollTop / lineHeightPx()) + 1);
+  statusEl.textContent = TPL_VIEW.replace('{p}', line);
+}
+
+// 미리보기 루프의 이동거리도 실제 스크롤 범위에서 계산해 상자와 본문이 같은 비율로 움직이게 한다
+function tuneLoop() {
+  var span = (view.scrollHeight - view.clientHeight) * 0.45;
+  var travel = Math.max(0, map.clientHeight - box.offsetHeight);
+  mm.style.setProperty('--mm-track-y', (-span).toFixed(0) + 'px');
+  mm.style.setProperty('--mm-thumb-y', (Math.abs(span) / Math.max(1, view.scrollHeight - view.clientHeight) * travel).toFixed(0) + 'px');
+}
+
+// 상자를 끌면(Pointer Events) 본문이 그 자리로 스크롤된다
+var dragging = false;
+function jumpTo(ev) {
+  var r = map.getBoundingClientRect();
+  var bh = box.offsetHeight;
+  var y = ev.clientY - r.top - bh / 2;
+  var k = Math.max(0, Math.min(1, y / Math.max(1, r.height - bh)));
+  view.scrollTop = k * (view.scrollHeight - view.clientHeight); // scroll 이벤트가 placeBox 를 부른다
+}
+map.addEventListener('pointerdown', function (ev) {
+  mm.classList.remove('is-demo');
+  dragging = true;
+  map.setPointerCapture(ev.pointerId);
+  jumpTo(ev);
+  ev.preventDefault();
+});
+map.addEventListener('pointermove', function (ev) { if (dragging) jumpTo(ev); });
+function endDrag(ev) {
+  dragging = false;
+  try { map.releasePointerCapture(ev.pointerId); } catch (err) { /* 이미 풀린 포인터 */ }
+}
+map.addEventListener('pointerup', endDrag);
+map.addEventListener('pointercancel', endDrag);
+view.addEventListener('scroll', function () { mm.classList.remove('is-demo'); placeBox(); });
+view.addEventListener('wheel', function () { mm.classList.remove('is-demo'); }, { passive: true });
+view.addEventListener('focus', function () { mm.classList.remove('is-demo'); });
+window.addEventListener('resize', function () { drawMap(); placeBox(); tuneLoop(); });
+
+fillTrack();
+drawMap();
+placeBox();
+tuneLoop();
+</script>
+</body>
+</html>

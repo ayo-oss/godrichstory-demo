@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구간 수 값이 부드러운 색을 띠 모양으로 끊어내는 배경 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">구간 수 값이 부드러운 색을 띠 모양으로 끊어내는 배경</p>
+  <p class="pv__step"><span id="bandLabel"></span><b id="bandVal">10</b></p>
+  <input class="pv__range" id="bandRange" type="range" min="3" max="24" step="1" value="10" aria-label="band count">
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 대각선으로 흐르는 부드러운 무지개 hue 값을 posterizeHue() 로 PLASMA_BAND_COUNT 구간에
+  // 맞춰 계단화한다 — 구간 수가 늘수록 띠가 가늘어지고 부드러운 그라데이션에 가까워진다.
+  // 실제 입력: range 슬라이더로 구간 수를 3~24 사이에서 즉시 바꿀 수 있다.
+  var BAND_LABEL = '구간 ';
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var bandValEl = document.getElementById('bandVal');
+  var bandLabelEl = document.getElementById('bandLabel');
+  var bandRangeEl = document.getElementById('bandRange');
+  bandLabelEl.textContent = BAND_LABEL;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_BAND_COUNT = 10;
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function posterizeHue(raw, bands) {
+    var step = 360 / bands;
+    return Math.floor(raw / step) * step + step / 2;
+  }
+
+  function renderField(t) {
+    var diag = t * 0.03;
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var raw = (x * 1.4 + y * 1.1 + diag) % 360;
+        var hue = posterizeHue(raw, PLASMA_BAND_COUNT);
+        var rgb = hslToRgb(hue, 0.68, 0.5);
+        offBuf[idx] = rgb[0]; offBuf[idx + 1] = rgb[1]; offBuf[idx + 2] = rgb[2]; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  bandRangeEl.addEventListener('input', function () {
+    PLASMA_BAND_COUNT = parseInt(bandRangeEl.value, 10);
+    bandValEl.textContent = String(PLASMA_BAND_COUNT);
+    draw(lastElapsed);
+  });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

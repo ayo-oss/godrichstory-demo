@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>値の大きさだけブロックが再分割されるツリーマップピッカー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="tm is-demo" id="tm">
+  <div class="tm__head">
+    <span class="tm__title">項目Aの比率</span>
+    <span class="tm__stat" aria-hidden="true"><b class="tm__n" id="tm-val">38</b>%</span>
+  </div>
+
+  <div class="tm__zone">
+    <div class="tm__map" id="map" role="img" aria-label="4ブロックのツリーマップ。Aの値を調整するたびに、Aブロックと残り3ブロック(B・C・D)の矩形サイズが比率に合わせてすべて再計算される。">
+      <div class="tm__block tm__block--a" id="blk-a"><b>A</b><span id="pct-a">38%</span></div>
+      <div class="tm__block tm__block--b" id="blk-b"><b>B</b><span id="pct-b">31%</span></div>
+      <div class="tm__block tm__block--c" id="blk-c"><b>C</b><span id="pct-c">19%</span></div>
+      <div class="tm__block tm__block--d" id="blk-d"><b>D</b><span id="pct-d">12%</span></div>
+    </div>
+  </div>
+
+  <div class="tm__track" id="track">
+    <span class="tm__rail" aria-hidden="true"></span>
+    <button class="tm__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="項目Aの値を選ぶ" aria-valuemin="5" aria-valuemax="70"
+            aria-valuenow="38" aria-valuetext="項目A 38%">
+      <svg class="tm__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><rect x="32" y="32" width="192" height="192" rx="12" opacity=".2"/><path d="M208 32H48a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h160a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 16v56h-64V48Zm-80 0v56H48V48ZM48 120h64v88H48Zm80 88v-88h80v88Z"/></g></svg>
+    </button>
+  </div>
+
+  <p class="tm__hint">棒をドラッグするか矢印キーを押すと、4つのブロックのサイズがすべて再計算されます。</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="tm-live"></span>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown 이 項目A 値(5~70)을 바꾸면, 나머지 値
+// (100-A)을 고정 比率(OTHER_RATIO)로 B·C·D 에 나눈 뒤, 네 항목의 값을 전체 합(100)으로
+// 나눈 비율을 사각형 넓이(왼쪽 A 열 너비 + 오른쪽 B/C/D 행 높이)로 바꿔 매 프레임 전부
+// 다시 계산해 그린다. 값은 관성 lerp 로 목표를 뒤따른다.
+// CSS @keyframes 없음(값이 매 프레임 실수로 바뀌어 선언형으로 못 담는다, 398-01~08 과 같은 이유).
+var root = document.getElementById('tm');
+var track = document.getElementById('track');
+var grab = document.getElementById('grab');
+var blkA = document.getElementById('blk-a');
+var blkB = document.getElementById('blk-b');
+var blkC = document.getElementById('blk-c');
+var blkD = document.getElementById('blk-d');
+var pctA = document.getElementById('pct-a');
+var pctB = document.getElementById('pct-b');
+var pctC = document.getElementById('pct-c');
+var pctD = document.getElementById('pct-d');
+var valEl = document.getElementById('tm-val');
+var live = document.getElementById('tm-live');
+
+var MIN_V = 5, MAX_V = 70;
+var OTHER_RATIO = [0.5, 0.3, 0.2];   // picker-graph-treemap-other-ratio — B:C:D 고정 比率
+var LERP_RATE = 0.2;
+var AUTO_PERIOD = 2.0;
+var STEP = 5;
+
+var value = 38;
+var current = 38;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var trackRect = null;
+var rafId = 0;
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function paint() {
+  var a = current;
+  var rest = 100 - a;
+  var b = rest * OTHER_RATIO[0];
+  var c = rest * OTHER_RATIO[1];
+  var d = rest * OTHER_RATIO[2];
+
+  blkA.style.width = a + '%';
+  blkA.style.height = '100%';
+  blkA.style.left = '0%';
+  blkA.style.top = '0%';
+
+  var colW = 100 - a;
+  var bH = rest > 0.001 ? (b / rest) * 100 : 0;
+  var cH = rest > 0.001 ? (c / rest) * 100 : 0;
+
+  blkB.style.left = a + '%';
+  blkB.style.width = colW + '%';
+  blkB.style.top = '0%';
+  blkB.style.height = bH + '%';
+
+  blkC.style.left = a + '%';
+  blkC.style.width = colW + '%';
+  blkC.style.top = bH + '%';
+  blkC.style.height = cH + '%';
+
+  blkD.style.left = a + '%';
+  blkD.style.width = colW + '%';
+  blkD.style.top = (bH + cH) + '%';
+  blkD.style.height = (100 - bH - cH) + '%';
+
+  pctA.textContent = Math.round(a) + '%';
+  pctB.textContent = Math.round(b) + '%';
+  pctC.textContent = Math.round(c) + '%';
+  pctD.textContent = Math.round(d) + '%';
+
+  var rv = Math.round(current);
+  valEl.textContent = String(rv);
+  grab.style.left = ((value - MIN_V) / (MAX_V - MIN_V) * 100) + '%';
+  grab.setAttribute('aria-valuenow', String(Math.round(value)));
+  grab.setAttribute('aria-valuetext', '項目A ' + Math.round(value) + '%');
+}
+
+function announce() {
+  live.textContent = '項目A ' + Math.round(current) + '% で4ブロックすべて再計算されました';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(MIN_V, Math.min(MAX_V, v));
+  if (isManual) { manual = true; root.classList.remove('is-demo'); }
+}
+
+function fromPointer(clientX) {
+  if (!trackRect) trackRect = track.getBoundingClientRect();
+  var ratio = (clientX - trackRect.left) / trackRect.width;
+  setValue(MIN_V + ratio * (MAX_V - MIN_V), true);
+}
+
+function reflectNow() { current = value; paint(); announce(); }
+
+function onDown(e) {
+  trackRect = track.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX);
+  if (reduced()) reflectNow();
+}
+function onMove(e) { fromPointer(e.clientX); if (reduced()) reflectNow(); }
+function onUp() { announce(); }
+function onTrackDown(e) { trackRect = track.getBoundingClientRect(); fromPointer(e.clientX); if (reduced()) reflectNow(); }
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(MIN_V, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(MAX_V, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) reflectNow();
+}
+
+function onResize() { trackRect = track.getBoundingClientRect(); if (reduced()) paint(); }
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  var mid = (MIN_V + MAX_V) / 2;
+  var amp = (MAX_V - MIN_V) / 2 * 0.92;
+  value = mid + amp * Math.sin(autoT * omega);
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) autoStep(dt);
+  current += (value - current) * LERP_RATE;
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+grab.addEventListener('keydown', onKey);
+track.addEventListener('pointerdown', onTrackDown);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  current = value;
+  paint();
+} else {
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>리본 하나의 굵기를 그 구간이 나르는 값의 크기에 맞춰 계산해, 굵은 리본일수록 더 많은 양이 흘러가는 것을 한눈에 보여준다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="skr is-demo" id="skrRoot">
+  <canvas class="skr__canvas" id="skrCanvas" width="480" height="300"></canvas>
+  <p class="skr__caption">리본 하나의 굵기를 그 구간이 나르는 값의 크기에 맞춰 계산해, 굵은 리본일수록 더 많은 양이 흘러가는 것을 한눈에 보여준다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 좌우 노드의 총합을 공통 SCALE 하나로 픽셀에 매핑해 리본 두께가 실제 값 비율을
+  // 그대로 나타내게 하고(진짜 산키 보존), 리본마다 시작 지연을 두고 사각 클립을 왼쪽에서
+  // 오른쪽으로 넓혀가며 그 안에 리본 전체 도형을 그려 "그어지는" 진행을 만든다.
+  var root = document.getElementById('skrRoot');
+  var canvas = document.getElementById('skrCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var rand = seedRand(425011);
+  var LEFT = ['A', 'B', 'C'];
+  var RIGHT = ['P', 'Q'];
+  var FLOW = [
+    [18 + rand() * 40, 0],
+    [10 + rand() * 30, 14 + rand() * 36],
+    [0, 22 + rand() * 44]
+  ];
+
+  // 리본이 왼쪽에서 오른쪽으로 그어지는 데 걸리는 시간(ms). 변형은 900 → 1800 으로 바뀐다.
+  var SANKEY_DRAW_DURATION_MS = 900;
+  var RIBBON_STAGGER_MS = 90;
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+
+  function buildLayout(cw, ch) {
+    var nodeW = Math.max(8, cw * 0.045);
+    var marginX = cw * 0.12;
+    var marginY = ch * 0.14;
+    var nodeGap = ch * 0.05;
+    var leftX = marginX;
+    var rightX = cw - marginX - nodeW;
+    var availH = ch - marginY * 2;
+
+    var leftTotal = [0, 0, 0];
+    var rightTotal = [0, 0];
+    for (var i = 0; i < LEFT.length; i += 1) {
+      for (var j = 0; j < RIGHT.length; j += 1) {
+        leftTotal[i] += FLOW[i][j];
+        rightTotal[j] += FLOW[i][j];
+      }
+    }
+    var grandTotal = leftTotal[0] + leftTotal[1] + leftTotal[2];
+    var leftGaps = nodeGap * (LEFT.length - 1);
+    var rightGaps = nodeGap * (RIGHT.length - 1);
+    var usableH = availH - Math.max(leftGaps, rightGaps);
+    var SCALE = usableH / grandTotal;
+
+    var leftH = [leftTotal[0] * SCALE, leftTotal[1] * SCALE, leftTotal[2] * SCALE];
+    var rightH = [rightTotal[0] * SCALE, rightTotal[1] * SCALE];
+
+    var totalLeftH = leftH[0] + leftH[1] + leftH[2] + leftGaps;
+    var totalRightH = rightH[0] + rightH[1] + rightGaps;
+    var leftStartY = marginY + (availH - totalLeftH) / 2;
+    var rightStartY = marginY + (availH - totalRightH) / 2;
+
+    var leftY = [];
+    var cursorL = leftStartY;
+    for (i = 0; i < LEFT.length; i += 1) { leftY.push(cursorL); cursorL += leftH[i] + nodeGap; }
+    var rightY = [];
+    var cursorR = rightStartY;
+    for (j = 0; j < RIGHT.length; j += 1) { rightY.push(cursorR); cursorR += rightH[j] + nodeGap; }
+
+    var leftCursor = leftY.slice();
+    var rightCursor = rightY.slice();
+    var ribbons = [];
+    var idx = 0;
+    for (i = 0; i < LEFT.length; i += 1) {
+      for (j = 0; j < RIGHT.length; j += 1) {
+        var v = FLOW[i][j];
+        if (v <= 0) continue;
+        var thick = v * SCALE;
+        var leftTop = leftCursor[i];
+        var leftBot = leftTop + thick;
+        leftCursor[i] = leftBot;
+        var rightTop = rightCursor[j];
+        var rightBot = rightTop + thick;
+        rightCursor[j] = rightBot;
+        ribbons.push({
+          j: j, leftTop: leftTop, leftBot: leftBot, rightTop: rightTop, rightBot: rightBot,
+          delay: idx * RIBBON_STAGGER_MS
+        });
+        idx += 1;
+      }
+    }
+
+    return {
+      nodeW: nodeW, leftX: leftX, rightX: rightX,
+      leftY: leftY, rightY: rightY, leftH: leftH, rightH: rightH,
+      ribbons: ribbons
+    };
+  }
+
+  var COLOR_P = '47,109,246';
+  var COLOR_Q = '194,54,26';
+
+  function drawRibbon(r, progress, fadeAlpha) {
+    var startX = layout.leftX + layout.nodeW;
+    var endX = layout.rightX;
+    var midX = (startX + endX) / 2;
+    var clipRight = lerp(startX, endX, progress);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, clipRight, ch);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.moveTo(startX, r.leftTop);
+    ctx.bezierCurveTo(midX, r.leftTop, midX, r.rightTop, endX, r.rightTop);
+    ctx.lineTo(endX, r.rightBot);
+    ctx.bezierCurveTo(midX, r.rightBot, midX, r.leftBot, startX, r.leftBot);
+    ctx.closePath();
+    var rgb = r.j === 0 ? COLOR_P : COLOR_Q;
+    ctx.fillStyle = 'rgba(' + rgb + ',' + (0.62 * fadeAlpha) + ')';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawNodes() {
+    ctx.font = Math.max(9, cw * 0.024) + 'px sans-serif';
+    ctx.textBaseline = 'middle';
+    var i, j;
+    for (i = 0; i < LEFT.length; i += 1) {
+      ctx.fillStyle = '#fff7e6';
+      ctx.fillRect(layout.leftX, layout.leftY[i], layout.nodeW, layout.leftH[i]);
+      ctx.fillStyle = 'rgba(255,247,230,.92)';
+      ctx.textAlign = 'right';
+      ctx.fillText(LEFT[i], layout.leftX - 6, layout.leftY[i] + layout.leftH[i] / 2);
+    }
+    for (j = 0; j < RIGHT.length; j += 1) {
+      ctx.fillStyle = '#fff7e6';
+      ctx.fillRect(layout.rightX, layout.rightY[j], layout.nodeW, layout.rightH[j]);
+      ctx.fillStyle = 'rgba(255,247,230,.92)';
+      ctx.textAlign = 'left';
+      ctx.fillText(RIGHT[j], layout.rightX + layout.nodeW + 6, layout.rightY[j] + layout.rightH[j] / 2);
+    }
+  }
+
+  var LOOP_MS = 2000;
+  var T0 = 200;
+  var cw = 480, ch = 300;
+  var layout = buildLayout(cw, ch);
+
+  function draw(nowMs) {
+    var phase = reduce ? 1500 : (nowMs % LOOP_MS);
+    var t = Math.max(0, phase - T0);
+    layout = buildLayout(cw, ch);
+    ctx.clearRect(0, 0, cw, ch);
+
+    var fadeAlpha = 1;
+    if (phase > 1650) fadeAlpha = 1 - clamp((phase - 1650) / (1900 - 1650), 0, 1);
+
+    for (var k = 0; k < layout.ribbons.length; k += 1) {
+      var r = layout.ribbons[k];
+      var p = easeOutCubic(clamp((t - r.delay) / SANKEY_DRAW_DURATION_MS, 0, 1));
+      if (p <= 0) continue;
+      drawRibbon(r, p, fadeAlpha);
+    }
+    drawNodes();
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) { elapsed += dt; draw(elapsed); }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

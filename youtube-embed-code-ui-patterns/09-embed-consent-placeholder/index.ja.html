@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>동의 후 불러오는 임베드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel">
+  <div class="card" id="card">
+    <div class="notice" id="notice">
+      <div class="noticeHead">
+        <span class="statusDot" id="statusDot" aria-hidden="true"></span>
+        <span class="noticeLead">この動画は外部サービスから読み込みます。</span>
+      </div>
+      <p class="noticeSub">同意するとこの場に読み込まれます。</p>
+      <button type="button" class="consentBtn" id="consentBtn" aria-expanded="true">同意して読み込む</button>
+    </div>
+    <div class="frame" id="frame" aria-hidden="true">
+      <canvas class="frameThumb" id="frameThumb" width="240" height="80"></canvas>
+      <div class="frameScrim"></div>
+      <div class="frameContent">
+        <span class="framePlay" aria-hidden="true"></span>
+        <span class="frameLabel">同意後に再生される動画</span>
+      </div>
+      <div class="progressTrack">
+        <div class="progressBar" id="progressBar"></div>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+<script>
+// 동의 후 불러오는 임베드(09) — 안내 블록의 실측 높이를 접힘 진행도에 맞춰
+// 그대로 프레임 높이로 넘긴다(계산 겹). 실키·실서버 요청 없음.
+// 동의 버튼 클릭 시 즉시 전환(실사용자 리스너 있음).
+(function () {
+  var cardEl = document.getElementById('card');
+  var noticeEl = document.getElementById('notice');
+  var frameEl = document.getElementById('frame');
+  var frameThumbEl = document.getElementById('frameThumb');
+  var statusDotEl = document.getElementById('statusDot');
+  var consentBtnEl = document.getElementById('consentBtn');
+  var progressBarEl = document.getElementById('progressBar');
+  if (!cardEl || !noticeEl || !frameEl || !frameThumbEl || !statusDotEl || !consentBtnEl || !progressBarEl) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var NARROW = window.matchMedia('(max-width: 340px)').matches;
+
+  var CYCLE_MS = 2000;
+  var CONSENT_AT = 700;
+  var CONSENT_FOLD_MS = 200;
+  var FRAME_BASE_H = NARROW ? 56 : 96;
+  var DOT_MS = 700;
+
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function drawSeedThumb(canvas, seed) {
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    var rnd = mulberry32(seed);
+    var w = canvas.width, h = canvas.height;
+    var hues = [216, 32, 268, 168];
+    ctx.fillStyle = 'hsl(' + hues[Math.floor(rnd() * hues.length)] + ', 38%, 22%)';
+    ctx.fillRect(0, 0, w, h);
+    for (var i = 0; i < 6; i++) {
+      var cx = rnd() * w, cy = rnd() * h, r = (0.18 + rnd() * 0.3) * Math.min(w, h);
+      ctx.fillStyle = 'hsla(' + hues[Math.floor(rnd() * hues.length)] + ', ' + (44 + rnd() * 22).toFixed(1) + '%, ' + (38 + rnd() * 26).toFixed(1) + '%, .5)';
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255, 247, 230, .06)';
+    for (var j = 0; j < h; j += 4) ctx.fillRect(0, j, w, 1);
+  }
+
+  function easeOutCubic(p) { return 1 - Math.pow(1 - p, 3); }
+
+  drawSeedThumb(frameThumbEl, 109);
+
+  var consented = false;
+  var consentTime = null;
+  var consentOverride = false;
+  var noticeH = 0;
+  var prevT = 0;
+
+  function enterConsent(t) {
+    consented = true;
+    consentTime = t;
+    consentOverride = false;
+    noticeH = noticeEl.offsetHeight;
+    consentBtnEl.setAttribute('aria-expanded', 'false');
+  }
+
+  consentBtnEl.addEventListener('click', function () {
+    consentOverride = true;
+  });
+
+  function resetToIdle() {
+    consented = false;
+    consentTime = null;
+    consentOverride = false;
+    noticeH = 0;
+    noticeEl.style.height = '';
+    frameEl.style.height = '0px';
+    progressBarEl.style.transform = 'scaleX(0)';
+    consentBtnEl.setAttribute('aria-expanded', 'true');
+  }
+
+  // 계산 겹: 동의 순간 안내 블록의 실측 高さ(noticeH)를 접힘 진행도(p)에 맞춰
+  // 그대로 프레임 高さ 증가분으로 넘긴다 — 안내가 접히는 만큼 프레임이 자란다.
+  function apply(t) {
+    var dotOpacity = 0.86 + 0.14 * Math.sin(2 * Math.PI * t / DOT_MS);
+    if (!consented) {
+      statusDotEl.style.opacity = dotOpacity.toFixed(3);
+      return;
+    }
+    var elapsed = t - consentTime;
+    if (elapsed < 0) elapsed += CYCLE_MS;
+    var p = easeOutCubic(Math.min(1, elapsed / CONSENT_FOLD_MS));
+    noticeEl.style.height = (noticeH * (1 - p)).toFixed(1) + 'px';
+    frameEl.style.height = (FRAME_BASE_H + noticeH * p).toFixed(1) + 'px';
+    var sweepSpan = CYCLE_MS - CONSENT_AT - CONSENT_FOLD_MS;
+    var sweepP = Math.max(0, Math.min(1, (elapsed - CONSENT_FOLD_MS) / sweepSpan));
+    progressBarEl.style.transform = 'scaleX(' + sweepP.toFixed(3) + ')';
+  }
+
+  if (reduce) {
+    apply(0);
+    return;
+  }
+
+  var start = null;
+  function loop(ts) {
+    if (start === null) start = ts;
+    var raw = ts - start;
+    var t = raw % CYCLE_MS;
+    if (t < prevT) resetToIdle();
+    prevT = t;
+    if (!consented && (consentOverride || t >= CONSENT_AT)) enterConsent(t);
+    apply(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

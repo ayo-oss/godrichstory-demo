@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドラッグ再配置 — 네트워크 그래프 캔버스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gbRoot" role="application" aria-label="ドラッグで再配置するネットワーク図の実験版" tabindex="0">
+  <canvas class="gb__cv" id="gbCv"></canvas>
+  <p class="gb__hint">
+    <span class="gb__title">ドラッグ再配置</span>
+    <span class="gb__desc">ノードを引くと周囲全体がリアルタイムで釣り合い直します</span>
+  </p>
+  <div class="gb__bar">
+    <span class="gb__meta">ノード14個 · ドラッグ伝播 · rAF</span>
+    <span class="gb__meta gb__meta--dim">pointermove · arc · lineTo</span>
+  </div>
+</div>
+</main>
+<script>
+// ドラッグ再配置(02) — 01 의 척력+스프링 엔진에 포인터 드래그를 얹는다. 붙잡은 노드는
+// 매 프레임 포인터 좌표로 강제 고정되고(적분에서 제외), 그 힘이 스프링을 타고 이웃으로
+// 퍼져 나머지 노드가 실시간으로 재배치된다. .is-demo 동안은 같은 로직을 자동 각본이
+// 반복 호출해 사람이 만지지 않아도 화면이 산다 — 실제 드래그와 자동 각본은 같은 함수를 쓴다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 14;
+  var ATTRACT = 0.03;
+  var REPEL = 760;
+  // ────────────────────────
+  var REST = 44;
+  var DAMP = 0.95;
+  var CENTER_K = 0.0011;
+  var JITTER = 42;
+  var NR = 5;
+  var HIT_R = 16;   // 드래그 인식 반경(px)
+  var OMEGA = 0.4;  // 안 잡힌 나머지 노드를 아주 천천히 회전시켜 화면을 넓게 훑는다
+
+  var root = document.getElementById('gbRoot');
+  var cvEl = document.getElementById('gbCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_PANEL = tokRGB('--gb-panel');
+  var C_EDGE  = tokRGB('--gb-edge');
+  var C_NODE  = tokRGB('--gb-node');
+  var C_HOT   = tokRGB('--gb-hot');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x327002);
+
+  var px, py, vx, vy, edges;
+  var dragIdx = -1, autoIdx = -1, autoEntry = null;
+
+  function buildGraph() {
+    px = new Float32Array(N); py = new Float32Array(N);
+    vx = new Float32Array(N); vy = new Float32Array(N);
+    for (var i = 0; i < N; i++) { px[i] = rand() * W; py[i] = rand() * H; }
+    edges = [];
+    for (var a = 1; a < N; a++) edges.push([a, Math.floor(rand() * a)]);
+    var extra = Math.round(N * 0.4);
+    for (var k = 0; k < extra; k++) {
+      var u = Math.floor(rand() * N), v = Math.floor(rand() * N);
+      if (u !== v) edges.push([u, v]);
+    }
+    dragIdx = -1; autoIdx = -1; autoEntry = null;
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildGraph();
+  }
+
+  function nearestNode(x, y) {
+    var best = -1, bd = Infinity;
+    for (var i = 0; i < N; i++) {
+      var dx = px[i] - x, dy = py[i] - y, d = Math.hypot(dx, dy);
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+
+  function step(dt, pinnedIdx) {
+    var fx = new Float32Array(N), fy = new Float32Array(N);
+    for (var i = 0; i < N; i++) {
+      for (var j = i + 1; j < N; j++) {
+        var dx = px[j] - px[i], dy = py[j] - py[i];
+        var d2 = dx * dx + dy * dy; if (d2 < 4) d2 = 4;
+        var d = Math.sqrt(d2);
+        var f = REPEL / d2;
+        var ux = dx / d, uy = dy / d;
+        fx[i] -= ux * f; fy[i] -= uy * f;
+        fx[j] += ux * f; fy[j] += uy * f;
+      }
+    }
+    for (var e = 0; e < edges.length; e++) {
+      var a = edges[e][0], b = edges[e][1];
+      var dx2 = px[b] - px[a], dy2 = py[b] - py[a];
+      var d3 = Math.hypot(dx2, dy2) || 0.001;
+      var diff = (d3 - REST) * ATTRACT;
+      var ux2 = dx2 / d3, uy2 = dy2 / d3;
+      fx[a] += ux2 * diff; fy[a] += uy2 * diff;
+      fx[b] -= ux2 * diff; fy[b] -= uy2 * diff;
+    }
+    var cx = W / 2, cy = H / 2;
+    for (var n = 0; n < N; n++) {
+      if (n === pinnedIdx) { vx[n] = 0; vy[n] = 0; continue; }
+      fx[n] += (cx - px[n]) * CENTER_K;
+      fy[n] += (cy - py[n]) * CENTER_K;
+      fx[n] += (rand() - 0.5) * JITTER;
+      fy[n] += (rand() - 0.5) * JITTER;
+      vx[n] = (vx[n] + fx[n] * dt) * DAMP;
+      vy[n] = (vy[n] + fy[n] * dt) * DAMP;
+      px[n] += vx[n] * dt; py[n] += vy[n] * dt;
+    }
+  }
+
+  function rotateAll(dtheta, exclude) {
+    var cx = W / 2, cy = H / 2, cs = Math.cos(dtheta), sn = Math.sin(dtheta);
+    for (var i = 0; i < N; i++) {
+      if (i === exclude) continue;
+      var rx = px[i] - cx, ry = py[i] - cy;
+      px[i] = cx + rx * cs - ry * sn;
+      py[i] = cy + rx * sn + ry * cs;
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + C_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = 'rgba(' + C_EDGE.join(',') + ',0.6)';
+    ctx.beginPath();
+    for (var e = 0; e < edges.length; e++) {
+      var a = edges[e][0], b = edges[e][1];
+      ctx.moveTo(px[a], py[a]); ctx.lineTo(px[b], py[b]);
+    }
+    ctx.stroke();
+
+    var pinned = dragIdx >= 0 ? dragIdx : autoIdx;
+    for (var i = 0; i < N; i++) {
+      var isPinned = i === pinned;
+      ctx.fillStyle = isPinned ? 'rgb(' + C_HOT.join(',') + ')' : 'rgb(' + C_NODE.join(',') + ')';
+      ctx.beginPath(); ctx.arc(px[i], py[i], isPinned ? NR + 2.4 : NR, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // .is-demo 자동 드래그 각본 — 사람이 안 눌러도 같은 pinnedIdx 경로로 화면이 산다.
+  var script = [
+    { t: 0.3, dur: 1.3, from: { x: 0.22, y: 0.5 }, to: { x: 0.78, y: 0.22 } },
+    { t: 2.1, dur: 1.3, from: { x: 0.78, y: 0.7 }, to: { x: 0.24, y: 0.82 } },
+    { t: 3.9, dur: 1.3, from: { x: 0.5, y: 0.18 }, to: { x: 0.62, y: 0.86 } }
+  ];
+  var AUTO_CYCLE = 5.6;
+
+  function findEntry(tMod) {
+    for (var i = 0; i < script.length; i++) {
+      var s = script[i];
+      if (tMod >= s.t && tMod <= s.t + s.dur) return s;
+    }
+    return null;
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1, last = -1;
+  function frame(now) {
+    if (t0 < 0) { t0 = now; last = now; }
+    var dt = Math.min((now - last) / 1000, 0.05); last = now;
+
+    if (dragIdx < 0 && root.classList.contains('is-demo')) {
+      var tMod = ((now - t0) / 1000) % AUTO_CYCLE;
+      var entry = findEntry(tMod);
+      if (entry) {
+        if (autoEntry !== entry) {
+          autoEntry = entry;
+          autoIdx = nearestNode(entry.from.x * W, entry.from.y * H);
+        }
+        var k = (tMod - entry.t) / entry.dur;
+        px[autoIdx] = W * (entry.from.x + (entry.to.x - entry.from.x) * k);
+        py[autoIdx] = H * (entry.from.y + (entry.to.y - entry.from.y) * k);
+      } else { autoEntry = null; autoIdx = -1; }
+    }
+
+    var pinned = dragIdx >= 0 ? dragIdx : autoIdx;
+    step(dt, pinned);
+    rotateAll(OMEGA * dt, pinned);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  function pointerXY(e) {
+    var r = cvEl.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+  }
+  cvEl.addEventListener('pointerdown', function (e) {
+    var xy = pointerXY(e);
+    var idx = nearestNode(xy[0], xy[1]);
+    if (idx >= 0 && Math.hypot(px[idx] - xy[0], py[idx] - xy[1]) <= HIT_R) {
+      dragIdx = idx; autoIdx = -1; autoEntry = null;
+      cvEl.setPointerCapture(e.pointerId);
+    }
+  });
+  cvEl.addEventListener('pointermove', function (e) {
+    if (dragIdx < 0) return;
+    var xy = pointerXY(e);
+    px[dragIdx] = xy[0]; py[dragIdx] = xy[1];
+  });
+  function release() { dragIdx = -1; }
+  cvEl.addEventListener('pointerup', release);
+  cvEl.addEventListener('pointercancel', release);
+
+  function settle() {
+    for (var s = 0; s < 200; s++) step(1 / 60, -1);
+    draw();
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) settle();
+  });
+
+  fit();
+  if (reduce) {
+    settle();
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

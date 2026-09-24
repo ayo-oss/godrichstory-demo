@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rubber-band overscroll — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prrbo is-demo" id="prrbo">
+  <div class="prrbo__panel">
+    <div class="prrbo__track" id="prrboTrack">
+      <span class="prrbo__cap"></span>
+      <span class="prrbo__marker" id="prrboMarker"></span>
+    </div>
+    <div class="prrbo__phone" id="prrboPhone">
+      <div class="prrbo__list" id="prrboList">
+        <div class="prrbo__row"></div>
+        <div class="prrbo__row"></div>
+      </div>
+    </div>
+  </div>
+  <span class="prrbo__hint" id="prrboHint">Pull down</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prrboPhone');
+  var marker = document.getElementById('prrboMarker');
+  var list = document.getElementById('prrboList');
+  var hint = document.getElementById('prrboHint');
+  var root = document.getElementById('prrbo');
+
+  // 계산 겹: LINEAR(70px) 까지는 raw 에 0.9 배로 거의 그대로 따라가다가, 그 뒤로는 MAX_D(120px) 에
+  // 점근하는 지수 감쇠(1-e^-x/K)로 늘어나는 폭이 급격히 줄어든다 — 같은 힘이라도 한계 근처에선 거의 안 늘어난다.
+  var LINEAR = 70, MAX_D = 120, K = 42, RAW_MAX = 260;
+  var TRACK_H = 92, SCALE = TRACK_H / 150;
+
+  function displayedOf(raw) {
+    if (raw <= LINEAR) { return raw * 0.9; }
+    var base = LINEAR * 0.9;
+    var excess = raw - LINEAR;
+    return base + (MAX_D - base) * (1 - Math.exp(-excess / K));
+  }
+
+  function apply(raw) {
+    var displayed = displayedOf(raw);
+    marker.style.transform = 'translateY(' + (-(displayed * SCALE)).toFixed(1) + 'px)';
+    list.style.transform = 'translateY(' + (displayed * 0.55).toFixed(1) + 'px)';
+    var pctOfCap = Math.round((displayed / MAX_D) * 100);
+    hint.textContent = raw > 4 ? ('Displaced ' + Math.round(displayed) + 'px · of limit ' + pctOfCap + '%') : 'Pull down';
+  }
+
+  var raw = 0, target = 0, raf = null;
+  function settle() {
+    raw += (target - raw) * 0.3;
+    if (Math.abs(target - raw) < 0.3) { raw = target; }
+    apply(raw);
+    if (raw !== target) { raf = requestAnimationFrame(settle); } else { raf = null; }
+  }
+  function goTo(v) { target = v; if (raf === null) { raf = requestAnimationFrame(settle); } }
+
+  var dragging = false, startY = 0, startRaw = 0;
+  function onDown(y) { dragging = true; startY = y; startRaw = raw; if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(RAW_MAX, startRaw + (y - startY)));
+    apply(raw);
+  }
+  function onUp() { if (!dragging) { return; } dragging = false; goTo(0); }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  apply(0);
+
+  // 자동 루프: raw 를 RAW_MAX 까지 크게 밀어 넣어 한계선에 점근만 하고 못 넘는 모습을 보인다.
+  var autoRaw = 0, autoTimer = null, autoDir = 1;
+  function autoTick() {
+    autoRaw += autoDir * 55;
+    if (autoRaw >= RAW_MAX) { autoRaw = RAW_MAX; autoDir = -1; goTo(0); return; }
+    if (autoRaw <= 0 && autoDir < 0) { autoRaw = 0; autoDir = 1; }
+    if (autoDir > 0) { raw = autoRaw; apply(raw); }
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 170); }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>End-of-list reveal — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="emr is-demo" id="emr">
+  <div class="emr__view" id="emrView">
+    <ul class="emr__track" id="emrTrack">
+      <li class="emr__sentinel" id="emrSentinel" aria-hidden="true"></li>
+    </ul>
+    <div class="emr__end" id="emrEnd" role="status" hidden>
+      <span class="emr__end-check" id="emrCheck" aria-hidden="true"></span>
+      <span class="emr__end-text">Loaded up to the last notification</span>
+    </div>
+  </div>
+  <p class="emr__hint" id="emrHint">Reaching the end fetches the next batch</p>
+</div>
+</main>
+<script>
+(function () {
+  var view = document.getElementById('emrView');
+  var track = document.getElementById('emrTrack');
+  var sentinel = document.getElementById('emrSentinel');
+  var endBox = document.getElementById('emrEnd');
+  var hint = document.getElementById('emrHint');
+  var root = document.getElementById('emr');
+
+  var TOTAL_PAGES = 3;
+  var PAGE_SIZE = 4;
+  var LOAD_DELAY_MS = 560;
+  var REVEAL_PX = 34;   // 안내 문구가 아래에서 밀려 올라오는 거리 값
+
+  var page = 0;
+  var loading = false;
+  var exhausted = false;
+  var rowSeq = 0;
+  var revealRaf = null;
+  var dir = 1;
+  var autoplayTimer = null;
+
+  function addRow() {
+    var li = document.createElement('li');
+    li.className = 'emr__row';
+    li.textContent = 'Alert ' + String(rowSeq + 1).padStart(2, '0');
+    track.insertBefore(li, sentinel);
+    rowSeq += 1;
+  }
+  for (var i = 0; i < 4; i += 1) { addRow(); }
+
+  // 계산 겹: 안내 문구의 올라오는 정도를 고정 트랜지션이 아니라 rAF 로 매 프레임 계산한다 —
+  // 시작 값을 REVEAL_PX 로 두고 목표 0 까지 지수 감쇠로 당긴다. 남은 항목 값이 0이 되기 전엔
+  // 이 계산 자체가 실행되지 않는다(한 번 확정되면 다시 계산되지 않는다).
+  function revealEnd() {
+    endBox.hidden = false;
+    var y = REVEAL_PX;
+    function tick() {
+      y += (0 - y) * 0.18;
+      endBox.style.transform = 'translateY(' + y.toFixed(2) + 'px)';
+      if (y > 0.4) { revealRaf = requestAnimationFrame(tick); }
+      else { endBox.style.transform = 'translateY(0px)'; revealRaf = null; }
+    }
+    revealRaf = requestAnimationFrame(tick);
+  }
+
+  function recompute() {
+    if (exhausted) { return; }   // 남은 항목 값이 0 — 끝에 닿아도 다시 계산하지 않는다
+    var remaining = sentinel.getBoundingClientRect().top - view.getBoundingClientRect().bottom;
+    if (remaining <= 2 && !loading) { startLoad(); }
+  }
+
+  function startLoad() {
+    loading = true;
+    sentinel.classList.add('emr__sentinel--loading');
+    setTimeout(function () {
+      page += 1;
+      for (var n = 0; n < PAGE_SIZE; n += 1) { addRow(); }
+      sentinel.classList.remove('emr__sentinel--loading');
+      loading = false;
+      if (page >= TOTAL_PAGES) {
+        exhausted = true;      // 남은 항목 값 0 확정 — 이 계산은 두 번 다시 일어나지 않는다
+        sentinel.remove();
+        revealEnd();
+        hint.textContent = 'The remaining-item value is zero — reaching the edge sends no request';
+      }
+    }, LOAD_DELAY_MS);
+  }
+
+  view.addEventListener('scroll', recompute);
+
+  function userTakesOver() {
+    if (!root.classList.contains('is-demo')) { return; }
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  view.addEventListener('wheel', userTakesOver, { passive: true });
+  view.addEventListener('touchstart', userTakesOver, { passive: true });
+
+  function autoplayTick() {
+    var max = view.scrollHeight - view.clientHeight;
+    if (exhausted && view.scrollTop >= max - 1 && dir !== 0) {
+      dir = 0;
+      setTimeout(function () {
+        while (track.firstChild) { track.removeChild(track.firstChild); }
+        rowSeq = 0; page = 0; exhausted = false; dir = 1;
+        endBox.hidden = true;
+        track.appendChild(sentinel);
+        for (var i = 0; i < 4; i += 1) { addRow(); }
+        view.scrollTop = 0;
+        hint.textContent = 'Reaching the end fetches the next batch';
+      }, 700);
+      return;
+    }
+    if (dir === 0) { return; }
+    view.scrollTop = Math.min(view.scrollTop + 5, max);
+    recompute();
+  }
+
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(autoplayTick, 60);
+  }
+})();
+</script>
+</body>
+</html>

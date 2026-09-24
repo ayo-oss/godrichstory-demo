@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스프링으로 튕겨 커지는 북마크 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp is-demo" id="sp">
+  <p class="sp__caption">스프링으로 튕겨 커지는 북마크 버튼</p>
+  <div class="sp__scene" id="spScene">
+    <button class="sp__btn" id="spBtn" type="button" aria-pressed="false">
+      <svg class="sp__icon" viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false">
+        <path class="sp__shape" d="M6.5 3A1.5 1.5 0 0 1 8 1.5h8A1.5 1.5 0 0 1 17.5 3v18.2a.9.9 0 0 1-1.38.76L12 19.1l-4.12 2.86A.9.9 0 0 1 6.5 21.2Z"/>
+      </svg>
+    </button>
+  </div>
+  <p class="sp__status" id="spStatus" aria-live="polite">저장 전</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 변형 3: BOOKMARK_SPRING_OVERSHOOT_PERCENT 가 스프링이 목표를 넘길 수 있는 최대치를 정한다.
+  var BOOKMARK_SPRING_OVERSHOOT_PERCENT = 12;
+  var SPRING_STIFFNESS = 210;
+  var SPRING_DAMPING = 18;
+  var SPRING_KICK_VELOCITY = 7.4;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("sp");
+  var scene = document.getElementById("spScene");
+  var btn = document.getElementById("spBtn");
+  var status = document.getElementById("spStatus");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var saved = false;
+  function setSaved(v) {
+    saved = v;
+    btn.setAttribute("aria-pressed", String(v));
+    root.classList.toggle("is-saved", v);
+    status.textContent = v ? "저장됨" : "저장 전";
+  }
+
+  var maxScale = 1 + BOOKMARK_SPRING_OVERSHOOT_PERCENT / 100;
+  var pos = 1;
+  var vel = 0;
+
+  function render(p) {
+    var s = clamp01to(p);
+    btn.style.transform = "scale(" + s.toFixed(4) + ")";
+    var tone = clamp(s - 1, 0, maxScale - 1) / (maxScale - 1);
+    scene.style.setProperty("--tone", tone.toFixed(3));
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function clamp01to(v) { return v; }
+
+  // 스프링 방정식(강성 SPRING_STIFFNESS · 감쇠 SPRING_DAMPING) 을 매 프레임 적분한다.
+  // 눌리는 순간 속도를 한 번 차 넣으면(kick), 스프링이 목표(1)를 넘겼다가 되돌아온다.
+  function integrate(dt) {
+    var accel = SPRING_STIFFNESS * (1 - pos) - SPRING_DAMPING * vel;
+    vel += accel * dt;
+    pos += vel * dt;
+    if (pos > maxScale) { pos = maxScale; vel *= -0.35; }
+    if (pos < 1 && vel < 0 && Math.abs(pos - 1) < 0.001 && Math.abs(vel) < 0.01) { pos = 1; vel = 0; }
+  }
+
+  function kick() {
+    vel += SPRING_KICK_VELOCITY;
+  }
+
+  btn.addEventListener("click", function () {
+    root.classList.remove("is-demo");
+    setSaved(!saved);
+    kick();
+  });
+
+  var lastNow = null;
+  var start = null;
+  var prevT = 0;
+  var toggledA = false;
+  var toggledB = false;
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; }
+    var dt = Math.min((now - lastNow) / 1000, 0.05);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) { toggledA = false; toggledB = false; }
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) {
+      if (!toggledA && t > 0.3) { toggledA = true; setSaved(true); kick(); }
+      if (!toggledB && t > 1.3) { toggledB = true; setSaved(false); kick(); }
+    }
+    if (reduce) {
+      pos = 1; vel = 0;
+    } else {
+      integrate(dt);
+    }
+    render(pos);
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

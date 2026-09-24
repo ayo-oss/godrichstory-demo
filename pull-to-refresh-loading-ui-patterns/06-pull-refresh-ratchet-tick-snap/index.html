@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>당김 눈금 래칫 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prtk is-demo" id="prtk">
+  <div class="prtk__panel">
+    <div class="prtk__track" id="prtkTrack">
+      <span class="prtk__tick" style="bottom:22px"></span>
+      <span class="prtk__tick" style="bottom:44px"></span>
+      <span class="prtk__tick" style="bottom:66px"></span>
+      <span class="prtk__tick" style="bottom:88px"></span>
+      <span class="prtk__marker" id="prtkMarker"></span>
+    </div>
+    <div class="prtk__phone" id="prtkPhone">
+      <div class="prtk__list" id="prtkList">
+        <div class="prtk__row"></div>
+        <div class="prtk__row"></div>
+      </div>
+    </div>
+  </div>
+  <span class="prtk__hint" id="prtkHint">아래로 당기세요</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prtkPhone');
+  var marker = document.getElementById('prtkMarker');
+  var list = document.getElementById('prtkList');
+  var hint = document.getElementById('prtkHint');
+  var root = document.getElementById('prtk');
+
+  // 계산 겹: 칸 경계(TICK 배수)를 새로 지날 때마다 감쇠 진동 AMP*e^(-t/TAU)*sin(t*W) 을
+  // 기준 위치에 얹는다 — 릴리즈 때 한 번이 아니라 손가락이 칸을 지날 때마다 걸리는 래칫 튐이다.
+  var TICK = 22, N = 5, TRACK_H = 110, MAX_TICK = TICK * N, RAW_MAX = 150;
+  var AMP = 10, TAU = 0.15, W = 26;
+
+  var raw = 0, lastTick = 0, burstActive = false, burstStart = 0;
+  var dragging = false, startY = 0, startRaw = 0, released = true;
+
+  function triggerBurst(now) { burstActive = true; burstStart = now; }
+
+  function frame(now) {
+    var clamped = Math.min(raw, MAX_TICK);
+    var tickIndex = Math.floor(clamped / TICK);
+    if (tickIndex > lastTick) { triggerBurst(now); }
+    lastTick = tickIndex;
+
+    var basePos = (clamped / MAX_TICK) * TRACK_H;
+    var burst = 0;
+    if (burstActive) {
+      var t = (now - burstStart) / 1000;
+      burst = AMP * Math.exp(-t / TAU) * Math.sin(t * W);
+      if (t > 0.6) { burstActive = false; }
+    }
+    marker.style.transform = 'translateY(' + (-(basePos) + burst).toFixed(1) + 'px)';
+    list.style.transform = 'translateY(' + (clamped * 0.35).toFixed(1) + 'px)';
+    hint.textContent = raw > 4 ? ('칸 ' + Math.min(tickIndex, N) + '/' + N) : '아래로 당기세요';
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  var committing = false, commitTimer = null;
+  function commit() {
+    committing = true;
+    hint.textContent = '새로고침 중';
+    commitTimer = setTimeout(function () {
+      committing = false;
+      raw = 0; lastTick = 0;
+      hint.textContent = '아래로 당기세요';
+    }, 620);
+  }
+
+  function onDown(y) { if (committing) { return; } dragging = true; released = false; startY = y; startRaw = raw; }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(RAW_MAX, startRaw + (y - startY)));
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false; released = true;
+    if (raw >= MAX_TICK) { commit(); } else { raw = 0; lastTick = 0; }
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (committing) { return; }
+    autoRaw += 16;
+    if (autoRaw >= MAX_TICK) { raw = MAX_TICK; autoRaw = 0; commit(); return; }
+    raw = autoRaw;
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } if (commitTimer) { clearTimeout(commitTimer); } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 160); }
+})();
+</script>
+</body>
+</html>

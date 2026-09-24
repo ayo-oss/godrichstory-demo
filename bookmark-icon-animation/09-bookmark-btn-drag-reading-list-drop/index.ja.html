@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドラッグして読書リストに落とすブックマーク — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dg is-demo" id="dg">
+  <p class="dg__caption">ドラッグしてリストに保存</p>
+  <div class="dg__scene" id="dgScene">
+    <div class="dg__drop" id="dgDrop">
+      <span class="dg__dropLabel">リーディングリストに落とす</span>
+    </div>
+    <button class="dg__chip" id="dgChip" type="button" aria-pressed="false">
+      <svg class="dg__icon" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true" focusable="false">
+        <path class="dg__shape" d="M6.5 3A1.5 1.5 0 0 1 8 1.5h8A1.5 1.5 0 0 1 17.5 3v18.2a.9.9 0 0 1-1.38.76L12 19.1l-4.12 2.86A.9.9 0 0 1 6.5 21.2Z"/>
+      </svg>
+    </button>
+  </div>
+  <p class="dg__status" id="dgStatus" aria-live="polite">リスト外</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var BOOKMARK_DRAG_SNAP_PX = 24;
+  var DRAG_INERTIA_DECAY = 0.86;
+  var DRAG_SETTLE_RATE = 0.22;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("dg");
+  var scene = document.getElementById("dgScene");
+  var chip = document.getElementById("dgChip");
+  var drop = document.getElementById("dgDrop");
+  var status = document.getElementById("dgStatus");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var dropX = 0, dropY = 78;
+  var chipX = 0, chipY = 0;
+  var velX = 0, velY = 0;
+  var targetX = 0, targetY = 0;
+  var dragging = false;
+  var saved = false;
+  var lastPX = 0, lastPY = 0;
+
+  function setSaved(v) {
+    saved = v;
+    chip.setAttribute("aria-pressed", String(v));
+    status.textContent = v ? "保存済み" : "リスト外";
+    drop.classList.toggle("dg__drop--filled", v);
+  }
+
+  // 값 하나: 놓은 지점과 드롭존 사이 거리 vs BOOKMARK_DRAG_SNAP_PX → 목록에 스냅하거나 원위치로 튕긴다.
+  function release() {
+    var dx = chipX - dropX, dy = chipY - dropY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= BOOKMARK_DRAG_SNAP_PX) {
+      targetX = dropX; targetY = dropY;
+      setSaved(true);
+    } else {
+      targetX = 0; targetY = 0;
+      setSaved(false);
+    }
+  }
+
+  function startDrag(clientX, clientY) {
+    root.classList.remove("is-demo");
+    dragging = true;
+    velX = 0; velY = 0;
+    lastPX = clientX; lastPY = clientY;
+  }
+
+  function moveDrag(clientX, clientY) {
+    var dx = clientX - lastPX, dy = clientY - lastPY;
+    chipX += dx; chipY += dy;
+    velX = dx; velY = dy;
+    lastPX = clientX; lastPY = clientY;
+  }
+
+  chip.addEventListener("pointerdown", function (e) {
+    chip.setPointerCapture(e.pointerId);
+    startDrag(e.clientX, e.clientY);
+  });
+  chip.addEventListener("pointermove", function (e) {
+    if (dragging) moveDrag(e.clientX, e.clientY);
+  });
+  chip.addEventListener("pointerup", function () {
+    if (dragging) { dragging = false; release(); }
+  });
+  chip.addEventListener("click", function () {
+    if (dragging) return;
+    root.classList.remove("is-demo");
+    if (saved) { targetX = 0; targetY = 0; setSaved(false); }
+    else { targetX = dropX; targetY = dropY; setSaved(true); }
+  });
+
+  function settle(dt) {
+    if (dragging) return;
+    if (!reduce) {
+      chipX += velX; chipY += velY;
+      velX *= DRAG_INERTIA_DECAY; velY *= DRAG_INERTIA_DECAY;
+      chipX += (targetX - chipX) * DRAG_SETTLE_RATE;
+      chipY += (targetY - chipY) * DRAG_SETTLE_RATE;
+    } else {
+      chipX = targetX; chipY = targetY; velX = 0; velY = 0;
+    }
+  }
+
+  function render() {
+    chip.style.transform = "translate(" + chipX.toFixed(2) + "px, " + chipY.toFixed(2) + "px)" +
+      (dragging ? " scale(1.06)" : "");
+    var near = Math.abs(chipX - dropX) < 40 && Math.abs(chipY - dropY) < 40;
+    drop.classList.toggle("dg__drop--near", near && (dragging || !saved && targetX === dropX));
+  }
+
+  // .is-demo 자동재생: 실제 pointer 이벤트 없이 chipX/Y·release() 를 같은 경로로 호출한다.
+  var start = null;
+  var prevT = 0;
+  var phase = "idle";
+  function synth(t) {
+    if (t > 0.1 && t < 0.55 && phase === "idle") {
+      phase = "dragIn";
+      dragging = true;
+    }
+    if (phase === "dragIn") {
+      var p = (t - 0.1) / 0.45;
+      p = Math.max(0, Math.min(1, p));
+      chipX = dropX * p; chipY = dropY * p;
+      if (t >= 0.55) { dragging = false; phase = "afterIn"; release(); }
+    }
+    if (t > 1.0 && t < 1.4 && phase === "afterIn") {
+      phase = "dragOut";
+      dragging = true;
+    }
+    if (phase === "dragOut") {
+      var q = (t - 1.0) / 0.4;
+      q = Math.max(0, Math.min(1, q));
+      chipX = dropX * (1 - q); chipY = dropY * (1 - q);
+      if (t >= 1.4) { dragging = false; phase = "done"; release(); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) start = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) { phase = "idle"; }
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) {
+      synth(t);
+    }
+    settle();
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

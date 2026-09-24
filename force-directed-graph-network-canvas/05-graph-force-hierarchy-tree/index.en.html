@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchy tree — 네트워크 그래프 캔버스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ge is-demo" id="geRoot" role="img" aria-label="Hierarchy tree demo radiating from a root" tabindex="0">
+  <canvas class="ge__cv" id="geCv"></canvas>
+  <p class="ge__hint">
+    <span class="ge__title">Hierarchy tree</span>
+    <span class="ge__desc">Force is calculated only within a ring whose radius grows with each depth</span>
+  </p>
+  <div class="ge__bar">
+    <span class="ge__meta">21 nodes · 3 levels · rAF</span>
+    <span class="ge__meta ge__meta--dim">lineTo · arc · Math.atan2</span>
+  </div>
+</div>
+</main>
+<script>
+// Hierarchy tree(05) — 루트에서 깊이가 늘 때마다 반지름이 커지는 링을 목표로 하는
+// 방사(radial) 스프링과, 같은 레벨끼리만 각도로 밀어내는 접선 힘을 합쳐 방향성
+// 있는 조직도가 저절로 정렬된다. Math.atan2 로 루트 기준 각도를 매 프레임 다시 잰다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var LEVELS = 3;
+  var PER_LEVEL = 7;       // 레벨마다 노드 수
+  var RSTEP = 40;          // 레벨 하나당 늘어나는 목표 반지름
+  // ────────────────────────
+  var RADIAL_K = 0.06;
+  var TANGENT_K = 60;
+  var PARENT_K = 0.03;
+  var DAMP = 0.95;
+  var JITTER = 46;
+  var OMEGA = 0.55;
+  var NR = 5;
+
+  var root = document.getElementById('geRoot');
+  var cvEl = document.getElementById('geCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_PANEL = tokRGB('--ge-panel');
+  var C_EDGE  = tokRGB('--ge-edge');
+  var C_NODE  = tokRGB('--ge-node');
+  var C_ROOT  = tokRGB('--ge-root');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x327005);
+
+  var N, px, py, vx, vy, level, parent;
+
+  function buildGraph() {
+    N = 1 + LEVELS * PER_LEVEL;
+    px = new Float32Array(N); py = new Float32Array(N);
+    vx = new Float32Array(N); vy = new Float32Array(N);
+    level = new Int8Array(N); parent = new Int32Array(N);
+    var cx = W / 2, cy = H / 2;
+    px[0] = cx; py[0] = cy; level[0] = 0; parent[0] = -1;
+    var idx = 1;
+    for (var lv = 1; lv <= LEVELS; lv++) {
+      var prevStart = lv === 1 ? 0 : 1 + (lv - 2) * PER_LEVEL;
+      var prevCount = lv === 1 ? 1 : PER_LEVEL;
+      for (var k = 0; k < PER_LEVEL; k++) {
+        level[idx] = lv;
+        parent[idx] = prevStart + Math.floor(rand() * prevCount);
+        var a = rand() * Math.PI * 2;
+        var r = lv * RSTEP;
+        px[idx] = cx + Math.cos(a) * r; py[idx] = cy + Math.sin(a) * r;
+        idx++;
+      }
+    }
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildGraph();
+  }
+
+  function step(dt) {
+    var fx = new Float32Array(N), fy = new Float32Array(N);
+    var cx = px[0], cy = py[0];
+    var ang = new Float32Array(N), rd = new Float32Array(N);
+    for (var i = 1; i < N; i++) {
+      var dx = px[i] - cx, dy = py[i] - cy;
+      rd[i] = Math.hypot(dx, dy) || 0.001;
+      ang[i] = Math.atan2(dy, dx);
+      var targetR = level[i] * RSTEP;
+      var diff = (rd[i] - targetR) * RADIAL_K;
+      var ux = dx / rd[i], uy = dy / rd[i];
+      fx[i] -= ux * diff; fy[i] -= uy * diff;
+      // 부모 쪽으로 약한 스프링 — 트리 모양을 유지
+      var pdx = px[parent[i]] - px[i], pdy = py[parent[i]] - py[i];
+      fx[i] += pdx * PARENT_K; fy[i] += pdy * PARENT_K;
+    }
+    // 같은 레벨끼리 각도로 밀어내기(접선 힘) — 겹치지 않게 링 위에 퍼진다
+    for (var a = 1; a < N; a++) {
+      for (var b = a + 1; b < N; b++) {
+        if (level[a] !== level[b]) continue;
+        var da = ang[a] - ang[b];
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        if (Math.abs(da) < 0.001) da = 0.02;
+        var strength = TANGENT_K / (Math.abs(da) * rd[a] + 8);
+        var sign = da > 0 ? 1 : -1;
+        // 접선 방향(반지름에 수직) 힘
+        var tx = -Math.sin(ang[a]), ty = Math.cos(ang[a]);
+        fx[a] += tx * strength * sign; fy[a] += ty * strength * sign;
+        var tx2 = -Math.sin(ang[b]), ty2 = Math.cos(ang[b]);
+        fx[b] -= tx2 * strength * sign; fy[b] -= ty2 * strength * sign;
+      }
+    }
+    for (var n = 1; n < N; n++) {
+      fx[n] += (rand() - 0.5) * JITTER;
+      fy[n] += (rand() - 0.5) * JITTER;
+      vx[n] = (vx[n] + fx[n] * dt) * DAMP;
+      vy[n] = (vy[n] + fy[n] * dt) * DAMP;
+      px[n] += vx[n] * dt; py[n] += vy[n] * dt;
+    }
+  }
+
+  function rotateAll(dtheta) {
+    var cx = px[0], cy = py[0], cs = Math.cos(dtheta), sn = Math.sin(dtheta);
+    for (var i = 1; i < N; i++) {
+      var rx = px[i] - cx, ry = py[i] - cy;
+      px[i] = cx + rx * cs - ry * sn;
+      py[i] = cy + rx * sn + ry * cs;
+    }
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + C_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = 'rgba(' + C_EDGE.join(',') + ',0.6)';
+    ctx.beginPath();
+    for (var i = 1; i < N; i++) {
+      ctx.moveTo(px[parent[i]], py[parent[i]]);
+      ctx.lineTo(px[i], py[i]);
+    }
+    ctx.stroke();
+
+    for (var n = 1; n < N; n++) {
+      var pulse = 0.5 + 0.5 * Math.sin(t * 2 + n * 0.8);
+      ctx.fillStyle = 'rgba(' + C_NODE.join(',') + ',' + (0.18 + 0.16 * pulse).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(px[n], py[n], NR + 4 + pulse * 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgb(' + C_NODE.join(',') + ')';
+      ctx.beginPath(); ctx.arc(px[n], py[n], NR, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = 'rgb(' + C_ROOT.join(',') + ')';
+    ctx.beginPath(); ctx.arc(px[0], py[0], NR + 2.4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1, last = -1;
+  function frame(now) {
+    if (t0 < 0) { t0 = now; last = now; }
+    var dt = Math.min((now - last) / 1000, 0.05); last = now;
+    var t = (now - t0) / 1000;
+    step(dt);
+    rotateAll(OMEGA * dt);
+    draw(t);
+    requestAnimationFrame(frame);
+  }
+  function settle() {
+    for (var s = 0; s < 260; s++) step(1 / 60);
+    draw(0);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) settle();
+  });
+
+  fit();
+  if (reduce) {
+    settle();
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

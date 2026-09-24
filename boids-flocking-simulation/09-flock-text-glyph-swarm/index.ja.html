@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文字を作る群れ — BOIDSで再構成される文章 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor" opacity=".9"><rect x="36" y="52" width="26" height="26" rx="4"/><rect x="88" y="40" width="18" height="18" rx="3"/><rect x="150" y="58" width="22" height="22" rx="4"/><rect x="60" y="112" width="20" height="20" rx="4"/><rect x="124" y="126" width="26" height="26" rx="5"/><rect x="182" y="104" width="16" height="16" rx="3"/><rect x="46" y="176" width="22" height="22" rx="4"/><rect x="110" y="188" width="18" height="18" rx="3"/><rect x="168" y="172" width="24" height="24" rx="4"/></g></svg>
+    <span>文章そのものが目標点です — ポインター(または矢印キー)で文字をかき分けると群れが散らばり、離れるとBOIDSに再び組み上がります</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="文字を作る群れ実験パネル — 矢印キーで文字をかき分けられます" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">320</b>個の目標点・スプリング再構成</span>
+    <span class="cd__meta cd__meta--dim">getImageDataサンプリング・fillTextオフスクリーン・requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 글자를 이루는 떼(09). 오프스크린 캔버스에 굵은 산세리프로 "BOIDS" 를 fillText 로 칠고
+// getImageData 로 밝은 픽셀 좌표를 샘플(약 300~400점)해 개체별 목표점으로 배정한다.
+// 스티어링 = 목표점 스프링(강) + 군집 3규칙(약) + 포인터 도망 벡터.
+// 포인터가 없는 렌더 환경에서는 시드 고정 가상 포인터가 주기적으로 문장을 가로질러
+// 흩었다 모으게 한다(23/23 프레임 보장). 오프스크린은 화면에 안 보인다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N = 320;           // 개체 수(샘플 점 수에 맞춰 상한에서 잘린다)
+  var FLEE_R = 120;      // 도망 반경(px) — 변형 "도망 반경" 축(28 → 120), 화면 넓은 영역까지 흩어진다
+  var SPRING = 6.0;      // 목표점 스프링 세기 — 낮춰 흩어진 뒤 되돌아오는 데 시간이 걸리게 한다
+  var TRAIL = 0.07;      // 잔상 덮개 알파 — 흩어지는 궤적을 남겨 누적면적을 넓힌다
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x09b0d5;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--flock-ink');
+  var C_MIST  = tokRGB('--flock-mist');
+  var C_LILAC = tokRGB('--flock-lilac');
+  var C_GLOW  = tokRGB('--flock-glow');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;      // 포인터(0..1) — 없으면 가상
+  var manual = false;
+  var firstFrame = true;   // 리사이즈마다 잔상 캔버스를 다시 깔아야 한다
+
+  // ── 이웃 반경 안 3벡터(약하게) ──
+  var NEI_R = 22, NEI_R2 = NEI_R * NEI_R, SEP_R = 8;
+  var W_SEP = 9, W_ALI = 2.4, W_COH = 1.2;
+
+  // ── 목표점 샘플 — 오프스크린 fillText → getImageData ──
+  var targets = [];    // {x,y} 정규화(0..1) 좌표
+  var boids = [];
+  var FONT_STACK = '900 100px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+  var sampleGap = 4;   // 픽셀 샘플 간격
+
+  function buildTargets() {
+    targets = [];
+    var off = document.createElement('canvas');
+    off.width = Math.max(64, Math.round(W));
+    off.height = Math.max(32, Math.round(H));
+    var octx = off.getContext('2d');
+    octx.fillStyle = '#000';
+    octx.fillRect(0, 0, off.width, off.height);
+    octx.fillStyle = '#fff';
+    octx.font = FONT_STACK;
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    var word = 'BOIDS';
+    octx.fillText(word, off.width / 2, off.height / 2);
+    var availW = off.width * 0.92;
+    var m = octx.measureText(word);
+    if (m.width > availW) {
+      // 폭이 넘치면 글꼴 크기를 비례 축소해 다시 칠한다
+      var scale = availW / m.width;
+      var px2 = Math.max(28, Math.floor(100 * scale));
+      octx.font = '900 ' + px2 + 'px "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+      octx.fillText(word, off.width / 2, off.height / 2);
+    }
+    var img = octx.getImageData(0, 0, off.width, off.height);
+    var d = img.data, ow = off.width, oh = off.height;
+    for (var yy = 0; yy < oh; yy += sampleGap) {
+      for (var xx = 0; xx < ow; xx += sampleGap) {
+        if (d[(yy * ow + xx) * 4] > 128) {
+          targets.push({ x: xx / ow, y: yy / oh });
+        }
+      }
+    }
+    // 개체 수를 목표점 수에 맞춰 재배치(목표 인덱스는 그대로 유지)
+    var count = Math.min(N, targets.length);
+    boids = [];
+    for (var i = 0; i < count; i++) {
+      var tg = targets[i % targets.length];
+      boids.push({
+        x: tg.x * W + (rand() - 0.5) * 40,
+        y: tg.y * H + (rand() - 0.5) * 40,
+        vx: (rand() - 0.5) * 20,
+        vy: (rand() - 0.5) * 20,
+        tx: tg.x, ty: tg.y,
+        ph: rand() * TAU
+      });
+    }
+    nOut.textContent = String(count);
+  }
+
+  function flockForce(idx) {
+    var p = boids[idx];
+    var sepX = 0, sepY = 0, aliX = 0, aliY = 0, cohX = 0, cohY = 0, cnt = 0;
+    for (var j = 0; j < boids.length; j++) {
+      if (j === idx) continue;
+      var q = boids[j];
+      var dx = q.x - p.x, dy = q.y - p.y;
+      if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+      if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+      var d2 = dx * dx + dy * dy;
+      if (d2 > NEI_R2) continue;
+      var d = Math.sqrt(d2) || 0.0001;
+      if (d < SEP_R) { sepX -= dx / d; sepY -= dy / d; }
+      aliX += q.vx; aliY += q.vy;
+      cohX += dx; cohY += dy;
+      cnt++;
+    }
+    var fx = sepX * W_SEP, fy = sepY * W_SEP;
+    if (cnt > 0) {
+      fx += (aliX / cnt - p.vx) * (W_ALI / 10);
+      fy += (aliY / cnt - p.vy) * (W_ALI / 10);
+      fx += (cohX / cnt) * (W_COH / 40);
+      fy += (cohY / cnt) * (W_COH / 40);
+    }
+    return [fx, fy];
+  }
+
+  var STILL_T = 1.5;
+
+  function draw(tSec, dt) {
+    // 잔상 덮개 — 첫 프레임은 불투명 full, 이후 반투명 TRAIL 로 흩어지는 궤적을 남긴다
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ',' + (firstFrame ? 1 : TRAIL).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+    firstFrame = false;
+
+    // 가상 포인터 — 주기적으로 문장을 가로질러 흩었다 모으게(23/23 보장)
+    var sX, sY;
+    if (manual) { sX = px01 * W; sY = py01 * H; }
+    else {
+      var cyc = (tSec % 6.2) / 6.2;                 // 6.2초 주기 — 더 자주 문장을 가로지른다
+      var sweep = Math.sin(cyc * TAU);
+      sX = W * (0.5 + sweep * 0.5);
+      sY = H * (0.5 + 0.4 * Math.cos(cyc * TAU * 2));
+    }
+
+    // ── 목표점 미광 — 문장 자리를 은은히 비춘다(재조립 방향 감각) ──
+    var breathe = 0.85 + 0.15 * Math.sin(tSec * 1.8);
+    var gA = 0.05 * breathe;
+    var rg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.05, W / 2, H / 2, Math.max(W, H) * 0.52);
+    rg.addColorStop(0, 'rgba(' + C_GLOW[0] + ',' + C_GLOW[1] + ',' + C_GLOW[2] + ',' + gA.toFixed(3) + ')');
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, W, H);
+
+    // ── 개체 — 목표 스프링 + 군집(약) + 도망 ──
+    for (var i = 0; i < boids.length; i++) {
+      var p = boids[i];
+      var dx = p.tx * W - p.x, dy = p.ty * H - p.y;
+      var ax = dx * SPRING, ay = dy * SPRING;
+      var ff = flockForce(i);
+      ax += ff[0]; ay += ff[1];
+      var dxs = p.x - sX, dys = p.y - sY;
+      var ds = Math.hypot(dxs, dys) || 0.0001;
+      if (ds < FLEE_R) {
+        var fm = (1 - ds / FLEE_R) * 460;
+        ax += (dxs / ds) * fm;
+        ay += (dys / ds) * fm;
+      }
+      var jitX = Math.sin(tSec * 6.3 + p.ph) * 34;
+      var jitY = Math.cos(tSec * 5.1 + p.ph * 1.3) * 30;
+      ax += jitX; ay += jitY;
+      p.vx += ax * dt; p.vy += ay * dt;
+      var damp = Math.pow(0.86, dt * 60);
+      p.vx *= damp; p.vy *= damp;
+      var sp = Math.hypot(p.vx, p.vy);
+      var maxV = 260;
+      if (sp > maxV) { p.vx = p.vx / sp * maxV; p.vy = p.vy / sp * maxV; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+
+      // 글자 색 $flock-mist — 도망 중(목표에서 멀수록) 라일락으로 물든다
+      var far = Math.min(1, Math.hypot(dx, dy) / 60);
+      var rC = C_MIST[0] + (C_LILAC[0] - C_MIST[0]) * far;
+      var gC = C_MIST[1] + (C_LILAC[1] - C_MIST[1]) * far;
+      var bC = C_MIST[2] + (C_LILAC[2] - C_MIST[2]) * far;
+      var rad = 2.6;
+      ctx.fillStyle = 'rgba(' + (rC | 0) + ',' + (gC | 0) + ',' + (bC | 0) + ',0.85)';
+      ctx.fillRect(p.x - rad, p.y - rad, rad * 2, rad * 2);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    firstFrame = true;   // 리사이즈마다 잔상 캔버스를 다시 깔아야 한다
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    draw(t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  field.addEventListener('pointerleave', function () { manual = false; });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); px01 = 0.5; py01 = 0.5; }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  window.addEventListener('resize', function () { fit(); buildTargets(); if (reduce) draw(STILL_T, 0.016); });
+
+  fit();
+  buildTargets();
+  if (reduce) {
+    draw(STILL_T, 0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

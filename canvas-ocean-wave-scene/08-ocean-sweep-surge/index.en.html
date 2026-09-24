@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>해일 surge 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ss" id="ss">
+  <p class="ss__hint">
+    <svg class="ss__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M16 120c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".25"/><path d="M16 168c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".15"/><path d="M228.92 49.09a112 112 0 1 0 14 84.91a8 8 0 0 0-15.5-4a96 96 0 1 1-12-72.91A8 8 0 0 1 216 71.63V40a8 8 0 0 1-8-8h-31.63a8 8 0 0 1-5.65-13.09ZM64 104a12 12 0 1 1 12 12a12 12 0 0 1-12-12m40 64a12 12 0 1 1 12 12a12 12 0 0 1-12-12m72-16a16 16 0 1 1 16 16a16 16 0 0 1-16-16" opacity=".9"/></g></svg>
+    <span>A long-wavelength surge sweeps across the surface, pushing the waterline up — swipe fast and the surge hits harder</span>
+  </p>
+  <div class="ss__field" id="field" role="application" aria-label="Sweep surge playground" tabindex="0">
+    <canvas class="ss__cv" id="cv"></canvas>
+    <b class="ss__badge" aria-hidden="true"><span class="ss__badgeNum" id="surgeVal">surge 1.0</span><span class="ss__badgeUnit" id="windVal">wind 1.0</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 해일 surge — 01 과 같은 뿌리(정현파 6개 mulberry32(7))의 파도장에 거리·시간의 함수로
+// 국소 진폭 엔벨로프를 얹는다. 엔벨로프 E(y,t) = 서지 파형(느린 정현파 하나)을 세로 거리로
+// 밀어 올려 한 덩어리의 물이 아래에서 위(horizon 쪽)로 밀려가게 한다. 엔벨로프가 1보다 크면
+// 그 구간 파도의 진폭이 부풀고(밀려오는 물), 지나간 뒤 1보다 낮게 꺼지면 수면이 가라앉는
+// 썰물(드로백)까지 잡힌다. 파도 색 램프도 엔벨로프를 따라 밝아지고 어두워져 "물벽"이 읽힌다.
+// surge 속도·진폭은 wind 세기(자동 리사주 + 포인터 실측)와 연동된다.
+var root = document.getElementById('ss');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var surgeVal = document.getElementById('surgeVal');
+var windVal = document.getElementById('windVal');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var CREST = [v('--crest'), v('--crest-2')];   // surge 마루(밀려오는 벽) — 민트
+var TROUGH = [v('--trough'), v('--trough-2')]; // 골 — 파랑
+var SINK = v('--sink');                        // 썰물(가라앉은 수면) — 깊은 남색
+
+var COLS = 110;   // 파도장 가로 칸 수(01 과 동일)
+var STEP = 3;     // 격자 한 칸이 렌더 버퍼에서 차지하는 픽셀
+var NW = 6;       // 겹칠 정현파 개수(공통 물리)
+var SURGE_LAM = 0.9; // 서지 엔벨로프의 파장(판 높이 비율) — 화면보다 길다
+var SURGE_GAIN = 1.9;// 엔벨로프 최대 부풀림 — 진폭이 최대 2.9배까지
+var SURGE_OM  = 0.5; // 서지 각속도(×wind 세기) — 한 스윕이 약 12초에 화면을 지난다
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    var u = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((u ^ (u >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var rng = mulberry32(7);
+
+var WAVES = [];
+(function () {
+  var lam = 34;
+  for (var i = 0; i < NW; i++) {
+    var ang = rng() * Math.PI * 2;
+    WAVES.push({
+      lam: lam,
+      freq: (Math.PI * 2) / lam,
+      dirX: Math.cos(ang), dirY: Math.sin(ang),
+      amp: 0.58 / (i * 0.62 + 1),
+      spd: 0.55 + rng() * 0.25,
+      ph: rng() * Math.PI * 2
+    });
+    lam *= 0.55;
+  }
+})();
+for (var w = 0; w < NW; w++) {
+  WAVES[w].om = WAVES[w].spd * 3.6 * Math.sqrt(1 / WAVES[w].lam) * 6;
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, ROWS = 0;
+var hgt = null;                           // 파도장 높이(엔벨로프 부풀림 반영)
+var env = null;                           // surge 엔벨로프(행별 0.2~2.9)
+var buf = null, bctx = null, out = null;
+var RW = 0, RH = 0;
+var raf = 0, auto = true, nowSec = 0;
+var wind = 1.0, windT = 1.0;
+var windAng = 0.5, windAngT = 0.5;
+var surge = 1.0;                          // 표시용 surge 세기(엔벨로프 최대값)
+var lastPX = -1, lastPY = -1, lastPT = 0;
+
+function hex2rgb(s) {
+  var pm = /^\s*rgb\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)\s*$/.exec(s);
+  if (pm) return [Math.round(pm[1] * 2.55), Math.round(pm[2] * 2.55), Math.round(pm[3] * 2.55)];
+  s = s.replace('#', '');
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+  var n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+var C0 = hex2rgb(CREST[0]), C1 = hex2rgb(CREST[1]);
+var T0 = hex2rgb(TROUGH[0]), T1 = hex2rgb(TROUGH[1]);
+var SK = hex2rgb(SINK);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROWS = Math.max(40, Math.round(COLS * H / W));
+  var n = COLS * ROWS;
+  hgt = new Float32Array(n);
+  env = new Float32Array(ROWS);
+  RW = COLS * STEP; RH = ROWS * STEP;
+  buf = document.createElement('canvas');
+  buf.width = RW; buf.height = RH;
+  bctx = buf.getContext('2d');
+  out = bctx.createImageData(RW, RH);
+}
+
+// 파도장 + 서지 엔벨로프 — 행(세로 위치)마다 엔벨로프를 먼저 계산:
+//   E(y) = 1 + SURGE_GAIN·max(0, sin((y/ROWS·2π/SURGE_LAM) - t·ω·wind))² … 밀려오는 물
+//   그리고 지나간 자리를 1 아래로 살짝 눌러 썰물(드로백)을 만든다.
+// 행의 엔벨로프가 그 행 파도 전체의 진폭과 밝기를 함께 부풀린다 — 물이 덩어리로 움직인다.
+function fieldcalc(t, wstr, wang) {
+  // 엔벨로프 — 아래(근접)에서 위(horizon)로 이동하는 느린 파형. 바람이 세면 빠르고 높다
+  var om = SURGE_OM * (0.55 + wind * 0.75);
+  var i = 0;
+  for (var y = 0; y < ROWS; y++) {
+    var yn = y / ROWS;
+    var sw = Math.sin(yn * Math.PI * 2 / SURGE_LAM - t * om + 0.7);
+    var crest = sw > 0 ? sw * sw : 0;                 // 밀려오는 물벽(양의 반파만)
+    var dip = sw < 0 ? -sw * sw * 0.42 : 0;           // 지나간 뒤 가라앉는 썰물
+    var e = 1 + crest * SURGE_GAIN * (0.55 + wind * 0.5) - dip;
+    env[y] = e;
+    for (var x = 0; x < COLS; x++, i++) {
+      var h = 0;
+      for (var w2 = 0; w2 < NW; w2++) {
+        var WV = WAVES[w2];
+        var da = wang * 0.5;
+        var dx = WV.dirX * Math.cos(da) - WV.dirY * Math.sin(da);
+        var dy = WV.dirX * Math.sin(da) + WV.dirY * Math.cos(da);
+        var ph = (x * dx + y * dy) * WV.freq * 0.62 + t * WV.om + WV.ph;
+        h += WV.amp * wstr * Math.sin(ph);
+      }
+      // 엔벨로프가 진폭을 부풀리고 바깥으로도 살짝 민다 — 물이 위로 볼록해진다
+      hgt[i] = h * e + (e - 1) * 0.34;
+    }
+  }
+}
+
+// 렌더 — 높이→색 램프. 엔벨로프 > 1(밀려옴)이면 마루 민트로, < 1(썰물)이면 골 색을
+// 깊은 남색(SINK)으로 더 끌어내려 수면이 잠기는 인상을 준다.
+function render() {
+  var o = out.data;
+  for (var y = 0; y < ROWS; y++) {
+    var row = y * COLS;
+    var e = env[y];
+    for (var x = 0; x < COLS; x++) {
+      var i = row + x;
+      var h = hgt[i];
+      var u = h * 1.24 + 0.5;
+      if (u < 0) u = 0; else if (u > 1) u = 1;
+      var r, g, b;
+      if (u > 0.5) {
+        var k = (u - 0.5) * 2;
+        r = C1[0] + (C0[0] - C1[0]) * k;
+        g = C1[1] + (C0[1] - C1[1]) * k;
+        b = C1[2] + (C0[2] - C1[2]) * k;
+      } else {
+        var k2 = u * 2;
+        r = T0[0] + (T1[0] - T0[0]) * k2;
+        g = T0[1] + (T1[1] - T0[1]) * k2;
+        b = T0[2] + (T1[2] - T0[2]) * k2;
+      }
+      // 엔벨로프 컬러 — 밀려오는 벽은 밝게, 빠지는 썰물은 SINK 로 가라앉는다
+      if (e > 1) {
+        var up = Math.min(1, (e - 1) * 0.55);
+        r += (C0[0] - r) * up * 0.4;
+        g += (C0[1] - g) * up * 0.4;
+        b += (C0[2] - b) * up * 0.4;
+      } else {
+        var dn = Math.min(1, (1 - e) * 0.85);
+        r += (SK[0] - r) * dn;
+        g += (SK[1] - g) * dn;
+        b += (SK[2] - b) * dn;
+      }
+      for (var sy = 0; sy < STEP; sy++) {
+        var base = ((y * STEP + sy) * RW + x * STEP) * 4;
+        for (var sx = 0; sx < STEP; sx++, base += 4) {
+          o[base] = r;
+          o[base + 1] = g;
+          o[base + 2] = b;
+          o[base + 3] = 255;
+        }
+      }
+    }
+  }
+  bctx.putImageData(out, 0, 0);
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+
+function frame(now) {
+  nowSec = now / 1000;
+  if (auto) {
+    var th = nowSec * 0.31;
+    windT = 1.05 + Math.sin(th * 0.9 + 0.4) * 0.55 + Math.sin(th * 2.3) * 0.12;
+    windAngT = 0.5 + Math.sin(th * 0.42) * 0.85;
+  }
+  wind += (windT - wind) * 0.05;
+  windAng += (windAngT - windAng) * 0.05;
+  fieldcalc(nowSec, wind, windAng);
+  render();
+  // 표시용 surge 세기 — 현재 엔벨로프 최대값
+  var mx = 0;
+  for (var y = 0; y < ROWS; y++) if (env[y] > mx) mx = env[y];
+  surge = mx;
+  surgeVal.textContent = 'surge ' + surge.toFixed(1);
+  windVal.textContent = 'wind ' + wind.toFixed(2);
+  raf = requestAnimationFrame(frame);
+}
+
+// 정지판 — 루프 없이 시드가 정한 한 시각의 서지가 살아 있는 정적 한 장
+function still() {
+  fieldcalc(7.3, 1.35, 0.5);
+  render();
+}
+
+function localXY(e) {
+  var r = field.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+field.addEventListener('pointermove', function (e) {
+  var p = localXY(e);
+  var t = performance.now();
+  if (lastPX >= 0 && t > lastPT) {
+    var vx = p[0] - lastPX, vy = p[1] - lastPY;
+    var sp2 = Math.sqrt(vx * vx + vy * vy);
+    if (sp2 > 0.5) {
+      windT = Math.max(0.35, Math.min(2.1, 0.9 + sp2 * 0.02));
+      windAngT = Math.atan2(vy, vx) * 0.16;
+    }
+  }
+  lastPX = p[0]; lastPY = p[1]; lastPT = t;
+  auto = false;
+});
+field.addEventListener('pointerleave', function () {
+  auto = true;
+  lastPX = -1;
+});
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  auto = false;
+  windT = Math.max(0.35, Math.min(2.1, windT - d[1] * 0.18));
+  windAngT = windAngT + d[0] * 0.1;
+  if (reduce) { fieldcalc(nowSec || 3.1, windT, windAngT); render(); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+fit();
+if (reduce) {
+  root.classList.add('is-still');
+  still();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

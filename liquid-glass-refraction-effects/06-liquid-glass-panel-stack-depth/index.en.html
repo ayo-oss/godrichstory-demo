@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three glass panels floating in layered depth — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">Three glass panels at different depths float at their own rhythm and swap front-to-back order</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 판 세 장을 서로 다른 진폭·주기로 위아래로 띄우고(깊이감), 절반 주기마다
+  // 그리는 순서(앞뒤)를 바꾼다. depthFor 로 각 판의 스택 깊이(앞 0→뒤 n)를 구해
+  // 굴절(bend)·그림자(shadow)·흐림(blur, 굴절 샘플 반경)이 깊이에 비례해 늘어나게
+  // 하고, 순서가 바뀔 때는 STACK_TRANSITION_MS 동안 이전 깊이에서 새 깊이로 lerp 한다.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var scene = document.createElement('canvas');
+  scene.width = CALC_W; scene.height = CALC_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421061);
+    var sky = pctx.createLinearGradient(0, 0, 0, CALC_H);
+    sky.addColorStop(0, '#fff0e6');
+    sky.addColorStop(1, '#e8f6ff');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, CALC_W, CALC_H);
+    var cols = ['#b9a0ff', '#6ec8ff', '#4cd4a6', '#ff9ebb'];
+    for (var i = 0; i < cols.length; i += 1) {
+      pctx.beginPath();
+      pctx.arc(CALC_W * (0.12 + i * 0.26), CALC_H * (0.25 + (i % 2) * 0.45), CALC_H * 0.24, 0, Math.PI * 2);
+      pctx.fillStyle = cols[i];
+      pctx.globalAlpha = 0.45;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 46; k += 1) {
+      var px = rand() * CALC_W, py = rand() * CALC_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.1 + rand() * 0.18) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, CALC_W, CALC_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var EDGE_BAND = 10;
+  var PERIOD_MS = 2000;
+  var SLOT_MS = PERIOD_MS / 3;
+  var STACK_TRANSITION_MS = 220;
+  var BEND_PER_DEPTH = 3;
+  var BLUR_RADIUS_PER_DEPTH = 1.4;
+  var SHADOW_BASE_SIZE = 5;
+  var SHADOW_SIZE_PER_DEPTH = 2.5;
+  var SHADOW_BASE_ALPHA = 0.14;
+  var SHADOW_ALPHA_PER_DEPTH = 0.1;
+
+  var PANELS = [
+    { x0: 24, y0: 20, x1: 84, y1: 62, amp: 8, freq: 1, phase: 0, bend: 5, shine: 20 },
+    { x0: 58, y0: 34, x1: 118, y1: 76, amp: 6, freq: 1.4, phase: 1.4, bend: 4, shine: 16 },
+    { x0: 90, y0: 24, x1: 148, y1: 66, amp: 10, freq: 0.8, phase: 3.0, bend: 6, shine: 22 }
+  ];
+
+  function boxEdgeSample(x, y, x0, y0, x1, y1, band) {
+    var dl = x - x0, dr = x1 - x, dt = y - y0, db = y1 - y;
+    var dmin = Math.min(dl, dr, dt, db);
+    if (dmin >= band || dmin < 0) return { f: 0, nx: 0, ny: 0 };
+    var nx = 0, ny = 0;
+    if (dl < band) nx -= (band - dl);
+    if (dr < band) nx += (band - dr);
+    if (dt < band) ny -= (band - dt);
+    if (db < band) ny += (band - db);
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len > 0.0001) { nx /= len; ny /= len; }
+    return { f: Math.max(0, (band - dmin) / band), nx: nx, ny: ny };
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function orderForSlot(slot) {
+    slot = ((slot % 3) + 3) % 3;
+    if (slot === 0) return [0, 1, 2];
+    if (slot === 1) return [1, 2, 0];
+    return [2, 0, 1];
+  }
+
+  function stackOrder(t) {
+    return orderForSlot(Math.floor((t % PERIOD_MS) / SLOT_MS));
+  }
+
+  function depthFor(panelIdx, t) {
+    var cyc = t % PERIOD_MS;
+    var slot = Math.floor(cyc / SLOT_MS);
+    var tSlot = cyc - slot * SLOT_MS;
+    var curOrder = orderForSlot(slot);
+    var prevOrder = orderForSlot(slot - 1);
+    var curDepth = (PANELS.length - 1) - curOrder.indexOf(panelIdx);
+    var prevDepth = (PANELS.length - 1) - prevOrder.indexOf(panelIdx);
+    var blend = Math.min(1, tSlot / STACK_TRANSITION_MS);
+    var e = 1 - Math.pow(1 - blend, 2);
+    return prevDepth + (curDepth - prevDepth) * e;
+  }
+
+  function darkenBand(x0, y0, x1, y1, bandH, alpha) {
+    for (var y = Math.max(0, Math.round(y1)); y < Math.min(CALC_H, y1 + bandH); y += 1) {
+      var f = 1 - (y - y1) / bandH;
+      for (var x = Math.max(0, Math.round(x0 - 3)); x < Math.min(CALC_W, x1 + 3); x += 1) {
+        var i = (y * CALC_W + x) * 4;
+        outBuf[i] = outBuf[i] * (1 - alpha * f);
+        outBuf[i + 1] = outBuf[i + 1] * (1 - alpha * f);
+        outBuf[i + 2] = outBuf[i + 2] * (1 - alpha * f);
+      }
+    }
+  }
+
+  function renderFrame(t) {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb = sampleScene(x, y);
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+    var order = stackOrder(t);
+    for (var oi = 0; oi < order.length; oi += 1) {
+      var panelIdx = order[oi];
+      var p = PANELS[panelIdx];
+      var depth = depthFor(panelIdx, t);
+      var bend = p.bend + depth * BEND_PER_DEPTH;
+      var blurR = depth * BLUR_RADIUS_PER_DEPTH;
+      var shadowSize = SHADOW_BASE_SIZE + depth * SHADOW_SIZE_PER_DEPTH;
+      var shadowAlpha = SHADOW_BASE_ALPHA + depth * SHADOW_ALPHA_PER_DEPTH;
+      var bobY = p.amp * Math.sin(t * 2 * Math.PI / PERIOD_MS * p.freq + p.phase);
+      var x0 = p.x0, x1 = p.x1, y0 = p.y0 + bobY, y1 = p.y1 + bobY;
+      darkenBand(x0, y0, x1, y1, shadowSize, shadowAlpha);
+      for (var yy = Math.max(0, Math.round(y0)); yy < Math.min(CALC_H, y1); yy += 1) {
+        for (var xx = Math.max(0, Math.round(x0)); xx < Math.min(CALC_W, x1); xx += 1) {
+          var e = boxEdgeSample(xx, yy, x0, y0, x1, y1, EDGE_BAND);
+          var mag = e.f * bend;
+          var sxx = xx - e.nx * mag, syy = (yy - bobY) - e.ny * mag;
+          var c;
+          if (blurR > 0.05) {
+            var c0 = sampleScene(sxx, syy);
+            var c1 = sampleScene(sxx - blurR, syy);
+            var c2 = sampleScene(sxx + blurR, syy);
+            var c3 = sampleScene(sxx, syy - blurR);
+            var c4 = sampleScene(sxx, syy + blurR);
+            c = [
+              (c0[0] + c1[0] + c2[0] + c3[0] + c4[0]) / 5,
+              (c0[1] + c1[1] + c2[1] + c3[1] + c4[1]) / 5,
+              (c0[2] + c1[2] + c2[2] + c3[2] + c4[2]) / 5
+            ];
+          } else {
+            c = sampleScene(sxx, syy);
+          }
+          var s = e.f * p.shine;
+          var i2 = (yy * CALC_W + xx) * 4;
+          outBuf[i2] = Math.min(255, c[0] + s);
+          outBuf[i2 + 1] = Math.min(255, c[1] + s);
+          outBuf[i2 + 2] = Math.min(255, c[2] + s);
+        }
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

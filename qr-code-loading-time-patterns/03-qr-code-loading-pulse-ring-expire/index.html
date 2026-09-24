@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>남은 유효시간만큼 퍼지는 펄스 링 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pre is-demo" id="preRoot">
+  <div class="pre__badge" id="preBadge">남은 유효 100%</div>
+  <button class="pre__ctrl" id="preCtrl" type="button">일시정지</button>
+  <div class="pre__canvas-wrap">
+    <canvas class="pre__canvas" id="preCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // PULSE_RING_INTERVAL_MS — 변형 1: 320 → 700 으로 늘리면 링이 더 드문드문 퍼진다.
+  // 320 으로 좁혀 2초 측정 창 안에 동시에 겹치는 링 수를 늘린다(화면을 채우는 시연 스케줄).
+  var PULSE_RING_INTERVAL_MS = 320;
+  var LOOP_MS = 2000;
+  var RING_LIFE_MS = 1100;
+  var MAX_RADIUS = 88; // fit() 이 캔버스 크기에 맞춰 화면 폭까지 퍼지도록 재계산한다
+
+  var canvas = document.getElementById('preCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var badge = document.getElementById('preBadge');
+  var ctrl = document.getElementById('preCtrl');
+  var root = document.getElementById('preRoot');
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(407033);
+  var qrDots = [];
+  for (var y = 0; y < 9; y += 1) {
+    for (var x = 0; x < 9; x += 1) {
+      if (rand() < 0.42) qrDots.push({ x: x, y: y });
+    }
+  }
+
+  function ringsFor(elapsed) {
+    var out = [];
+    var firstIndex = Math.ceil((elapsed - RING_LIFE_MS) / PULSE_RING_INTERVAL_MS);
+    var lastIndex = Math.floor(elapsed / PULSE_RING_INTERVAL_MS);
+    for (var i = Math.max(0, firstIndex); i <= lastIndex; i += 1) {
+      var born = i * PULSE_RING_INTERVAL_MS;
+      var age = elapsed - born;
+      if (age < 0 || age > RING_LIFE_MS) continue;
+      out.push(age / RING_LIFE_MS);
+    }
+    return out;
+  }
+
+  // 계산된 시각 레이어: 캔버스 크기가 바뀌면 중심·최대 반경을 다시 잰다 —
+  // 링이 항상 스테이지 폭까지 퍼지게(278px 캡 없이 반응형).
+  var dpr = 1, cw = 240, ch = 200, cx = 120, cy = 100;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    cw = r.width; ch = r.height;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = cw / 2; cy = ch / 2;
+    MAX_RADIUS = (cw / 2) * 1.08;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    ctx.clearRect(0, 0, cw, ch);
+
+    // 계산 한 겹: 루프 안 남은 유효시간 비율이 곧 그대로 링의 최대 반경 스케일이 된다
+    // (남은 시간이 줄수록 링이 더 작게 퍼진다 = 만료 임박 표시).
+    var remain = 1 - (elapsed % LOOP_MS) / LOOP_MS;
+    var radiusScale = 0.4 + 0.6 * remain;
+    var strokeBase = Math.max(2.5, cw * 0.02);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ringsFor(elapsed).forEach(function (p) {
+      var r = p * MAX_RADIUS * radiusScale;
+      var alpha = (1 - p) * 0.5;
+      // 글로우 패스 — 굵고 옅은 띠를 먼저 얹어 화면에 퍼지는 면적을 넓힌다.
+      ctx.strokeStyle = 'rgba(120,200,255,' + (alpha * 0.55).toFixed(3) + ')';
+      ctx.lineWidth = strokeBase * 3.2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // 선명 패스
+      ctx.strokeStyle = 'rgba(150,215,255,' + alpha.toFixed(3) + ')';
+      ctx.lineWidth = strokeBase;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    ctx.globalCompositeOperation = 'source-over';
+
+    var box = Math.min(cw, ch) * 0.32;
+    ctx.fillStyle = 'rgba(20,26,38,.9)';
+    ctx.fillRect(cx - box / 2, cy - box / 2, box, box);
+    var cell = box / 9;
+    ctx.fillStyle = 'rgb(255,247,230)';
+    qrDots.forEach(function (d) {
+      var s = cell * 0.62;
+      ctx.fillRect(cx - box / 2 + d.x * cell + (cell - s) / 2, cy - box / 2 + d.y * cell + (cell - s) / 2, s, s);
+    });
+
+    badge.textContent = '남은 유효 ' + Math.round(remain * 100) + '%';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? LOOP_MS - 1 : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? '일시정지' : '재생';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = '일시정지';
+    }
+  });
+})();
+</script>
+</body>
+</html>

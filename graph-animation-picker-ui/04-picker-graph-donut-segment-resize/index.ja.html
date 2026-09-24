@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>値の比率だけ断片が伸びるドーナツピッカー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="dn is-demo" id="dn">
+  <div class="dn__zone" id="zone">
+    <svg class="dn__chart" id="chart" viewBox="0 0 480 300" role="img" aria-label="4つの断片に分かれたドーナツグラフ。最初の断片の比率を調整すると、残り3つの断片も余った比率に合わせて再計算される。">
+      <path class="dn__seg dn__seg--0" id="seg0"></path>
+      <path class="dn__seg dn__seg--1" id="seg1"></path>
+      <path class="dn__seg dn__seg--2" id="seg2"></path>
+      <path class="dn__seg dn__seg--3" id="seg3"></path>
+      <text class="dn__num" id="num" x="240" y="150" text-anchor="middle" dominant-baseline="central">40%</text>
+      <text class="dn__cap" id="cap" x="240" y="176" text-anchor="middle" dominant-baseline="central">セグメントA</text>
+    </svg>
+    <b class="dn__badge" aria-hidden="true">A <span id="dn-val">40</span>%</b>
+  </div>
+
+  <div class="dn__track" id="track">
+    <span class="dn__rail" aria-hidden="true"></span>
+    <button class="dn__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="セグメントAの比率を選ぶ" aria-valuemin="10" aria-valuemax="70"
+            aria-valuenow="40" aria-valuetext="セグメントA 40%">
+      <svg class="dn__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M96 64v128a8 8 0 0 1-16 0V64a8 8 0 0 1 16 0m88 0v128a8 8 0 0 1-16 0V64a8 8 0 0 1 16 0" opacity=".2"/><path d="M188 32a8 8 0 0 0-8 8v176a8 8 0 0 0 16 0V40a8 8 0 0 0-8-8M76 32a8 8 0 0 0-8 8v176a8 8 0 0 0 16 0V40a8 8 0 0 0-8-8"/></g></svg>
+    </button>
+  </div>
+
+  <p class="dn__hint">棒の上をドラッグするか矢印キーを押すと、残りの断片の比率も一緒に再計算されます。</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="dn-live"></span>
+    <table>
+      <caption>断片別の比率</caption>
+      <thead><tr><th>断片</th><th>比率</th></tr></thead>
+      <tbody id="sr-body"></tbody>
+    </table>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown 이 セグメントA 比率(10~70)을 바꾸면, 남는 比率
+// (100-A)을 B·C·D 조각의 고정 가중치로 나눠 각 조각의 시작각~끝각을 다시 계산하고
+// 4개 도넛 断片(path d 속성)을 매 프레임 새로 그린다. 값은 관성 lerp 로 목표를 뒤따른다.
+// CSS @keyframes 없음(네 断片 모두가 매 프레임 실수 각도로 바뀌어 선언형으로 못 담는다,
+// 398-01/02/03 과 같은 이유).
+var root = document.getElementById('dn');
+var zone = document.getElementById('zone');
+var track = document.getElementById('track');
+var grab = document.getElementById('grab');
+var segEls = [document.getElementById('seg0'), document.getElementById('seg1'), document.getElementById('seg2'), document.getElementById('seg3')];
+var numEl = document.getElementById('num');
+var capEl = document.getElementById('cap');
+var valEl = document.getElementById('dn-val');
+var live = document.getElementById('dn-live');
+var srBody = document.getElementById('sr-body');
+
+var CX = 240, CY = 150, R = 104;        // picker-graph-donut-radius — 도넛 반지름
+var STROKE = 46;
+var OTHER_RATIO = [0.5, 0.3, 0.2];      // B·C·D 가 남는 비율을 나누는 고정 가중치
+var LABELS = ['セグメントA', 'セグメントB', 'セグメントC', 'セグメントD'];
+var MIN_V = 10, MAX_V = 70;
+var LERP_RATE = 0.20;
+var AUTO_PERIOD = 1.8;
+var STEP = 5;
+
+var value = 40;
+var current = 40;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var zoneRect = null;
+var rafId = 0;
+var pct = [40, 30, 18, 12];
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function polar(cx, cy, r, deg) {
+  var rad = deg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(cx, cy, r, a0, a1) {
+  if (a1 - a0 < 0.6) return '';
+  var s = polar(cx, cy, r, a0), e = polar(cx, cy, r, a1);
+  var large = (a1 - a0) > 180 ? 1 : 0;
+  return 'M ' + s.x + ' ' + s.y + ' A ' + r + ' ' + r + ' 0 ' + large + ' 1 ' + e.x + ' ' + e.y;
+}
+
+function recompute(v) {
+  var rest = 100 - v;
+  pct = [v, rest * OTHER_RATIO[0], rest * OTHER_RATIO[1], rest * OTHER_RATIO[2]];
+}
+
+function paint() {
+  recompute(current);
+  var start = -90, a = start;
+  for (var i = 0; i < 4; i++) {
+    var sweep = pct[i] * 3.6;
+    var a1 = a + sweep;
+    segEls[i].setAttribute('d', arcPath(CX, CY, R, a, a1));
+    a = a1;
+  }
+  var rv = Math.round(current);
+  numEl.textContent = rv + '%';
+  capEl.textContent = LABELS[0];
+  valEl.textContent = String(rv);
+  grab.style.left = ((value - MIN_V) / (MAX_V - MIN_V) * 100) + '%';
+  grab.setAttribute('aria-valuenow', String(rv));
+  grab.setAttribute('aria-valuetext', 'セグメントA ' + rv + '%');
+  var rows = '';
+  for (var j = 0; j < 4; j++) rows += '<tr><th>' + LABELS[j] + '</th><td>' + Math.round(pct[j]) + '%</td></tr>';
+  srBody.innerHTML = rows;
+}
+
+function announce() {
+  live.textContent = 'セグメントA ' + Math.round(current) + '% に再計算されました';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(MIN_V, Math.min(MAX_V, v));
+  if (isManual) { manual = true; root.classList.remove('is-demo'); }
+}
+
+function fromPointer(clientX) {
+  if (!zoneRect) zoneRect = track.getBoundingClientRect();
+  var ratio = (clientX - zoneRect.left) / zoneRect.width;
+  setValue(MIN_V + ratio * (MAX_V - MIN_V), true);
+}
+
+function onDown(e) {
+  zoneRect = track.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+function onMove(e) { fromPointer(e.clientX); if (reduced()) { current = value; paint(); announce(); } }
+function onUp() { announce(); }
+function onTrackDown(e) { zoneRect = track.getBoundingClientRect(); fromPointer(e.clientX); if (reduced()) { current = value; paint(); announce(); } }
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(MIN_V, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(MAX_V, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) { current = value; paint(); announce(); }
+}
+
+function onResize() { zoneRect = track.getBoundingClientRect(); if (reduced()) paint(); }
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  value = 40 + 26 * Math.sin(autoT * omega);
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) autoStep(dt);
+  current += (value - current) * LERP_RATE;
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+grab.addEventListener('keydown', onKey);
+track.addEventListener('pointerdown', onTrackDown);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  current = value;
+  paint();
+} else {
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>여섯 접 눈결정 — 60도 부채꼴 하나만 그리기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kf" id="kf">
+  <p class="kf__hint">60도 부채꼴 안에만 그리면 여섯 접 반사가 눈결정을 완성합니다</p>
+  <div class="kf__row">
+    <div class="kf__field" id="field" role="application" aria-label="여섯 접 눈결정 실험판" tabindex="0">
+      <canvas class="kf__cv" id="cv"></canvas>
+    </div>
+    <div class="kf__side">
+      <b class="kf__num" id="fold">6</b>
+      <span class="kf__unit">접 반사</span>
+      <p class="kf__meta">부채꼴 <b id="deg">60</b>도</p>
+      <p class="kf__meta"><b id="cnt">0</b>붓질 — 경계 밖은 잘립니다</p>
+      <p class="kf__meta">부채꼴 안을 직접 그려 보세요</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 여섯 접 눈결정 — 부채꼴 하나(−90도 ~ −30도, 60도 폭)만 그리기 판이다. 붓질은 전부
+// 세그먼트로 저장해 두고, k번째 접의 변환 [[cos, sin],[sin, −cos]] (a = −60도·k) 로
+// 여섯 번 찍는다. 종이 접기와 같아 경계를 넘는 선은 클리핑돼 잘린 채 반사된다.
+(function () {
+  var root = document.getElementById('kf');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var fold = document.getElementById('fold');
+  var deg = document.getElementById('deg');
+  var cnt = document.getElementById('cnt');
+  if (!root || !field || !cv || !fold || !deg || !cnt) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var GRID = css.getPropertyValue('--grid').trim();
+
+  var N = 6;                       // 접 수 — 360/60
+  var A0 = -Math.PI / 2;           // 부채꼴 시작각 (12시 방향)
+  var WEDGE = Math.PI / 3;         // 60도
+  var strokes = 0;
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+    drawGuide();
+  }
+
+  // 부채꼴 안내선 — 첫 접만 진하게, 나머지는 흐리게
+  function drawGuide() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+    for (var k = 0; k < N; k++) {
+      var a = A0 + k * WEDGE;
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(cx, cy, R, A0, A0 + WEDGE); ctx.stroke();
+  }
+
+  // 반사 복제 — 세그먼트를 여섯 접에 찍는다. 부채꼴 클리핑은 beginPath-clip 로
+  function mirroredSeg(x0, y0, x1, y1, ci) {
+    for (var k = 0; k < N; k++) {
+      var a = A0 + k * WEDGE, c = Math.cos(a), s = Math.sin(a);
+      ctx.setTransform(dpr * c, dpr * s, dpr * s, -dpr * c, cx * dpr, cy * dpr);
+      // 부채꼴(0 <= 각 <= WEDGE, 지역좌표) 클리핑 — 경계 밖 붓질이 잘리는 규칙
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R + 2, 0, WEDGE);
+      ctx.closePath();
+      ctx.clip();
+      ctx.strokeStyle = ci ? C2 : C1;
+      ctx.lineWidth = 4.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0 - cx, y0 - cy); ctx.lineTo(x1 - cx, y1 - cy); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    strokes += 1;
+    cnt.textContent = String(strokes);
+  }
+
+  // 부채꼴 안으로 좌표를 뒤집어 주는 그리기 좌표 — 사용자가 어디를 그려도 첫 접에 사상
+  function foldPoint(px, py) {
+    var dx = px - cx, dy = py - cy;
+    var a = Math.atan2(dy, dx);
+    var r = Math.min(R, Math.hypot(dx, dy));
+    // 각도를 [A0, A0+WEDGE] 로 접는다 — 육각 대칭이라 어떤 각이든 이 부채꼴로 사상 가능
+    var span = 2 * Math.PI / N;
+    var rel = ((a - A0) % (2 * span) + 2 * span) % (2 * span);
+    if (rel > span) rel = 2 * span - rel;         // 넓은 쪽이면 반사로 접힘
+    var a2 = A0 + rel;
+    return [cx + r * Math.cos(a2), cy + r * Math.sin(a2)];
+  }
+
+  // 시드 고정 자동 붓질 — 가지 뻗는 결정 성장 곡선
+  function pathAt(t) {
+    var rel = WEDGE * (0.5 + 0.42 * Math.sin(t * 0.7));      // 부채꼴 안을 좌우로
+    var r = R * (0.18 + 0.74 * (0.5 + 0.5 * Math.sin(t * 0.23 + 1.1)));
+    var a = A0 + rel;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t = 0, last = 0, prev = null, pen = false, penPt = null, ci = 0, lastInput = -9;
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    pen = true; penPt = foldPoint.apply(null, toLocal(e)); lastInput = t;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!pen) return;
+    var p = foldPoint.apply(null, toLocal(e));
+    mirroredSeg(penPt[0], penPt[1], p[0], p[1], ci);
+    penPt = p; lastInput = t;
+  });
+  field.addEventListener('pointerup', function () { pen = false; ci = 1 - ci; lastInput = t; });
+  field.addEventListener('pointercancel', function () { pen = false; lastInput = t; });
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!pen && t - lastInput > 1.6) {
+      t += dt;
+      var p = pathAt(t);
+      if (prev) mirroredSeg(prev[0], prev[1], p[0], p[1], Math.floor(t * 0.7));
+      prev = p;
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 시간 5초 분의 성장을 미리 그린다
+    for (var j = 1; j <= 250; j++) {
+      var tt = j * 0.02;
+      var a0 = pathAt(tt - 0.02), a1 = pathAt(tt);
+      mirroredSeg(a0[0], a0[1], a1[0], a1[1], Math.floor(tt * 0.7));
+    }
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

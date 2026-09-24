@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シマウマ縞デモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tzs" id="tzs">
+  <p class="tzs__hint">
+    <svg class="tzs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M168 16a56 56 0 0 0-53.16 38.47A44 44 0 0 0 64 97.34c0 .83 0 1.66.08 2.49A36 36 0 0 0 68 172h100a52 52 0 0 0 0-104" opacity=".2"/><path d="M224 96h-16.6a36 36 0 0 0-8.4-32.4A39.94 39.94 0 0 0 152 65.13A40 40 0 0 0 84.4 78.9A32 32 0 0 0 64 140h160a22 22 0 0 0 0-44m0 32H75.19a16 16 0 0 1-4.18-31.5l10.82-3.7-3.46-10.9A24 24 0 0 1 101 78.4l4.22-3.13 5 2a24 24 0 0 1 13.76 22.06V112h16V99.29a40 40 0 0 1 23.19-36.26l4.14-1.88 4.37 1.29a24 24 0 0 1 13 9.45A23.9 23.9 0 0 1 172.37 96H224a6 6 0 0 1 0 12ZM56 188h144a8 8 0 0 1 0 16H56a8 8 0 0 1 0-16m-16 40h144a8 8 0 0 1 0 16H40a8 8 0 0 1 0-16"/></g></svg>
+    <span>縞が落ち着いた後も縞に沿って注入が流れ、縦の筋が動き続けます</span>
+  </p>
+  <div class="tzs__field" id="field">
+    <canvas class="tzs__cv" id="cv"></canvas>
+  </div>
+  <div class="tzs__bar">
+    <label class="tzs__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="パターンシード">
+    </label>
+    <label class="tzs__dial tzs__grow">供給率 F
+      <input type="range" id="fk" min="0.010" max="0.070" step="0.001" value="0.026" aria-label="供給率 F">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 얼룩말 세로 줄 — Gray-Scott 반응-확산. 격자를 세로로 길게(48x72) 잡고
+// 시드를 세로 줄 몇 개로 뿌린다. 라플라스의 가로 항에 편향(WX=1.15)을 줘
+// 줄이 가로 방향으로 밀며 세로 정렬을 유지하게 한다 — 얼룩말 옆구리 줄무늬 축.
+// U(사료)·V(촉매) 두 격자, 매 프레임 14스텝. DU·DV 는 WX 편향 보정세트(실측 안정값).
+// 시드는 '균일 U 밭(미세 노이즈) + 세로 V 주입줄' — 노이즈가 대칭을 깨야
+// 줄이 살아남아 성장한다(노이즈 없는 균일 밭은 반응이 그냥 잠든다).
+// 완전 정렬된 줄은 수학적 정지 상태라 변화가 사라진다 — 그래서 성숙 뒤에도
+// 주입원 5개가 세로 줄을 따라 위·아래로 천천히 오가며 U 를 부어 (07 다중 주입원의
+// 세로 밴드 변형) 줄 결이 계시 살아 움직이게 한다. 주제는 '세로 줄이 촘촘히'.
+// 렌더: 셀 V 값을 파스텔 LUT 로 저해상 버퍼에 putImageData, drawImage 로 확대.
+var root = document.getElementById('tzs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var fkIn = document.getElementById('fk');
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var GW = 48, GH = 72;            // 격자 셀 수 — 세로로 길게 (얼룩말 옆구리 비율)
+var WX = 1.2;                    // 라플라스 가로 편향 — 세로 줄 정렬을 돕는다
+var DU = 0.85, DV = 0.425;        // 확산 계수 — WX 편향 보정세트(DU 대비 DV=0.5 비율 유지)
+var F = 0.026, K = 0.058;        // 사료율·제거율 (fk 슬라이더가 F 를 움직인다)
+var STEPS = 14;                  // 프레임당 시뮬레이션 스텝
+var PRE = 260;                   // 시작 시 미리 성숙시키는 스텝 — 줄이 막 정렬되는 중간
+var t = 0;                       // 주입 위상 — 주입원이 이 시간을 따라 줄을 따라 오간다
+var SRC_N = 5;                   // 주입원 개수 — 세로 밴드 위주, 각자 위상이 다르다
+var SRC_RAD = 3;                 // 주입 반경(셀)
+var SRC_BOOST = 0.40;            // 주입량 — 정렬된 줄을 밀어 결이 계속 움직이게 하는 힘
+var SRC_DT = 0.004;              // 주입원 이동 속도 — 세로 줄을 따라 천천히
+var u = new Float32Array(GW * GH);
+var v = new Float32Array(GW * GH);
+var u2 = new Float32Array(GW * GH);
+var v2 = new Float32Array(GW * GH);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+// ── 색 — scss 가 내려준 파스텔 사용자속성을 읽어 5단계 LUT 를 미리 편다 ──
+var css = getComputedStyle(root);
+var LUT = new Uint8Array(256 * 3);
+function tok(name) { return css.getPropertyValue(name); }
+function col2rgb(s) {
+  // sass 가 rgb(...) 함수꼴로 내려보내는 값과 hex 를 둘 다 받는다
+  s = String(s).trim();
+  var m = s.match(/^rgba?\(([^)]+)\)$/);
+  if (m) {
+    var parts = m[1].split(',');
+    var out = [];
+    for (var i = 0; i < 3; i++) {
+      var p = parseFloat(parts[i]);
+      out.push(parts[i].indexOf('%') >= 0 ? Math.round(p * 2.55) : Math.round(p));
+    }
+    return out;
+  }
+  s = s.replace('#', '');
+  if (s.length === 3) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+  return [parseInt(s.slice(0, 2), 16) || 0, parseInt(s.slice(2, 4), 16) || 0, parseInt(s.slice(4, 6), 16) || 0];
+}
+function buildLut() {
+  var stops = [col2rgb(tok('--tzs-c0')), col2rgb(tok('--tzs-c1')), col2rgb(tok('--tzs-c2')), col2rgb(tok('--tzs-c3')), col2rgb(tok('--tzs-c4'))];
+  for (var q = 0; q < 256; q++) {
+    var t = q / 255 * (stops.length - 1);
+    var k = Math.min(stops.length - 2, Math.floor(t));
+    var f = t - k;
+    for (var c = 0; c < 3; c++) LUT[q * 3 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f;
+  }
+}
+
+// ── シード — 균일 U 밭(0.98~1.02 노이즈) + 세로 V 주입줄 4~6개. 시드가 좌표를 결정 ──
+function seedField(sd) {
+  var rng = mulberry32(sd >>> 0);
+  u.fill(0); v.fill(0);
+  for (var p = 0; p < GW * GH; p++) u[p] = 0.98 + rng() * 0.04;
+  var nbars = 4 + Math.floor(rng() * 3);
+  srcX = [];
+  for (var n = 0; n < nbars; n++) {
+    var cx = 6 + rng() * (GW - 12);
+    srcX.push(cx);
+    var rr = 2.5 + rng() * 1.5;
+    var x0 = Math.max(0, Math.floor(cx - rr)), x1 = Math.min(GW - 1, Math.ceil(cx + rr));
+    for (var x = x0; x <= x1; x++) {
+      var dx = x - cx;
+      if (dx * dx < rr * rr) {
+        for (var y = 0; y < GH; y++) v[y * GW + x] = 0.4;
+      }
+    }
+  }
+}
+
+// ── 한 스텝 — 9점 가중 라플라스(토러스 경계, 가로 편향 WX) + Gray-Scott 반응항 ──
+function step() {
+  for (var y = 0; y < GH; y++) {
+    var yT = ((y - 1 + GH) % GH) * GW, yB = ((y + 1) % GH) * GW, yC = y * GW;
+    for (var x = 0; x < GW; x++) {
+      var xL = (x - 1 + GW) % GW, xR = (x + 1) % GW;
+      var i = yC + x;
+      var uc = u[i], vc = v[i];
+      var lapU = 0.2 * WX * (u[yC + xL] + u[yC + xR]) + 0.2 * (u[yT + x] + u[yB + x])
+               + 0.05 * (u[yT + xL] + u[yT + xR] + u[yB + xL] + u[yB + xR])
+               - (0.4 * (1 + WX) + 0.2) * uc;
+      var lapV = 0.2 * WX * (v[yC + xL] + v[yC + xR]) + 0.2 * (v[yT + x] + v[yB + x])
+               + 0.05 * (v[yT + xL] + v[yT + xR] + v[yB + xL] + v[yB + xR])
+               - (0.4 * (1 + WX) + 0.2) * vc;
+      var uvv = uc * vc * vc;
+      u2[i] = uc + DU * lapU - uvv + F * (1 - uc);
+      v2[i] = vc + DV * lapV + uvv - (F + K) * vc;
+      // 포화 클램프 — 주입(v=1) 이웃에서 WX 편향 라플라스가 오버슈트해 음수 U 를 만들면
+      // uvv 가 음수가 되며 발산한다. 07 과 같이 [0,1] 로 자른다
+      var cu = u2[i], cv2 = v2[i];
+      u2[i] = cu < 0 ? 0 : (cu > 1 ? 1 : cu);
+      v2[i] = cv2 < 0 ? 0 : (cv2 > 1 ? 1 : cv2);
+    }
+  }
+  var tu = u; u = u2; u2 = tu;
+  var tv = v; v = v2; v2 = tv;
+}
+
+var buf = null, small = null, sctx = null;
+function setupBuffers() {
+  small = document.createElement('canvas');
+  small.width = GW; small.height = GH;
+  sctx = small.getContext('2d');
+  buf = sctx.createImageData(GW, GH);
+}
+
+// 미세 U 주입 — 주입원 5개가 세로줄 위를 위·아래로 천천히 오가며 정렬된 줄을 계속
+// 밀어 결이 움직이게 한다 (07 다중 주입원의 세로 밴드 변형). x 위치는 シード 시드가 뽑은
+// 줄 위치를 재사용해 주입이 늘 '줄 위'에 떨어지게 한다
+var srcX = [];
+function graze() {
+  for (var j = 0; j < SRC_N; j++) {
+    var cx = srcX[j % srcX.length] | 0;
+    var cy = (GH / 2 + Math.sin(t * (0.8 + j * 0.7)) * GH * 0.42) | 0;
+    for (var dy = -SRC_RAD; dy <= SRC_RAD; dy++) {
+      for (var dx = -SRC_RAD; dx <= SRC_RAD; dx++) {
+        if (dx * dx + dy * dy > SRC_RAD * SRC_RAD) continue;
+        var i = ((cy + dy + GH) % GH) * GW + ((cx + dx + GW) % GW);
+        u[i] = 1;
+        var nv = v[i] + SRC_BOOST;
+        v[i] = nv > 1 ? 1 : nv;
+      }
+    }
+  }
+}
+
+function paint() {
+  var px = buf.data, i4 = 0;
+  for (var p = 0; p < GW * GH; p++) {
+    // V 농도 0(종이) → 1(잉크끼 파스텔) — LUT 로 색 단계
+    var q = Math.max(0, Math.min(255, (v[p] * 460) | 0));
+    px[i4] = LUT[q * 3];
+    px[i4 + 1] = LUT[q * 3 + 1];
+    px[i4 + 2] = LUT[q * 3 + 2];
+    px[i4 + 3] = 255;
+    i4 += 4;
+  }
+  sctx.putImageData(buf, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, GW, GH, 0, 0, W, H);
+}
+
+function frame() {
+  for (var s = 0; s < STEPS; s++) { graze(); step(); }
+  t += SRC_DT;
+  paint();
+  raf = requestAnimationFrame(frame);
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// シード 재생성 → 미리성숙(PRE 스텝 동기) → 즉시 다시 그리기 (reduce 경로에서도)
+function regrow(sd) {
+  seedField(sd);
+  for (var s = 0; s < PRE; s++) step();
+  t = 0;
+  paint();
+}
+
+function onSeed() {
+  var val = Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1));
+  regrow(val);
+}
+function onFk() {
+  F = Number(fkIn.value);
+  // reduce 경로에서도 프레임이 변해야 한다 — シード 유지 상태로 새 F 로 다시 성숙시켜 그린다
+  if (reduce) regrow(Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1)));
+}
+
+seedIn.addEventListener('input', onSeed);
+seedIn.addEventListener('change', onSeed);
+fkIn.addEventListener('input', onFk);
+fkIn.addEventListener('change', onFk);
+window.addEventListener('resize', function () { fit(); paint(); });
+
+buildLut();
+setupBuffers();
+fit();
+regrow(Number(seedIn.value) || 7);
+if (reduce) {
+  // reduce — 루프를 돌지 않고 성숙 상태 한 장만 그린다
+  root.classList.add('is-still');
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

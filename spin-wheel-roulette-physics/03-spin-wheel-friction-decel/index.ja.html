@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>摩擦減衰 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fr" id="fr">
+  <p class="fr__hint">rAFループでdtを測り、角度 += 角速度·dt、角速度 ×= 摩擦^dt を積分します</p>
+  <div class="fr__row">
+    <div class="fr__field" id="field" role="application" aria-label="摩擦減衰実験盤" tabindex="0">
+      <canvas class="fr__cv" id="cv"></canvas>
+    </div>
+    <div class="fr__side">
+      <b class="fr__num" id="coef">0.30</b>
+      <span class="fr__unit">摩擦係数 — 毎秒角速度に掛ける</span>
+      <div class="fr__sw" id="sw" role="group" aria-label="摩擦係数を選ぶ"></div>
+      <p class="fr__meta">停止まで <b class="fr__count" id="sec">0.0</b><span class="fr__metaUnit">秒で停止</span></p>
+      <p class="fr__meta">同じはじき(16 rad/s)で係数だけ変わります</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 마찰 감쇠(03) — requestAnimationFrame 루프에서 dt 를 재고 각도 += 각속도·dt,
+// 각속도 ×= 마찰^dt 를 적분하면 튕김 직후엔 빠르다가 지수곡선으로 느려진다.
+// 우측 그래프는 그 적분을 실시간으로 그린다 — 판의 각속도와 그래프의 기울기가 같다.
+(function () {
+  var root = document.getElementById('fr');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var coefEl = document.getElementById('coef');
+  var secEl = document.getElementById('sec');
+  var swEl = document.getElementById('sw');
+  if (!root || !field || !cv || !coefEl || !secEl || !swEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 6; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var N = 6, SEG = TAU / N;
+  var COEFS = [0.08, 0.18, 0.38];    // 낮음·보통·높음 — 3段階 버튼
+  var ci = 1;
+  var FLICK = 16;                    // 시연 튕김은 항상 같다 — 계수만 바뀐다
+  var STOP = 0.5;
+  var ang = -0.8, angularVelocity = 0, t0 = 0, hist = [], settled = false, settleAt = 0, dpr = 1;
+  var MXW = 3.2;                     // 그래프에 담는 시야 (초) — 한 시행이 창을 가득 채운다
+  var sweep = -1;                    // 재시작 대기 중 그래프를 훑는 스캔라인 (0~1)
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+
+  function draw() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w * 0.28, cy = h * 0.5, R = Math.min(w * 0.56, h * 0.94) / 2 - 4;
+    // 판
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    for (var k = 0; k < N; k++) {
+      var a0 = k * SEG;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a0 + SEG); ctx.closePath();
+      ctx.fillStyle = PAL[k]; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.20)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 11, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill(); ctx.strokeStyle = 'rgba(23,20,26,.35)'; ctx.stroke();
+    // 정지 뒤 허브 펄스 — 대기 중에도 판이 산다
+    if (sweep >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 11 + sweep * 16, 0, TAU);
+      ctx.strokeStyle = 'rgba(23,20,26,' + (1 - sweep) * 0.5 + ')';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy - R - 8); ctx.lineTo(cx + 6, cy - R - 8); ctx.lineTo(cx, cy - R + 8);
+    ctx.closePath(); ctx.fillStyle = INK; ctx.fill();
+    // 감쇠 그래프 — 우측 패널. x = 경과 초, y = 각속도 (0~FLICK). 판 옆 자리를 최소화한다
+    var gx = w * 0.56, gw = w - gx - 8, gy = 10, gh = h - 20;
+    ctx.strokeStyle = 'rgba(23,20,26,.30)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx, gy + gh); ctx.lineTo(gx + gw, gy + gh); ctx.stroke();
+    // 보조 눈금 — 25%·50%·75%
+    for (var gI = 1; gI <= 3; gI++) {
+      var yy = gy + gh * (1 - gI / 4);
+      ctx.beginPath(); ctx.moveTo(gx, yy); ctx.lineTo(gx + 4, yy);
+      ctx.strokeStyle = 'rgba(23,20,26,.25)'; ctx.stroke();
+    }
+    if (hist.length > 1) {
+      ctx.beginPath();
+      for (var j = 0; j < hist.length; j++) {
+        var px = gx + (hist[j].t / MXW) * gw;
+        var py = gy + gh * (1 - hist[j].v / (FLICK + 1));
+        if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = INK; ctx.lineWidth = 2; ctx.stroke();
+      // 현재 점
+      var lp = hist[hist.length - 1];
+      ctx.beginPath();
+      ctx.arc(gx + (lp.t / MXW) * gw, gy + gh * (1 - lp.v / (FLICK + 1)), 3, 0, TAU);
+      ctx.fillStyle = INK; ctx.fill();
+    }
+    // 스캔라인 — 재시작 대기 중 시야를 훑는다. 그래프가 다시 그려질 시점을 예고한다
+    if (sweep >= 0) {
+      var sx = gx + sweep * gw;
+      ctx.beginPath(); ctx.moveTo(sx, gy); ctx.lineTo(sx, gy + gh);
+      ctx.strokeStyle = 'rgba(23,20,26,.4)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(sx, gy + gh, 3, 0, TAU);
+      ctx.fillStyle = INK; ctx.fill();
+    }
+  }
+
+  // 계수 버튼 3개
+  var btns = [];
+  for (var b = 0; b < COEFS.length; b++) {
+    (function (idx) {
+      var el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'fr__btn' + (idx === ci ? ' is-on' : '');
+      el.textContent = String(COEFS[idx]);
+      el.addEventListener('click', function () {
+        ci = idx;
+        coefEl.textContent = COEFS[idx].toFixed(2);
+        for (var q = 0; q < btns.length; q++) btns[q].className = 'fr__btn' + (q === idx ? ' is-on' : '');
+        relaunch();
+      });
+      btns.push(el); swEl.appendChild(el);
+    })(b);
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    var v = Math.max(-24, Math.min(24, drag.v));
+    start(Math.abs(v) < 1 ? FLICK : v);
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); start(FLICK); }
+  });
+
+  function start(v) {
+    angularVelocity = v; t0 = 0; hist = [{ t: 0, v: Math.abs(v) }]; settled = false; sweep = -1;
+    secEl.textContent = '0.0';
+  }
+  function relaunch() { start(FLICK); }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag.on) {
+      if (angularVelocity !== 0) {
+        ang += angularVelocity * dt;
+        var before = Math.abs(angularVelocity);
+        angularVelocity *= Math.pow(COEFS[ci], dt);
+        t0 += dt;
+        if (Math.abs(angularVelocity) < STOP) {
+          angularVelocity = 0; settled = true; settleAt = t0;
+          secEl.textContent = settleAt.toFixed(1);
+          hist.push({ t: t0, v: 0 });
+        } else {
+          hist.push({ t: t0, v: Math.abs(angularVelocity) });
+        }
+        if (hist.length > 200) hist.shift();
+      } else if (settled && t0 > settleAt + 1.0) {
+        relaunch();
+      } else if (!settled) { relaunch(); }
+      if (settled) {
+        t0 += dt;
+        sweep = Math.max(0, Math.min(1, (t0 - settleAt) / 1.0));
+      }
+    }
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 계수 0.18 로 시뮬레이션한 감쇠 곡선 전체를 미리 계산해 그린다
+    var vv = FLICK, tt = 0, rr = [];
+    rr.push({ t: 0, v: vv });
+    while (Math.abs(vv) >= STOP && tt < MXW) { vv *= Math.pow(0.18, 1 / 60); tt += 1 / 60; rr.push({ t: tt, v: Math.abs(vv) }); }
+    hist = rr; ang = -0.8 + FLICK * 0.35; sweep = 0.55;
+    draw();
+    root.classList.add('is-still');
+  } else {
+    start(FLICK);
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

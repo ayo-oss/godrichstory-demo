@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拡大後にドラッグで移動するライトボックス — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg"></span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="写真の拡大移動">
+    <div class="frame" id="frame">
+      <span class="fullImg" id="fullImg"></span>
+    </div>
+    <button class="zoomBtn zoomBtn--in" id="zoomInBtn" type="button" aria-label="拡大"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 112a80 80 0 1 1-80-80a80 80 0 0 1 80 80" opacity=".2"/><path d="m229.66 218.34l-50.06-50.06a88.21 88.21 0 1 0-11.32 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32M40 112a72 72 0 1 1 72 72a72.08 72.08 0 0 1-72-72m112 0a8 8 0 0 1-8 8h-24v24a8 8 0 0 1-16 0v-24H80a8 8 0 0 1 0-16h24V80a8 8 0 0 1 16 0v24h24a8 8 0 0 1 8 8"/></g></svg></button>
+    <button class="zoomBtn zoomBtn--out" id="zoomOutBtn" type="button" aria-label="縮小"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 112a80 80 0 1 1-80-80a80 80 0 0 1 80 80" opacity=".2"/><path d="m229.66 218.34l-50.06-50.06a88.21 88.21 0 1 0-11.32 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32M40 112a72 72 0 1 1 72 72a72.08 72.08 0 0 1-72-72m112 0a8 8 0 0 1-8 8H80a8 8 0 0 1 0-16h64a8 8 0 0 1 8 8"/></g></svg></button>
+    <p class="zoomNote" id="zoomNote">1.0×</p>
+    <button class="closeBtn" id="closeBtn" type="button">閉じる</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var ZOOM_SCALE = 2.2;
+  var ZOOM_MS = 420;
+  var PAN_MS = 900;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var frame = document.getElementById('frame');
+  var fullImg = document.getElementById('fullImg');
+  var zoomInBtn = document.getElementById('zoomInBtn');
+  var zoomOutBtn = document.getElementById('zoomOutBtn');
+  var zoomNote = document.getElementById('zoomNote');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumb = document.getElementById('thumb0');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var open = false;
+  var scale = 1;
+  var offX = 0;
+  var offY = 0;
+  var dragging = false;
+  var dragStartX = 0;
+  var dragStartY = 0;
+  var dragBaseX = 0;
+  var dragBaseY = 0;
+  var panRafId = null;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // 拡大 배율만큼 남는 여백을 프레임 실측 크기로 매번 다시 계산한다 — 拡大 정도가 바뀌면 이동 가능 범위도 바뀐다
+  function panBounds(s) {
+    var r = frame.getBoundingClientRect();
+    return { x: (s - 1) * r.width / 2, y: (s - 1) * r.height / 2 };
+  }
+
+  function apply() {
+    fullImg.style.transform = 'translate(' + offX.toFixed(2) + 'px,' + offY.toFixed(2) + 'px) scale(' + scale.toFixed(3) + ')';
+    zoomNote.textContent = scale.toFixed(1) + '×';
+  }
+
+  function zoomTo(target, onDone) {
+    var fromScale = scale;
+    var fromX = offX, fromY = offY;
+    animate(ZOOM_MS, function (e) {
+      scale = fromScale + (target - fromScale) * e;
+      var b = panBounds(scale);
+      offX = clamp(fromX * (1 - e), -b.x, b.x);
+      offY = clamp(fromY * (1 - e), -b.y, b.y);
+      apply();
+    }, onDone);
+  }
+
+  function panLoop(durationMs, onDone) {
+    if (reduce) { if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame2(now) {
+      var t = now - start;
+      var b = panBounds(scale);
+      offX = clamp(b.x * Math.sin(t / 300), -b.x, b.x);
+      offY = clamp(b.y * 0.6 * Math.sin(t / 420 + 1), -b.y, b.y);
+      apply();
+      if (t < durationMs) panRafId = requestAnimationFrame(frame2);
+      else if (onDone) onDone();
+    }
+    panRafId = requestAnimationFrame(frame2);
+  }
+
+  function openFrom() {
+    if (open) return;
+    open = true;
+    scale = 1; offX = 0; offY = 0;
+    apply();
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    animate(240, function (e) { backdrop.style.opacity = (e * 0.78).toFixed(3); }, function () {
+      zoomInBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox() {
+    if (!open) return;
+    if (panRafId) cancelAnimationFrame(panRafId);
+    animate(220, function (e) { backdrop.style.opacity = (0.78 * (1 - e)).toFixed(3); }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumb.focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      if (panRafId) cancelAnimationFrame(panRafId);
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumb.addEventListener('click', function () { human(); openFrom(); });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(); });
+  zoomInBtn.addEventListener('click', function () { human(); zoomTo(ZOOM_SCALE); });
+  zoomOutBtn.addEventListener('click', function () { human(); zoomTo(1); });
+  frame.addEventListener('dblclick', function () { human(); zoomTo(scale > 1.01 ? 1 : ZOOM_SCALE); });
+  document.addEventListener('keydown', function (e) {
+    if (open && e.key === 'Escape') { human(); closeLightbox(); }
+  });
+
+  frame.addEventListener('pointerdown', function (e) {
+    if (scale <= 1.01) return;
+    human();
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragBaseX = offX;
+    dragBaseY = offY;
+    frame.setPointerCapture(e.pointerId);
+  });
+  frame.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var b = panBounds(scale);
+    offX = clamp(dragBaseX + (e.clientX - dragStartX), -b.x, b.x);
+    offY = clamp(dragBaseY + (e.clientY - dragStartY), -b.y, b.y);
+    apply();
+  });
+  function endDrag() { dragging = false; }
+  frame.addEventListener('pointerup', endDrag);
+  frame.addEventListener('pointercancel', endDrag);
+
+  function cycle() {
+    openFrom();
+    timers.push(setTimeout(function () {
+      zoomTo(ZOOM_SCALE, function () {
+        panLoop(PAN_MS, function () {
+          zoomTo(1);
+        });
+      });
+    }, 260));
+    timers.push(setTimeout(closeLightbox, 1780));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wallpaper tile export — seamless repeat via toDataURL — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kt" id="kt">
+  <p class="kt__hint">Quarter-turn assembly of one motif makes a seamless wallpaper</p>
+  <div class="kt__row">
+    <div class="kt__field" id="field" role="application" aria-label="Wallpaper tile lab" tabindex="0">
+      <canvas class="kt__cv" id="cv"></canvas>
+    </div>
+    <div class="kt__side">
+      <div class="kt__tile" id="tile" role="img" aria-label="Exported tile preview"></div>
+      <span class="kt__lab">toDataURL preview</span>
+      <p class="kt__meta">Tiles <b id="cells">9</b>cells</p>
+      <p class="kt__meta">Drag and the motif grain rolls with your hand</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 배경지 Tiles 내보내기 — 사분면 조각(q)을 Tiles 캔버스의 네 칸에 0/90/180/270도로
+// 돌려 놓는다. 이웃 타일과 맞닿는 가장자리가 짝 반사라 어느 방향으로 반복해도
+// 이음새가 없다. 완성 타일은 toDataURL 로 짜서 오른쪽 미리보기 배경에 실제로 심는다 —
+// 내보낸 결과를 화면에서 바로 보는 게 이 데모의 낙점이다.
+(function () {
+  var root = document.getElementById('kt');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var tile = document.getElementById('tile');
+  var cells = document.getElementById('cells');
+  if (!root || !field || !cv || !tile || !cells) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var C3 = css.getPropertyValue('--c3').trim();
+  var STAGE = css.getPropertyValue('--stage').trim();
+
+  var NX = 3, NY = 3;                  // Tiles 격자 3×3
+  cells.textContent = String(NX * NY);
+  var W = 0, H = 0, dpr = 1;
+  var S = 0;                           // 사분면 한 변 (css px)
+  var q = null, qc = null;             // 사분면 캔버스
+  var tw = null, tc = null;            // Tiles(2S×2S) 캔버스
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    var tileS = Math.min(W, H) / NX;   // Tiles 한 변 = 사분면 두 개
+    S = tileS / 2;
+    q = document.createElement('canvas');
+    q.width = Math.max(2, Math.round(S * dpr)); q.height = q.width;
+    qc = q.getContext('2d');
+    tw = document.createElement('canvas');
+    tw.width = q.width * 2; tw.height = q.height * 2;
+    tc = tw.getContext('2d');
+    render(0);
+  }
+
+  // 사분면 무늬 — 파라미터 곡선 결. p(0~1) 가 흐르면 결의 위상이 구른다
+  function paintQuadrant(p) {
+    qc.setTransform(1, 0, 0, 1, 0, 0);
+    qc.clearRect(0, 0, q.width, q.height);
+    qc.scale(dpr, dpr);
+    for (var i = 0; i < 7; i++) {
+      var ph = i * 1.9 + p * 6.28;
+      qc.strokeStyle = [C1, C2, C3][i % 3];
+      qc.lineWidth = 1.6 + (i % 3) * 0.7;
+      qc.beginPath();
+      for (var s = 0; s <= 12; s++) {
+        var x = S * s / 12;
+        var y = S * (0.2 + 0.6 * (0.5 + 0.5 * Math.sin(s * 0.55 + ph)));
+        if (s === 0) qc.moveTo(x, y); else qc.lineTo(x, y);
+      }
+      qc.stroke();
+    }
+  }
+
+  // 4분할 회전 배치 — 좌상(0deg)·우상(90)·우하(180)·좌하(270). 변환 행렬이 곧 회전
+  function assembleTile() {
+    var qd = q.width;                  // 사분면 device px — 정사각형
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+    tc.clearRect(0, 0, tw.width, tw.height);
+    tc.drawImage(q, 0, 0);                                    // 좌상 0deg
+    tc.setTransform(0, 1, -1, 0, qd * 2, 0); tc.drawImage(q, 0, 0);   // 우상 90deg
+    tc.setTransform(-1, 0, 0, -1, qd * 2, qd * 2); tc.drawImage(q, 0, 0); // 우하 180deg
+    tc.setTransform(0, -1, 1, 0, 0, qd * 2); tc.drawImage(q, 0, 0);   // 좌하 270deg
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  function render(p) {
+    paintQuadrant(p);
+    assembleTile();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = STAGE;
+    ctx.fillRect(0, 0, W, H);
+    var tileS = S * 2;
+    for (var gy = 0; gy < NY; gy++) {
+      for (var gx = 0; gx < NX; gx++) {
+        ctx.drawImage(tw, gx * tileS, gy * tileS, tileS, tileS);
+      }
+    }
+    // 내보내기 — 완성 타일을 데이터 URL 로 짜서 미리보기 배경에 심는다
+    var url = tw.toDataURL('image/png');
+    tile.style.backgroundImage = 'url(' + url + ')';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t = 0, last = 0, drag = false, dragP = null;
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag = true; dragP = toLocal(e);
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag || !dragP) return;
+    var p = toLocal(e);
+    render(Math.max(0, Math.min(1, p[0] / W)));
+    dragP = p;
+  });
+  field.addEventListener('pointerup', function () { drag = false; dragP = null; });
+  field.addEventListener('pointercancel', function () { drag = false; dragP = null; });
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag) {
+      t += dt;
+      render(0.5 + 0.48 * Math.sin(t * 0.19));
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — p = 0.35 배경지 + 미리보기
+    render(0.35);
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

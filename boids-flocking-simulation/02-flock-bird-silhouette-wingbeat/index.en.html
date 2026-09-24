@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bird-Flock Silhouette — Wingbeat Phase — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 1 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>A flock of birds cutting across the evening sky — two triangular wings flap on a phase offset per bird, and each body tilts toward its heading</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Bird-flock silhouette test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">130</b>birds · wingbeat phase</span>
+    <span class="cd__meta cd__meta--dim">ctx.rotate · sin phase · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 새떼 실루엣(02). 군집 코어는 01 과 같은 뼈대(분리·정렬·결합 + 토러스 랩).
+// 장면이 다르다: 배경은 매 프레임 세로 그라디언트(슬레이트→지평선 파스텔)를 다시 칠해 잔상을 남기지 않고,
+// 개체는 실루엣 잉크 삼각형 날개 2개 — 날갯짓 위상이 개체마다 어긋나고(sin), 진행 방향으로 ctx.rotate 한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N_B = 130;    // 새 수 — 밀도 축(90 → 260 수준으로 커버리지 확보)
+  var W_SEP = 1.6;  // 분리 무게
+  var W_ALI = 1.2;  // 정렬 무게
+  var W_COH = 1.0;  // 결합 무게
+  var TONE = 0;     // 실루엣 색 변형 — 0: 잉크(#23262f), 1: 라일락(#b9a0ff)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 새떼로 흐른다
+  var SEED = 0x30c102;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--flock-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_DUSK = tokRGB('--flock-dusk');
+  var C_GLOW = tokRGB('--flock-glow');
+  var C_BIRD = tokRGB('--flock-bird');
+  var C_LILA = tokRGB('--flock-lilac');
+  var C_SILH = TONE ? C_LILA : C_BIRD;   // 색 변형 — 실루엣 톤 교체
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var STILL_T = 1.6;   // reduce 에서 그리는 시각
+
+  // ── 시뮬 상수 ──
+  var R_NEIGH = 52;    // 이웃 반경 (px)
+  var MAX_SPD = 130;   // 최대 속도 (px/s)
+  var MAX_FOR = 260;   // 최대 힘 (px/s^2)
+
+  // ── 새 개체 ──
+  var boids = [];
+  function spawnB(b, i) {
+    b.x = rand() * W;
+    b.y = rand() * H;
+    var ang = rand() * TAU;
+    var spd = MAX_SPD * (0.5 + rand() * 0.5);
+    b.vx = Math.cos(ang) * spd;
+    b.vy = Math.sin(ang) * spd;
+    b.ph = rand() * TAU;              // 날갯짓 위상 — 개체마다 어긋나게
+    b.flap = 5.2 + rand() * 3.4;      // 날갯짓 속도 (rad/s)
+    b.sz = 0.8 + rand() * 0.55;       // 날개 스케일
+    b.grp = (i || 0) % 4;             // 하위 무리 — 화면 커버리지
+  }
+  function build() {
+    boids = [];
+    for (var i = 0; i < N_B; i++) { var b = {}; spawnB(b, i); boids.push(b); }
+    nOut.textContent = String(N_B);
+  }
+
+  // 이동 방향으로 가속을 제한하는 스티어 — 목표 속도에서 현재 속도를 뺀 뒤 힘 한계로 자른다
+  function steer(vx, vy, tvx, tvy, out) {
+    var sx = tvx - vx, sy = tvy - vy;
+    var m = Math.hypot(sx, sy);
+    if (m > MAX_FOR) { sx = sx / m * MAX_FOR; sy = sy / m * MAX_FOR; }
+    out[0] = sx; out[1] = sy;
+  }
+
+  var sA = [0, 0], sB = [0, 0], sC = [0, 0];
+
+  function step(dt) {
+    var n = boids.length;
+    for (var i = 0; i < n; i++) {
+      var b = boids[i];
+      var sepX = 0, sepY = 0, aliX = 0, aliY = 0, cx = 0, cy = 0, cnt = 0;
+      for (var j = 0; j < n; j++) {
+        if (j === i) continue;
+        var o = boids[j];
+        var dx = o.x - b.x, dy = o.y - b.y;
+        var d2 = dx * dx + dy * dy;
+        if (d2 > R_NEIGH * R_NEIGH || d2 === 0) continue;
+        var d = Math.sqrt(d2);
+        cnt++;
+        aliX += o.vx; aliY += o.vy;
+        cx += o.x; cy += o.y;
+        if (d < R_NEIGH * 0.5) {          // 분리 — 반경 절반 안에서만, 가까울수록 세게
+          var w = (R_NEIGH * 0.5 - d) / (R_NEIGH * 0.5) / (d / (R_NEIGH * 0.5) + 0.18);
+          sepX -= dx / d * w; sepY -= dy / d * w;
+        }
+      }
+      var fx = 0, fy = 0;
+      if (cnt > 0) {
+        steer(b.vx, b.vy, aliX / cnt, aliY / cnt, sA);
+        steer(b.vx, b.vy, (cx / cnt - b.x) * 2.2, (cy / cnt - b.y) * 2.2, sB);
+        fx += W_ALI * sA[0] + W_COH * sB[0];
+        fy += W_ALI * sA[1] + W_COH * sB[1];
+      }
+      if (sepX !== 0 || sepY !== 0) {
+        steer(b.vx, b.vy, b.vx + sepX * 60, b.vy + sepY * 60, sC);
+        fx += W_SEP * sC[0]; fy += W_SEP * sC[1];
+      }
+      b.vx += fx * dt; b.vy += fy * dt;
+      var sp = Math.hypot(b.vx, b.vy);
+      if (sp > MAX_SPD) { b.vx = b.vx / sp * MAX_SPD; b.vy = b.vy / sp * MAX_SPD; }
+      else if (sp < MAX_SPD * 0.5) { var k2 = MAX_SPD * 0.5 / (sp || 1); b.vx *= k2; b.vy *= k2; }
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      // 토러스 랩 — 빠져나가면 반대편에서 등장
+      if (b.x < -8) b.x += W + 16; else if (b.x > W + 8) b.x -= W + 16;
+      if (b.y < -8) b.y += H + 16; else if (b.y > H + 8) b.y -= H + 16;
+    }
+  }
+
+  // 하위 무리 안내 — 4개 무리가 각자 다른 위상으로 무대를 돌아 화면 커버리지를 넓힌다
+  function herdGuide(dt, tSec) {
+    for (var i = 0; i < boids.length; i++) {
+      var b = boids[i];
+      var ga = tSec * (1.3 + b.grp * 0.3) + b.ph;
+      b.vx += Math.cos(ga) * 180 * dt;
+      b.vy += Math.sin(ga) * 180 * dt;
+    }
+  }
+
+  function draw(tSec) {
+    // 1) 저녁하늘 — 매 프레임 세로 그라디언트를 다시 칠한다(잔상 없음). 지평선 파스텔이 아래.
+    // 하늘 전체가 은은히 숨쉬게 — 그라디언트 정지점을 tSec 로 미세하게 밀어 넓은 면적이 매 프레임 변한다
+    var breath = 0.5 + 0.5 * Math.sin(tSec * 0.9);
+    var horizon = H * (0.72 + 0.05 * breath);
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, 'rgb(' + C_DUSK[0] + ',' + C_DUSK[1] + ',' + C_DUSK[2] + ')');
+    sky.addColorStop(Math.max(0.2, horizon / H - 0.22), 'rgb(' +
+      (C_DUSK[0] + (C_GLOW[0] - C_DUSK[0]) * 0.35 | 0) + ',' +
+      (C_DUSK[1] + (C_GLOW[1] - C_DUSK[1]) * 0.35 | 0) + ',' +
+      (C_DUSK[2] + (C_GLOW[2] - C_DUSK[2]) * 0.35 | 0) + ')');
+    sky.addColorStop(1, 'rgb(' + C_GLOW[0] + ',' + C_GLOW[1] + ',' + C_GLOW[2] + ')');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    // 2) 새떼 — 삼각형 날개 2개 실루엣. 진행 방향으로 회전, 날갯짓은 sin 위상
+    for (var i = 0; i < boids.length; i++) {
+      var b = boids[i];
+      var flap = Math.sin(tSec * b.flap + b.ph);        // -1..1 — 날개 펄럭임
+      var ang = Math.atan2(b.vy, b.vx);
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(ang);
+      var s = b.sz;
+      // 몸 — 진행축으로 가는 얇은 쐐기
+      ctx.fillStyle = 'rgb(' + C_SILH[0] + ',' + C_SILH[1] + ',' + C_SILH[2] + ')';
+      ctx.beginPath();
+      ctx.moveTo(5 * s, 0);
+      ctx.lineTo(-3 * s, 1.6 * s);
+      ctx.lineTo(-3 * s, -1.6 * s);
+      ctx.closePath();
+      ctx.fill();
+      // 날개 앞 — 위상이 양수일 때 위로, 음수일 때 아래로 접힌다
+      var wy = flap * 4.2 * s;
+      ctx.beginPath();
+      ctx.moveTo(1.5 * s, 0);
+      ctx.lineTo(-2.5 * s, (-4.5 + wy) * s * 0 + wy - 4.5 * s);
+      ctx.lineTo(-1.2 * s, -0.4 * s);
+      ctx.closePath();
+      ctx.fill();
+      // 날개 뒤 — 앞 날개와 반대 위상(어긋난 두 박자)
+      var wy2 = -flap * 4.2 * s;
+      ctx.beginPath();
+      ctx.moveTo(-1.5 * s, 0);
+      ctx.lineTo(2.5 * s, (-4.5 + wy2) * s * 0 + wy2 - 4.5 * s);
+      ctx.lineTo(1.2 * s, -0.4 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    var oldW = W, oldH = H;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    if (oldW !== W || oldH !== H) {
+      prngState = SEED >>> 0;
+      build();
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    herdGuide(dt, t);
+    step(dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T); });
+
+  fit();
+  build();
+  if (reduce) {
+    for (var w = 0; w < 96; w++) { herdGuide(1 / 60, w / 60); step(1 / 60); }
+    draw(STILL_T);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

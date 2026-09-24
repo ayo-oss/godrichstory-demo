@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>貪欲巻き — 스트링아트 실 감기 기하 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sf is-demo" id="sfRoot" role="application" aria-label="貪欲探索板" tabindex="0">
+  <canvas class="sf__cv" id="sfCv"></canvas>
+  <p class="sf__hint">
+    <span class="sf__title">貪欲巻き</span>
+    <span class="sf__desc">候補をすべて描き、最も似る1本だけを残す探索が図案を完成させます</span>
+  </p>
+  <div class="sf__bar">
+    <span class="sf__meta">候補180弦 · 1段階1本 · 周期2秒</span>
+    <span class="sf__meta sf__meta--dim">ImageData · 貪欲選択</span>
+  </div>
+</div>
+</main>
+<script>
+// 스트링아트 貪欲巻き(06) — 후보를 전부 그려보고 가장 나은 한 올만 남기는 탐색 루프.
+// 목표 도안(오프스크린 캔버스에 절차적으로 그린 별 문양)을 getImageData 로 읽어 격자로 두고,
+// 감은 판 상태를 같은 크기 보드(Float32Array)에 유지한다. 매 단계에서 후보 180현을 보드에
+// 얹었다 되돌리며 점수를 재고, 목표와 가장 가까워지는 한 올만 실제로 남긴다 —
+// 이 탐욕 선택을 반복하면 실만으로 별이 그려진다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N     = 180;   // 원 둘레 핀 개수
+  var CAND  = 180;   // 매 단계 비교하는 후보 현 수
+  var STEPS = 190;   // 주기 안에 완성하는 올 수
+  var CYCLE = 2.0;   // 감기 주기(초)
+  var SS    = 72;    // 비교용 축소 격자 크기(SS×SS)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('sfRoot');
+  var cvEl = document.getElementById('sfCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var COL_THRD  = tokRGB('--sf-thread');
+  var COL_CAND  = tokRGB('--sf-cand');
+  var COL_PIN   = tokRGB('--sf-pin');
+  var COL_PANEL = tokRGB('--sf-panel');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var R = 0, CX = 0, CY = 0;
+
+  // ── 목표 도안 — 오프스크린에 5각 별을 그리고 ImageData 로 읽어 격자로 둔다 ──
+  var goal = new Float32Array(SS * SS);
+  (function buildGoal() {
+    var oc = document.createElement('canvas');
+    oc.width = SS; oc.height = SS;
+    var o = oc.getContext('2d');
+    o.fillStyle = '#000'; o.fillRect(0, 0, SS, SS);
+    o.strokeStyle = '#fff'; o.lineWidth = 2.6;
+    o.beginPath();
+    for (var k = 0; k <= 5; k++) {
+      var a = -Math.PI / 2 + Math.PI * 4 * k / 5;
+      var x = SS / 2 + Math.cos(a) * SS * 0.38;
+      var y = SS / 2 + Math.sin(a) * SS * 0.38;
+      if (k === 0) o.moveTo(x, y); else o.lineTo(x, y);
+    }
+    o.stroke();
+    var d = o.getImageData(0, 0, SS, SS).data;
+    for (var i = 0; i < SS * SS; i++) goal[i] = d[i * 4] / 255;
+  })();
+
+  // ── 감기 상태 — 핀 사용 횟수와 확정 올 목록 ──
+  var pinsUsed = [];
+  var woven = [];   // [i, j] 확정 올
+  var board = new Float32Array(SS * SS);   // 감은 판의 잉크량
+
+  function resetBoard() {
+    for (var b = 0; b < SS * SS; b++) board[b] = 0;
+    for (var u = 0; u < N; u++) pinsUsed[u] = 0;
+    woven = [];
+  }
+
+  // 격자 좌표의 핀 위치
+  function gPin(i) {
+    var a = Math.PI * 2 * i / N - Math.PI / 2;
+    return [SS / 2 + Math.cos(a) * SS * 0.46, SS / 2 + Math.sin(a) * SS * 0.46];
+  }
+  // 올 얹기/되돌리기 — 현을 따라 점을 찍어 잉크량을 더거나 뺀다
+  function paintChord(i, j, sign) {
+    var a = gPin(i), b = gPin(j);
+    var K = 60;
+    for (var k = 0; k <= K; k++) {
+      var u = k / K;
+      var x = a[0] + (b[0] - a[0]) * u, y = a[1] + (b[1] - a[1]) * u;
+      var gx = x | 0, gy = y | 0;
+      if (gx < 0 || gy < 0 || gx >= SS || gy >= SS) continue;
+      var idx = gy * SS + gx;
+      board[idx] += sign * 0.5;
+    }
+  }
+  // 보드가 목표와 얼마나 다른가 — 작을수록 닮았다
+  function score() {
+    var s = 0;
+    for (var i = 0; i < SS * SS; i++) {
+      var ink = board[i] > 1 ? 1 : board[i];   // 겹친 올은 포화
+      var diff = ink - goal[i];
+      s += diff * diff;
+    }
+    return s;
+  }
+
+  // 매 단계 — 후보 CAND현을 얹었다 되돌리며 점수를 재고 최선 한 올을 확정한다
+  function greedyStep() {
+    var base = score();
+    var i0 = woven.length ? woven[woven.length - 1][1] : 0;   // 이전 올 끝핀에서 이어서
+    var bestJ = -1, bestSc = base;
+    for (var c = 1; c <= CAND; c++) {
+      var j = (i0 + c) % N;
+      paintChord(i0, j, 1);
+      var sc = score();
+      paintChord(i0, j, -1);
+      if (sc < bestSc) { bestSc = sc; bestJ = j; }
+    }
+    if (bestJ >= 0) {
+      paintChord(i0, bestJ, 1);
+      woven.push([i0, bestJ]);
+      pinsUsed[i0]++; pinsUsed[bestJ]++;
+      return bestJ;
+    }
+    // 나아질 후보가 없으면 규칙 올 한 개라도 감아 진행을 지킨다
+    var fallback = (i0 + Math.round(N * 0.37)) % N;
+    paintChord(i0, fallback, 1);
+    woven.push([i0, fallback]);
+    pinsUsed[i0]++; pinsUsed[fallback]++;
+    return fallback;
+  }
+
+  // 주기마다 재현할 STEPS 단계의 탐욕 결과를 미리 계산해 둔다(같은 도안이 반복된다)
+  var endpoints = [];
+  (function precompute() {
+    resetBoard();
+    for (var s = 0; s < STEPS; s++) endpoints.push(greedyStep());
+  })();
+
+  function pinXY(i) {
+    var a = Math.PI * 2 * i / N - Math.PI / 2;
+    return [CX + Math.cos(a) * R, CY + Math.sin(a) * R];
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    R = Math.min(W, H) * 0.48;
+    CX = W / 2; CY = H / 2;
+  }
+
+  function draw(progress, t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + COL_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    var full = Math.min(STEPS, Math.floor(progress * STEPS));
+    var frac = progress * STEPS - full;   // 지금 탐색 중인 올의 진행 0..1
+
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = 'rgba(' + COL_THRD.join(',') + ',0.3)';
+    for (var i = 0; i < full; i++) {
+      var seg = woven[i];
+      var a = pinXY(seg[0]), b = pinXY(seg[1]);
+      var recency = (full - i) / STEPS;
+      var alpha = 0.6 + 0.34 * Math.pow(recency, 1.2);
+      ctx.strokeStyle = 'rgba(' + COL_THRD.join(',') + ',' + Math.min(0.95, alpha).toFixed(3) + ')';
+      ctx.lineWidth = 2.2 + recency * 1.6;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // 지금 탐색 중인 올 — 확정되어 자라나는 후보(더스티 로즈)
+    if (full > 0 && full <= STEPS && frac > 0) {
+      var i0 = woven[full - 1][1];
+      var jNow = endpoints[full - 1];
+      var a2 = pinXY(i0), b2 = pinXY(jNow);
+      var grow = Math.min(1, frac * 2);
+      ctx.strokeStyle = 'rgba(' + COL_CAND.join(',') + ',' + (0.6 + 0.25 * Math.sin(t * 9)).toFixed(3) + ')';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(a2[0], a2[1]);
+      ctx.lineTo(a2[0] + (b2[0] - a2[0]) * grow, a2[1] + (b2[1] - a2[1]) * grow);
+      ctx.stroke();
+    }
+
+    // 핀 — 감긴 핀일수록 크고 진하며 순차적으로 숨쉰다(유지 구간에도 맥동)
+    for (var p = 0; p < N; p++) {
+      var xy = pinXY(p);
+      var use = pinsUsed[p];
+      var pulse = 0.5 + 0.5 * Math.sin(t * 4 - p * 0.3);
+      if (use > 0) {
+        var sz = 1 + Math.min(1.4, use * 0.28) + 0.9 * pulse;
+        ctx.fillStyle = 'rgba(' + COL_PIN.join(',') + ',' + (0.6 + 0.35 * pulse).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(xy[0], xy[1], sz, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.fillStyle = 'rgba(' + COL_PIN.join(',') + ',0.4)';
+        ctx.beginPath(); ctx.arc(xy[0], xy[1], 1, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = ((now - t0) / 1000) % CYCLE;
+    // 0→0.85 탐색+감기 · 0.85→1 유지(완성 도안을 볼 시간)
+    var progress = Math.min(1, t / CYCLE / 0.85);
+    draw(progress, t);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(1, 0);
+  });
+  fit();
+  if (reduce) {
+    draw(1, 0);   // reduce — 완성된 탐욕 도안 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

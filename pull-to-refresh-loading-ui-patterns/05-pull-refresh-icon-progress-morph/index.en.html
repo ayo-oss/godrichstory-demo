@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pull progress ring — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prim is-demo" id="prim">
+  <div class="prim__phone" id="primPhone">
+    <div class="prim__ringwrap">
+      <svg class="prim__ring" viewBox="0 0 56 56" width="56" height="56">
+        <circle class="prim__ring-track" cx="28" cy="28" r="22"></circle>
+        <circle class="prim__ring-bar" id="primBar" cx="28" cy="28" r="22"></circle>
+        <polyline class="prim__check" id="primCheck" points="17,29 24,36 40,19"></polyline>
+      </svg>
+    </div>
+    <div class="prim__list">
+      <div class="prim__row"></div>
+      <div class="prim__row"></div>
+    </div>
+  </div>
+  <span class="prim__hint" id="primHint">Pull down</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('primPhone');
+  var bar = document.getElementById('primBar');
+  var check = document.getElementById('primCheck');
+  var hint = document.getElementById('primHint');
+  var root = document.getElementById('prim');
+
+  // 계산 겹: Pull 거리(raw)를 REF 로 나눈 progress(0~1)를 원 둘레(C)에 곱해
+  // strokeDashoffset 을 직접 놓는다 — 프레임마다 새 각도를 계산하는 것이지 CSS 트랜지션이 아니다.
+  var REF = 130, MAX = 150;
+  var R = 22, C = 2 * Math.PI * R;
+  bar.style.strokeDasharray = C.toFixed(2);
+  var checkLen = check.getTotalLength();
+  check.style.strokeDasharray = checkLen.toFixed(2);
+  check.style.strokeDashoffset = checkLen.toFixed(2);
+
+  function ringOf(progress) { return C * (1 - progress); }
+
+  function apply(raw) {
+    var progress = Math.max(0, Math.min(1, raw / REF));
+    bar.style.strokeDashoffset = ringOf(progress).toFixed(2);
+    var pct = Math.round(progress * 100);
+    hint.textContent = progress >= 1 ? 'Release to refresh' : (raw > 4 ? ('Pull progress ' + pct + '%') : 'Pull down');
+  }
+
+  var committing = false, commitTimer = null;
+  function commit() {
+    committing = true;
+    hint.textContent = 'Refresh complete';
+    var start = null, dur = 320;
+    function step(ts) {
+      if (start === null) { start = ts; }
+      var t = Math.min(1, (ts - start) / dur);
+      check.style.strokeDashoffset = (checkLen * (1 - t)).toFixed(2);
+      if (t < 1) { requestAnimationFrame(step); }
+    }
+    requestAnimationFrame(step);
+    commitTimer = setTimeout(function () {
+      check.style.strokeDashoffset = checkLen.toFixed(2);
+      committing = false;
+      bar.style.strokeDashoffset = C.toFixed(2);
+      hint.textContent = 'Pull down';
+      apply(0);
+    }, 760);
+  }
+
+  var raw = 0, target = 0, raf = null;
+  function settle() {
+    raw += (target - raw) * 0.28;
+    if (Math.abs(target - raw) < 0.3) { raw = target; }
+    apply(raw);
+    if (raw !== target) { raf = requestAnimationFrame(settle); } else { raf = null; }
+  }
+  function goTo(v) { target = v; if (raf === null) { raf = requestAnimationFrame(settle); } }
+
+  var dragging = false, startY = 0, startRaw = 0;
+  function onDown(y) { if (committing) { return; } dragging = true; startY = y; startRaw = raw; if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(MAX, startRaw + (y - startY)));
+    apply(raw);
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (raw >= REF) { commit(); } else { goTo(0); }
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  apply(0);
+
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (committing) { return; }
+    autoRaw += 22;
+    if (autoRaw >= REF) { raw = REF; apply(raw); autoRaw = 0; commit(); return; }
+    raw = autoRaw; apply(raw);
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } if (commitTimer) { clearTimeout(commitTimer); } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 190); }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>최근 色相 컬러피커 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel">
+  <div class="grid" id="grid" role="list" aria-label="最近使用した色の一覧">
+    <span class="chip" data-i="0" role="img" aria-label="最近の色1"></span>
+    <span class="chip" data-i="1" role="img" aria-label="最近の色2"></span>
+    <span class="chip" data-i="2" role="img" aria-label="最近の色3"></span>
+    <span class="chip" data-i="3" role="img" aria-label="最近の色4"></span>
+    <span class="chip" data-i="4" role="img" aria-label="最近の色5"></span>
+    <span class="chip" data-i="5" role="img" aria-label="最近の色6"></span>
+    <span class="chip" data-i="6" role="img" aria-label="最近の色7"></span>
+    <span class="chip" data-i="7" role="img" aria-label="最近の色8"></span>
+    <span class="chip" data-i="8" role="img" aria-label="最近の色9"></span>
+    <span class="chip" data-i="9" role="img" aria-label="最近の色10"></span>
+  </div>
+  <p class="count" id="count">10個 → 10個</p>
+</section>
+</main>
+<script>
+// 최근 色相(09) — 목록 안 색상값 사이의 실제 거리를 계산해, 그 거리가 MERGE_DIST 보다
+// 가까운 색끼리는 대표 하나로 합쳐 표시 개수를 줄인다. 실키·실서버 요청 없음.
+(function () {
+  var gridEl = document.getElementById('grid');
+  var countEl = document.getElementById('count');
+  var chipEls = gridEl ? gridEl.querySelectorAll('.chip') : [];
+  if (!gridEl || !countEl || chipEls.length !== 10) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var MERGE_DIST = 30;
+  var CELL = 44;
+  var GAP = 8;
+  var STEP = CELL + GAP;
+  var COLS = 5;
+  var CYCLE_MS = 2800;
+
+  var RAW = [
+    { h: 8, s: 70, l: 55 },
+    { h: 12, s: 68, l: 57 },
+    { h: 45, s: 80, l: 60 },
+    { h: 200, s: 60, l: 50 },
+    { h: 205, s: 58, l: 52 },
+    { h: 140, s: 50, l: 40 },
+    { h: 280, s: 45, l: 65 },
+    { h: 283, s: 47, l: 63 },
+    { h: 20, s: 65, l: 58 },
+    { h: 320, s: 55, l: 50 }
+  ];
+
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    var k = function (n) { return (n + h / 30) % 12; };
+    var a = s * Math.min(l, 1 - l);
+    var f = function (n) { return l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); };
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  function toHex(n) {
+    return n.toString(16).padStart(2, '0');
+  }
+
+  function dist(a, b) {
+    return Math.sqrt(
+      Math.pow(a[0] - b[0], 2) + Math.pow(a[1] - b[1], 2) + Math.pow(a[2] - b[2], 2)
+    );
+  }
+
+  var RGB = RAW.map(function (c) { return hslToRgb(c.h, c.s, c.l); });
+
+  var kept = [];
+  var groupOf = new Array(RAW.length);
+  for (var i = 0; i < RAW.length; i++) {
+    var found = -1;
+    for (var j = 0; j < kept.length; j++) {
+      if (dist(RGB[i], RGB[kept[j]]) < MERGE_DIST) { found = kept[j]; break; }
+    }
+    if (found === -1) {
+      kept.push(i);
+      groupOf[i] = i;
+    } else {
+      groupOf[i] = found;
+    }
+  }
+
+  function centerOf(i) {
+    var col = i % COLS;
+    var row = Math.floor(i / COLS);
+    return { x: col * STEP, y: row * STEP };
+  }
+
+  RAW.forEach(function (c, i) {
+    var rgb = RGB[i];
+    var hex = '#' + toHex(rgb[0]) + toHex(rgb[1]) + toHex(rgb[2]);
+    chipEls[i].style.background = hex;
+  });
+
+  countEl.textContent = RAW.length + '個 →  ' + kept.length + '個';
+
+  function apply(t) {
+    var p = (t / CYCLE_MS) % 1;
+    var mergeAmount = p < .5 ? p * 2 : (1 - p) * 2;
+
+    for (var i = 0; i < RAW.length; i++) {
+      var own = centerOf(i);
+      if (groupOf[i] === i) {
+        var pulse = 1 + .3 * mergeAmount;
+        var tilt = mergeAmount * 10;
+        chipEls[i].style.transform = 'translate(' + own.x.toFixed(2) + 'px, ' + own.y.toFixed(2) + 'px) scale(' + pulse.toFixed(3) + ') rotate(' + tilt.toFixed(2) + 'deg)';
+        chipEls[i].style.opacity = '1';
+      } else {
+        var target = centerOf(groupOf[i]);
+        var x = own.x + (target.x - own.x) * mergeAmount;
+        var y = own.y + (target.y - own.y) * mergeAmount;
+        var scale = 1 - .95 * mergeAmount;
+        var opacity = 1 - .9 * mergeAmount;
+        chipEls[i].style.transform = 'translate(' + x.toFixed(2) + 'px, ' + y.toFixed(2) + 'px) scale(' + scale.toFixed(3) + ')';
+        chipEls[i].style.opacity = opacity.toFixed(3);
+      }
+    }
+  }
+
+  if (reduce) {
+    apply(0);
+    return;
+  }
+
+  var start = null;
+  function loop(ts) {
+    if (start === null) start = ts;
+    var t = (ts - start) % CYCLE_MS;
+    apply(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

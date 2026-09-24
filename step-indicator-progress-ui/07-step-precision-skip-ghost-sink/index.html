@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>건너뛴 단계가 흐려지며 가라앉는 표시 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gh is-demo" id="gh">
+  <ol class="gh__row" id="ghRow" role="list" aria-label="설정 마법사 단계">
+    <li class="gh__node" data-i="0"><span class="gh__circle is-active" id="n0">1</span><span class="gh__label">약관</span></li>
+    <li class="gh__connector" id="k0"></li>
+    <li class="gh__node" data-i="1"><span class="gh__circle" id="n1">2</span><span class="gh__label">프로필</span></li>
+    <li class="gh__connector" id="k1"></li>
+    <li class="gh__node" data-i="2"><span class="gh__aura" id="ghAura"></span><span class="gh__circle" id="n2">3</span><span class="gh__label">알림설정</span><span class="gh__optional">선택</span></li>
+    <li class="gh__connector" id="k2"></li>
+    <li class="gh__node" data-i="3"><span class="gh__circle" id="n3">4</span><span class="gh__label">완료</span></li>
+  </ol>
+  <p class="gh__status" id="ghStatus" aria-live="polite">1단계: 약관 진행 중</p>
+  <div class="gh__controls">
+    <button type="button" class="gh__btn" id="ghSkip">알림설정 건너뛰기</button>
+    <button type="button" class="gh__btn gh__btn--primary" id="ghNext">다음</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_SKIP_SINK_PX = 16;
+  var STEP_SKIP_ALPHA_MIN = 0.4;
+  var STEP_SKIP_TWEEN_MS = 320;
+  var STEP_COUNT = 4;
+  var LABELS = ['약관', '프로필', '알림설정', '완료'];
+  var STATUS_TEXTS = ['1단계: 약관 진행 중', '2단계: 프로필 진행 중', '3단계: 알림설정 진행 중', '4단계: 완료 진행 중'];
+  var OPTIONAL_INDEX = 2;
+  var AURA_MAX_PX = 170;
+
+  var root = document.getElementById('gh');
+  var status = document.getElementById('ghStatus');
+  var nextBtn = document.getElementById('ghNext');
+  var skipBtn = document.getElementById('ghSkip');
+  var ghAura = document.getElementById('ghAura');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var circles = [0, 1, 2, 3].map(function (i) { return document.getElementById('n' + i); });
+  var connectors = [0, 1, 2].map(function (i) { return document.getElementById('k' + i); });
+
+  var current = 0;
+  var skipped = false;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function applySkinkTween(fromRatio, toRatio) {
+    if (reduce) { paintSkip(toRatio); return; }
+    var start = null;
+    function step(now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / STEP_SKIP_TWEEN_MS, 0, 1);
+      var r = fromRatio + (toRatio - fromRatio) * easeOutCubic(t);
+      paintSkip(r);
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  function paintSkip(ratio) {
+    var node = circles[OPTIONAL_INDEX];
+    var small = window.innerWidth < 340;
+    var sink = STEP_SKIP_SINK_PX * ratio;
+    var alpha = 1 - (1 - STEP_SKIP_ALPHA_MIN) * ratio;
+    node.style.transform = 'translateY(' + sink.toFixed(2) + 'px)';
+    node.style.opacity = alpha.toFixed(3);
+    // 계산된 시각 레이어 1: 가라앉음 값 ratio 를 노드 그림자(블러·퍼짐)에 그대로 전파
+    var shadowBlur = (small ? 3 : 6) + ratio * (small ? 8 : 22);
+    var shadowSpread = ratio * (small ? 1 : 4);
+    node.style.boxShadow = ratio > 0.01
+      ? ('0 ' + (2 + sink * 0.4).toFixed(1) + 'px ' + shadowBlur.toFixed(1) + 'px ' + shadowSpread.toFixed(1) + 'px rgba(0,0,0,' + (0.3 * ratio).toFixed(3) + ')')
+      : 'none';
+    // 계산된 시각 레이어 2: 같은 ratio 로 커지고 옅어지는 고스트 아우라(320px 이하에서는 축소해 BD9 유지)
+    var auraMax = small ? AURA_MAX_PX * 0.3 : AURA_MAX_PX;
+    var auraSize = auraMax * ratio;
+    ghAura.style.width = auraSize.toFixed(1) + 'px';
+    ghAura.style.height = auraSize.toFixed(1) + 'px';
+    ghAura.style.opacity = (0.5 * ratio).toFixed(3);
+    connectors[OPTIONAL_INDEX - 1].style.opacity = (1 - 0.35 * ratio).toFixed(3);
+    connectors[OPTIONAL_INDEX].style.opacity = (1 - 0.35 * ratio).toFixed(3);
+  }
+
+  function render() {
+    circles.forEach(function (el, i) {
+      el.classList.toggle('is-active', i === current);
+      el.classList.toggle('is-done', i < current);
+      el.classList.toggle('is-skipped', i === OPTIONAL_INDEX && skipped);
+    });
+    status.textContent = current >= STEP_COUNT - 1 ? '모든 단계 완료' : STATUS_TEXTS[current];
+    skipBtn.disabled = current !== OPTIONAL_INDEX || skipped;
+    nextBtn.disabled = current === STEP_COUNT - 1;
+  }
+
+  function toggleSkip(next) {
+    if (next === skipped) return;
+    skipped = next;
+    applySkinkTween(next ? 0 : 1, next ? 1 : 0);
+    render();
+  }
+
+  function advance() {
+    current = clamp(current + 1, 0, STEP_COUNT - 1);
+    render();
+  }
+
+  skipBtn.addEventListener('click', function () { root.classList.remove('is-demo'); toggleSkip(true); advance(); });
+  nextBtn.addEventListener('click', function () { root.classList.remove('is-demo'); advance(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); advance(); e.preventDefault(); }
+  });
+
+  var startTime = null;
+  var phase = 0;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2.0;
+    if (root.classList.contains('is-demo')) {
+      if (t < 0.05 && phase !== 0) { phase = 0; current = 0; skipped = false; paintSkip(0); render(); }
+      if (phase === 0 && t > 0.2) { current = OPTIONAL_INDEX; render(); toggleSkip(true); phase = 1; }
+      if (phase === 1 && t > 0.58) { toggleSkip(false); phase = 2; }
+      if (phase === 2 && t > 0.96) { toggleSkip(true); phase = 3; }
+      if (phase === 3 && t > 1.34) { toggleSkip(false); phase = 4; }
+      if (phase === 4 && t > 1.7) { current = 0; render(); phase = 5; }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

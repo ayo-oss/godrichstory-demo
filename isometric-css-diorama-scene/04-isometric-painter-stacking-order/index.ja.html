@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>画家アルゴリズム整列 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ps" id="ps">
+  <p class="ps__hint">z-index = (col+row)×10 を毎フレーム計算して代入します — 移動ブロックが格子を横切ると前後関係が自動で入れ替わります</p>
+  <div class="ps__field" role="img" aria-label="移動するブロックが固定格子ブロックの間を通り、前後順序が計算で変わる場面">
+    <div class="ps__world" id="world"></div>
+  </div>
+  <p class="ps__meta">移動ブロックのz-index =  <b id="z">0</b></p>
+</div>
+</main>
+<script>
+// 페인터 알고리즘 정렬(04) — 등각 장면에는 depth buffer 가 없다. 대신 "뒤에 있는 것부터
+// 그린다"(화가의 순서)를 z-index 숫자로 흉내낸다. col+row 가 클수록 화면 앞쪽(카메라에
+// 가깝다) 이므로 z-index 도 커야 한다. 이동 블록은 매 프레임 자신의 (col,row) 로 같은
+// 공식을 다시 계산해 z-index 를 갱신한다 — 그래서 격자를 지나가면 앞뒤가 자동으로 뒤집힌다.
+(function () {
+  var root = document.getElementById('ps');
+  var world = document.getElementById('world');
+  var zEl = document.getElementById('z');
+  if (!root || !world || !zEl) return;
+
+  function mat4RotateX(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  }
+  function mat4RotateZ(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+  function mat4Mul(a, b) {
+    var out = new Array(16);
+    for (var col = 0; col < 4; col++) {
+      for (var row = 0; row < 4; row++) {
+        var sum = 0;
+        for (var k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+  function mat4ToCss(m) {
+    var s = '';
+    for (var i = 0; i < m.length; i++) s += (i ? ',' : '') + m[i].toFixed(6);
+    return 'matrix3d(' + s + ')';
+  }
+
+  var TILT = -35.264;
+  world.style.transform = mat4ToCss(mat4Mul(mat4RotateX(TILT), mat4RotateZ(45)));
+
+  var mm = window.matchMedia('(max-width: 340px)').matches;
+  var N = 4;
+  var TILE_W = mm ? 30 : 38, TILE_H = mm ? 15 : 19;
+  var SIDE = mm ? 26 : 34;
+
+  function place(el, col, row) {
+    var x = (col - row) * TILE_W / 2;
+    var y = (col + row) * TILE_H / 2;
+    el.style.setProperty('--tx', x.toFixed(2) + 'px');
+    el.style.setProperty('--ty', y.toFixed(2) + 'px');
+  }
+
+  // 고정 격자 블록 — z-index 는 한 번만 계산해서 고정
+  for (var row = 0; row < N; row++) {
+    for (var col = 0; col < N; col++) {
+      var block = document.createElement('div');
+      block.className = 'ps__block';
+      block.style.setProperty('--w', SIDE + 'px');
+      place(block, col, row);
+      block.style.zIndex = String(Math.round((col + row) * 10));
+      world.appendChild(block);
+    }
+  }
+
+  // 이동 블록 — 매 프레임 (col,row) 를 다시 계산해 같은 공식으로 z-index 를 갱신한다
+  var traveler = document.createElement('div');
+  traveler.className = 'ps__block ps__block--traveler';
+  traveler.style.setProperty('--w', SIDE + 'px');
+  world.appendChild(traveler);
+
+  var CENTER = (N - 1) / 2;
+  var RADIUS = CENTER + 0.35;
+
+  function paint(t) {
+    var ang = t * 0.9;
+    var col = CENTER + Math.cos(ang) * RADIUS;
+    var row = CENTER + Math.sin(ang) * RADIUS;
+    place(traveler, col, row);
+    var z = Math.round((col + row) * 10) + 1;   // +1 — 같은 칸일 때 이동 블록이 위로
+    traveler.style.zIndex = String(z);
+    zEl.textContent = String(z);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    paint(0.8);
+    root.classList.add('is-still');
+  } else {
+    var start = performance.now();
+    (function step(now) {
+      paint((now - start) / 1000);
+      requestAnimationFrame(step);
+    })(start);
+  }
+})();
+</script>
+</body>
+</html>

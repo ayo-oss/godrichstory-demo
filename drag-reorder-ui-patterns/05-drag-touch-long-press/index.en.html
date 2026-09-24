@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long-Press Gate — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lp">
+  <p class="lp__hint">Surviving 250ms without crossing the movement threshold promotes the touch into a drag.</p>
+  <ul class="lp__list" id="lpList">
+    <li class="lp__row" data-id="0"><span class="lp__txt">Laundry</span></li>
+    <li class="lp__row" data-id="1"><span class="lp__txt">Dishes</span></li>
+    <li class="lp__row" data-id="2"><span class="lp__txt">Cleaning</span></li>
+    <li class="lp__row" data-id="3"><span class="lp__txt">Recycling</span></li>
+  </ul>
+  <p class="lp__meta"><b class="lp__state" id="lpState">press 0ms</b><span class="lp__unit" id="lpUnit">move 0px</span></p>
+</div>
+</main>
+<script>
+// 롱프레스 판정(05) — pointerdown 에서 setTimeout(HOLD_MS) 타이머를 걸고, 타이머가 살아있는 동안
+// pointermove 의 이동량이 임계값(MOVE_PX)을 넘으면 clearTimeout 으로 취소해 scroll/탭으로 넘긴다.
+// 타이머가 끝까지 살아남아 activate() 가 불리면 그 행이 포인터를 따라가는 드래그로 바뀐다.
+// 표시되는 250ms 는 HOLD_MS 상수와 같은 값이다.
+(function () {
+  var list = document.getElementById('lpList');
+  var stateEl = document.getElementById('lpState');
+  var unitEl = document.getElementById('lpUnit');
+  if (!list || !stateEl || !unitEl) return;
+
+  var HOLD_MS = 250;
+  var MOVE_PX = 8;
+
+  var press = null;   // { row, startX, startY, timer, pressStart, raf }
+  var active = null;  // { row, offsetInRow }
+
+  function rowsExcept(row) {
+    return Array.prototype.slice.call(list.children).filter(function (r) { return r !== row; });
+  }
+
+  function flipInsert(row, target) {
+    var siblings = rowsExcept(row);
+    var first = siblings.map(function (s) { return s.getBoundingClientRect(); });
+    list.insertBefore(row, target);
+    siblings.forEach(function (s, i) {
+      var r = s.getBoundingClientRect();
+      var dy = first[i].top - r.top;
+      if (dy !== 0) {
+        s.style.transition = 'none';
+        s.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(function () {
+          s.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+          s.style.transform = 'translateY(0)';
+        });
+      }
+    });
+  }
+
+  function reflow(row, pointerY) {
+    var siblings = rowsExcept(row);
+    var target = null;
+    for (var i = 0; i < siblings.length; i++) {
+      var r = siblings[i].getBoundingClientRect();
+      if (pointerY < r.top + r.height / 2) { target = siblings[i]; break; }
+    }
+    if (target === row.nextElementSibling) return;
+    if (target === null && row === list.lastElementChild) return;
+    flipInsert(row, target);
+  }
+
+  function pressTick() {
+    if (!press) return;
+    var el = press.pressStart === null ? 0 : performance.now() - press.pressStart;
+    stateEl.textContent = 'press ' + Math.min(HOLD_MS, Math.round(el)) + 'ms';
+    press.raf = requestAnimationFrame(pressTick);
+  }
+
+  function startPress(row, x, y) {
+    cancelPress();
+    press = { row: row, startX: x, startY: y, pressStart: performance.now(), raf: null, timer: null };
+    press.timer = setTimeout(function () { activate(row, y); }, HOLD_MS);
+    pressTick();
+  }
+
+  function cancelPress() {
+    if (!press) return;
+    if (press.timer) clearTimeout(press.timer);
+    if (press.raf) cancelAnimationFrame(press.raf);
+    press = null;
+  }
+
+  function activate(row, y) {
+    if (press && press.row === row) cancelPress();
+    var r = row.getBoundingClientRect();
+    row.classList.add('lp__row--drag');
+    stateEl.textContent = 'drag';
+    active = { row: row, offsetInRow: y - r.top };
+  }
+
+  function moveActive(clientY) {
+    if (!active) return;
+    var listRect = list.getBoundingClientRect();
+    var ty = clientY - active.offsetInRow - listRect.top - active.row.offsetTop;
+    active.row.style.transform = 'translateY(' + ty.toFixed(1) + 'px)';
+    reflow(active.row, clientY);
+  }
+
+  function endActive() {
+    if (!active) return;
+    var row = active.row;
+    active = null;
+    row.classList.remove('lp__row--drag');
+    row.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+    row.style.transform = 'translateY(0)';
+    setTimeout(function () { row.style.transition = ''; }, 240);
+    stateEl.textContent = 'press 0ms';
+    unitEl.textContent = 'move 0px';
+  }
+
+  function onDown(e) {
+    var row = e.target.closest('.lp__row');
+    if (!row) return;
+    stop();
+    row.setPointerCapture(e.pointerId);
+    startPress(row, e.clientX, e.clientY);
+  }
+  function onMove(e) {
+    if (active) { moveActive(e.clientY); return; }
+    if (!press) return;
+    var dx = e.clientX - press.startX, dy = e.clientY - press.startY;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    unitEl.textContent = 'move ' + Math.round(d) + 'px';
+    if (d > MOVE_PX) cancelPress();
+  }
+  function onUp() {
+    if (active) { endActive(); return; }
+    cancelPress();
+    stateEl.textContent = 'press 0ms';
+    unitEl.textContent = 'move 0px';
+  }
+
+  list.addEventListener('pointerdown', onDown);
+  list.addEventListener('pointermove', onMove);
+  list.addEventListener('pointerup', onUp);
+  list.addEventListener('pointercancel', onUp);
+
+  // 자동 시연 — 같은 함수를 실제 타이밍으로 호출한다(setTimeout 은 실제 시간을 쓴다)
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function loopOnce() {
+    var row = list.children[0];
+    var r = row.getBoundingClientRect();
+    startPress(row, r.left + r.width / 2, r.top + r.height / 2);
+    setTimeout(function () {
+      if (!active) return;
+      var r3 = list.children[2] ? list.children[2].getBoundingClientRect() : r;
+      moveActive(r3.top + r3.height / 2 + 4);
+    }, HOLD_MS + 120);
+    setTimeout(function () { onUp(); }, HOLD_MS + 420);
+  }
+
+  if (reduce) {
+    activate(list.children[0], list.children[0].getBoundingClientRect().top);
+    endActive();
+  } else {
+    loopOnce();
+    setInterval(function () { if (playing) loopOnce(); }, 1700);
+  }
+})();
+</script>
+</body>
+</html>

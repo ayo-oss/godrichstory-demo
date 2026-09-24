@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>こすった場所から飛び散った破片が重力と回転を受けてカードの外へ弾け飛ぶ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">スクラッチカード</p>
+    <div class="scv__zone" id="zone">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">誕生日クーポン</p>
+        <p class="scv__prizeSub">こするたびに破片が飛び散ります</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+      <canvas class="scv__flakes" id="flakes" width="280" height="150" aria-hidden="true"></canvas>
+    </div>
+    <button type="button" class="scv__reveal" id="revealBtn">一気に見る</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 긁는 지점마다 spawnFlake() 로 작은 은박 조각을 만들어 중력(FLAKE_GRAVITY_PX_S2)과
+  // 각속도를 준다. stepFlakes() 가 매 프레임 속도·회전을 적분해 조각이 카드 경계 밖으로
+  // 튕겨 나가며 사라지게 한다 — 파티클 엔진 없이 배열 하나로 발생·낙하·소멸을 계산한다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var flakesCanvas = document.getElementById('flakes');
+  var fctx = flakesCanvas.getContext('2d');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var FW = foil.width, FH = foil.height;
+  var SCRATCH_BRUSH_R = 15;
+  var FLAKE_GRAVITY_PX_S2 = 400;
+  var FLAKE_LIFE_MS = 900;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424031);
+  var flakeRand = seedRand(424032);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, FW, FH);
+    var grad = ctx.createLinearGradient(0, 0, FW, FH);
+    grad.addColorStop(0, '#d8863f');
+    grad.addColorStop(.5, '#f3c98a');
+    grad.addColorStop(1, '#c9752c');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.strokeStyle = 'rgba(23,20,26,.16)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 20; i += 1) {
+      var x = foilRand() * FW, y = foilRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 22 - 11), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  var flakes = [];
+  function spawnFlake(x, y, vx, vy) {
+    if (reduce) return;
+    flakes.push({
+      x: x, y: y, vx: vx, vy: vy,
+      rot: flakeRand() * Math.PI * 2,
+      angVel: (flakeRand() - .5) * 10,
+      born: 0, size: 3 + flakeRand() * 3
+    });
+  }
+  function stepFlakes(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    var alive = [];
+    for (var i = 0; i < flakes.length; i += 1) {
+      var f = flakes[i];
+      f.vy += FLAKE_GRAVITY_PX_S2 * dtS;
+      f.x += f.vx * dtS;
+      f.y += f.vy * dtS;
+      f.rot += f.angVel * dtS;
+      f.born += dtMs;
+      if (f.born < FLAKE_LIFE_MS && f.x > -8 && f.x < FW + 8 && f.y < FH + 8) alive.push(f);
+    }
+    flakes = alive;
+  }
+  function drawFlakes() {
+    fctx.clearRect(0, 0, FW, FH);
+    for (var i = 0; i < flakes.length; i += 1) {
+      var f = flakes[i];
+      var fade = Math.max(0, 1 - f.born / FLAKE_LIFE_MS);
+      fctx.save();
+      fctx.translate(f.x, f.y);
+      fctx.rotate(f.rot);
+      fctx.fillStyle = 'rgba(243,201,138,' + fade + ')';
+      fctx.fillRect(-f.size / 2, -f.size / 2, f.size, f.size);
+      fctx.restore();
+    }
+  }
+
+  function scratchAt(x, y, vx, vy) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+    spawnFlake(x, y, vx, vy - 30);
+    spawnFlake(x + (flakeRand() - .5) * 6, y + (flakeRand() - .5) * 6, -vx * .6, vy - 60);
+  }
+
+  function clearedRatio() {
+    var data = ctx.getImageData(0, 0, FW, FH).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  var opened = false;
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = '誕生日クーポンが開きました';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  paintFoil();
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dragging = false, lastPos = null;
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    dragging = true;
+    var p = pos(e);
+    scratchAt(p.x, p.y, 0, 0);
+    lastPos = p;
+    if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!dragging || opened) return;
+    var p = pos(e);
+    var vx = lastPos ? (p.x - lastPos.x) * 6 : 0;
+    var vy = lastPos ? (p.y - lastPos.y) * 6 : 0;
+    scratchAt(p.x, p.y, vx, vy);
+    lastPos = p;
+    if (clearedRatio() > .85) openCard();
+  });
+  window.addEventListener('pointerup', function () { dragging = false; lastPos = null; });
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+
+  // 격자 미리보기 — 같은 scratchAt() 경로를 스케줄로 호출해 조각을 계속 만든다
+  var demoRand = seedRand(424033);
+  var demoPath = [];
+  (function buildDemoPath() {
+    for (var i = 0; i < 22; i += 1) {
+      demoPath.push({
+        t: 230 + i * 82,
+        x: (FW * 0.14) + (i % 6) * (FW * 0.15) + (demoRand() - .5) * 6,
+        y: (FH * 0.24) + Math.floor(i / 6) * (FH * 0.26) + (demoRand() - .5) * 6,
+        vx: (demoRand() - .5) * 90,
+        vy: -40 - demoRand() * 40
+      });
+    }
+  })();
+  var DEMO_LOOP_MS = 3800;
+  var demoStep = 0;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+    flakes = [];
+    demoStep = 0;
+  }
+  function runDemo(tMod) {
+    while (demoStep < demoPath.length && demoPath[demoStep].t <= tMod) {
+      var p = demoPath[demoStep];
+      scratchAt(p.x, p.y, p.vx, p.vy);
+      demoStep += 1;
+    }
+    if (clearedRatio() > .85) openCard();
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod);
+    }
+    if (!reduce) stepFlakes(dt, elapsed);
+    drawFlakes();
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

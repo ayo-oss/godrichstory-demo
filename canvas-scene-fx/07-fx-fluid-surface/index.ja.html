@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>流体の波紋の表面のデモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fs" id="fs">
+  <p class="fs__hint">
+    <svg class="fs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 144a80 80 0 0 1-160 0c0-72 80-128 80-128s80 56 80 128" opacity=".2"/><path d="M174 47.75a254.2 254.2 0 0 0-41.45-38.3a8 8 0 0 0-9.18 0A254.2 254.2 0 0 0 82 47.75C54.51 79.32 40 112.6 40 144a88 88 0 0 0 176 0c0-31.4-14.51-64.68-42-96.25M128 216a72.08 72.08 0 0 1-72-72c0-57.23 55.47-105 72-118c16.53 13 72 60.75 72 118a72.08 72.08 0 0 1-72 72m55.89-62.66a57.6 57.6 0 0 1-46.56 46.55a9 9 0 0 1-1.33.11a8 8 0 0 1-1.32-15.89c16.57-2.79 30.63-16.85 33.44-33.45a8 8 0 0 1 15.78 2.68Z"/></g></svg>
+    <span>押すか、なぞるとその場から波紋が広がり、壁に当たると戻ってきます</span>
+  </p>
+  <div class="fs__field" id="field" role="application" aria-label="波紋の実験台" tabindex="0">
+    <canvas class="fs__cv" id="cv"></canvas>
+    <b class="fs__badge" aria-hidden="true"><span class="fs__badgeNum" id="gridVal">96×47</span><span class="fs__badgeUnit">計算格子</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 유체 물결 표면 — 高さの格子を二枚(curr·prev)을 번갈아 쓰며 파동 방정식을 푼다.
+// next = (이웃 네 칸의 합) × 0.5 − prev, 다시 감쇠를 곱한다. 포인터를 누르거나 지나가면
+// 그 자리 높이를 올려 동그란 물결이 퍼지고, 가장자리 칸을 0 으로 고정해 둔 벽에서 반사된다.
+// 화면은 밑그림(격자+글자)의 ImageData 를 떠 두고, 이웃 칸의 높이差를 굴절 오프셋으로 바꿔
+// 원본 픽셀을 당겨 온다 — 그림을 다시 그리는 게 아니라 어디서 읽을지만 바꾼다(01 렌즈와 같은 뿌리).
+var root = document.getElementById('fs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var gridVal = document.getElementById('gridVal');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var PAPER = v('--paper'), INK = v('--ink'), LINE = v('--line');
+
+var LINES = ['高さの格子を二枚', '波動式を解くと', '波紋が広がります'];
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+var COLS = 96;        // 計算格子 가로 칸 수 — 세로 칸 수는 판 폭에 맞춰 정사각 칸이 되게 잡는다.
+                      // 칸이 직사각이면 물결이 타원으로 퍼져 물로 안 읽힌다
+var DAMP = 0.986;     // 감쇠 — 1 에 가까울수록 물결이 오래 살아 벽 반사가 몇 번씩 보인다
+var REFR = 4;         // 굴절 계수 — 높이 기울기 1 이 렌더 픽셀을 몇 칸 당기는가
+var SPEC = 26;        // 경면광 계수 — 기울기를 밝기 요철로도 보게 한다. 색이 고른 데서는 이 요철이 굴절의 증거다
+var SUBSTEPS = 2;     // 프레임마다 푸는 걸음 수 — 2 걸음이면 물결이 약 0.8초 만에 판을 건넌다
+var DROP_EVERY = 0.9; // 자동 물방울 간격(초)
+var TOUR = 8.1;       // 낙하 위치가 리사주로 한 바퀴 도는 초(물방울 9개)
+var STEP = 3;         // 시뮬 한 칸이 렌더 버퍼에서 차지하는 픽셀 — 렌더 해상도를 낮춰 픽셀 루프를 가볍게 한다
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, ROWS = 0;
+var curr = null, prev = null, swap = null;  // Float32Array 高さの格子を二枚(+교환용)
+var bgd = null;                             // 밑그림을 떠 둔 픽셀
+var buf = null, bctx = null, out = null;    // 굴절 결과를 담는 렌더 버퍼(시뮬 칸의 3배 해상도)
+var RW = 0, RH = 0;
+var auto = true, tx = 0, ty = 0, lastDrop = -1, nowSec = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROWS = Math.max(24, Math.round(COLS * H / W));
+  var n = COLS * ROWS;
+  curr = new Float32Array(n);
+  prev = new Float32Array(n);
+  tx = W * 0.5; ty = H * 0.5;
+  RW = COLS * STEP; RH = ROWS * STEP;
+  // 밑그림 — 크림 바탕 + 격자 + 잉크 글자. 가늘고 곧은 것이 굴절을 가장 잘 드러낸다
+  var bgc = document.createElement('canvas');
+  bgc.width = RW; bgc.height = RH;
+  var g = bgc.getContext('2d');
+  g.fillStyle = PAPER;
+  g.fillRect(0, 0, RW, RH);
+  g.strokeStyle = LINE;
+  g.globalAlpha = 0.5;
+  g.lineWidth = 1;
+  g.beginPath();
+  for (var x = STEP * 2; x < RW; x += STEP * 2) { g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, RH); }
+  for (var y = STEP * 2; y < RH; y += STEP * 2) { g.moveTo(0, y + 0.5); g.lineTo(RW, y + 0.5); }
+  g.stroke();
+  g.globalAlpha = 1;
+  // 글자 크기 역산 — 100px 로 재 본 뒤 가장 긴 줄이 판 폭의 88% 를 차지하게 한다(01 과 같은 방식)
+  g.font = '700 100px ' + FONT;
+  var widest = 1;
+  for (var k = 0; k < LINES.length; k++) widest = Math.max(widest, g.measureText(LINES[k]).width);
+  var size = Math.max(11, Math.round(100 * (RW * 0.88) / widest));
+  var rowH = Math.round(size * 1.18);
+  var rows = Math.max(3, Math.round(RH / rowH));
+  var top = (RH - (rows - 1) * rowH) * 0.5;
+  g.fillStyle = INK;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.font = '700 ' + size + 'px ' + FONT;
+  for (var i = 0; i < rows; i++) g.fillText(LINES[i % LINES.length], RW * 0.5, top + i * rowH);
+  bgd = g.getImageData(0, 0, RW, RH).data;
+  buf = document.createElement('canvas');
+  buf.width = RW; buf.height = RH;
+  bctx = buf.getContext('2d');
+  out = bctx.createImageData(RW, RH);
+  gridVal.textContent = COLS + '×' + ROWS;
+}
+
+// 파동식 — 이웃 네 칸 평균의 두 배에서 직전 값을 빼면 다음 높이다. 두 장을 교환하며 푼다
+function sim(steps) {
+  for (var s = 0; s < steps; s++) {
+    for (var y = 1; y < ROWS - 1; y++) {
+      var row = y * COLS;
+      for (var x = 1; x < COLS - 1; x++) {
+        var i = row + x;
+        prev[i] = ((curr[i - 1] + curr[i + 1] + curr[i - COLS] + curr[i + COLS]) * 0.5 - prev[i]) * DAMP;
+      }
+    }
+    swap = prev; prev = curr; curr = swap;
+  }
+}
+
+// 물방울 낙하 — 중심이 강하고 가장자리가 0 인 코사인 낙차로 높이를 올린다
+function disturb(px, py, rad, str) {
+  var gx = px / W * COLS, gy = py / H * ROWS;
+  var x0 = Math.max(1, Math.floor(gx - rad)), x1 = Math.min(COLS - 2, Math.ceil(gx + rad));
+  var y0 = Math.max(1, Math.floor(gy - rad)), y1 = Math.min(ROWS - 2, Math.ceil(gy + rad));
+  for (var y = y0; y <= y1; y++) {
+    for (var x = x0; x <= x1; x++) {
+      var dx = x - gx, dy = y - gy;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d > rad) continue;
+      curr[y * COLS + x] += str * Math.cos(d / rad * Math.PI / 2);
+    }
+  }
+}
+
+// 굴절 렌더 — 각 렌더 픽셀에서 시뮬 칸 좌표의 높이를 네 방향으로 샘플해 기울기를 만들고,
+// 그 기울기만큼 밑그림의 읽을 자리를 당겨 온다. 밝기 요철(경면광)을 함께 얹는다
+function render() {
+  var o = out.data, b = bgd;
+  var kx = COLS / RW, ky = ROWS / RH;
+  for (var y = 0; y < RH; y++) {
+    var cy = Math.round(y * ky);
+    var rc = cy * COLS;
+    var ru = Math.max(0, cy - 1) * COLS;
+    var rd = Math.min(ROWS - 1, cy + 1) * COLS;
+    for (var x = 0; x < RW; x++) {
+      var cx = Math.round(x * kx);
+      var cl = Math.max(0, cx - 1), cr = Math.min(COLS - 1, cx + 1);
+      var hL = curr[rc + cl], hR = curr[rc + cr];
+      var hU = curr[ru + cx], hD = curr[rd + cx];
+      var sxp = x + (hL - hR) * REFR;
+      var syp = y + (hU - hD) * REFR;
+      if (sxp < 0) sxp = 0; else if (sxp > RW - 1.001) sxp = RW - 1.001;
+      if (syp < 0) syp = 0; else if (syp > RH - 1.001) syp = RH - 1.001;
+      var j = ((syp | 0) * RW + (sxp | 0)) * 4;
+      var i = (y * RW + x) * 4;
+      var spec = (hL - hR + hU - hD) * SPEC;
+      o[i] = b[j] + spec;
+      o[i + 1] = b[j + 1] + spec;
+      o[i + 2] = b[j + 2] + spec;
+      o[i + 3] = 255;
+    }
+  }
+  bctx.putImageData(out, 0, 0);
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+
+function frame(now) {
+  nowSec = now / 1000;
+  if (auto) {
+    var k = Math.floor(nowSec / DROP_EVERY);
+    if (k !== lastDrop) {
+      lastDrop = k;
+      var th = (k * DROP_EVERY / TOUR % 1) * Math.PI * 2;   // 낙하 위치가 리사주로 옮겨 다닌다
+      tx = W * (0.5 + Math.sin(th) * 0.3);
+      ty = H * (0.5 + Math.sin(th * 2 + 1.2) * 0.24);
+      disturb(tx, ty, 3, 4.5);
+    }
+  }
+  sim(SUBSTEPS);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+// 정지판 — 루프 없이 파동을 몰아 전진해, 퍼져 가는 물결이 살아 있는 한 장을 담는다
+function still() {
+  disturb(W * 0.52, H * 0.4, 3.4, 6);
+  sim(30);
+  disturb(W * 0.28, H * 0.66, 2.8, 4.5);
+  sim(20);
+  render();
+}
+
+function localXY(e) {
+  var r = field.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+field.addEventListener('pointermove', function (e) {
+  var p = localXY(e);
+  auto = false;
+  disturb(p[0], p[1], 2.2, 2.2);   // 지나가는 자국 — 누름보다 얕게
+});
+field.addEventListener('pointerdown', function (e) {
+  var p = localXY(e);
+  auto = false;
+  tx = p[0]; ty = p[1];
+  disturb(p[0], p[1], 3.2, 5.5);   // 누름 — 동그란 파문의 씨
+  field.setPointerCapture(e.pointerId);
+});
+field.addEventListener('pointerup', function (e) { field.releasePointerCapture(e.pointerId); });
+field.addEventListener('pointerleave', function () {
+  auto = true;
+  lastDrop = Math.floor(nowSec / DROP_EVERY);   // 떠나면 다음 간격 뒤 자율 낙하로 돌아간다
+});
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-14, 0], ArrowRight: [14, 0], ArrowUp: [0, -14], ArrowDown: [0, 14] }[e.key];
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    auto = false;
+    disturb(tx, ty, 3.4, 6);
+    if (reduce) { sim(26); render(); }
+    return;
+  }
+  if (!d) { if (e.key === 'Escape') auto = true; return; }
+  e.preventDefault();
+  auto = false;
+  tx = Math.max(0, Math.min(W, tx + d[0]));
+  ty = Math.max(0, Math.min(H, ty + d[1]));
+  if (reduce) { disturb(tx, ty, 1.8, 1.8); sim(20); render(); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+fit();
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 물결이 살아 있는 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  still();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

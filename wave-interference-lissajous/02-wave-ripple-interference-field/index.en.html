@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이중 point sources 간섭 필드 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ri" id="ri">
+  <p class="ri__hint">
+    <svg class="ri__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24Zm0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88Z" opacity=".35"/><path d="M128 56a72 72 0 1 0 72 72a72.08 72.08 0 0 0-72-72Zm0 128a56 56 0 1 1 56-56a56.06 56.06 0 0 1-56 56Z" opacity=".6"/><circle cx="128" cy="128" r="24"/></g></svg>
+    <span>Where the two source waves meet they brighten into bands — interference</span>
+  </p>
+  <div class="ri__field" id="field" role="application" aria-label="Wave interference playground">
+    <canvas class="ri__cv" id="cv"></canvas>
+    <b class="ri__badge" aria-hidden="true"><span class="ri__badgeNum">2</span><span class="ri__badgeUnit">point sources</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 이중 point sources 간섭 필드 — 매 픽셀에서 두 점원까지의 거리를 Math.hypot 으로 잰 뒤
+// 두 파동의 사인 합으로 진폭을 계산한다. 위상이 맞는 곳(보강 간섭)은 밝게,
+// 어긋나는 곳(상쇄 간섭)은 어두운 쌍곡선 줄이 된다.
+var root = document.getElementById('ri');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+// willReadFrequently — 매 프레임 putImageData 로 되돌리는 캔버스는 이 힌트로 GPU 왕복을 줄인다
+var ctx = cv.getContext('2d', { willReadFrequently: true });
+
+var css = getComputedStyle(root);
+var INK = css.getPropertyValue('--ink-line').trim();
+var HALO = css.getPropertyValue('--halo').trim();
+var BGN = css.getPropertyValue('--field-bg').trim();
+
+var LOOP = 2;                // 파동 한 주기(초). 캡처 창과 같아 gif 가 이어진다
+var WAVE = 26;               // 파장(CSS px) — 짧을수록 무늬가 촘촘해진다
+var STEP = 2;                // 계산 픽셀 간격 — 2px 씩 계산해 4픽셀 뭉치로 찍는다(속도)
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var img = null, buf = null;  // createImageData 로 만든 프레임 버퍼
+
+// 색을 [r,g,b] 로 미리 풀어둔다 — 매 픽셀마다 파싱하면 느리다
+function parse(c) {
+  var m = c.match(/^#([0-9a-f]{6})$/i);
+  if (!m) return [110, 200, 255];
+  return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+}
+var C1 = parse(INK);
+var C2 = parse(HALO);
+var BGC = parse(BGN);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = Math.round(r.width); H = Math.round(r.height);
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  img = ctx.createImageData(W, H);
+  buf = img.data;
+}
+
+// 두 점원의 위치 — 화면 폭의 32% 지점에 좌우로 마주 본다
+function sources() {
+  return [
+    { x: W * 0.32, y: H * 0.5 },
+    { x: W * 0.68, y: H * 0.5 }
+  ];
+}
+
+// 간섭 계산 — 픽셀마다 sin(d/λ·2π − t·2π) 두 개를 더해 진폭(-2..2)을 밝기로 눕힌다
+function interference(sec) {
+  var s = sources();
+  var t = (sec % LOOP) / LOOP * Math.PI * 2;
+  var k = Math.PI * 2 / WAVE;
+  var cx1 = s[0].x, cy1 = s[0].y, cx2 = s[1].x, cy2 = s[1].y;
+  for (var y = 0; y < H; y++) {
+    for (var x = 0; x < W; x++) {
+      var d1 = Math.hypot(x - cx1, y - cy1);
+      var d2 = Math.hypot(x - cx2, y - cy2);
+      // 보강(+)·상쇄(-)를 같은 비율로 두고 0.5 오프셋으로 밝기 축에 올린다
+      var a1 = Math.sin(k * d1 - t);
+      var a2 = Math.sin(k * d2 - t);
+      var v = (a1 + a2) * 0.25 + 0.5;           // 0..1
+      var i = (y * W + x) * 4;
+      // 파랑(바다) → 민트(고 에너지) 두 색을 v 로 섞는다 — 파스텔 톤 안에서 대비를 만든다
+      buf[i]     = Math.round(C1[0] + (C2[0] - C1[0]) * v);
+      buf[i + 1] = Math.round(C1[1] + (C2[1] - C1[1]) * v);
+      buf[i + 2] = Math.round(C1[2] + (C2[2] - C1[2]) * v);
+      buf[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  // point sources 두 개 표시 — 흰 점과 얇은 고리
+  for (var j = 0; j < 2; j++) {
+    ctx.fillStyle = '#fff7e6';
+    ctx.beginPath();
+    ctx.arc(s[j].x, s[j].y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,247,230,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(s[j].x, s[j].y, 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function frame(now) {
+  interference(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+fit();
+window.addEventListener('resize', function () { fit(); if (reduce) interference(0.25); });
+if (reduce) {
+  // reduce — 루프 없이 위상 0.25의 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  interference(0.25);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

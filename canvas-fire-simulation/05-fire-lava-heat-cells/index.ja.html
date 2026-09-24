@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>溶岩の流れ — 格子セルに積もる熱 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lv is-demo" id="lvRoot">
+  <p class="lv__hint">
+    <svg class="lv__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>隣接セル同士が熱をやり取りする拡散の一手順だけで、溶岩が固まっては溶けます — ポインターで火口を動かします</span>
+  </p>
+  <div class="lv__field" id="lvField" role="application" aria-label="溶岩熱拡散格子実験盤" tabindex="0">
+    <canvas class="lv__cv" id="lvCv"></canvas>
+  </div>
+  <div class="lv__bar">
+    <span class="lv__meta"><b class="lv__val" id="lvRes">96×54</b> 熱格子・k 0.34</span>
+    <span class="lv__meta lv__meta--dim">ImageData · putImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 용암 흐름(05). 화면을 저해상도 격자(GW×GH)로 나눠 각 셀에 열 h 를 저장한다.
+// 매 프레임: next[i] = cur[i] + k * (이웃평균 - cur[i]) — 이것이 확산 방정식의
+// 가장 단순한 명시적 근사(라플라시안 이완). 화구(vent) 셀에 열을 계속 붓고,
+// 밝기가 임곗값 T_MELT 를 넘는 셀만 용암색, 그 아래는 굳은 암석색으로
+// ImageData/putImageData 로 픽셀에 직접 찍는다. 열이 퍼지고 식으며 굳는 과정이
+// 격자에서 그대로 보인다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var GW = 96;           // 격자 폭(셀) — 변형 "해상도" 축(48 → 144)
+  var K_DIFF = 0.34;     // 확산 계수 — 변형 "확산" 축(0.12 → 0.40). 재튜닝(2026-09-15): 0.24→0.34 — 격자 전체가 순환에 들게
+  var VENT_N = 5;        // 화구 수 — 변형 "화구" 축(1 → 5). 재튜닝: 3→5 — 하단 폭을 넓게 덮는다
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('lvRoot');
+  var field = document.getElementById('lvField');
+  var cv = document.getElementById('lvCv');
+  var ctx = cv.getContext('2d');
+  var resOut = document.getElementById('lvRes');
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x5eed05;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, GH = 0;
+  var img, buf, bctx;
+  var heat, heat2;                   // 현재/다음 열장(Float32Array GW×GH)
+  var vents = [];                    // 화구 목록 {gx, gy, amp, ph}
+  var raf = 0, t0 = -1, tick = 0;
+  var curT = 0;                      // 재튜닝: render() 의 잔열 셔머가 쓰는 최근 시각(step 에서 갱신)
+  var px01 = 0.5, py01 = 0.7;        // 포인터(화구 후보 위치)
+  var manual = false;
+
+  var T_MELT = 0.62;                 // 용암 임곗값 — 이 위면 녹는다
+  var T_GLOW = 0.86;                 // 코어 임곗값 — 이 위면 하얗게 달아오른다
+  var COOL = 0.006;                  // 냉각(방사) — 매 스텝 열이 조금씩 빠져나간다
+  var STILL_TICK = 210;              // reduce 에서 그리는 스텝 — 흐름이 읽히는 한 장
+
+  // 색 램프 — 굳은 바위(잉크↔연기) → 잔불 → 주황(amber) → 코어(gold)
+  // t: 0(차가움) → 1(가장 뜨거움). 4 구간 선형 보간.
+  var ramp = [];
+  (function buildRamp() {
+    var stops = [
+      [0.00, C_INK[0],   C_INK[1],   C_INK[2]],
+      [0.30, mixc(C_INK, C_SMOKE, 0.5)[0], mixc(C_INK, C_SMOKE, 0.5)[1], mixc(C_INK, C_SMOKE, 0.5)[2]],
+      [0.62, C_EMBER[0], C_EMBER[1], C_EMBER[2]],
+      [0.82, C_AMBER[0], C_AMBER[1], C_AMBER[2]],
+      [1.00, C_GOLD[0],  C_GOLD[1],  C_GOLD[2]]
+    ];
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255;
+      for (var s = 0; s < stops.length - 1; s++) {
+        if (t >= stops[s][0] && t <= stops[s + 1][0]) {
+          var f = (t - stops[s][0]) / (stops[s + 1][0] - stops[s][0]);
+          ramp.push([stops[s][1] + (stops[s + 1][1] - stops[s][1]) * f,
+                     stops[s][2] + (stops[s + 1][2] - stops[s][2]) * f,
+                     stops[s][3] + (stops[s + 1][3] - stops[s][3]) * f]);
+          break;
+        }
+      }
+    }
+  })();
+  function mixc(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    GH = Math.max(24, Math.round(GW * H / W));
+    buf = document.createElement('canvas');
+    buf.width = GW; buf.height = GH;
+    bctx = buf.getContext('2d');
+    img = bctx.createImageData(GW, GH);
+    heat = new Float32Array(GW * GH);
+    heat2 = new Float32Array(GW * GH);
+    // 화구 — 시드 고정 배치. 하단에 두어 위로 번지게(열 상승 근사: 아래 행이 위 행에 열을 더 준다)
+    // 재튜닝(2026-09-15): 화구 수(VENT_N)가 늘어도 폭 전체에 고르게 퍼지도록 span 으로 재계산
+    vents = [];
+    var span = VENT_N > 1 ? 0.78 / (VENT_N - 1) : 0;
+    for (var v = 0; v < VENT_N; v++) {
+      vents.push({
+        gx: Math.floor(GW * (0.11 + span * v + (rand() - 0.5) * 0.06)),
+        gy: Math.floor(GH * (0.72 + (rand() - 0.5) * 0.14)),
+        amp: 0.9 + rand() * 0.35,
+        ph: rand() * Math.PI * 2
+      });
+    }
+    resOut.textContent = GW + '×' + GH;
+  }
+
+  // ── 시뮬레이션 한 스텝 ──
+  // ① 화구에 열 주입(시간에 따라 맥동 — 분출이 쉬었다 불다)
+  // ② 확산: next[i] = cur[i] + k*(이웃평균 - cur[i])
+  //    이웃평균은 상하좌우 4셀 평균(경계는 클램프 — 벽은 단열)
+  // ③ 위쪽으로 편향 전달(부유 근사): 아래→위 열 이동을 살짝 비대칭 계수로
+  // ④ 냉각: h *= (1 - COOL) — 방사로 식는다. 임곗값 아래로 떨어지면 굳는다
+  function step(tSec) {
+    curT = tSec;
+    // ① 화구 — 맥동 진폭(0.35..1). 분출이 쉬는 구간에 흐름이 멈춘 모양이 나온다
+    for (var v = 0; v < vents.length; v++) {
+      var vt = vents[v];
+      var pulse = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(tSec * 1.1 + vt.ph));
+      for (var dy = -3; dy <= 3; dy++) {
+        for (var dx = -3; dx <= 3; dx++) {
+          var x = vt.gx + dx, y = vt.gy + dy;
+          if (x < 1 || x >= GW - 1 || y < 1 || y >= GH - 1) continue;
+          var falloff = 1 - Math.sqrt(dx * dx + dy * dy) / 4.4;
+          if (falloff <= 0) continue;
+          var idx = y * GW + x;
+          heat[idx] += vt.amp * pulse * 0.10 * falloff;
+        }
+      }
+    }
+    // 포인터가 살린 화구(사용자가 대는 손) — manual 일 때만
+    if (manual) {
+      var pgx = Math.floor(px01 * (GW - 2)) + 1;
+      var pgy = Math.floor(py01 * (GH - 2)) + 1;
+      if (pgx >= 1 && pgx < GW - 1 && pgy >= 1 && pgy < GH - 1) {
+        heat[pgy * GW + pgx] += 0.12;
+      }
+    }
+    // ②③ 확산 + 부유 편향
+    for (var yy = 1; yy < GH - 1; yy++) {
+      for (var xx = 1; xx < GW - 1; xx++) {
+        var i2 = yy * GW + xx;
+        var c = heat[i2];
+        var nU = heat[i2 - GW], nD = heat[i2 + GW], nL = heat[i2 - 1], nR = heat[i2 + 1];
+        // 이웃평균 — 아래 셀에 가중치를 더 준다(위로 자라는 흐름)
+        var avg = (nU * 0.9 + nD * 1.1 + nL + nR) / 4;
+        var nh = c + K_DIFF * (avg - c);
+        // ④ 냉각 — 매 스텝 소량. 높은 열일수록 더 식는다(방사 ∝ h)
+        nh = nh - nh * COOL * (0.6 + nh);
+        if (nh < 0) nh = 0;
+        if (nh > 1.4) nh = 1.4;
+        heat2[i2] = nh;
+      }
+    }
+    // 경계는 이전 값 유지(단열 벽)
+    var tmp = heat; heat = heat2; heat2 = tmp;
+  }
+
+  // ── 렌더 — 열값 → 색 램프 → ImageData 픽셀 ──
+  // 임곗값 이하(굳은 바위)는 어둡게, T_MELT 위는 용암색.
+  // 용암 경계에 로즈 톤 스트로크를 1셀 얹어 "갓 굳은 껍질"을 만든다.
+  function render() {
+    var data = img.data;
+    var p = 0;
+    for (var yy = 0; yy < GH; yy++) {
+      for (var xx = 0; xx < GW; xx++) {
+        var i2 = yy * GW + xx;
+        var h = heat[i2];
+        var t01 = h >= T_GLOW ? 1 : (h / T_GLOW);
+        var ci = (t01 * 255) | 0;
+        var col = ramp[ci > 255 ? 255 : ci];
+        var r = col[0], g = col[1], b = col[2];
+        if (h < T_MELT * 0.5) {
+          // 차가운 암석 — 잉크에 가깝게 눌러 바위와 용암의 대비를 만든다
+          // 재튜닝(2026-09-15): 잔열색(ember) 셔머를 미묘하게 얹어 정적 검은 영역을 없앤다(위치+시간 위상)
+          var k = h / (T_MELT * 0.5);
+          var shimmer = 0.05 + 0.05 * Math.sin(curT * 1.3 + xx * 0.13 + yy * 0.19);
+          r = C_INK[0] + (r - C_INK[0]) * k + (C_EMBER[0] - C_INK[0]) * shimmer;
+          g = C_INK[1] + (g - C_INK[1]) * k + (C_EMBER[1] - C_INK[1]) * shimmer;
+          b = C_INK[2] + (b - C_INK[2]) * k + (C_EMBER[2] - C_INK[2]) * shimmer;
+        } else if (h >= T_MELT && h < T_MELT + 0.06) {
+          // 갓 굳은 껍질 — 로즈 톤 혼합
+          var k2 = (h - T_MELT) / 0.06;
+          r = r + (C_ROSE[0] - r) * 0.35 * (1 - k2);
+          g = g + (C_ROSE[1] - g) * 0.35 * (1 - k2);
+          b = b + (C_ROSE[2] - b) * 0.35 * (1 - k2);
+        }
+        data[p] = r | 0; data[p + 1] = g | 0; data[p + 2] = b | 0; data[p + 3] = 255;
+        p += 4;
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(buf, 0, 0, W, H);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    step(t);
+    render();
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0.9); render(); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.7; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.05, 0], ArrowRight: [0.05, 0], ArrowUp: [0, -0.05], ArrowDown: [0, 0.05] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0.9); render(); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) { for (var s = 0; s < STILL_TICK; s++) step(0.9); render(); } });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 없이 STILL_TICK 스텝만 시뮬레이션해 흐름이 자리 잡은 한 장을 그린다
+    for (var s = 0; s < STILL_TICK; s++) step(0.9);
+    render();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

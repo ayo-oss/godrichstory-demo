@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Contrast Badge Where the Hex Value Crosses the Pass Line — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="cc">
+  <label class="cc__field">
+    <span class="cc__cap">hex value</span>
+    <input class="cc__input" id="ccHex" type="text" maxlength="7" value="#ff5b3c" aria-describedby="ccReadout">
+  </label>
+  <div class="cc__badge" aria-hidden="true">
+    <span class="cc__swatch" id="ccSwatch"></span>
+    <div class="cc__lum" id="ccLum">
+      <div class="cc__lumMark" id="ccLumMark"></div>
+    </div>
+    <span class="cc__status" id="ccStatus">Pass</span>
+  </div>
+  <p class="cc__readout" id="ccReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('cc');
+  var input = document.getElementById('ccHex');
+  var swatch = document.getElementById('ccSwatch');
+  var lumBox = document.getElementById('ccLum');
+  var lumMark = document.getElementById('ccLumMark');
+  var statusEl = document.getElementById('ccStatus');
+  var readout = document.getElementById('ccReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var PASS_THRESHOLD = 4.5; // WCAG AA 본문 글자 At reference
+
+  function hexToRgb(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return { r: 255, g: 91, b: 60 };
+    var n = parseInt(m[1], 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  }
+  // 계산 한 겹 — sRGB 감마 보정 상대휘도와 WCAG 대비 공식
+  function relativeLuminance(rgb) {
+    function chan(c) {
+      var v = c / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * chan(rgb.r) + 0.7152 * chan(rgb.g) + 0.0722 * chan(rgb.b);
+  }
+  function contrastRatio(l1, l2) {
+    var hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  var SENT_PREFIX = 'White-background contrast ', SENT_MID1 = ':1 · black-background contrast ', SENT_MID2 = ':1 — ', SENT_SUFFIX = ' is better.';
+
+  var targetX = 0, renderedX = 0;
+  var LERP_RATE = 0.17; // 변형 05: 낮추면 표시가 값 변화를 더 천천히 뒤따라간다
+
+  function applyValue(hex) {
+    var rgb = hexToRgb(hex);
+    var L = relativeLuminance(rgb);
+    var whiteContrast = contrastRatio(L, 1);
+    var blackContrast = contrastRatio(L, 0);
+    var best = Math.max(whiteContrast, blackContrast);
+    var bestName = whiteContrast >= blackContrast ? 'white background' : 'black background';
+    var pass = best >= PASS_THRESHOLD;
+
+    swatch.style.background = '#' + ('000000' + ((rgb.r << 16) | (rgb.g << 8) | rgb.b).toString(16)).slice(-6);
+    statusEl.textContent = pass ? 'Pass' : 'Fail';
+    statusEl.classList.toggle('is-pass', pass);
+    statusEl.classList.toggle('is-fail', !pass);
+
+    var trackW = lumBox.clientWidth - lumMark.offsetWidth;
+    targetX = clamp01(L) * trackW;
+    readout.textContent = SENT_PREFIX + whiteContrast.toFixed(1) + SENT_MID1 + blackContrast.toFixed(1) + SENT_MID2 + bestName + SENT_SUFFIX;
+    if (reduce) { renderedX = targetX; paint(); }
+  }
+
+  function paint() {
+    lumMark.style.transform = 'translateX(' + renderedX.toFixed(1) + 'px)';
+  }
+
+  input.addEventListener('input', function () { human(); applyValue(input.value); });
+  input.addEventListener('change', function () { human(); applyValue(input.value); });
+
+  var DEMO_HEXES = ['#ff5b3c', '#2f6df6', '#ffd23f', '#17141a', '#fff7e6', '#8e2287'];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_HEXES.length);
+      if (idx !== lastIdx) { lastIdx = idx; input.value = DEMO_HEXES[idx]; applyValue(DEMO_HEXES[idx]); }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame() { renderedX += (targetX - renderedX) * LERP_RATE; paint(); requestAnimationFrame(frame); }
+
+  window.addEventListener('resize', function () { applyValue(input.value); });
+  applyValue(input.value);
+
+  if (!reduce) { requestAnimationFrame(driveTick); requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

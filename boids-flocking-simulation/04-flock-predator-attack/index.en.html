@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Predator Appears — A Flock That Splits and Re-forms — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 32a96 96 0 1 0 96 96a96.11 96.11 0 0 0-96-96m0 176a80 80 0 1 1 80-80a80.09 80.09 0 0 1-80 80" opacity=".2"/><path d="M225.86 102.82c-3.77-13.68-11-26.16-21-36.21c-19.55-19.54-45.9-27.06-71.06-21.24a8 8 0 0 0-4.19 13.2l31 34.4l-11.6 11.6l-34.4-31a8 8 0 0 0-13.2 4.19c-5.82 25.16 1.7 51.51 21.24 71.06c14.36 14.36 33.15 22.06 52.4 22.94l-30 30a44 44 0 1 0 11.31 11.31l30-30c.88 19.25 8.58 38 22.94 52.4c19.55 19.54 45.9 27.06 71.06 21.24a8 8 0 0 0 4.19-13.2l-31-34.4l11.6-11.6l34.4 31a8 8 0 0 0 13.2-4.19c5.31-22.96-.44-46.94-16.79-65.5M120 216a28 28 0 1 1-28-28a28 28 0 0 1 28 28"/></g></svg>
+    <span>The pointer becomes a predator — agents within its radius flee with a force inversely proportional to distance, splitting the flock apart before it re-forms. Without a pointer, a virtual predator patrols on its own</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Bird-flock predator-avoidance test panel. Use the arrow keys to move the predator" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">160</b>agents · flee radius <b class="cd__val" id="cdR">90</b>px</span>
+    <span class="cd__meta cd__meta--dim">separation · alignment · cohesion · flee</span>
+  </div>
+</div>
+</main>
+<script>
+// 천적 등장(04). 보이드 3규칙(분리·정렬·결합)에 네 번째 힘 "도망" 을 더한다.
+// 포인터(또는 시드 고정 가상 천적)가 반경 안 개체마다 거리에 반비례하는 회피 벡터를 주입해
+// 무리가 순간적으로 갈라졌다가, 천적이 멀어지면 결합력이 다시 봉합한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N_BIRD    = 160;    // 개체 수
+  var FLEE_R    = 90;     // 천적 도망 반경(px) — 변형 "천적 반경" 축(90 → 160)
+  var FLEE_GAIN = 1.0;    // 도망 힘 배율 변형
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+  var rOut = document.getElementById('cdR');
+  nOut.textContent = String(N_BIRD);
+  rOut.textContent = String(FLEE_R);
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x0b0104;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--flock-ink');
+  var C_MIST = tokRGB('--flock-mist');
+  var C_GLOW = tokRGB('--flock-glow');
+  var C_DUSK = tokRGB('--flock-dusk');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var predX = 0.5, predY = 0.5;   // 0..1 정규화 좌표
+  var manual = false;
+
+  // ── 보이드 파라미터 ──
+  var PERCEP  = 40;     // 이웃 지각 반경
+  var SEP_R   = 18;     // 분리 반경
+  var MAX_SPD = 96;      // px/s
+  var MAX_FRC = 260;     // px/s^2
+  var W_SEP = 1.7, W_ALI = 1.0, W_COH = 0.9;
+
+  var birds = [];
+  for (var i = 0; i < N_BIRD; i++) {
+    birds.push({
+      x: rand() * 300, y: rand() * 140,
+      vx: (rand() - 0.5) * MAX_SPD, vy: (rand() - 0.5) * MAX_SPD
+    });
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+  }
+
+  function step(dt) {
+    var predPx = predX * W, predPy = predY * H;
+    for (var i = 0; i < birds.length; i++) {
+      var b = birds[i];
+      var sx = 0, sy = 0, ax = 0, ay = 0, cx = 0, cy = 0;
+      var sepN = 0, aliN = 0, cohN = 0;
+      for (var j = 0; j < birds.length; j++) {
+        if (i === j) continue;
+        var o = birds[j];
+        var dx = o.x - b.x, dy = o.y - b.y;
+        // 토러스 최단거리(랩된 화면에서 가까운 쪽으로)
+        if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+        if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+        var d = Math.hypot(dx, dy);
+        if (d < PERCEP && d > 0.0001) {
+          if (d < SEP_R) { sx -= dx / d / d * SEP_R; sy -= dy / d / d * SEP_R; sepN++; }
+          ax += o.vx; ay += o.vy; aliN++;
+          cx += dx; cy += dy; cohN++;
+        }
+      }
+      var fx = 0, fy = 0;
+      if (sepN) { fx += (sx / sepN) * W_SEP; fy += (sy / sepN) * W_SEP; }
+      if (aliN) { fx += (ax / aliN - b.vx) * 0.06 * W_ALI; fy += (ay / aliN - b.vy) * 0.06 * W_ALI; }
+      if (cohN) { fx += (cx / cohN) * 0.04 * W_COH; fy += (cy / cohN) * 0.04 * W_COH; }
+
+      // ── 도망 — 천적 반경 안이면 거리에 반비례한 힘(가까울수록 급격히 강함) ──
+      var pdx = b.x - predPx, pdy = b.y - predPy;
+      if (pdx > W / 2) pdx -= W; else if (pdx < -W / 2) pdx += W;
+      if (pdy > H / 2) pdy -= H; else if (pdy < -H / 2) pdy += H;
+      var pd = Math.hypot(pdx, pdy);
+      if (pd < FLEE_R && pd > 0.0001) {
+        var t = (FLEE_R - pd) / FLEE_R;              // 0..1 — 가까울수록 1
+        var mag = t * t * MAX_FRC * 3.2 * FLEE_GAIN;
+        fx += (pdx / pd) * mag; fy += (pdy / pd) * mag;
+      }
+
+      var fl = Math.hypot(fx, fy);
+      if (fl > MAX_FRC) { fx = fx / fl * MAX_FRC; fy = fy / fl * MAX_FRC; }
+      b.vx += fx * dt; b.vy += fy * dt;
+      var sp = Math.hypot(b.vx, b.vy);
+      if (sp > MAX_SPD) { b.vx = b.vx / sp * MAX_SPD; b.vy = b.vy / sp * MAX_SPD; }
+      else if (sp < MAX_SPD * 0.28) { b.vx = b.vx / (sp || 1) * MAX_SPD * 0.28; b.vy = b.vy / (sp || 1) * MAX_SPD * 0.28; }
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < 0) b.x += W; else if (b.x > W) b.x -= W;
+      if (b.y < 0) b.y += H; else if (b.y > H) b.y -= H;
+    }
+  }
+
+  function draw(tSec) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 지평선 은은한 슬레이트 띠 — 무대가 완전히 죽지 않게
+    var hg = ctx.createLinearGradient(0, 0, 0, H);
+    hg.addColorStop(0, 'rgba(' + C_DUSK[0] + ',' + C_DUSK[1] + ',' + C_DUSK[2] + ',0.22)');
+    hg.addColorStop(1, 'rgba(' + C_DUSK[0] + ',' + C_DUSK[1] + ',' + C_DUSK[2] + ',0)');
+    ctx.fillStyle = hg;
+    ctx.fillRect(0, 0, W, H * 0.5);
+
+    // 개체 — mist 톤 사각 점, 속도 방향으로 살짝 늘여 흐름감
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < birds.length; i++) {
+      var b = birds[i];
+      var sp = Math.hypot(b.vx, b.vy);
+      var a = 0.42 + Math.min(0.5, sp / MAX_SPD * 0.5);
+      ctx.fillStyle = 'rgba(' + C_MIST[0] + ',' + C_MIST[1] + ',' + C_MIST[2] + ',' + a.toFixed(3) + ')';
+      var r = 2.1 + Math.min(1.4, sp / MAX_SPD * 1.4);
+      ctx.fillRect(b.x - r, b.y - r, r * 2, r * 2);
+    }
+
+    // 천적 링 — glow 톤. 숨쉬듯 반경이 진동한다
+    ctx.globalCompositeOperation = 'source-over';
+    var ringR = FLEE_R * (0.34 + 0.05 * Math.sin(tSec * 3.1));
+    var predPx = predX * W, predPy = predY * H;
+    ctx.strokeStyle = 'rgba(' + C_GLOW[0] + ',' + C_GLOW[1] + ',' + C_GLOW[2] + ',0.55)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(predPx, predPy, ringR, 0, TAU);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(' + C_GLOW[0] + ',' + C_GLOW[1] + ',' + C_GLOW[2] + ',0.85)';
+    ctx.beginPath();
+    ctx.arc(predPx, predPy, 3, 0, TAU);
+    ctx.fill();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    if (!manual) {
+      // 가상 천적 — 시드 고정 Lissajous 순회(포인터 없어도 장면이 산다)
+      var ph = t * TAU / 5.4;
+      predX = 0.5 + 0.4 * Math.sin(ph);
+      predY = 0.5 + 0.34 * Math.sin(ph * 1.7 + 1.1);
+    }
+    step(dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    predX = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    predY = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0.016); draw(1.2); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { predX = -1; predY = -1; }   // 화면 밖으로 — 도망 힘 사실상 0
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.06, 0], ArrowRight: [0.06, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); predX = 0.5; predY = 0.5; }
+    predX = Math.max(0, Math.min(1, predX + d[0]));
+    predY = Math.max(0, Math.min(1, predY + d[1]));
+    if (reduce) { step(0.016); draw(1.2); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(1.2); });
+
+  fit();
+  if (reduce) {
+    // reduce — 초기 대형이 흩어지기 전, 도망이 시작된 한 장면만 고정해 그린다
+    predX = 0.5; predY = 0.42;
+    for (var s = 0; s < 40; s++) step(0.033);
+    draw(1.2);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

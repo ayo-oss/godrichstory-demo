@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクロールするほど曇って屈折が強まるガラスナビバー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">下の場面をスクロールするほど、上部ナビバーの屈折と波が強まる</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 스크롤 진행도(0~1)를 배경 세로 샘플 오프셋에 그대로 써서 장면이 흘러가게 하고,
+  // 같은 진행도를 상단 내비 바의 가장자리 굴절 세기·물결 진폭에 곱해 스크롤이 깊어질수록
+  // 바가 더 짙게 굴절하도록 만든다.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var SCENE_H = 220;
+  var scene = document.createElement('canvas');
+  scene.width = CALC_W; scene.height = SCENE_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421091);
+    var sky = pctx.createLinearGradient(0, 0, 0, SCENE_H);
+    sky.addColorStop(0, '#6ec8ff');
+    sky.addColorStop(0.5, '#b9a0ff');
+    sky.addColorStop(1, '#fff2da');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, CALC_W, SCENE_H);
+    var cols = ['#ffffff', '#4cd4a6', '#ff9ebb', '#ffd23f'];
+    for (var i = 0; i < 6; i += 1) {
+      var cy = SCENE_H * ((i + 0.5) / 6);
+      pctx.beginPath();
+      pctx.arc(CALC_W * (0.2 + (i % 2) * 0.55), cy, 14, 0, Math.PI * 2);
+      pctx.fillStyle = cols[i % cols.length];
+      pctx.globalAlpha = 0.55;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 90; k += 1) {
+      var px = rand() * CALC_W, py = rand() * SCENE_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.08 + rand() * 0.16) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, CALC_W, SCENE_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > SCENE_H - 1 ? SCENE_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var NAV_Y0 = 0, NAV_Y1 = 26;
+  var EDGE_BAND = 10;
+  var BASE_BEND = 2, EXTRA_BEND = 7;
+  var RIPPLE_AMP = 3;
+  var PAN_RANGE = SCENE_H - CALC_H;
+  var PERIOD_MS = 2000;
+
+  function boxEdgeSample(x, y, x0, y0, x1, y1, band) {
+    var dl = x - x0, dr = x1 - x, dt = y - y0, db = y1 - y;
+    var dmin = Math.min(dl, dr, dt, db);
+    if (dmin >= band || dmin < 0) return { f: 0, nx: 0, ny: 0 };
+    var nx = 0, ny = 0;
+    if (dl < band) nx -= (band - dl);
+    if (dr < band) nx += (band - dr);
+    if (dt < band) ny -= (band - dt);
+    if (db < band) ny += (band - db);
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len > 0.0001) { nx /= len; ny /= len; }
+    return { f: Math.max(0, (band - dmin) / band), nx: nx, ny: ny };
+  }
+
+  function triangleWave(t, period) {
+    var p = (t % period) / period;
+    return p < 0.5 ? p * 2 : (1 - p) * 2;
+  }
+
+  var realProgress = 0;
+  var lastInteractionT = -Infinity;
+
+  function wantProgress(t) {
+    if (t - lastInteractionT < 2500) return realProgress;
+    return triangleWave(t, PERIOD_MS);
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function renderFrame(t, progress) {
+    var panY = progress * PAN_RANGE;
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        if (y >= NAV_Y0 && y <= NAV_Y1) {
+          var e = boxEdgeSample(x, y, NAV_Y0 - 999, NAV_Y0, NAV_Y0 + 1998, NAV_Y1, EDGE_BAND);
+          var bendMag = (BASE_BEND + EXTRA_BEND * progress) * (e.f || 1) * 0.6 + BASE_BEND * 0.4;
+          var ripple = Math.sin(x * 0.16 - t * 0.006) * RIPPLE_AMP * progress;
+          rgb = sampleScene(x, (y + panY) - e.ny * bendMag - ripple);
+          var frost = 60 * progress;
+          rgb = [
+            Math.min(255, rgb[0] * (1 - progress * 0.25) + frost),
+            Math.min(255, rgb[1] * (1 - progress * 0.25) + frost),
+            Math.min(255, rgb[2] * (1 - progress * 0.25) + frost)
+          ];
+        } else {
+          rgb = sampleScene(x, y + panY);
+        }
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t, wantProgress(t));
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  wrap.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    realProgress = Math.max(0, Math.min(1, realProgress + e.deltaY * 0.0015));
+    lastInteractionT = lastElapsed;
+    if (reduce) draw(lastElapsed);
+  }, { passive: false });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowUp' || e.key === 'PageUp') realProgress = Math.max(0, realProgress - 0.12);
+    else if (e.key === 'ArrowDown' || e.key === 'PageDown') realProgress = Math.min(1, realProgress + 0.12);
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      lastInteractionT = lastElapsed;
+      if (reduce) draw(lastElapsed);
+    }
+  });
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

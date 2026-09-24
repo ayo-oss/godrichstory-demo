@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スナップ選択ダイヤル — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ss is-demo" id="ss">
+  <div class="ss__ring" id="ssRing">
+    <div class="ss__ticks" id="ssTicks"></div>
+    <button class="ss__handle" id="ssHandle" type="button" aria-label="タイマー時間ダイヤル"></button>
+  </div>
+  <p class="ss__value" id="ssValue">15分</p>
+</div>
+<script>
+(function () {
+  var NOTCHES = [0, 15, 30, 45, 60, 75, 90, 105];   // 分 단위 눈금 값
+  var N = NOTCHES.length;
+  var NOTCH_DEG = 360 / N;
+  var SNAP_THRESHOLD_DEG = 20;   // 놓은 각도가 눈금에서 이 안이면 스냅한다
+  var LOOP_MS = 2000;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var root = document.getElementById('ss');
+  var ring = document.getElementById('ssRing');
+  var ticks = document.getElementById('ssTicks');
+  var handle = document.getElementById('ssHandle');
+  var valueEl = document.getElementById('ssValue');
+  var isDemo = true;
+  var angle = 0;
+  var dragging = false;
+  var settling = false;
+  var settleFrom = 0, settleTo = 0, settleStart = 0;
+  var SETTLE_MS = reduce ? 0 : 260;
+
+  for (var i = 0; i < N; i++) {
+    var t = document.createElement('span');
+    t.className = 'ss__tick';
+    t.style.setProperty('--i', i);
+    t.setAttribute('aria-hidden', 'true');
+    ticks.appendChild(t);
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  function angleAt(clientX, clientY) {
+    var r = ring.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    return Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI + 90;
+  }
+  function norm360(d) { return ((d % 360) + 360) % 360; }
+
+  // 계산 겹: 놓은 각도와 가장 가까운 눈금(N 등분) 사이의 최단 각거리를 구해, 문턱 안이면 그 눈금으로 스냅한다.
+  function nearestNotch(deg) {
+    var idx = Math.round(deg / NOTCH_DEG) % N;
+    var notchDeg = idx * NOTCH_DEG;
+    var dist = Math.abs(((deg - notchDeg + 540) % 360) - 180);
+    return { idx: idx, notchDeg: notchDeg, dist: dist };
+  }
+
+  function apply(a) {
+    ring.style.setProperty('--angle', a);
+  }
+
+  function startSettle(target) {
+    settling = true;
+    settleFrom = angle;
+    settleTo = target;
+    settleStart = performance.now();
+  }
+
+  function easeOvershoot(t) {
+    // 목표를 살짝 넘겼다 되돌아오는 튕김(easeOutBack) — cubic-bezier 로는 못 만드는 부호 반전 곡선
+    var c1 = 1.70158, c3 = c1 + 1;
+    var t1 = t - 1;
+    return 1 + c3 * t1 * t1 * t1 + c1 * t1 * t1;
+  }
+
+  function tickSettle(nowTs) {
+    if (!settling) return;
+    if (SETTLE_MS === 0) { angle = settleTo; settling = false; valueEl.textContent = readout(); return; }
+    var t = Math.min(1, (nowTs - settleStart) / SETTLE_MS);
+    angle = settleFrom + (settleTo - settleFrom) * easeOvershoot(t);
+    if (t >= 1) { settling = false; angle = settleTo; }
+  }
+
+  function readout() {
+    var idx = Math.round(norm360(angle) / NOTCH_DEG) % N;
+    return NOTCHES[idx] + '分';
+  }
+
+  handle.addEventListener('pointerdown', function (e) {
+    human();
+    dragging = true; settling = false;
+    handle.setPointerCapture(e.pointerId);
+    angle = angleAt(e.clientX, e.clientY);
+    apply(angle);
+  });
+  handle.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    angle = angleAt(e.clientX, e.clientY);
+    apply(angle);
+    valueEl.textContent = readout();
+  });
+  handle.addEventListener('pointerup', function () {
+    dragging = false;
+    var n = nearestNotch(norm360(angle));
+    if (n.dist <= SNAP_THRESHOLD_DEG) { startSettle(angle + (n.notchDeg - norm360(angle))); }
+    valueEl.textContent = NOTCHES[n.idx] + '分';
+  });
+
+  // 자동 루프: 드래그 → 놓기 → 스냅 정착을 반복해 계산 흐름 전체를 보여준다
+  function loop(ts) {
+    if (isDemo) {
+      if (!reduce) {
+        var phase = (ts % LOOP_MS) / LOOP_MS;
+        if (phase < 0.45) {
+          angle = phase / 0.45 * 250; // 자유 회전 구간
+          apply(angle);
+          valueEl.textContent = readout();
+        } else if (phase < 0.5) {
+          if (!settling) {
+            var n = nearestNotch(norm360(angle));
+            startSettle(angle + (n.notchDeg - norm360(angle)));
+          }
+        } else {
+          tickSettle(ts);
+          apply(angle);
+          valueEl.textContent = readout();
+        }
+      } else {
+        apply(0);
+      }
+    } else {
+      tickSettle(ts);
+      apply(angle);
+    }
+    requestAnimationFrame(loop);
+  }
+  apply(0);
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

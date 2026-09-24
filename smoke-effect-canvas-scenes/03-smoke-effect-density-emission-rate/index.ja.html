@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>発生量の値を上げると画面上で重なる粒子数が増え、煙がより濃く不透明に見える。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">発生量の値を上げると画面上で重なる粒子数が増え、煙がより濃く不透明に見える。</p>
+  <div class="smk__control">
+    <label class="smk__label" for="smkRate">発生量</label>
+    <input class="smk__range" id="smkRate" type="range" min="2" max="22" value="4" step="1" aria-label="発生量">
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 초당 발생 수(emissionRate)만큼 입자를 계속 만들어내고, 살아있는 입자마다 옅은
+  // 알파로 겹쳐 그린다(source-over). 겹치는 입자 수가 많아질수록 알파가 누적되어 짙고
+  // 불투명하게 보이는 게 실제 계산 결과다 — 색을 진하게 바꾸는 게 아니라 개수가 밀도를 만든다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var rateInput = document.getElementById('smkRate');
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_EMISSION_RATE = 4;
+  var SMOKE_RISE_SPEED_PX = 14;
+  var PLUME_LIFE_MS = 2200;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423031);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  var pRand = seedRand(423032);
+  var particles = [];
+  var spawnAcc = 0;
+  var emissionRate = SMOKE_EMISSION_RATE;
+
+  rateInput.addEventListener('input', function () {
+    root.classList.remove('is-demo');   // 사람이 만졌으니 자동 스윕을 끈다
+    emissionRate = parseFloat(rateInput.value);
+  });
+
+  function spawn(bornMs) {
+    particles.push({
+      bx: CALC_W * (0.28 + pRand() * 0.44),
+      y: CALC_H - 6,
+      born: bornMs,
+      wSeed: pRand() * 1000
+    });
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * emissionRate / 1000;
+    while (spawnAcc >= 1) { spawn(nowMs); spawnAcc -= 1; }
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      p.y -= SMOKE_RISE_SPEED_PX * dtS;
+      if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+    if (particles.length > 320) particles = particles.slice(particles.length - 320);
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var turb = (valueNoise2D(p.wSeed * 0.03, nowMs * 0.0015) - 0.5) * 2;
+      var x = p.bx + turb * 14 * f;
+      var r = 8 + f * 20;
+      var alpha = Math.sin(f * Math.PI) * 0.22;
+      if (alpha <= 0.01) continue;
+      var dx = x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(30,26,20,' + alpha + ')');
+      g.addColorStop(1, 'rgba(30,26,20,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  rateInput.addEventListener('input', function () {
+    if (reduce) drawSmoke(elapsed);
+  });
+
+  var warmSteps = 140;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  var demoPhase = 0;
+  var DEMO_SWEEP_MS = 2000;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      if (root.classList.contains('is-demo')) {
+        demoPhase = (demoPhase + dt) % DEMO_SWEEP_MS;
+        var t = demoPhase / DEMO_SWEEP_MS;
+        var sweep = t < 0.5 ? t * 2 : (1 - t) * 2;
+        emissionRate = 3 + sweep * 17;
+      }
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

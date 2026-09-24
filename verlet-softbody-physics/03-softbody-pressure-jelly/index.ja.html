@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>말랑 젤리 圧力 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="jb" id="jb">
+  <p class="jb__hint">
+    <svg class="jb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>ゼリーを押すと押した面積ぶん圧力が下がり、残りの面積が戻ろうと揺れます</span>
+  </p>
+  <div class="jb__field" id="field" role="application" aria-label="ゼリー圧力実験盤" tabindex="0">
+    <canvas class="jb__cv" id="cv"></canvas>
+    <b class="jb__badge" aria-hidden="true"><span class="jb__badgeNum" id="prVal">100</span><span class="jb__badgeUnit">圧力比%</span></b>
+  </div>
+  <div class="jb__bar">
+    <label class="jb__dial">圧力
+      <input type="range" id="pr" min="1" max="10" step="1" value="5" aria-label="圧力の強さ">
+    </label>
+    <button class="jb__reset" id="reset" type="button">最初から</button>
+  </div>
+</div>
+</main>
+<script>
+// 말랑 젤리 — 소프트바디의 정석 "圧力 모델". 테두리 점 N 개를 이웃 거리 제약(+ 대각 보강)으로 묶고,
+// 슈루스호크 공식으로 구한 현재 다각형 면적이 목표 면적에 못 미치는 만큼을 "圧力"으로 바꿔
+// 각 테두리 점을 바깥 법선 방향으로 민다:  F = (A0 - A) / A0 * k * edgeNormal
+// 속도 변수는 없다 — 위치 기반 Verlet 적분 next = pos + (pos - prev) * damp + accel * dt^2 뿐.
+// 누르면(pointer) 테두리가 안쪽으로 밀려 면적이 줄고, 떼면 압력이 면적을 다시 채우며 출렁인다.
+var root = document.getElementById('jb');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var prIn = document.getElementById('pr');
+var prVal = document.getElementById('prVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var INK = css.getPropertyValue('--ink').trim();
+var GLOSS = css.getPropertyValue('--gloss').trim();
+var PULP = css.getPropertyValue('--pulp').trim();
+var PRESS = css.getPropertyValue('--press').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+var N = 20;                   // 테두리 점 수
+var GRAV = 900;               // 중력(px/s^2) — 젤리는 무거우니 낮게
+var DAMP = 0.988;             // 속도 보존률(젤리 특유의 출렁 거듭감쇠)
+var LOOP = 2;                 // 자동 시연 한 바퀴(초)
+
+var pts = [];                 // 점: {x, y, px, py, nx, ny(법선)}
+var RAD = 0, AREA0 = 0;       // 시작 반지름 · 목표 면적
+var W = 0, H = 0, dpr = 1;
+var t0 = performance.now();
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  pts = [];
+  RAD = Math.min(W, H) * 0.30;
+  var cx = W * 0.5, cy = H * 0.44;
+  for (var i = 0; i < N; i++) {
+    var a = i / N * Math.PI * 2 - Math.PI / 2;
+    var x = cx + Math.cos(a) * RAD, y = cy + Math.sin(a) * RAD;
+    pts.push({ x: x, y: y, px: x, py: y, nx: 0, ny: 0 });
+  }
+  AREA0 = area();
+  pressing = false;
+}
+
+// 슈루스호크 공식 — 다각형 면적. 시계 반대 순회면 양수가 나온다
+function area() {
+  var s = 0;
+  for (var i = 0; i < N; i++) {
+    var a = pts[i], b = pts[(i + 1) % N];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(s) * 0.5;
+}
+
+// 이웃 거리를 목표 간격으로 못 박는 제약 한 번. idx 원 주위로 민다
+function solveDist(a, b, len, rigid) {
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+  var off = (d - len) / d * 0.5 * rigid;
+  var ox = dx * off, oy = dy * off;
+  a.x += ox; a.y += oy;
+  b.x -= ox; b.y -= oy;
+}
+
+// 한 프레임 — 적분 → 圧力 → 制約反復 → 누름·바닥
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var k = Number(prIn.value);
+  var rest = RAD * Math.PI * 2 / N;   // 이웃 목표 間隔(시작 원 둘레 기준)
+
+  // (1) 관성 + 중력
+  for (var i = 0; i < N; i++) {
+    var p = pts[i];
+    var vx = (p.x - p.px) * DAMP;
+    var vy = (p.y - p.py) * DAMP;
+    p.px = p.x; p.py = p.y;
+    p.x += vx;
+    p.y += vy + GRAV * dt * dt;
+  }
+  // (2) 圧力 — 면적 부족분을 법선 방향 힘으로. 법선은 이웃 점의 차분으로 계산한다
+  var A = area();
+  var press = (AREA0 - A) / AREA0 * k * 7200 * dt * dt;
+  for (var v = 0; v < N; v++) {
+    var q = pts[v];
+    var pr = pts[(v + N - 1) % N], nx2 = pts[(v + 1) % N];
+    var tx = nx2.x - pr.x, ty = nx2.y - pr.y;
+    var tl = Math.hypot(tx, ty) || 0.0001;
+    // 점은 반시계로 배치했다(슈루스호크 양수). 이 순회에서 바깥 법선은 (ty, -tx) —
+    // 부호를 반대로 쓰면 부족한 면적을 안쪽으로 밀어 젤리가 스스로 접혀버린다
+    q.nx = ty / tl; q.ny = -tx / tl;
+    q.x += q.nx * press;
+    q.y += q.ny * press;
+  }
+  // (3) 制約反復 — 이웃 거리 + 한 칸 건너 대각 보강(찌그러짐 방지)
+  for (var it = 0; it < 5; it++) {
+    for (var c = 0; c < N; c++) solveDist(pts[c], pts[(c + 1) % N], rest, 1);
+    for (var g = 0; g < N; g++) solveDist(pts[g], pts[(g + 2) % N], rest * 2 * 0.92, 0.24);
+  }
+  // (4) 누름 — 누른 점 방향으로 가장 가까운 테두리 점 몇 개를 민다
+  if (pressing) {
+    for (var m = 0; m < N; m++) {
+      var s = pts[m];
+      var dxp = s.x - ptrX, dyp = s.y - ptrY;
+      var dp = Math.hypot(dxp, dyp);
+      if (dp < RAD * 0.7) {
+        var push = (1 - dp / (RAD * 0.7)) * 8;
+        s.x += dxp / (dp || 1) * push;
+        s.y += dyp / (dp || 1) * push;
+      }
+    }
+  }
+  // (5) 바닥 스프링 — 젤리가 바닥에 쿵 박지 않고 살짝 눌러 앉는다
+  var floorY = H - RAD * 0.36;
+  for (var f = 0; f < N; f++) {
+    var t = pts[f];
+    if (t.y > floorY) t.y = floorY + (t.y - floorY) * 0.70;
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 몸통 — 테두리를 2차 곡선으로 이어 젤리의 동글동글한 결을 낸다
+  var cx = 0, cy = 0;
+  for (var q = 0; q < N; q++) { cx += pts[q].x; cy += pts[q].y; }
+  cx /= N; cy /= N;
+  ctx.beginPath();
+  ctx.moveTo((pts[0].x + pts[N - 1].x) * 0.5, (pts[0].y + pts[N - 1].y) * 0.5);
+  for (var i = 0; i < N; i++) {
+    var a = pts[i], b = pts[(i + 1) % N];
+    ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+  }
+  ctx.closePath();
+  ctx.fillStyle = PULP;
+  ctx.fill();
+  // 윤곽선 — 몸통 경로 그대로. 광택을 그린 뒤에 stroke 하면
+  // '현재 경로'가 타원으로 바뀌어 있어 몸통이 아니라 타원에 줄이 쳐진다.
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = INK;
+  ctx.stroke();
+  // 광택 — 젤리 반사 하이라이트. 몸통 중심을 따라가게(화면 고정이면 가라앉은 젤리와 어긋난다)
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = GLOSS;
+  ctx.beginPath();
+  ctx.ellipse(cx - RAD * 0.26, cy - RAD * 0.42, RAD * 0.34, RAD * 0.2, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // 누르는 커서 표시
+  if (pressing) {
+    ctx.fillStyle = PRESS;
+    ctx.beginPath();
+    ctx.arc(ptrX, ptrY, 7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// 사람이 안 만졌을 때 도는 자동 시연 — 가상 손가락이 8자로 젤리를 누른다.
+// Math.random 금지 — 사인파로 완전 결정적이다. pointerdown 이 오면 manual 로 넘어간다.
+var manual = false;
+var pressing = false;
+var ptrX = 0, ptrY = 0;
+function demoTarget(now) {
+  var ph = (now / 1000) / LOOP * Math.PI * 2;
+  return {
+    x: W * 0.5 + Math.sin(ph) * W * 0.30,
+    y: H * 0.44 + Math.sin(ph * 2 + 1.2) * RAD * 0.75
+  };
+}
+var frameN = 0;
+function frame(now) {
+  if (!manual) {
+    var t = demoTarget(now);
+    ptrX = t.x; ptrY = t.y;
+    // 8자 원점이 젤리 중심 근처로 지나갈 때만 누른 것으로 취급
+    pressing = Math.hypot(t.x - W * 0.5, t.y - H * 0.44) < RAD * 0.9;
+  }
+  step(now);
+  draw();
+  frameN++;
+  if (frameN % 12 === 0) prVal.textContent = Math.round(area() / AREA0 * 100);
+  requestAnimationFrame(frame);
+}
+
+// 조작 — 젤리를 눌러 민다. 젤리 내부(무게중심 기준)를 찍어도 눌린다
+function inside(x, y) {
+  var cx = 0, cy = 0;
+  for (var i = 0; i < N; i++) { cx += pts[i].x; cy += pts[i].y; }
+  cx /= N; cy /= N;
+  return Math.hypot(x - cx, y - cy) < RAD * 1.25;
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var x = e.clientX - r.left, y = e.clientY - r.top;
+  manual = true;
+  pressing = true;
+  ptrX = x; ptrY = y;
+  field.setPointerCapture(e.pointerId);
+  if (reduce.matches) {
+    // 줄인 모드에서는 출렁임 없이 눌린 장면만 그린다
+    step(performance.now());
+    draw();
+  }
+});
+field.addEventListener('pointermove', function (e) {
+  if (!pressing) return;
+  var r = field.getBoundingClientRect();
+  ptrX = e.clientX - r.left;
+  ptrY = e.clientY - r.top;
+});
+window.addEventListener('pointerup', function () { pressing = false; });
+document.getElementById('reset').addEventListener('click', function () {
+  manual = false; build();
+  prVal.textContent = 100;
+});
+prIn.addEventListener('input', function () { prVal.textContent = Math.round(area() / AREA0 * 100); });
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

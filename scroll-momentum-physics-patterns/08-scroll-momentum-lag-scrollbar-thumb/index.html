@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지연 추적 스크롤바 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lst is-demo" id="lst">
+  <div class="lst__viewport" id="lstViewport" role="application" aria-label="지연 스크롤바 실험판" tabindex="0">
+    <div class="lst__track" id="lstTrack">
+      <div class="lst__row">행 1</div>
+      <div class="lst__row">행 2</div>
+      <div class="lst__row">행 3</div>
+      <div class="lst__row">행 4</div>
+      <div class="lst__row">행 5</div>
+      <div class="lst__row">행 6</div>
+      <div class="lst__row">행 7</div>
+      <div class="lst__row">행 8</div>
+    </div>
+    <div class="lst__rail" id="lstRail">
+      <div class="lst__thumb" id="lstThumb"></div>
+    </div>
+  </div>
+  <p class="lst__hint">스크롤하면 목록은 바로 따라가고, 막대 손잡이는 뒤처졌다 서서히 따라붙습니다</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('lst');
+  var viewport = document.getElementById('lstViewport');
+  var track = document.getElementById('lstTrack');
+  var rail = document.getElementById('lstRail');
+  var thumb = document.getElementById('lstThumb');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 목록 내용은 입력에 1:1 로 즉시 따라가지만(scrollPos), 손잡이 위치(thumbY)는
+  // 목표값(targetThumbY)을 매 프레임 LAG 만큼만 따라잡는 지수 보간(lerp)이라 항상 한 박자 늦게 도착한다.
+  var LAG = 0.15;
+  var SNAP_EPS = 0.3;
+  var rowH = 40, rowCount = 8;
+  var maxScroll = Math.max(0, rowH * rowCount - viewport.clientHeight);
+  var scrollPos = 0;
+  var thumbY = 0;
+  var raf = null;
+
+  // BD19 — 막대·손잡이 실측 픽셀은 getBoundingClientRect 로 잰다(짐작값 금지).
+  var railRect = rail.getBoundingClientRect();
+  var railH = railRect.height;
+  var thumbH = Math.max(28, railH * (viewport.clientHeight / (rowH * rowCount)));
+  thumb.style.height = thumbH.toFixed(1) + 'px';
+
+  function paintTrack() { track.style.transform = 'translateY(-' + scrollPos.toFixed(1) + 'px)'; }
+  function targetThumbY() { return maxScroll <= 0 ? 0 : (scrollPos / maxScroll) * (railH - thumbH); }
+  function paintThumb() { thumb.style.transform = 'translateY(' + thumbY.toFixed(1) + 'px)'; }
+  function loopTick() {
+    var target = targetThumbY();
+    if (reduce) { thumbY = target; paintThumb(); raf = null; return; }
+    thumbY += (target - thumbY) * LAG;
+    if (Math.abs(target - thumbY) < SNAP_EPS) {
+      thumbY = target; paintThumb(); raf = null; return;
+    }
+    paintThumb();
+    raf = requestAnimationFrame(loopTick);
+  }
+  function ensureLoop() { if (raf === null) { raf = requestAnimationFrame(loopTick); } }
+  function setScroll(v) {
+    scrollPos = Math.max(0, Math.min(maxScroll, v));
+    paintTrack();
+    ensureLoop();
+  }
+  paintTrack(); paintThumb();
+
+  function wireReal() {
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay();
+      setScroll(scrollPos + e.deltaY);
+    }, { passive: false });
+
+    var dragging = false, lastY = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay();
+      dragging = true; lastY = e.clientY;
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      setScroll(scrollPos - (e.clientY - lastY));
+      lastY = e.clientY;
+    });
+    viewport.addEventListener('pointerup', function () { dragging = false; });
+    viewport.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') { return; }
+      root.classList.remove('is-demo'); stopAutoplay();
+      setScroll(scrollPos + (e.key === 'ArrowDown' ? 40 : -40));
+    });
+  }
+  wireReal();
+
+  // 자동 루프: 바닥까지 내렸다 다시 위로 올려 손잡이가 뒤늦게 따라붙는 지연을 반복 재현한다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    phase += 1;
+    setScroll(phase % 2 === 0 ? 0 : maxScroll);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 1500); autoTick(); }
+})();
+</script>
+</body>
+</html>

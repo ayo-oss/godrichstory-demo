@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>물결 흐름 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="twr" id="twr">
+  <p class="twr__hint">
+    <svg class="twr__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M240 96h-8v-8a8 8 0 0 0-16 0v8h-16V80a8 8 0 0 0-16 0v16h-16V80a8 8 0 0 0-16 0v16h-16V80a8 8 0 0 0-16 0v16h-16V80a8 8 0 0 0-16 0v16h-16V80a8 8 0 0 0-16 0v16h-16V80a8 8 0 0 0-16 0v16H8a8 8 0 0 0 0 16h8v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h16v16a8 8 0 0 0 16 0v-16h8a8 8 0 0 0 0-16" opacity=".25"/><path d="M24 136h208a8 8 0 0 0 8-8v-24a8 8 0 0 0-8-8H24a8 8 0 0 0-8 8v24a8 8 0 0 0 8 8m8-24h192v8H32Z" transform="translate(0 60)"/><path d="M24 176h208a8 8 0 0 0 8-8v-24a8 8 0 0 0-8-8H24a8 8 0 0 0-8 8v24a8 8 0 0 0 8 8m8-24h192v8H32Z" transform="translate(0 60)"/></g></svg>
+    <span>縞が落ち着いた後も微小注入が続き、模様全体が流れ続けます</span>
+  </p>
+  <div class="twr__field" id="field">
+    <canvas class="twr__cv" id="cv"></canvas>
+  </div>
+  <div class="twr__bar">
+    <label class="twr__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="パターンシード">
+    </label>
+    <label class="twr__dial">供給率 f
+      <input type="range" id="fk" min="0.010" max="0.070" step="0.001" value="0.032" aria-label="供給率 f">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 물결 흐름 — Gray-Scott 반응-확산 격자를 줄무늬 영역(f 낮음)에서 성숙시킨 뒤,
+// 매 프레임 시간 위상이 다른 위치에 미세한 U 를 조금씩 주입해 무늬 전체가 천천히 흐르게 한다.
+// 라이브러리 0 — 두 물질 U(사료)·V(촉매)의 라플라스 확산 + 반응항만으로 계산한다.
+var root = document.getElementById('twr');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var fkIn = document.getElementById('fk');
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var GW = 96, GH = 60;              // 반응 격자 해상도 — 화면이 커져도 이 값은 그대로다
+var DU = 1.0, DV = 0.5;            // 확산 계수(고정)
+var F = 0.032, K = 0.058;          // 사료율·제거율 — fk 슬라이더가 F 를 움직인다
+var STEPS = 12;                    // 한 프레임에 도는 시뮬레이션 스텝 수
+var RIP_STEPS = 4000;              // 시작할 때 동기로 돌려 두는 미리성숙 스텝 — 줄무늬가 완전히 자리 잡은 상태
+var SRC_N = 8;                     // 주입원 개수 — 각자 위상이 달라 무늬를 여러 방향에서 흔든다
+var SRC_RAD = 6;                   // 주입 반경(셀)
+var SRC_BOOST = 0.40;              // 주입량 — 성숙한 줄을 밀어내 성장이 계속 되게 하는 힘
+
+var U = new Float32Array(GW * GH);
+var V = new Float32Array(GW * GH);
+var U2 = new Float32Array(GW * GH);
+var V2 = new Float32Array(GW * GH);
+var t = 0;                         // 흐름 위상 — 주입 위치가 이 시간을 따라 회전한다
+
+// 밑그림 종이 → 청록 잉크끼 파스텔 5단계 LUT — V 농도를 색 단계로 편다
+var css = getComputedStyle(root);
+function tok(name) { return css.getPropertyValue(name).trim().replace('#', ''); }
+function rgbOf(hex) {
+  var h = hex.length === 3 ? hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2) : hex;
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+var STOPS = [rgbOf(tok('--p0')), rgbOf(tok('--p1')), rgbOf(tok('--p2')), rgbOf(tok('--p3')), rgbOf(tok('--p4'))];
+var LUT = new Uint8Array(256 * 3);
+(function () {
+  for (var q = 0; q < 256; q++) {
+    var s = q / 255 * (STOPS.length - 1);
+    var k = Math.min(STOPS.length - 2, Math.floor(s));
+    var f = s - k;
+    for (var c = 0; c <  3; c++) LUT[q * 3 + c] = Math.round(STOPS[k][c] + (STOPS[k + 1][c] - STOPS[k][c]) * f);
+  }
+})();
+
+var small = document.createElement('canvas');
+small.width = GW; small.height = GH;
+var sctx = small.getContext('2d');
+var img = sctx.createImageData(GW, GH);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// ── Gray-Scott 한 스텝 — 5점 라플라스 + 반응항. 경계는 토러스(wrap)다 ──────────────
+function step() {
+  for (var y = 0; y < GH; y++) {
+    var ym = ((y - 1 + GH) % GH) * GW, y0 = y * GW, yp = ((y + 1) % GH) * GW;
+    for (var x = 0; x < GW; x++) {
+      var xl = (x - 1 + GW) % GW, xr = (x + 1) % GW;
+      var i = y0 + x;
+      var u = U[i], v = V[i];
+      var lapU = U[y0 + xl] + U[y0 + xr] + U[ym + x] + U[yp + x] - 4 * u;
+      var lapV = V[y0 + xl] + V[y0 + xr] + V[ym + x] + V[yp + x] - 4 * v;
+      var uvv = u * v * v;
+      var nu = u + DU * lapU - uvv + F * (1 - u);
+      var nv = v + DV * lapV + uvv - (F + K) * v;
+      U2[i] = nu < 0 ? 0 : (nu > 1 ? 1 : nu);
+      V2[i] = nv < 0 ? 0 : (nv > 1 ? 1 : nv);
+    }
+  }
+  var tu = U; U = U2; U2 = tu;
+  var tv = V; V = V2; V2 = tv;
+}
+
+// 미세 U 주입 — 위상이 제각각인 주입원 여럿이 시간 t 로 자리를 옮기며 성숙한 줄무늬를 계속
+// 흔들어 새 성장을 만든다. 주입원끼리 위상이 다르면 밀림 방향도 제각각 — 무늬 전체가 흐르게 보인다
+function ripple() {
+  for (var j = 0; j < SRC_N; j++) {
+    var ph = 1.7 + j * 2.4;
+    var cx = (GW / 2 + Math.cos(t * ph) * GW * 0.36) | 0;
+    var cy = (GH / 2 + Math.sin(t * (0.9 + j * 0.8)) * GH * 0.36) | 0;
+    for (var dy = -SRC_RAD; dy <= SRC_RAD; dy++) {
+      for (var dx = -SRC_RAD; dx <= SRC_RAD; dx++) {
+        if (dx * dx + dy * dy > SRC_RAD * SRC_RAD) continue;
+        var i = ((cy + dy + GH) % GH) * GW + ((cx + dx + GW) % GW);
+        U[i] = 1;
+        var nv = V[i] + SRC_BOOST;
+        V[i] = nv > 1 ? 1 : nv;
+      }
+    }
+  }
+}
+
+// シード 재생성 — 균일 V 밭에 mulberry32 로 뽑은 점들에 U 를 부어 둔다. 미리성숙 스텝으로 줄무늬를 만들어 둔다
+function build(seed) {
+  var rng = mulberry32(seed >>> 0);
+  for (var i = 0; i < GW * GH; i++) { U[i] = 1; V[i] = 0.5 + (rng() - 0.5) * 0.06; }
+  var n = 10 + ((rng() * 5) | 0);
+  for (var s = 0; s < n; s++) {
+    var cx = (2 + rng() * (GW - 4)) | 0, cy = (2 + rng() * (GH - 4)) | 0;
+    for (var dy = -3; dy <= 3; dy++) for (var dx = -3; dx <= 3; dx++) {
+      if (dx * dx + dy * dy > 9) continue;
+      V[((cy + dy + GH) % GH) * GW + ((cx + dx + GW) % GW)] = 1;
+    }
+  }
+  for (var m = 0; m < RIP_STEPS; m++) step();
+  t = 0;
+}
+
+// 렌더 — 격자 V 를 ImageData 화소에 LUT 로 매핑해 putImageData 로 버퍼에 그리고 drawImage 로 확대한다
+function paint() {
+  var px = img.data, i = 0;
+  for (var c = 0; c < GW * GH; c++) {
+    var q = (V[c] * 255) | 0;
+    px[i] = LUT[q * 3]; px[i + 1] = LUT[q * 3 + 1]; px[i + 2] = LUT[q * 3 + 2]; px[i + 3] = 255;
+    i += 4;
+  }
+  sctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, GW, GH, 0, 0, W, H);
+}
+
+function frame() {
+  for (var s = 0; s < STEPS; s++) { ripple(); step(); }
+  t += 0.006;
+  paint();
+  raf = requestAnimationFrame(frame);
+}function onSeed() {
+  var v = Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1));
+  build(v);
+  if (reduce) paint();
+}
+
+function onFk() {
+  F = Number(fkIn.value);
+  if (reduce) { build(Number(seedIn.value) || 7); paint(); }
+}
+
+seedIn.addEventListener('input', onSeed);
+seedIn.addEventListener('change', onSeed);
+fkIn.addEventListener('input', onFk);
+fkIn.addEventListener('change', onFk);
+window.addEventListener('resize', function () { fit(); if (reduce) paint(); });
+
+build(Number(seedIn.value) || 7);
+fit();
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 성숙 상태 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

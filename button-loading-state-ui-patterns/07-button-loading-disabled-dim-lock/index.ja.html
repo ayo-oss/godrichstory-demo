@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ローディング中に暗くなり押せなくなるロックボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <button class="btn" id="btn" type="button">
+    <span class="btnFilm" id="film" aria-hidden="true"></span>
+    <span class="btnLockWrap" id="lockWrap" aria-hidden="true">
+      <svg viewBox="0 0 256 256" width="14" height="14">
+        <g fill="currentColor"><path d="M208 88H48a8 8 0 0 0-8 8v112a8 8 0 0 0 8 8h160a8 8 0 0 0 8-8V96a8 8 0 0 0-8-8m-80 72a20 20 0 1 1 20-20a20 20 0 0 1-20 20" opacity=".2"/><path d="M208 80h-32V56a48 48 0 0 0-96 0v24H48a16 16 0 0 0-16 16v112a16 16 0 0 0 16 16h160a16 16 0 0 0 16-16V96a16 16 0 0 0-16-16M96 56a32 32 0 0 1 64 0v24H96Zm112 152H48V96h160zm-80-96a28 28 0 0 0-8 54.83V184a8 8 0 0 0 16 0v-17.17a28 28 0 0 0-8-54.83m0 40a12 12 0 1 1 12-12a12 12 0 0 1-12 12"/></g>
+      </svg>
+    </span>
+    <span class="btnLabel" id="label">Confirm</span>
+  </button>
+  <span class="visuallyHidden" id="status" role="status" aria-live="polite"></span>
+</div>
+</main>
+<script>
+(function () {
+  var COOLDOWN_MS = 1300;
+  var FADE_MS = 160;
+  var GAP_MS = 480;
+  var START_DELAY_MS = 200;
+  var BASE_HZ = 0.6;
+  var MAX_HZ = 2.4;
+
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var film = document.getElementById('film');
+  var lockWrap = document.getElementById('lockWrap');
+  var status = document.getElementById('status');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gen = 0;
+  var timers = [];
+  var rafId = 0;
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); });
+      timers = [];
+    }
+  }
+
+  function clamp01(v) { return Math.min(1, Math.max(0, v)); }
+
+  // 계산 겹: 남은 시간(remaining)이 줄어들수록 진동수를 BASE_HZ→MAX_HZ 로 끌어올린다.
+  // 진동수가 시간에 따라 바뀌므로 sin(2π·f·t) 를 그대로 쓸 수 없어 phase 를 프레임 델타로
+  // 직접 적분한다(phase += 2π·f(now)·dt) — 막이 남은 시간이 줄수록 더 빨리 깜빡인다.
+  function pulseLoop(myGen) {
+    var last = null;
+    var phase = 0;
+    var loopStart = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (last === null) { last = now; loopStart = now; }
+      var dt = now - last;
+      last = now;
+      var elapsed = now - loopStart;
+      var remainingFrac = clamp01(1 - elapsed / COOLDOWN_MS);
+      var freq = BASE_HZ + (MAX_HZ - BASE_HZ) * (1 - remainingFrac);
+      phase += 2 * Math.PI * freq * (dt / 1000);
+      var wave = (1 + Math.sin(phase)) / 2;
+      film.style.opacity = String(.14 + .16 * wave);
+      rafId = requestAnimationFrame(step);
+    }
+    rafId = requestAnimationFrame(step);
+  }
+
+  function fade(el, from, to, ms, myGen, onDone) {
+    var start = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (start === null) start = now;
+      var p = Math.min(1, (now - start) / ms);
+      el.style.opacity = String(from + (to - from) * p);
+      if (p < 1) requestAnimationFrame(step); else if (onDone) onDone();
+    }
+    requestAnimationFrame(step);
+  }
+
+  function runAnimated() {
+    gen++;
+    var myGen = gen;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    status.textContent = 'しばらくお待ちください';
+    fade(lockWrap, 0, 1, FADE_MS, myGen);
+    film.style.opacity = '.14';
+    pulseLoop(myGen);
+    timers.push(setTimeout(function () {
+      cancelAnimationFrame(rafId);
+      fade(film, parseFloat(film.style.opacity || '0'), 0, FADE_MS, myGen);
+      fade(lockWrap, 1, 0, FADE_MS, myGen, function () {
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        status.textContent = '';
+      });
+    }, COOLDOWN_MS));
+  }
+
+  function runReduced() {
+    gen++;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    status.textContent = 'しばらくお待ちください';
+    film.style.opacity = '.2';
+    lockWrap.style.opacity = '1';
+    timers.push(setTimeout(function () {
+      film.style.opacity = '0';
+      lockWrap.style.opacity = '0';
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+      status.textContent = '';
+    }, COOLDOWN_MS));
+  }
+
+  btn.addEventListener('click', function () {
+    if (btn.disabled) return;
+    human();
+    if (reduce) runReduced(); else runAnimated();
+  });
+
+  // reduce: 실사용 경로 적용 — runReduced() 는 진동수 계산 없이 고정 opacity 로 즉시 바뀐다.
+  // 아래 자동 루프는 시연 게이트만 — reduce 에서는 돌지 않는다.
+  function cycle() {
+    if (!scene.classList.contains('is-demo')) return;
+    runAnimated();
+    timers.push(setTimeout(function () {
+      timers.push(setTimeout(cycle, GAP_MS));
+    }, COOLDOWN_MS + FADE_MS));
+  }
+
+  if (!reduce) {
+    timers.push(setTimeout(cycle, START_DELAY_MS));
+  }
+})();
+</script>
+</body>
+</html>

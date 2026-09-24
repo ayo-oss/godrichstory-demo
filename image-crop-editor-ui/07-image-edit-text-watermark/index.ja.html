@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>透かしを載せる — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wm is-demo" id="wm">
+  <div class="wm__frame" id="frame">
+    <canvas class="wm__view" id="view" width="320" height="200" role="img" aria-label="透かしを載せた写真"></canvas>
+    <span class="wm__ghost" aria-hidden="true"><span class="wm__mark">© GODRICH</span></span>
+  </div>
+  <div class="wm__foot">
+    <span class="wm__lab" id="sizeLab"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" class="wm__ico" aria-hidden="true"><g fill="currentColor"><path d="M232 164c0 15.46-14.33 28-32 28s-32-12.54-32-28s14.33-28 32-28s32 12.54 32 28M34.82 152h90.36L80 56Z" opacity=".2"/><path d="M87.24 52.59a8 8 0 0 0-14.48 0l-64 136a8 8 0 1 0 14.48 6.81L39.9 160h80.2l16.66 35.4a8 8 0 1 0 14.48-6.81ZM47.43 144L80 74.79L112.57 144ZM200 96c-12.76 0-22.73 3.47-29.63 10.32a8 8 0 0 0 11.26 11.36c3.8-3.77 10-5.68 18.37-5.68c13.23 0 24 9 24 20v3.22a42.76 42.76 0 0 0-24-7.22c-22.06 0-40 16.15-40 36s17.94 36 40 36a42.73 42.73 0 0 0 24-7.25a8 8 0 0 0 16-.75v-60c0-19.85-17.94-36-40-36m0 88c-13.23 0-24-9-24-20s10.77-20 24-20s24 9 24 20s-10.77 20-24 20"/></g></svg><span>文字サイズ</span></span>
+    <span class="wm__track" id="track" role="slider" tabindex="0" aria-labelledby="sizeLab" aria-valuemin="14" aria-valuemax="42" aria-valuenow="24"><span class="wm__thumb" id="thumb"></span></span>
+    <button type="button" class="wm__btn" id="shadowBtn" aria-pressed="true">影</button>
+    <span class="wm__hint">ドラッグで移動</span>
+  </div>
+</div>
+</main>
+<script>
+var wm = document.getElementById('wm');
+var frame = document.getElementById('frame');
+var view = document.getElementById('view');
+var track = document.getElementById('track');
+var thumb = document.getElementById('thumb');
+var shadowBtn = document.getElementById('shadowBtn');
+var vctx = view.getContext('2d');
+var src = document.createElement('canvas');
+var mark = '© GODRICH';
+var spot = { x: 0.5, y: 0.78 };
+var size = 24, shadowOn = true;
+var VOICE = '%s ピクセル';
+
+// 가짜 사진 — 외부 파일 없이 그라디언트와 도형으로 합성한다. 필터·히스토그램이 보이도록 대비를 세게 준다
+function paintPhoto(c, w, h) {
+  var sky = c.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#2f6df6'); sky.addColorStop(0.55, '#ff9ebb'); sky.addColorStop(1, '#ffd23f');
+  c.fillStyle = sky; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#fff7e6';
+  c.beginPath(); c.arc(w * 0.74, h * 0.28, h * 0.13, 0, Math.PI * 2); c.fill();
+  // 곧은 수평선 하나 — 기울기 보정이 눈에 보이려면 비교할 직선이 있어야 한다
+  c.fillStyle = 'rgba(23, 20, 26, 0.5)'; c.fillRect(0, Math.round(h * 0.66), w, 2);
+  c.fillStyle = '#17141a';
+  c.beginPath(); c.moveTo(0, h); c.lineTo(w * 0.34, h * 0.36); c.lineTo(w * 0.62, h); c.closePath(); c.fill();
+  c.fillStyle = '#c2361a';
+  c.beginPath(); c.moveTo(w * 0.46, h); c.lineTo(w * 0.78, h * 0.52); c.lineTo(w, h); c.closePath(); c.fill();
+  for (var i = 0; i < 6; i++) { c.fillStyle = i % 2 ? '#fff7e6' : '#17141a'; c.fillRect(w * (0.08 + i * 0.07), h * (0.14 + (i % 3) * 0.06), 7, 7); }
+}
+
+function render() {
+  var w = view.width, h = view.height;
+  vctx.setTransform(1, 0, 0, 1, 0, 0);
+  vctx.clearRect(0, 0, w, h);
+  vctx.drawImage(src, 0, 0, w, h);
+  thumb.style.left = ((size - 14) / 28 * 100) + '%';
+  track.setAttribute('aria-valuenow', size);
+  track.setAttribute('aria-valuetext', VOICE.replace('%s', size));
+  // 격자 미리보기 동안에는 글자를 유령 판이 맡는다 — 캔버스에 구운 글자는 CSS 로 못 움직인다
+  if (wm.classList.contains('is-demo')) { return; }
+  vctx.textAlign = 'center';
+  vctx.textBaseline = 'middle';
+  vctx.fillStyle = 'rgba(255, 247, 230, 0.94)';
+  vctx.shadowColor = 'rgba(23, 20, 26, 0.62)';
+  // 그림자는 글자 아래 번지는 정도만 — 0 이면 밝은 하늘 위에서 글자가 묻힌다
+  vctx.shadowBlur = shadowOn ? 9 : 0;
+  vctx.shadowOffsetY = shadowOn ? 2 : 0;
+  vctx.fillText(mark, spot.x * w, spot.y * h);
+}
+
+function setFont(px) {
+  size = Math.max(14, Math.min(42, Math.round(px)));
+  vctx.font = '800 ' + size + 'px system-ui, sans-serif';
+  wm.classList.remove('is-demo');
+  render();
+}
+
+frame.addEventListener('pointerdown', function (e) {
+  frame.setPointerCapture(e.pointerId);
+  wm.classList.remove('is-demo');
+  moveMark(e);
+});
+frame.addEventListener('pointermove', function (e) { if (e.buttons) { moveMark(e); } });
+function moveMark(e) {
+  var r = frame.getBoundingClientRect();
+  spot.x = Math.max(0.12, Math.min(0.88, (e.clientX - r.left) / r.width));
+  spot.y = Math.max(0.12, Math.min(0.9, (e.clientY - r.top) / r.height));
+  render();
+}
+
+function fromPointer(e) {
+  var r = track.getBoundingClientRect();
+  setFont((e.clientX - r.left) / r.width * 28 + 14);
+}
+track.addEventListener('pointerdown', function (e) { track.setPointerCapture(e.pointerId); fromPointer(e); });
+track.addEventListener('pointermove', function (e) { if (e.buttons) { fromPointer(e); } });
+// 화살표 1픽셀, Shift 와 함께면 6픽셀
+track.addEventListener('keydown', function (e) {
+  var step = e.shiftKey ? 6 : 1;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); setFont(size - step); }
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); setFont(size + step); }
+});
+shadowBtn.addEventListener('click', function () {
+  shadowOn = !shadowOn;
+  shadowBtn.setAttribute('aria-pressed', shadowOn ? 'true' : 'false');
+  wm.classList.remove('is-demo'); render();
+});
+
+// 미리보기 클래스가 어떤 경로로 떨어지든 캔버스를 다시 그린다 —
+// 손을 대지 않고 클래스만 벗겨진 상태에서 글자가 없는 사진만 남는 일이 없게
+new MutationObserver(render).observe(wm, { attributes: true, attributeFilter: ['class'] });
+
+src.width = 320; src.height = 200;
+paintPhoto(src.getContext('2d'), src.width, src.height);
+vctx.font = '800 ' + size + 'px system-ui, sans-serif';
+render();
+</script>
+</body>
+</html>

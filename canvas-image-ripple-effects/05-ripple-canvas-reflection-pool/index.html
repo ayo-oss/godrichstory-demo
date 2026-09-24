@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이미지 아래 뒤집힌 반사가 물결치듯 좌우로 흔들리며 서서히 흐려진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rvRoot">
+  <canvas class="rv__canvas" id="rvCanvas" width="480" height="300"></canvas>
+  <p class="rv__caption">이미지 아래 뒤집힌 반사가 물결치듯 좌우로 흔들리며 서서히 흐려진다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 원본을 위쪽에 그리고 아래쪽엔 상하 반전한 복사본을 행마다 다른 x 오프셋(sin)으로 밀어 수면 반사처럼 만든다.
+  // 오프셋은 정적이지 않고 시간에 따라 위상이 흐르며, 아래로 갈수록 알파를 낮춰 감쇠하는 반사를 표현한다.
+  var root = document.getElementById('rvRoot');
+  var canvas = document.getElementById('rvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawPhotoBase(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#274b7a');
+    sky.addColorStop(1, '#6f9fd6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.62, sunY = h * 0.22, sunR = h * 0.13;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.8);
+    glow.addColorStop(0, 'rgba(255,224,160,.85)');
+    glow.addColorStop(1, 'rgba(255,224,160,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#ffe9b8';
+    pctx.fill();
+    var towerColors = ['#1c2f4a', '#24405f', '#2d5578'];
+    for (var i = 0; i < towerColors.length; i += 1) {
+      var tw = w * (0.05 + i * 0.03);
+      var tx = w * (0.18 + i * 0.28);
+      var th = h * (0.32 + i * 0.08);
+      pctx.fillStyle = towerColors[i];
+      pctx.fillRect(tx, h * 0.5 - th, tw, th);
+    }
+    for (var k = 0; k < 40; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.5, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.1 + rand() * 0.2) + ')';
+      pctx.fill();
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var HORIZON = Math.round(CALC_H * 0.5);
+  var REFLECT_SWAY_AMP = 6.5;
+  var REFLECT_SWAY_SPEED = 0.0066;
+  var REFLECT_GLOW_AMP = 46;
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawPhotoBase(octx, CALC_W, CALC_H, 419051);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function sampleBase(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [baseBuf[i], baseBuf[i + 1], baseBuf[i + 2]];
+  }
+
+  function reflectWave(depth, t) {
+    return Math.sin(depth * 0.5 - t * REFLECT_SWAY_SPEED);
+  }
+
+  function renderFrame(t) {
+    var idx = 0;
+    var span = CALC_H - HORIZON;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        var alpha = 1;
+        var glow = 0;
+        if (y < HORIZON) {
+          rgb = sampleBase(x, y);
+        } else {
+          var depth = y - HORIZON;
+          var srcY = HORIZON - depth;
+          var frac = depth / span;
+          var wave = reflectWave(depth, t);
+          var offset = wave * REFLECT_SWAY_AMP * frac;
+          rgb = sampleBase(x + offset, srcY);
+          // 수면 하이라이트: x 오프셋과 같은 파형(wave)을 밝기 감쇠·스웨이 알파에도 그대로 전파한다.
+          alpha = Math.max(0.15, 1 - frac * 0.75) * (0.9 + 0.1 * wave);
+          glow = Math.max(0, wave) * REFLECT_GLOW_AMP * (1 - frac);
+        }
+        outBuf[idx] = Math.max(0, Math.min(255, rgb[0] * alpha + glow));
+        outBuf[idx + 1] = Math.max(0, Math.min(255, rgb[1] * alpha + glow));
+        outBuf[idx + 2] = Math.max(0, Math.min(255, rgb[2] * alpha + glow));
+        outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? 700 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) { elapsed += dt; }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

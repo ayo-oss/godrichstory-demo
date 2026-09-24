@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Random-dot basics — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>Random-dot basics</span>
+    <span class="me__desc">Lay noise, nudge the disc pixels a few columns per row, and a circle turns into a ball the moment your eyes relax</span>
+  </p>
+  <div class="me__field" role="application" aria-label="Random-dot lab" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <span class="me__meta">bulge depth 10px · 1px grain · cycle 2s</span>
+    <span class="me__meta me__meta--dim">ImageData · per-row shift</span>
+  </div>
+</div>
+</main>
+<script>
+// 매직아이 기본(01) — 랜덤닷 스테레오그램의 최소 구현.
+// 1) 시간이 지나도 같은 난수 노이즈를 깔는다(밑칠 baseIdx — 씨앗은 좌표만 받는다).
+// 2) 깊이 지도 depth(x,y) 를 계산해 0..1 로 정규화한다(여기선 숨쉬는 반구 원판).
+// 3) 각 행을 왼쪽에서 오른쪽으로 훑며, 깊이가 0인 칸은 밑칠 그대로 두고
+//    깊이가 있는 칸은 col[x] = col[x - round(depth*MAXSHIFT)] 로 왼쪽에서 복사한다.
+//    같은 낱알이 두 눈에 시차를 두고 들어와 입체로 읽히는 autostereogram 계산의 전부다.
+// 원판이 주기 안에 부풀었다 가라앉으면 복사 거리가 바뀌어 원판 영역의 낱알이 다시 엮인다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var MAXSHIFT = 10;   // 돌출 깊이(px) — 22로 올리면 공이 코앞까지 나온다(변형 1)
+  var CYCLE    = 2.0;  // 숨쉬기 주기(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = [];
+  for (var i = 0; i < 5; i++) PAL.push(tokRGB('--me-p' + i));
+
+  // ── 밑칠 노이즈 — 좌표만 받는 결정적 해시. 시간을 안 받으므로 프레임 사이에 같다(눈이 패턴을 기억한다) ──
+  function baseIdx(x, y) {
+    var h = (Math.imul(x + 11, 374761393) + Math.imul(y + 7, 668265263)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return ((h % PAL.length) + PAL.length) % PAL.length;   // ^ 는 ToInt32 로 음수가 될 수 있어 접는다
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null;
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    img = ctx.createImageData(W, H);
+  }
+
+  // 깊이 지도 — 중앙 반구가 부풀었다 가라앉으며 살짝 위아래로도 흐른다. 0(배경) .. 1(최대 돌출)
+  function depthAt(x, y, t) {
+    var ph = t / CYCLE * Math.PI * 2;
+    var cx = W * 0.5, cy = H * 0.5 + Math.sin(ph) * H * 0.07;
+    var rad = Math.min(W, H) * 0.74;
+    var dx = (x - cx) / rad, dy = (y - cy) / rad;
+    var d2 = dx * dx + dy * dy;
+    if (d2 >= 1) return 0;
+    var bulge = 0.16 + 0.84 * (Math.sin(ph - Math.PI / 2) * .5 + .5);
+    return Math.sqrt(1 - d2) * bulge;   // 반구 단면 × 숨쉬기
+  }
+
+  function draw(t) {
+    var d = img.data, x, y, di;
+    var col = new Int32Array(W);   // 이 행의 낱알 팔레트 인덱스
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        var s = Math.round(depthAt(x, y, t) * MAXSHIFT);
+        if (s <= 0) {
+          col[x] = baseIdx(x, y);                    // 배경 — 밑칠 낱알 그대로
+        } else {
+          var from = x - s;
+          col[x] = from >= 0 ? col[from] : baseIdx(from + W, y);  // 왼쪽에서 복사(화면 밖은 되감아)
+        }
+      }
+      for (x = 0; x < W; x++) {
+        var c = PAL[col[x]];
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.5);
+  });
+  fit();
+  if (reduce) {
+    draw(0.5);   // reduce — 부풀은 원판 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Icon morph — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <button class="iconbtn is-demo" type="button" aria-pressed="false" aria-labelledby="t3">
+    <span class="iconbtn__stack">
+      <svg class="ic ic--play" viewBox="0 0 24 24" width="26" height="26">
+        <title id="t3">Play</title>
+        <path d="M8 5l11 7-11 7z"/>
+      </svg>
+      <svg class="ic ic--pause" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+        <path d="M7 5h4v14H7zM13 5h4v14h-4z"/>
+      </svg>
+      <svg class="morph" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+        <circle class="morph__halo" cx="12" cy="12" r="7"/>
+        <path class="morph__ghost" d="M8 5l11 7-11 7z"/>
+        <circle class="morph__spark" r=".9" cx="12" cy="12"/>
+        <circle class="morph__bit" r=".5" cx="12" cy="11" style="--dx:0px;--dy:-3.2px"/>
+        <circle class="morph__bit" r=".45" cx="12" cy="11" style="--dx:2.8px;--dy:1.6px"/>
+        <circle class="morph__bit" r=".45" cx="12" cy="11" style="--dx:-2.8px;--dy:1.6px"/>
+        <circle class="morph__bit" r=".45" cx="12" cy="11" style="--dx:-2.2px;--dy:-1.8px"/>
+        <circle class="morph__bit" r=".45" cx="12" cy="11" style="--dx:2.2px;--dy:1.8px"/>
+        <circle class="morph__bit" r=".45" cx="12" cy="11" style="--dx:2px;--dy:-2.2px"/>
+      </svg>
+    </span>
+  </button>
+</main>
+<script>
+// 의미 있는 아이콘 버튼: <title>이 접근 가능한 이름이고, 클릭마다 상태에 맞게 바꾼다
+document.querySelectorAll(".iconbtn").forEach(function (b) {
+  var t = b.querySelector("title");
+  b.addEventListener("click", function () {
+    b.classList.remove("is-demo");
+    var on = b.getAttribute("aria-pressed") === "true";
+    b.setAttribute("aria-pressed", String(!on));
+    t.textContent = on ? "Play" : "Pause";
+  });
+});
+
+// 모프 한 겹 — 전환 순간(Play→Pause, Pause→Play)에 링 궤적 + 입자 방출.
+// 애니메이션 타이밍을 하드코딩하지 않고 getComputedStyle() 로 아이콘 opacity 실측값을
+// 읽어 "페이드가 진행 중"인 순간을 감지해 그 순간만 발화한다 (01 스파크와 같은 원리).
+(function () {
+  var btn = document.querySelector('.iconbtn');
+  if (!btn) return;
+  var ghost = btn.querySelector('.morph__ghost');
+  var halo = btn.querySelector('.morph__halo');
+  var spark = btn.querySelector('.morph__spark');
+  var bits = [].slice.call(btn.querySelectorAll('.morph__bit'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !ghost || !bits.length) return;
+
+  var prevOp = null, armed = true;
+  var dPlay = btn.querySelector('.ic--play path');
+  var dPause = btn.querySelector('.ic--pause path');
+  // 모프 순간 고스트 — '나타나는' 아이콘의 실루엣이 링처럼 번지며 지워진다 (잔상)
+  function burst(d) {
+    ghost.setAttribute('d', d);
+    ghost.style.animation = 'none';
+    void ghost.getBoundingClientRect();
+    ghost.style.animation = '';
+    ghost.style.animationName = 'ghost-ring';
+    // 링 파동 — 중앙에서 퍼지며 옅어지는 미광 (06 halo 와 같은 원리)
+    if (halo) {
+      halo.style.animation = 'none';
+      void halo.getBoundingClientRect();
+      halo.style.animation = '';
+      halo.style.animationName = 'halo-ring';
+    }
+    // 중앙 스파크 점멸
+    if (spark) {
+      spark.style.animation = 'none';
+      void spark.getBoundingClientRect();
+      spark.style.animation = '';
+      spark.style.animationName = 'spark-pop';
+    }
+    bits.forEach(function (b) {
+      var ang = Math.random() * Math.PI * 2;
+      var sp = 2.4 + Math.random() * 1.4;
+      b.style.setProperty('--dx', (Math.cos(ang) * sp).toFixed(2) + 'px');
+      b.style.setProperty('--dy', (Math.sin(ang) * sp).toFixed(2) + 'px');
+      b.style.animation = 'none';
+      void b.getBoundingClientRect();
+      b.style.animation = '';
+      b.style.animationName = 'bit-fly';
+    });
+  }
+  function watch() {
+    // is-demo 루프 중엔 play 루프의 opacity 로 전환 순간을 잡는다
+    var target = btn.classList.contains('is-demo')
+      ? btn.querySelector('.ic--play')
+      : (btn.getAttribute('aria-pressed') === 'true' ? btn.querySelector('.ic--pause') : btn.querySelector('.ic--play'));
+    if (target) {
+      var op = parseFloat(getComputedStyle(target).opacity);
+      var moving = op > 0.02 && op < 0.98;
+      // 전환당 한 번만: 페이드 시작 순간에 발화하고(opacity 가 완전히 멈출 때까지 재장전 안 함)
+      if (moving && armed) {
+        // 나타나는 아이콘: 루프 중엔 opacity 상승=play 복귀·하강=pause 진입,
+        // 클릭 후엔 target 자체가 나타나는 아이콘이다
+        var rising = prevOp === null || op > prevOp;
+        var incoming = btn.classList.contains('is-demo') ? (rising ? dPlay : dPause)
+                      : (target.classList.contains('ic--play') ? dPlay : dPause);
+        burst(incoming.getAttribute('d'));
+        armed = false;
+      }
+      if (!moving && prevOp !== null && Math.abs(op - prevOp) < 0.002) armed = true;
+      prevOp = op;
+    }
+    requestAnimationFrame(watch);
+  }
+  requestAnimationFrame(watch);
+})();
+</script>
+</body>
+</html>

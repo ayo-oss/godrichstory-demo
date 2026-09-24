@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ポインター角度で光沢が流れるボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ss is-demo" id="ss">
+  <p class="ss__hint"><span>ポインターの角度を計算し、光沢の筋がその方向へ流れます</span></p>
+  <div class="ss__scene" id="scene">
+    <span class="ss__glow" id="glow" aria-hidden="true"></span>
+    <span class="ss__floor" id="floor" aria-hidden="true"></span>
+    <button class="ss__btn" id="btn" type="button" aria-label="今すぐアップグレード — ポインター角度で光沢が流れるボタン">
+      <span class="ss__sweep" id="sweep" aria-hidden="true"></span>
+      <span class="ss__label">今すぐアップグレード</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('ss');
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var sweep = document.getElementById('sweep');
+  var floor = document.getElementById('floor');
+  var glow = document.getElementById('glow');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var SWEEP_WIDTH = 46;      // 광택 줄기의 각도 폭(deg) — 불변
+  var LERP = 0.2;
+  var targetAngle = 0, curAngle = 0;
+  var targetMag = 0, curMag = 0;
+  var hasPointer = false;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // 합성 포인터 각도 — 원을 그리며 도는 위상(자동 시연 · 헤드리스 측정)
+  // 진폭을 넓혀 자동 시연에서도 기울기가 가장자리(최대 각)까지 실제로 닿게 한다(경로 상수만 조정)
+  function syntheticAngle(t) { return t * 74; }
+  function syntheticMag(t) { return Math.min(1, 0.6 + 0.55 * Math.sin(t * 1.3)); }
+
+  function shortestDelta(from, to) {
+    var d = (to - from) % 360;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+  }
+
+  function render(angle, mag) {
+    var rotY = Math.cos(angle * Math.PI / 180) * mag * 10;
+    var rotX = Math.sin(angle * Math.PI / 180) * mag * -10;
+    btn.style.transform = 'rotateX(' + rotX.toFixed(2) + 'deg) rotateY(' + rotY.toFixed(2) + 'deg)';
+    var a0 = (angle - SWEEP_WIDTH / 2).toFixed(1);
+    var a1 = angle.toFixed(1);
+    var a2 = (angle + SWEEP_WIDTH / 2).toFixed(1);
+    // 대비·폭(요소 크기)을 키워 광택 줄기가 버튼 면 전체를 가로지르게 — SWEEP_WIDTH(각도 폭) 값 자체는 그대로
+    var alpha = (0.46 + mag * 0.54).toFixed(2);
+    sweep.style.background = 'conic-gradient(from ' + a0 + 'deg at 50% 50%, rgba(23,20,26,0), rgba(23,20,26,' + alpha + ') ' + (SWEEP_WIDTH / 2).toFixed(1) + 'deg, rgba(23,20,26,0) ' + SWEEP_WIDTH.toFixed(1) + 'deg)';
+    sweep.style.opacity = String(0.8 + mag * 0.4);
+    // 기울기에 연동된 바닥 그림자 — 버튼이 기운 방향으로 그림자가 옮겨가며 면적을 만든다
+    var floorShift = Math.cos(angle * Math.PI / 180) * mag * 34;
+    var floorScale = 1 + mag * 0.28;
+    floor.style.transform = 'translateX(' + floorShift.toFixed(1) + 'px) scaleX(' + floorScale.toFixed(2) + ')';
+    floor.style.opacity = (0.08 + mag * 0.88).toFixed(2);
+    // 배경에 반사광 레이어 — % 좌표만 써서 이동시키므로 폭 넘침 위험이 없다(transform 미사용)
+    var gx = (50 + Math.cos(angle * Math.PI / 180) * mag * 38).toFixed(0);
+    var gy = (50 + Math.sin(angle * Math.PI / 180) * mag * 38).toFixed(0);
+    glow.style.background = 'radial-gradient(circle at ' + gx + '% ' + gy + '%, rgba(255,255,255,' + (0.18 + mag * 0.5).toFixed(2) + '), rgba(255,255,255,0) 60%)';
+  }
+
+  var t0 = null;
+  function loop(now) {
+    if (t0 === null) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!hasPointer && !reduce) {
+      targetAngle = syntheticAngle(t) % 360;
+      targetMag = syntheticMag(t);
+    }
+    curAngle += shortestDelta(curAngle, targetAngle) * LERP;
+    curMag += (targetMag - curMag) * LERP;
+    render(curAngle, curMag);
+    requestAnimationFrame(loop);
+  }
+
+  function angleFromEvent(e) {
+    var r = scene.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    var dx = e.clientX - cx, dy = e.clientY - cy;
+    var ang = Math.atan2(dy, dx) * 180 / Math.PI;
+    var mag = clamp(Math.sqrt(dx * dx + dy * dy) / (r.width / 2), 0, 1);
+    return [ang, mag];
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var a = angleFromEvent(e);
+    targetAngle = a[0]; targetMag = a[1];
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetMag = 0.15;
+  });
+  btn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    targetMag = 1;
+    if (reduce) { render(targetAngle, targetMag); }
+    setTimeout(function () { targetMag = hasPointer ? 0.5 : 0.15; if (reduce) { render(targetAngle, targetMag); } }, 220);
+  });
+  btn.addEventListener('keydown', function (e) {
+    var step = 18;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); root.classList.remove('is-demo'); hasPointer = true; targetAngle -= step; }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); root.classList.remove('is-demo'); hasPointer = true; targetAngle += step; }
+    else { return; }
+    if (reduce) { render(targetAngle, targetMag); }
+  });
+
+  if (reduce) {
+    render(45, 0.4);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

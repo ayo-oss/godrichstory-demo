@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Empty-list message that appears once every row is gone — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="les is-demo" id="les">
+  <ul class="les__list" id="lesList"></ul>
+  <div class="les__empty" id="lesEmpty" aria-live="polite">
+    <p class="les__emptyText">No tasks left</p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var ROWS = ['Review task A', 'Review task B', 'Review task C', 'Review task D'];
+  var EMPTY_HEIGHT = 120; // 목록이 다 비었을 때의 최종 높이
+  var LERP_RATE = 0.18; // 목표 높이로 매 프레임 다가가는 비율(지수 감쇠)
+  var AUTO_STEP_MS = 380;
+  var AUTO_RESET_DELAY_MS = 700;
+
+  var root = document.getElementById('les');
+  var list = document.getElementById('lesList');
+  var empty = document.getElementById('lesEmpty');
+
+  function addRow(label) {
+    var li = document.createElement('li');
+    li.className = 'les__row';
+    var span = document.createElement('span');
+    span.className = 'les__label';
+    span.textContent = label;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'les__del';
+    btn.setAttribute('aria-label', label + ' Remove');
+    btn.textContent = 'Remove';
+    li.appendChild(span);
+    li.appendChild(btn);
+    list.appendChild(li);
+    return li;
+  }
+
+  function resetRows() {
+    list.innerHTML = '';
+    ROWS.forEach(function (label) { addRow(label); });
+  }
+  resetRows();
+
+  // 계산 겹: 목표 높이(0 또는 EMPTY_HEIGHT)로 매 프레임 지수 감쇠(lerp)해 다가간다 —
+  // 행이 0개가 되는 순간 문구 영역이 즉시 뚝 나타나지 않고 남은 공간 크기를 따라 커진다.
+  var currentHeight = 0;
+  var targetHeight = 0;
+  var rafId = null;
+
+  function computeTarget() {
+    return list.children.length === 0 ? EMPTY_HEIGHT : 0;
+  }
+
+  function step() {
+    var diff = targetHeight - currentHeight;
+    if (Math.abs(diff) < 0.5) {
+      currentHeight = targetHeight;
+      empty.style.height = currentHeight + 'px';
+      empty.style.opacity = (currentHeight / EMPTY_HEIGHT).toFixed(2);
+      rafId = null;
+      return;
+    }
+    currentHeight += diff * LERP_RATE;
+    empty.style.height = currentHeight + 'px';
+    empty.style.opacity = Math.min(1, currentHeight / EMPTY_HEIGHT).toFixed(2);
+    rafId = window.requestAnimationFrame(step);
+  }
+
+  function startLoop() {
+    if (rafId === null) { rafId = window.requestAnimationFrame(step); }
+  }
+
+  function removeRow(li) {
+    if (!li || li.classList.contains('is-removing')) { return; }
+    li.classList.add('is-removing');
+    if (reduce) {
+      // reduce: 실사용 경로 — 퇴장 트윈 없이 즉시 제거. animationend 를 기다리지 않는다
+      li.remove();
+      targetHeight = computeTarget();
+      startLoop();
+      return;
+    }
+    li.addEventListener('animationend', function () {
+      li.remove();
+      targetHeight = computeTarget();
+      startLoop();
+    }, { once: true });
+  }
+
+  function human() {
+    if (root.classList.contains('is-demo')) {
+      root.classList.remove('is-demo');
+      if (timer) { window.clearInterval(timer); timer = null; }
+    }
+  }
+
+  list.addEventListener('click', function (e) {
+    var btn = e.target.closest('button.les__del');
+    if (!btn) { return; }
+    human();
+    removeRow(btn.closest('li'));
+  });
+
+  var timer = null;
+
+  function autoTick() {
+    var first = list.querySelector('.les__row:not(.is-removing)');
+    if (first) {
+      removeRow(first);
+    } else {
+      window.clearInterval(timer);
+      timer = null;
+      window.setTimeout(function () {
+        resetRows();
+        targetHeight = computeTarget();
+        startLoop();
+        timer = window.setInterval(autoTick, AUTO_STEP_MS);
+      }, AUTO_RESET_DELAY_MS);
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    timer = window.setInterval(autoTick, AUTO_STEP_MS);
+  } else {
+    // reduce: 실사용 경로 적용 — 자동 Delete 루프와 등장 트윈을 멈추고 목록이 있는 상태를 고정으로 보여준다
+  }
+})();
+</script>
+</body>
+</html>

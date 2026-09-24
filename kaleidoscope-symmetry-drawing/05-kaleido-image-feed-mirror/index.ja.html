@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>写真投入万華鏡 — 写真の帯を反射で撒き散らす — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="km" id="km">
+  <p class="km__hint">写真の細い帯を切り取り、扇形ごとに少しずつずらして貼ります</p>
+  <div class="km__row">
+    <div class="km__field" id="field" role="application" aria-label="写真フィード実験盤" tabindex="0">
+      <canvas class="km__cv" id="cv"></canvas>
+    </div>
+    <div class="km__side">
+      <b class="km__num" id="parts">10</b>
+      <span class="km__unit">断片の枝 2n</span>
+      <p class="km__meta">帯の位置 <b id="pos">0</b>%</p>
+      <p class="km__meta">ドラッグすると帯が手に追います</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 사진 먹이기 만화경 — 원본 사진 대신 코드가 그린 비단결 무늬 캔버스(source)를 쓴다.
+// 매 프레임 source 의 좁은 세로 띠(스캔라인)를 drawImage 로 잘라 반사 행렬 N 갈래로
+// 원뿔에 감듯 붙인다. 띠 위치가 시간으로 흐르면 사진을 천천히 먹여 나가는 셈이다.
+(function () {
+  var root = document.getElementById('km');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var parts = document.getElementById('parts');
+  var pos = document.getElementById('pos');
+  if (!root || !field || !cv || !parts || !pos) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var STAGE = css.getPropertyValue('--stage').trim();
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var C3 = css.getPropertyValue('--c3').trim();
+
+  var N = 5;                      // 차수 — 조각 2N 개
+  parts.textContent = String(2 * N);
+  var SW = 320, SH = 240;         // 소스 캔버스 크기
+  var src = document.createElement('canvas');
+  src.width = SW; src.height = SH;
+  var sc = src.getContext('2d');
+
+  // 소스 "사진" — 파라미터 곡선으로 짠 비단결. 시드 고정이라 항상 같은 결
+  function paintSource() {
+    sc.fillStyle = STAGE;
+    sc.fillRect(0, 0, SW, SH);
+    for (var i = 0; i < 46; i++) {
+      var ph = i * 1.7;
+      sc.strokeStyle = [C1, C2, C3][i % 3];
+      sc.lineWidth = 2 + (i % 5);
+      sc.beginPath();
+      for (var y = 0; y <= SH; y += 8) {
+        var x = SW / 2 + (SW / 2 - 8) * Math.sin(y * 0.013 + ph) * Math.cos(y * 0.005 + ph * 0.5);
+        if (y === 0) sc.moveTo(x, y); else sc.lineTo(x, y);
+      }
+      sc.stroke();
+    }
+  }
+
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+    render(0);
+  }
+
+  // 조각 배치 — k번째 부채꼴에 띠 하나. 帯の位置 p(0~1) 는 k 와 시간으로 조금씩 다르게
+  function render(p) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = STAGE;
+    ctx.fillRect(0, 0, W, H);
+    var band = SW / N;                        // 부채꼴마다 맡은 띠 폭
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N, c = Math.cos(a), s = Math.sin(a);
+      // 扇形 뒤집기(반사) — 같은 띠를 좌우로 뒤집어 이웃과 맞물리게
+      var flip = (k % 2 === 0) ? 1 : -1;
+      ctx.setTransform(dpr * c, dpr * s * flip, dpr * s, -dpr * c * flip, cx * dpr, cy * dpr);
+      var sx = ((p * (SW - band) + k * band * 0.13) % SW + SW) % SW;
+      // 띠를 원뿔에 감듯: 세로를 반경으로 눕히고 가로를 호 방향으로 늘린다
+      ctx.drawImage(src, sx, 0, band, SH, -R * 0.18, -R, R * 0.36, R * 2);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    pos.textContent = String(Math.round(p * 100));
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t = 0, last = 0, drag = false, dragP = null;
+
+  paintSource();
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag = true; dragP = toLocal(e);
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 무시 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag || !dragP) return;
+    var p = toLocal(e);
+    render(Math.max(0, Math.min(1, p[0] / W)));
+    dragP = p;
+  });
+  field.addEventListener('pointerup', function () { drag = false; dragP = null; });
+  field.addEventListener('pointercancel', function () { drag = false; dragP = null; });
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag) {
+      t += dt;
+      var p = 0.5 + 0.48 * Math.sin(t * 0.21);   // 띠가 천천히 앞뒤로 흐른다
+      render(p);
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — p = 0.35 의 완성 무늬
+    render(0.35);
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

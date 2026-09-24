@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドラゴン曲線 — Lシステム フラクタルツリー 9種 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>FX の一行に X→X+YF+、Y→-FX-Y の二つの規則を繰り返し適用すると、紙を半分に折り続けた跡のように重ならずぎっしり折り重なるドラゴン曲線が育ちます</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="ドラゴン曲線ラボ" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">規則 X→X+YF+ · 角度90° · 世代 <b id="lsGen">0</b></span>
+    <span class="ls__meta ls__meta--dim">canvas · 文字列書き換え · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 드래곤 커브(06) — 종이 접기를 문자로 옮긴 L-시스템(FX 축, X→X+YF+, Y→-FX-Y, 90도).
+// 세대가 늘수록 접힌 자국(F 전진, +/- 90도 회전)이 촘촘해지며 자기 자신과 닿되 겹치지 않는다.
+// 움직임 = 世代 크로스페이드 성장(0→11) + 완성 뒤 곡선을 따라 도는 빛 한 점.
+(function () {
+  // ── 변형 상수 블록 ──
+  var ANGLE  = 90;
+  var MAXGEN = 11;
+  var CYCLE  = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var genEl = document.getElementById('lsGen');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_LINE = tokRGB('--ls-bark2');
+  var C_GLOW = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  var RULE = { 'X': 'X+YF+', 'Y': '-FX-Y' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  // 거북 해석 — F 만 전진(점 추가), X·Y 는 자리표시자(전진 없음), +/- 는 90도 회전.
+  function turtlePath(str, step) {
+    var x = 0, y = 0, a = 0;
+    var pts = [{ x: x, y: y }];
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        x += Math.cos(a) * step;
+        y += Math.sin(a) * step;
+        pts.push({ x: x, y: y });
+      } else if (ch === '+') {
+        a += ANGLE * Math.PI / 180;
+      } else if (ch === '-') {
+        a -= ANGLE * Math.PI / 180;
+      }
+    }
+    return pts;
+  }
+
+  var AXIOM = 'FX';
+  var POLY = [];
+  (function precompute() {
+    var strs = [];
+    for (var g = 0; g <= MAXGEN; g++) strs.push(expand(AXIOM, g));
+    var raw = [];
+    for (var g2 = 0; g2 <= MAXGEN; g2++) raw.push(turtlePath(strs[g2], 1));
+    var last = raw[MAXGEN];
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < last.length; i++) {
+      minX = Math.min(minX, last[i].x); maxX = Math.max(maxX, last[i].x);
+      minY = Math.min(minY, last[i].y); maxY = Math.max(maxY, last[i].y);
+    }
+    var span = Math.max(maxX - minX, maxY - minY) || 1;
+    for (var g3 = 0; g3 <= MAXGEN; g3++) {
+      var norm = [];
+      for (var j = 0; j < raw[g3].length; j++) {
+        norm.push({ x: (raw[g3][j].x - minX) / span, y: (raw[g3][j].y - minY) / span });
+      }
+      POLY.push(norm);
+    }
+  })();
+
+  function rgb(c, a) {
+    return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')';
+  }
+
+  function drawPath(ctx, pts, ox, oy, sc, col, alpha, lw) {
+    if (pts.length < 2) return;
+    ctx.strokeStyle = rgb(col, alpha);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(ox + pts[0].x * sc, oy + pts[0].y * sc);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(ox + pts[i].x * sc, oy + pts[i].y * sc);
+    ctx.stroke();
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = Math.min(W, H) * 0.8;
+    var ox = (W - sc) / 2, oy = (H - sc) / 2;
+
+    var grPhase = Math.min(loop / 0.7, 1);
+    var genF = grPhase * MAXGEN;
+    var gA = Math.min(MAXGEN, Math.floor(genF));
+    var gB = Math.min(MAXGEN, gA + 1);
+    var f = genF - gA;
+
+    drawPath(ctx, POLY[gA], ox, oy, sc, C_LINE, 1, 2.1);
+    if (f > 0 && gB !== gA) drawPath(ctx, POLY[gB], ox, oy, sc, C_GLOW, f, 1.9);
+
+    if (genEl) genEl.textContent = String(gA);
+
+    if (loop >= 0.7) {
+      var t = (loop - 0.7) / 0.3;
+      var pts = POLY[MAXGEN];
+      var idxF = t * (pts.length - 1);
+      var i0 = Math.floor(idxF) % (pts.length - 1);
+      var lf = idxF - Math.floor(idxF);
+      var p0 = pts[i0], p1 = pts[i0 + 1] || pts[pts.length - 1];
+      var lx = ox + (p0.x + (p1.x - p0.x) * lf) * sc;
+      var ly = oy + (p0.y + (p1.y - p0.y) * lf) * sc;
+      ctx.fillStyle = rgb(C_GLOW, 0.9);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.85 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.85);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

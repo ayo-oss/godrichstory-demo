@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightbox That Instantly Reflects Reduced Motion — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="switchRow">
+    <button class="switch" id="switchBtn" type="button" role="switch" aria-checked="false" aria-label="Reduced-motion simulation">
+      <span class="switchKnob" id="switchKnob"></span>
+    </button>
+    <p class="switchLabel" id="switchLabel">Motion normal</p>
+  </div>
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg"></span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Reduced motion comparison">
+    <span class="fullImg" id="fullImg"></span>
+    <p class="modeNote" id="modeNote">Opened with normal motion</p>
+    <button class="closeBtn" id="closeBtn" type="button">Close</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var OPEN_MS = 420;
+  var CLOSE_MS = 320;
+  var HOLD_MS = 380;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var fullImg = document.getElementById('fullImg');
+  var modeNote = document.getElementById('modeNote');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumb = document.getElementById('thumb0');
+  var switchBtn = document.getElementById('switchBtn');
+  var switchLabel = document.getElementById('switchLabel');
+
+  // 실제 OS/브라우저 설정 — 이 값이 true 면 시뮬레이션 스위치와 무관하게 항상 즉시 전환한다
+  var mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var realReduce = mql.matches;
+  // 시연용 시뮬레이션 스위치 — 실제 설정이 "보통"이어도 이 편의 라이트박스만 강제로 즉시 전환해 차이를 비교한다
+  var simulateReduce = false;
+
+  function effectiveReduce() { return realReduce || simulateReduce; }
+
+  var open = false;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function animate(duration, onFrame, onDone) {
+    if (effectiveReduce()) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function updateSwitchUI() {
+    switchBtn.setAttribute('aria-checked', simulateReduce ? 'true' : 'false');
+    switchBtn.classList.toggle('is-on', simulateReduce);
+    if (realReduce) {
+      switchLabel.textContent = 'Actual setting: reduced motion on';
+    } else {
+      switchLabel.textContent = simulateReduce ? 'Reduced-motion simulation on' : 'Motion normal';
+    }
+  }
+
+  function setSimulate(on) {
+    simulateReduce = on;
+    updateSwitchUI();
+  }
+
+  function openFrom() {
+    if (open) return;
+    open = true;
+    var reduceNow = effectiveReduce();
+    modeNote.textContent = reduceNow ? 'Switched instantly (reduced motion)' : 'Opened with normal motion';
+    fullImg.style.transform = 'scale(.82)';
+    fullImg.style.opacity = '0';
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    animate(OPEN_MS, function (e) {
+      fullImg.style.transform = 'scale(' + (0.82 + 0.18 * e).toFixed(4) + ')';
+      fullImg.style.opacity = e.toFixed(3);
+      backdrop.style.opacity = (0.74 * e).toFixed(3);
+    }, function () {
+      closeBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox() {
+    if (!open) return;
+    animate(CLOSE_MS, function (e) {
+      fullImg.style.opacity = (1 - e).toFixed(3);
+      backdrop.style.opacity = (0.74 * (1 - e)).toFixed(3);
+    }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumb.focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumb.addEventListener('click', function () { human(); openFrom(); });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(); });
+  switchBtn.addEventListener('click', function () { human(); setSimulate(!simulateReduce); });
+  document.addEventListener('keydown', function (e) {
+    if (open && e.key === 'Escape') { human(); closeLightbox(); }
+  });
+
+  // 실제 설정이 바뀌면(운영체제·브라우저 쪽) 즉시 반영한다 — 시뮬레이션과 별개의 진짜 경로
+  function onRealChange(e) {
+    realReduce = e.matches;
+    updateSwitchUI();
+  }
+  if (mql.addEventListener) mql.addEventListener('change', onRealChange);
+  else if (mql.addListener) mql.addListener(onRealChange);
+
+  function cycle() {
+    setSimulate(false);
+    openFrom();
+    timers.push(setTimeout(closeLightbox, OPEN_MS + HOLD_MS));
+    timers.push(setTimeout(function () {
+      setSimulate(true);
+      openFrom();
+    }, OPEN_MS + HOLD_MS + CLOSE_MS + 160));
+    timers.push(setTimeout(closeLightbox, OPEN_MS + HOLD_MS + CLOSE_MS + 160 + HOLD_MS));
+  }
+
+  updateSwitchUI();
+  if (!realReduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  } else {
+    // 실제 설정이 이미 줄이기라면 루프를 돌리지 않고 정적 상태로 둔다 — 실사용 경로 그대로
+    modeNote.textContent = 'Switched instantly (reduced motion)';
+  }
+})();
+</script>
+</body>
+</html>

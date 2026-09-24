@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>산 부식 — 만나는 재료를 지우는 반응 규칙 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint"><span>Acid dissolves soil and rock, carving a passage</span></p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Acid Dissolve cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">30</b>% corrosion chance · acid-soil-rock reaction</span>
+    <span class="cd__meta cd__meta--dim">canvas · ImageData putImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 산 부식(07). 재료 코드: 0 빈칸 1 모래 10 흙 11 돌 12 산.
+// 산 칸은 물처럼 아래→대각→좌우로 이동하되, 이동 전 아래·좌·우 이웃이 흙/돌/모래면 그 이웃을 지우고(부식)
+// 확률 EAT_P 로 산 자신도 소모돼 사라진다. 3~4 단 계단형 지형(흙+돌) 위 얇은 모래층을 상단 좌·우
+// 스포너에서 떨어지는 산이 뚫고 내려가며 지하 통로를 판다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var EAT_P = 0.3;      // 부식 성공 시 산이 소모될 확률 — 낮추면 산이 오래 남아 통로가 굵어진다
+  var SPAWN_EVERY = 7; // 산 스포너 간격(틱) — 줄이면 산이 더 자주 떨어진다
+  // ────────────────────────────
+
+  var EMPTY = 0, SAND = 1, DIRT = 10, STONE = 11, ACID = 12;
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A07);
+
+  function hexToRgb(hex) {
+    hex = hex.trim();
+    if (hex.length === 4) hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var cols = 0, rows = 0, grid = null;
+  var COL = {};
+  // 지형 연출 — 프레임0 은 빈 무대에서 시작해 TERRAIN_TICKS 틱에 걸쳐 계단 지형이 위에서부터 굳는다.
+  // 채워지는 지형 자체가 누적면적을 만들고(장면의 절반 이상), 굳는 동안 모래가 흘러내리는 낙하도 겹친다.
+  var TERRAIN_TICKS = 115;
+
+  function readColors() {
+    var css = getComputedStyle(root);
+    COL.night = hexToRgb(css.getPropertyValue('--sand-night'));
+    COL.dirt = hexToRgb(css.getPropertyValue('--sand-wood'));
+    COL.stone = hexToRgb(css.getPropertyValue('--sand-stone'));
+    COL.sandA = hexToRgb(css.getPropertyValue('--sand-grain'));
+    COL.sandB = hexToRgb(css.getPropertyValue('--sand-gold'));
+    COL.acidA = hexToRgb(css.getPropertyValue('--sand-acid'));
+    COL.acidB = hexToRgb(css.getPropertyValue('--sand-glow'));
+    COL.mist = hexToRgb(css.getPropertyValue('--sand-mist'));
+  }
+
+  function idx(x, y) { return y * cols + x; }
+  function get(x, y) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return STONE;
+    return grid[idx(x, y)];
+  }
+  function set(x, y, v) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+    grid[idx(x, y)] = v;
+  }
+
+  function buildTerrainFull() {
+    // 3~4 단 계단형 흙+돌 선반 — x 를 4 구간으로 나눠 단마다 깊이를 다르게
+    var seg = Math.max(1, Math.floor(cols / 4));
+    for (var x = 0; x < cols; x++) {
+      var tier = Math.min(3, Math.floor(x / seg));
+      var top = Math.floor(rows * (0.32 + tier * 0.15));
+      for (var y = top; y < rows; y++) {
+        var depth = y - top;
+        set(x, y, depth < 2 ? DIRT : STONE);
+      }
+      // 선반 위 얇은 모래층 1~2 칸
+      var sandDepth = 1 + (rand() < 0.4 ? 1 : 0);
+      for (var sy = 0; sy < sandDepth; sy++) {
+        var ty = top - 1 - sy;
+        if (ty >= 0) set(x, ty, SAND);
+      }
+    }
+  }
+
+  // 지형 낙하 연출 — 각 칸에 '굳는 시각' 을 배정하고 update 마다 그 시각이 지난 칸만 채운다.
+  // 위쪽 행부터 먼저 굳고 x 는 좌우에서 안쪽으로(협곡이 벌어지듯) 차오른다.
+  var solidAt = null;
+  function buildTerrainStagger() {
+    solidAt = new Float32Array(cols * rows);
+    var seg = Math.max(1, Math.floor(cols / 4));
+    for (var x = 0; x < cols; x++) {
+      var tier = Math.min(3, Math.floor(x / seg));
+      var top = Math.floor(rows * (0.32 + tier * 0.15));
+      var edgeDist = Math.min(x, cols - 1 - x) / (cols / 2); // 0(가장자리) → 1(중앙)
+      for (var y = top; y < rows; y++) {
+        var depthFrac = (y - top) / Math.max(1, rows - top);
+        // 가장자리·얕은 쪽 먼저, 중앙 심부가 마지막에 굳는다
+        solidAt[idx(x, y)] = TERRAIN_TICKS * (0.15 + 0.85 * edgeDist * 0.55 + 0.45 * depthFrac) * (0.85 + 0.3 * rand());
+      }
+      var sandDepth = 1 + (rand() < 0.4 ? 1 : 0);
+      for (var sy = 0; sy < sandDepth; sy++) {
+        var ty = top - 1 - sy;
+        if (ty >= 0) solidAt[idx(x, ty)] = TERRAIN_TICKS * (0.7 + 0.5 * rand()) * (0.4 + 0.6 * edgeDist);
+      }
+    }
+  }
+
+  function resolveSolid(tick) {
+    if (!solidAt) return;
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (solidAt[i] > 0 && solidAt[i] <= tick && grid[i] === EMPTY) {
+          // 굳는 시각에 도달한 칸 — 흙 표층(위 2칸) / 돌 심부 / 모래 얇은 층
+          var seg = Math.max(1, Math.floor(cols / 4));
+          var tier = Math.min(3, Math.floor(x / seg));
+          var top = Math.floor(rows * (0.32 + tier * 0.15));
+          if (y < top) grid[i] = SAND;
+          else if (y - top < 2) grid[i] = DIRT;
+          else grid[i] = STONE;
+        }
+      }
+    }
+  }
+
+  function resetGrid() {
+    grid = new Uint8Array(cols * rows);
+    buildTerrainStagger();
+  }
+
+  function spawnAcid(tick) {
+    if (tick % SPAWN_EVERY !== 0) return;
+    var leftX = 1 + Math.floor(rand() * 3);
+    var rightX = cols - 2 - Math.floor(rand() * 3);
+    if (get(leftX, 0) === EMPTY) set(leftX, 0, ACID);
+    if (get(rightX, 0) === EMPTY) set(rightX, 0, ACID);
+  }
+
+  function isErodible(m) { return m === DIRT || m === STONE || m === SAND; }
+
+  function moveInto(x, y, nx, ny, m) {
+    if (get(nx, ny) !== EMPTY) return false;
+    set(x, y, EMPTY);
+    set(nx, ny, m);
+    return true;
+  }
+
+  function updateAcid(x, y, dir) {
+    var m = get(x, y);
+    if (m !== ACID) return;
+    var spots = [[x, y + 1], [x - 1, y], [x + 1, y]];
+    var melted = false;
+    for (var i = 0; i < spots.length; i++) {
+      var nx = spots[i][0], ny = spots[i][1];
+      if (isErodible(get(nx, ny))) { set(nx, ny, EMPTY); melted = true; }
+    }
+    if (melted && rand() < EAT_P) { set(x, y, EMPTY); return; }
+    if (moveInto(x, y, x, y + 1, ACID)) return;
+    var first = dir > 0 ? -1 : 1;
+    if (moveInto(x, y, x + first, y + 1, ACID)) return;
+    if (moveInto(x, y, x - first, y + 1, ACID)) return;
+    if (moveInto(x, y, x + first, y, ACID)) return;
+    moveInto(x, y, x - first, y, ACID);
+  }
+
+  function updateSand(x, y, dir) {
+    var m = get(x, y);
+    if (m !== SAND) return;
+    if (moveInto(x, y, x, y + 1, SAND)) return;
+    var first = dir > 0 ? -1 : 1;
+    if (moveInto(x, y, x + first, y + 1, SAND)) return;
+    moveInto(x, y, x - first, y + 1, SAND);
+  }
+
+  var tick = 0;
+  function update() {
+    tick++;
+    resolveSolid(tick);
+    spawnAcid(tick);
+    var dir = (tick % 2 === 0) ? 1 : -1;
+    for (var y = rows - 1; y >= 0; y--) {
+      if (dir > 0) {
+        for (var x = 0; x < cols; x++) {
+          var m = get(x, y);
+          if (m === ACID) updateAcid(x, y, dir);
+          else if (m === SAND) updateSand(x, y, dir);
+        }
+      } else {
+        for (var x2 = cols - 1; x2 >= 0; x2--) {
+          var m2 = get(x2, y);
+          if (m2 === ACID) updateAcid(x2, y, dir);
+          else if (m2 === SAND) updateSand(x2, y, dir);
+        }
+      }
+    }
+  }
+
+  var buf = null, imgData = null;
+  function ensureBuf() {
+    imgData = ctx.createImageData(cv.width, cv.height);
+    buf = imgData.data;
+  }
+
+  function shade(c, amt) {
+    return [
+      Math.max(0, Math.min(255, c[0] + amt)),
+      Math.max(0, Math.min(255, c[1] + amt)),
+      Math.max(0, Math.min(255, c[2] + amt))
+    ];
+  }
+
+  function draw(t) {
+    if (!buf) ensureBuf();
+    var W = cv.width, H = cv.height;
+    var wave = Math.sin(t * 0.00055) * 0.5 + 0.5;
+    var cx = W * (0.5 + 0.34 * Math.sin(t * 0.00042));
+    var cy = H * (0.5 + 0.34 * Math.cos(t * 0.00036));
+    var maxD = Math.hypot(W, H) * 0.6;
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var m = grid[idx(x, y)];
+        var px0 = x * CELL, py0 = y * CELL;
+        var d = Math.hypot(px0 - cx, py0 - cy) / maxD;
+        var glow = Math.max(0, 1 - d) * (0.08 + 0.05 * wave);
+        var col;
+        if (m === EMPTY) {
+          col = shade(COL.night, Math.round(glow * 40));
+        } else if (m === DIRT) {
+          col = shade(COL.dirt, ((x * 7 + y * 13) % 5) - 2 + Math.round(glow * 14));
+        } else if (m === STONE) {
+          col = shade(COL.stone, ((x * 11 + y * 5) % 5) - 2 + Math.round(glow * 10));
+        } else if (m === SAND) {
+          col = ((x + y) % 3 === 0) ? shade(COL.sandA, Math.round(glow * 18)) : shade(COL.sandB, Math.round(glow * 18));
+        } else if (m === ACID) {
+          var flick = Math.sin(t * 0.02 + x * 0.7 + y * 0.5) * 0.5 + 0.5;
+          col = shade(flick > 0.5 ? COL.acidB : COL.acidA, Math.round(glow * 20));
+        } else {
+          col = COL.night;
+        }
+        for (var cyi = 0; cyi < CELL; cyi++) {
+          var rowOff = ((py0 + cyi) * W + px0) * 4;
+          for (var cxi = 0; cxi < CELL; cxi++) {
+            var o = rowOff + cxi * 4;
+            buf[o] = col[0]; buf[o + 1] = col[1]; buf[o + 2] = col[2]; buf[o + 3] = 255;
+          }
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  function fit() {
+    readColors();
+    var r = field.getBoundingClientRect();
+    cv.width = Math.max(1, Math.round(r.width));
+    cv.height = Math.max(1, Math.round(r.height));
+    cols = Math.max(1, Math.floor(cv.width / CELL));
+    rows = Math.max(1, Math.floor(cv.height / CELL));
+    buf = null;
+    resetGrid();
+  }
+
+  function stillFrame() {
+    buildTerrainFull();
+    solidAt = null;
+    for (var i = 0; i < 90; i++) update();
+    draw(1500);
+    root.classList.add('is-still');
+  }
+
+  var last = 0, acc = 0;
+  var STEP = 1000 / 60;
+  function frame(now) {
+    if (!last) last = now;
+    acc += now - last;
+    last = now;
+    var guard = 0;
+    while (acc >= STEP && guard < 6) { update(); acc -= STEP; guard++; }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+  if (reduce) { stillFrame(); } else { requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

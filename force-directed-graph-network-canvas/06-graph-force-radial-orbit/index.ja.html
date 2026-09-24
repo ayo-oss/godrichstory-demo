@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>放射軌道 — 네트워크 그래프 캔버스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gf is-demo" id="gfRoot" role="img" aria-label="同心円レベルに沿って回る放射状ネットワーク図の実験版" tabindex="0">
+  <canvas class="gf__cv" id="gfCv"></canvas>
+  <p class="gf__hint">
+    <span class="gf__title">放射軌道</span>
+    <span class="gf__desc">同心円のレベル内で角度がゆっくり回り力の均衡を保ちます</span>
+  </p>
+  <div class="gf__bar">
+    <span class="gf__meta">ノード24個 · 4軌道 · rAF</span>
+    <span class="gf__meta gf__meta--dim">arc · Math.sin · Math.cos</span>
+  </div>
+</div>
+</main>
+<script>
+// 放射軌道(06) — 각 노드는 자기 링의 반지름을 유지한 채 각도만 시간에 따라
+// 회전한다(링마다 각속도가 다르다). 같은 링 안에서는 각도가 너무 가까워지면
+// 접선 방향으로 서로 밀어내 겹치지 않는다 — 매 프레임 Math.sin/cos 로 좌표를 다시 계산한다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var RINGS = 4;
+  var PER_RING = 6;
+  var RSTEP = 32;         // 링 사이 반지름 간격
+  // ────────────────────────
+  var RING_OMEGA = [0.5, -0.38, 0.62, -0.46];  // 링마다 다른 각속도(방향도 반대)
+  var SEP_K = 0.9;
+  var BREATHE = 14;        // 반지름 숨쉬기 폭
+  var NR = 5;
+
+  var root = document.getElementById('gfRoot');
+  var cvEl = document.getElementById('gfCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_PANEL = tokRGB('--gf-panel');
+  var C_NODE  = tokRGB('--gf-node');
+  var C_CTR   = tokRGB('--gf-ctr');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x327006);
+
+  var N, ring, angle, px, py;
+
+  function buildGraph() {
+    N = RINGS * PER_RING;
+    ring = new Int8Array(N);
+    angle = new Float32Array(N);
+    px = new Float32Array(N); py = new Float32Array(N);
+    var idx = 0;
+    for (var r = 0; r < RINGS; r++) {
+      for (var k = 0; k < PER_RING; k++) {
+        ring[idx] = r;
+        angle[idx] = (k / PER_RING) * Math.PI * 2 + rand() * 0.3;
+        idx++;
+      }
+    }
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildGraph();
+  }
+
+  function step(dt, t) {
+    // 링별 각속도 회전
+    for (var i = 0; i < N; i++) {
+      angle[i] += RING_OMEGA[ring[i]] * dt;
+    }
+    // 같은 링끼리 각도 간격 벌리기(접선 힘, 각도 공간에서 직접 보정)
+    for (var a = 0; a < N; a++) {
+      for (var b = a + 1; b < N; b++) {
+        if (ring[a] !== ring[b]) continue;
+        var da = angle[a] - angle[b];
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        var minGap = (Math.PI * 2 / PER_RING) * 0.7;
+        if (Math.abs(da) < minGap && Math.abs(da) > 0.0001) {
+          var push = (minGap - Math.abs(da)) * SEP_K * dt;
+          var sign = da > 0 ? 1 : -1;
+          angle[a] += push * sign;
+          angle[b] -= push * sign;
+        }
+      }
+    }
+    var cx = W / 2, cy = H / 2;
+    for (var n = 0; n < N; n++) {
+      var baseR = (ring[n] + 1) * RSTEP;
+      var rr = baseR + Math.sin(t * 0.7 + n * 0.6) * BREATHE;
+      px[n] = cx + Math.cos(angle[n]) * rr;
+      py[n] = cy + Math.sin(angle[n]) * rr;
+    }
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + C_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = 'rgb(' + C_CTR.join(',') + ')';
+    ctx.beginPath(); ctx.arc(W / 2, H / 2, 4, 0, Math.PI * 2); ctx.fill();
+
+    for (var i = 0; i < N; i++) {
+      var pulse = 0.5 + 0.5 * Math.sin(t * 2.4 + i * 0.5);
+      ctx.fillStyle = 'rgba(' + C_NODE.join(',') + ',' + (0.2 + 0.18 * pulse).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(px[i], py[i], NR + 4 + pulse * 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgb(' + C_NODE.join(',') + ')';
+      ctx.beginPath(); ctx.arc(px[i], py[i], NR, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1, last = -1;
+  function frame(now) {
+    if (t0 < 0) { t0 = now; last = now; }
+    var dt = Math.min((now - last) / 1000, 0.05); last = now;
+    var t = (now - t0) / 1000;
+    step(dt, t);
+    draw(t);
+    requestAnimationFrame(frame);
+  }
+  function settle(t) {
+    for (var s = 0; s < 200; s++) step(1 / 60, s / 60);
+    draw(t || 0);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) settle(1.2);
+  });
+
+  fit();
+  if (reduce) {
+    settle(1.2);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

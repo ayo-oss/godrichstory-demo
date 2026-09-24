@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>누르면 볼록함이 눌려 납작해지는 유리 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">평소엔 볼록하게 배경을 확대해 보여주다가, 누르면 볼록함이 줄어 납작하게 눌린다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 버튼 안쪽 좌표를 -1~1 로 정규화해 반지름 r 을 재고, (1-r^2) 로 만든 돔 굴절
+  // 오프셋에 squeeze(0~1) 를 곱해 배경을 샘플링한다. 누르면 squeeze 가 0 으로 lerp 되어
+  // 돔이 눌려 납작해진 것처럼 보인다.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var scene = document.createElement('canvas');
+  scene.width = CALC_W; scene.height = CALC_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421081);
+    var sky = pctx.createLinearGradient(0, 0, CALC_W, CALC_H);
+    sky.addColorStop(0, '#231f28');
+    sky.addColorStop(1, '#3a3345');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, CALC_W, CALC_H);
+    var cols = ['#5b8cf8', '#ffd23f', '#ff9ebb'];
+    for (var i = 0; i < cols.length; i += 1) {
+      pctx.beginPath();
+      pctx.arc(CALC_W * (0.22 + i * 0.3), CALC_H * (0.3 + (i % 2) * 0.35), CALC_H * 0.26, 0, Math.PI * 2);
+      pctx.fillStyle = cols[i];
+      pctx.globalAlpha = 0.5;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 46; k += 1) {
+      var px = rand() * CALC_W, py = rand() * CALC_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.08 + rand() * 0.16) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, CALC_W, CALC_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var BTN_CX = 80, BTN_CY = 50, BTN_HW = 62, BTN_HH = 34;
+  var BULGE_STRENGTH = 0.5;
+  var SQUEEZE_MIN = 0.32;
+  var SQUEEZE_TAU_MS = 90;
+  var PERIOD_MS = 2000;
+  var PRESS_WINDOWS = [[200, 460], [900, 1160], [1500, 1760]];
+  var RIM_MAX = 44, LIFT_MAX = 42, SHADOW_MAX = 40, HALO_MAX = 38;
+  var SHADOW_MULT_BASE = 1.15, SHADOW_MULT_K = 0.55;
+  var HALO_MULT_BASE = 1.45, HALO_MULT_K = 0.75;
+  var BAND_BASE = 0.72, BAND_K = 0.18;
+
+  function virtualPressed(t) {
+    var cyc = t % PERIOD_MS;
+    for (var i = 0; i < PRESS_WINDOWS.length; i += 1) {
+      if (cyc >= PRESS_WINDOWS[i][0] && cyc <= PRESS_WINDOWS[i][1]) return true;
+    }
+    return false;
+  }
+
+  var realPressed = false;
+  var lastInteractionT = -Infinity;
+  var squeeze = 1;
+
+  function wantPressed(t) {
+    if (t - lastInteractionT < 2500) return realPressed;
+    return virtualPressed(t);
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function renderFrame(t) {
+    // 두께(squeeze) 를 세 곳에 같은 함수로 전파: 그림자 반경(shadowMult) ·
+    // 주변 배경 굴절 반경(haloMult, 눌리며 번지는 빛) · 하이라이트 밴드 폭(bandStart)
+    var k = 1 - squeeze;
+    var pressY = BTN_CY + (1 - squeeze) * 3;
+    var bandStart = BAND_BASE - k * BAND_K;
+    var shadowMult = SHADOW_MULT_BASE + k * SHADOW_MULT_K;
+    var haloMult = HALO_MULT_BASE + k * HALO_MULT_K;
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        var nx = (x - BTN_CX) / BTN_HW;
+        var ny = (y - pressY) / BTN_HH;
+        var r2 = nx * nx + ny * ny;
+        if (r2 <= 1) {
+          var dome = (1 - r2) * BULGE_STRENGTH * squeeze;
+          var sx = x - nx * BTN_HW * dome * 0.5;
+          var sy = y - ny * BTN_HH * dome * 0.5;
+          rgb = sampleScene(sx, sy);
+          var rNorm = Math.sqrt(r2);
+          var rim = Math.max(0, (rNorm - bandStart) / (1 - bandStart)) * RIM_MAX * squeeze;
+          var lift = (1 - r2) * LIFT_MAX * squeeze;
+          rgb = [
+            Math.min(255, rgb[0] + rim + lift),
+            Math.min(255, rgb[1] + rim + lift),
+            Math.min(255, rgb[2] + rim + lift)
+          ];
+        } else {
+          rgb = sampleScene(x, y);
+          var sdx = (x - BTN_CX) / (BTN_HW * shadowMult);
+          var sdy = (y - (pressY + 2)) / (BTN_HH * shadowMult);
+          var shadowR2 = sdx * sdx + sdy * sdy;
+          if (shadowR2 <= 1) {
+            var sh = (1 - shadowR2) * SHADOW_MAX * squeeze;
+            rgb = [Math.max(0, rgb[0] - sh), Math.max(0, rgb[1] - sh), Math.max(0, rgb[2] - sh)];
+          } else {
+            var hdx = (x - BTN_CX) / (BTN_HW * haloMult);
+            var hdy = (y - BTN_CY) / (BTN_HH * haloMult);
+            var haloR2 = hdx * hdx + hdy * hdy;
+            if (haloR2 <= 1) {
+              var glow = (1 - haloR2) * HALO_MAX * k;
+              rgb = [
+                Math.min(255, rgb[0] + glow),
+                Math.min(255, rgb[1] + glow),
+                Math.min(255, rgb[2] + glow)
+              ];
+            }
+          }
+        }
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  wrap.addEventListener('pointerdown', function () {
+    realPressed = true;
+    lastInteractionT = lastElapsed;
+    if (reduce) { squeeze = SQUEEZE_MIN; draw(lastElapsed); }
+  });
+  function releasePointer() {
+    realPressed = false;
+    lastInteractionT = lastElapsed;
+    if (reduce) { squeeze = 1; draw(lastElapsed); }
+  }
+  wrap.addEventListener('pointerup', releasePointer);
+  wrap.addEventListener('pointerleave', releasePointer);
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    if (e.repeat) return;
+    realPressed = true;
+    lastInteractionT = lastElapsed;
+    if (reduce) { squeeze = SQUEEZE_MIN; draw(lastElapsed); }
+  });
+  wrap.addEventListener('keyup', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    realPressed = false;
+    lastInteractionT = lastElapsed;
+    if (reduce) { squeeze = 1; draw(lastElapsed); }
+  });
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    var target = wantPressed(elapsed) ? SQUEEZE_MIN : 1;
+    var k = Math.min(1, dt / SQUEEZE_TAU_MS);
+    squeeze += (target - squeeze) * k;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

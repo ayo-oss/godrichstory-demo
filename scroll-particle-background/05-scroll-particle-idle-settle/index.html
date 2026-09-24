@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>정지 가라앉음 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>손을 떼면 흔들리던 격자가 서서히 가라앉습니다</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="입자 정지 스크롤 영역">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">0ms</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(2718281);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#4cd4a6';
+
+  // 계산 겹: 감쇠 스프링(gravity-damping spring) — 격자의 각 점은 스크롤 속도를 목표값(target)으로 쫓는
+  // 개별 스프링(STIFFNESS·SETTLE_DAMP)을 가진다. 스크롤이 멈추면 목표가 0 으로 떨어지며 서서히 가라앉는다.
+  var COLS = 7, ROWS = 5;
+  var STIFFNESS = 70;    // 스프링 강성 (1/s^2 꼴)
+  var SETTLE_DAMP = 22;  // 감쇠율 — 값이 낮을수록 오래 흔들리다 가라앉는다 (변형 대상 상수)
+  var DRIVE_GAIN = 0.09; // 스크롤 속도(px/s) → 목표 변위(px) 변환 계수
+
+  var W = 0, H = 0, dpr = 1;
+  var dots = [];
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    layoutDots();
+  }
+
+  function layoutDots() {
+    dots = [];
+    for (var row = 0; row < ROWS; row++) {
+      for (var col = 0; col < COLS; col++) {
+        dots.push({
+          rx: (col + 0.5) / COLS * W,
+          ry: (row + 0.5) / ROWS * H,
+          dispX: 0, velX: 0,
+          stiff: STIFFNESS * (0.75 + rng() * 0.5),
+          r: 2.4 + rng() * 1.4
+        });
+      }
+    }
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, idleMs = 0, lastTop = 0, lastT = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.3;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; idleMs = 0; } else { idleMs += dt; }
+    lastTop = top; lastT = now;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function step(dtSec) {
+    var target = scrollVel * DRIVE_GAIN;
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      var acc = (target - d.dispX) * d.stiff - d.velX * SETTLE_DAMP;
+      d.velX += acc * dtSec;
+      d.dispX += d.velX * dtSec;
+    }
+  }
+
+  function paint() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      var settle = Math.max(0, 1 - Math.min(1, idleMs / 900));
+      ctx.globalAlpha = 0.5 + Math.min(0.4, Math.abs(d.velX) * 0.01) + settle * 0.05;
+      ctx.beginPath(); ctx.arc(d.rx + d.dispX, d.ry, d.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateVal() { val.textContent = Math.min(999, Math.round(idleMs)) + 'ms'; }
+
+  function paintStatic() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    var settleDisp = scrollDir === 0 ? 0 : scrollPos * 6 * scrollDir;
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.arc(d.rx + settleDisp, d.ry, d.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(dtSec);
+    paint();
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangleHold(frac) {
+    // 절반은 세게 훑고 절반은 멈춰 있어야 "정지 가라앉음" 이 캡처 구간 안에서 보인다
+    if (frac < 0.32) return frac / 0.32;
+    if (frac < 0.5) return 1;
+    if (frac < 0.82) return 1 - (frac - 0.5) / 0.32;
+    return 0;
+  }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = triangleHold(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

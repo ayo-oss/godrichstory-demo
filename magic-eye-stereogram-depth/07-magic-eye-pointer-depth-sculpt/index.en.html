@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pointer sculpting — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>Pointer sculpting</span>
+    <span class="me__desc">Depth traces pile up wherever the pointer goes and invisible clay becomes sculpture</span>
+  </p>
+  <div class="me__field" role="application" aria-label="Depth sculpting board" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <span class="me__meta">brush 26px · lift (+0.8) · press (−0.5) · 6s decay</span>
+    <span class="me__meta me__meta--dim">ImageData · depth buffer</span>
+  </div>
+</div>
+</main>
+<script>
+// Pointer sculpting(07) — 깊이 지도를 손으로 만지는 항목.
+// sculpt 버퍼(Float32Array)에 포인터가 지나간 자리의 깊이를 더하고 빼고,
+// 흔적은 6초에 걸쳐 지수 감쇠로 스며든다. 눈에는 아무 변화가 없다가
+// 눈을 늦추는 순간 진흙 위에 쌓인 조각이 떠오른다 — 결과 확인 자체가 반전.
+// 왼쪽 끌기는 끌어올림(+0.8), 오른쪽 끌기는 누르기(−0.5).
+(function () {
+  // ── 변형 상수 블록 ──
+  var BRUSH  = 26;   // 브러시 지름(px)
+  var LIFT   = 0.8;  // 끌어올림(왼쪽 끌기) — 한 번 스치면 올라가는 깊이 계수
+  var PRESS  = 0.5;  // 누르기(오른쪽 끌기)
+  var DECAY  = 6;    // 이행 감쇠(초) — 흔적이 스며드는 시간
+  var MAXSHIFT = 10; // 최대 시프트(px)
+  // ─────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = [];
+  for (var i = 0; i < 5; i++) PAL.push(tokRGB('--me-p' + i));
+
+  function baseIdx(x, y) {
+    var h = (Math.imul(x + 11, 374761393) + Math.imul(y + 7, 668265263)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return ((h % PAL.length) + PAL.length) % PAL.length;
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null, sculpt = null;
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    img = ctx.createImageData(W, H);
+    sculpt = new Float32Array(W * H);   // 리사이즈의 흔적 리셋은 감수한다
+  }
+
+  // 브러시 — 선분 (x0,y0)→(x1,y1) 을 따라 반지름 r 원뿔로 찍는다
+  function brush(x0, y0, x1, y1, amount, r) {
+    r = r || BRUSH / 2;
+    var dist = Math.hypot(x1 - x0, y1 - y0);
+    var steps = Math.max(1, Math.ceil(dist / (r * 0.4)));
+    for (var i = 0; i <= steps; i++) {
+      var bx = x0 + (x1 - x0) * (i / steps);
+      var by = y0 + (y1 - y0) * (i / steps);
+      var x0i = Math.max(0, Math.floor(bx - r)), x1i = Math.min(W - 1, Math.ceil(bx + r));
+      var y0i = Math.max(0, Math.floor(by - r)), y1i = Math.min(H - 1, Math.ceil(by + r));
+      for (var yy = y0i; yy <= y1i; yy++) {
+        for (var xx = x0i; xx <= x1i; xx++) {
+          var dx = xx - bx, dy = yy - by;
+          var dd = Math.sqrt(dx * dx + dy * dy);
+          if (dd >= r) continue;
+          var fall = 1 - dd / r;               // 원뿔 falloff — 가장자리는 얕게
+          var idx = yy * W + xx;
+          var v = sculpt[idx] + amount * fall;
+          sculpt[idx] = v < 0 ? 0 : (v > 1 ? 1 : v);
+        }
+      }
+    }
+  }
+
+  function draw() {
+    var d = img.data, x, y, di;
+    var col = new Int32Array(W);
+    for (y = 0; y < H; y++) {
+      var row = y * W;
+      for (x = 0; x < W; x++) {
+        var s = Math.round(sculpt[row + x] * MAXSHIFT);
+        if (s <= 0) {
+          col[x] = baseIdx(x, y);
+        } else {
+          var from = x - s;
+          col[x] = from >= 0 ? col[from] : baseIdx(from + W, y);
+        }
+      }
+      for (x = 0; x < W; x++) {
+        var c = PAL[col[x]];
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    if (root.classList.contains('is-demo')) {
+      ctx.fillStyle = 'rgba(240, 224, 208, 0.85)';
+      ctx.font = '500 11px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('left-drag lifts · right-drag presses', W / 2, H - 10);
+    }
+  }
+
+  // ── 사람 입력 — 왼쪽/오른쪽 끌기 ──
+  var mode = 0, lastX = null, lastY = null;
+  function localXY(ev) {
+    var r = fieldEl.getBoundingClientRect();
+    return [ev.clientX - r.left, ev.clientY - r.top];
+  }
+  fieldEl.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+  fieldEl.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();
+    root.classList.remove('is-demo');   // 첫 손질에서 격자 연출을 물린다
+    mode = ev.button === 2 ? -1 : 1;    // 오른쪽 버튼 = 누르기
+    var p = localXY(ev); lastX = p[0]; lastY = p[1];
+    fieldEl.setPointerCapture(ev.pointerId);
+  });
+  fieldEl.addEventListener('pointermove', function (ev) {
+    if (!mode) return;
+    var p = localXY(ev);
+    if (lastX !== null) {
+      brush(lastX, lastY, p[0], p[1], mode > 0 ? LIFT : -PRESS);
+    }
+    lastX = p[0]; lastY = p[1];
+  });
+  function endStroke() { mode = 0; lastX = null; lastY = null; }
+  fieldEl.addEventListener('pointerup', endStroke);
+  fieldEl.addEventListener('pointercancel', endStroke);
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1, lastNow = -1, HOOKS = 5, prevXs = [], prevYs = [];
+  function frame(now) {
+    if (t0 < 0) { t0 = now; lastNow = now; }
+    var dt = Math.min(0.05, (now - lastNow) / 1000 || 0.016);
+    lastNow = now;
+    var t = (now - t0) / 1000;
+
+    // 격자 연출(.is-demo) — 갈고리 5개(리사주 궤적)가 판을 넓게 쓸고 다닌다
+    if (root.classList.contains('is-demo')) {
+      var RX = [0.40, 0.30, 0.44, 0.36, 0.24];
+      var RY = [0.36, 0.44, 0.24, 0.30, 0.40];
+      var CY = [0.5, 0.3, 0.7, 0.5, 0.5];
+      for (var g = 0; g < HOOKS; g++) {
+        var ph = t * 2.6 + g * 1.26;
+        var bx = W / 2 + Math.cos(ph) * W * RX[g];
+        var by = H * CY[g] + Math.sin(ph * 2 + g) * H * RY[g];
+        if (prevXs[g] !== null && prevXs[g] !== undefined) {
+          var amt = Math.sin(t * 1.9 + g) > -0.25 ? LIFT : -PRESS;
+          brush(prevXs[g], prevYs[g], bx, by, amt, 20 + (g % 3) * 5);
+        }
+        prevXs[g] = bx; prevYs[g] = by;
+      }
+    }
+
+    // 이행 감쇠 — 흔적이 6초에 걸쳐 스며든다
+    var k = Math.exp(-dt / DECAY);
+    for (var i = 0; i < sculpt.length; i++) {
+      if (sculpt[i] !== 0) sculpt[i] *= k;
+    }
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw();
+  });
+  fit();
+  if (reduce) {
+    // reduce — 조각 한 점(브러시 자국 몇 개)만 남긴 정지 판
+    brush(W * 0.36, H * 0.5, W * 0.64, H * 0.5, LIFT);
+    brush(W * 0.5, H * 0.3, W * 0.5, H * 0.7, LIFT);
+    draw();
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

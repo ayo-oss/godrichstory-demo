@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>끝까지 가도 티 안 나게 처음으로 되돌아가는 무한 루프 캐러셀 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="carousel is-demo" id="carousel" role="region" aria-roledescription="carousel" aria-label="카드 캐러셀">
+  <div class="viewport" id="viewport" tabindex="0">
+    <div class="track" id="track"></div>
+  </div>
+  <button type="button" class="navBtn navBtn--prev" id="prevBtn" aria-label="이전 카드">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="M112 56v144l-72-72Z" opacity=".2"/><path d="M216 120h-96V56a8 8 0 0 0-13.66-5.66l-72 72a8 8 0 0 0 0 11.32l72 72A8 8 0 0 0 120 200v-64h96a8 8 0 0 0 0-16m-112 60.69L51.31 128L104 75.31Z"/></g></svg>
+  </button>
+  <button type="button" class="navBtn navBtn--next" id="nextBtn" aria-label="다음 카드">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="m216 128l-72 72V56Z" opacity=".2"/><path d="m221.66 122.34l-72-72A8 8 0 0 0 136 56v64H40a8 8 0 0 0 0 16h96v64a8 8 0 0 0 13.66 5.66l72-72a8 8 0 0 0 0-11.32M152 180.69V75.31L204.69 128Z"/></g></svg>
+  </button>
+  <div class="readout" id="readout" aria-live="polite"></div>
+</section>
+</main>
+<script>
+(function () {
+  var TOTAL = 5;
+  var CLONE_COUNT = 1;      // 앞뒤로 각 1장씩 이웃 카드를 복제해 둔다 — 경계에서도 다음 칸이 항상 보인다
+  var CARD_W = 200;
+  var GAP = 16;             // BD15: flex gap 대신 margin-right 로 간격을 준다(무한 루프 트랙 금지 규칙) — style.scss $sp-4 와 동일값
+  var STEP = CARD_W + GAP;
+  var TRANSITION_MS = 360;
+
+  var carousel = document.getElementById('carousel');
+  var viewport = document.getElementById('viewport');
+  var track = document.getElementById('track');
+  var readout = document.getElementById('readout');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var LABEL_PREFIX = '카드 ';
+  var LABEL_SEP = ' / ';
+  var COLOR_CLASSES = ['card--0', 'card--1', 'card--2', 'card--3', 'card--4'];
+
+  // 실제 카드 앞뒤에 이웃 카드를 복제해 그린다. realIndex = -1 은 마지막 카드의 복제, TOTAL 은 첫 카드의 복제.
+  var sequence = [];
+  for (var s = -CLONE_COUNT; s < TOTAL + CLONE_COUNT; s++) sequence.push(((s % TOTAL) + TOTAL) % TOTAL);
+
+  sequence.forEach(function (realIdx) {
+    var el = document.createElement('div');
+    el.className = 'card ' + COLOR_CLASSES[realIdx];
+    var num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(realIdx + 1);
+    el.appendChild(num);
+    track.appendChild(el);
+  });
+
+  var pos = CLONE_COUNT;      // 트랙 안에서의 칸 위치(복제 포함) — CLONE_COUNT 가 실제 인덱스 0
+  var dragging = false;
+  var dragOriginPos = 0;
+  var startX = 0;
+  var demoTimers = [];
+  var transitioning = false;
+
+  function realIndex() {
+    return ((pos - CLONE_COUNT) % TOTAL + TOTAL) % TOTAL;
+  }
+  function paint(withTransition) {
+    track.style.transition = withTransition ? 'transform ' + TRANSITION_MS + 'ms cubic-bezier(.22,.61,.36,1)' : 'none';
+    track.style.transform = 'translate3d(' + (-pos * STEP).toFixed(1) + 'px,0,0)';
+    readout.textContent = LABEL_PREFIX + (realIndex() + 1) + LABEL_SEP + TOTAL;
+  }
+
+  // 모듈로 감기 — 위치가 복제 구간(첫 칸 미만 또는 마지막 칸 초과)에 닿으면, 전환이 끝난 그 순간
+  // transition 을 끄고 같은 그림의 실제 칸으로 pos 만 순간 이동시킨다(화면상 티가 나지 않는다).
+  function wrapIfNeeded() {
+    if (pos < CLONE_COUNT) {
+      pos += TOTAL;
+      paint(false);
+      void track.offsetWidth; // 강제 리플로우로 transition:none 을 확정시킨다
+    } else if (pos >= CLONE_COUNT + TOTAL) {
+      pos -= TOTAL;
+      paint(false);
+      void track.offsetWidth;
+    }
+  }
+
+  function onTransitionEnd() {
+    transitioning = false;
+    wrapIfNeeded();
+  }
+  track.addEventListener('transitionend', onTransitionEnd);
+
+  function human() {
+    if (carousel.classList.contains('is-demo')) {
+      carousel.classList.remove('is-demo');
+      demoTimers.forEach(function (t) { clearTimeout(t); });
+      demoTimers = [];
+    }
+  }
+
+  function go(dir) {
+    pos += dir;
+    transitioning = true;
+    paint(true);
+  }
+  function step(dir) {
+    human();
+    go(dir);
+  }
+
+  function onPointerDown(e) {
+    human();
+    dragging = true;
+    dragOriginPos = pos;
+    startX = e.clientX;
+    viewport.setPointerCapture(e.pointerId);
+    track.classList.add('isDragging');
+    track.style.transition = 'none';
+  }
+  function onPointerMove(e) {
+    if (!dragging) return;
+    var dx = e.clientX - startX;
+    pos = dragOriginPos - dx / STEP;
+    track.style.transform = 'translate3d(' + (-pos * STEP).toFixed(1) + 'px,0,0)';
+  }
+  function onPointerUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    track.classList.remove('isDragging');
+    try { viewport.releasePointerCapture(e.pointerId); } catch (err) {}
+    pos = Math.round(pos);
+    transitioning = true;
+    paint(true);
+  }
+  function onKeydown(e) {
+    if (e.key === 'ArrowLeft') { step(-1); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { step(1); e.preventDefault(); }
+  }
+
+  viewport.addEventListener('pointerdown', onPointerDown);
+  viewport.addEventListener('pointermove', onPointerMove);
+  viewport.addEventListener('pointerup', onPointerUp);
+  viewport.addEventListener('pointercancel', onPointerUp);
+  viewport.addEventListener('keydown', onKeydown);
+  prevBtn.addEventListener('click', function () { step(-1); });
+  nextBtn.addEventListener('click', function () { step(1); });
+
+  // reduce: 실사용 경로 적용 — 드래그·키보드·버튼은 위 리스너가 그대로 모듈로 감기 계산을 돌린다.
+  // 아래 demoCycle() 은 시연 게이트만이고 reduce 에서는 돌지 않는다.
+  function demoCycle(i) {
+    if (!carousel.classList.contains('is-demo')) return;
+    go(1);
+    demoTimers.push(setTimeout(function () { demoCycle(i + 1); }, TRANSITION_MS + 420));
+  }
+
+  function init() {
+    paint(false);
+    if (!reduce) demoCycle(0);
+  }
+  init();
+})();
+</script>
+</body>
+</html>

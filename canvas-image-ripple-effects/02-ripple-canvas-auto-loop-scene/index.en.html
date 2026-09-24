@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Even without any input, overlapping sine waves keep the image's surface gently rippling. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rvRoot">
+  <canvas class="rv__canvas" id="rvCanvas" width="480" height="300"></canvas>
+  <p class="rv__caption">Even without any input, overlapping sine waves keep the image's surface gently rippling.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 포인터 없이도 사인파 RIPPLE_AMBIENT_WAVE_COUNT 겹을 분석식으로 합쳐 높이 필드를 매 프레임 계산한다.
+  // 높이 필드의 x·y 기울기를 굴절 변위로 써서 절차적 "사진" 픽셀을 매 프레임 다시 그린다(속성 트윈이 아니다).
+  var root = document.getElementById('rvRoot');
+  var canvas = document.getElementById('rvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawPhotoBase(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#ffe6a8');
+    sky.addColorStop(1, '#fff8ea');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.24, sunY = h * 0.28, sunR = h * 0.17;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.4);
+    glow.addColorStop(0, 'rgba(255,255,255,.85)');
+    glow.addColorStop(1, 'rgba(255,255,255,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#fff3c9';
+    pctx.fill();
+    var hillColors = ['#f3b25a', '#c9713a', '#6a3420'];
+    for (var i = 0; i < hillColors.length; i += 1) {
+      var baseY = h * (0.5 + i * 0.14);
+      pctx.beginPath();
+      pctx.moveTo(0, h);
+      var step = Math.max(2, w / 24);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.05 + i * 1.7 + seed * 0.0002) * h * 0.04 + Math.sin(x * 0.14 + i) * h * 0.02;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h);
+      pctx.closePath();
+      pctx.fillStyle = hillColors[i];
+      pctx.fill();
+    }
+    for (var k = 0; k < 55; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.5, r = rand() * 1.2 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.1 + rand() * 0.2) + ')';
+      pctx.fill();
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var RIPPLE_AMBIENT_WAVE_COUNT = 2;
+  var REFRACT_K = 1.15;
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawPhotoBase(octx, CALC_W, CALC_H, 419021);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function ambientHeight(x, y, t) {
+    var h = 0;
+    for (var i = 0; i < RIPPLE_AMBIENT_WAVE_COUNT; i += 1) {
+      var ang = (i / RIPPLE_AMBIENT_WAVE_COUNT) * Math.PI + 0.5;
+      var freq = 0.05 + i * 0.021;
+      var speed = 0.0017 + i * 0.0009;
+      var amp = 6.5 / (i + 1);
+      var dir = (i % 2 === 0) ? 1 : -1;
+      h += amp * Math.sin(x * Math.cos(ang) * freq + y * Math.sin(ang) * freq + t * speed * dir);
+    }
+    return h;
+  }
+
+  function sampleBase(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [baseBuf[i], baseBuf[i + 1], baseBuf[i + 2]];
+  }
+
+  function renderFrame(t) {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var h0 = ambientHeight(x, y, t);
+        var hx = ambientHeight(x + 1, y, t) - ambientHeight(x - 1, y, t);
+        var hy = ambientHeight(x, y + 1, t) - ambientHeight(x, y - 1, t);
+        var dx = hx * REFRACT_K, dy = hy * REFRACT_K;
+        var rgb = sampleBase(x + dx, y + dy);
+        var shine = Math.max(-26, Math.min(46, h0 * 4));
+        outBuf[idx] = Math.max(0, Math.min(255, rgb[0] + shine));
+        outBuf[idx + 1] = Math.max(0, Math.min(255, rgb[1] + shine));
+        outBuf[idx + 2] = Math.max(0, Math.min(255, rgb[2] + shine));
+        outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? 900 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) { elapsed += dt; }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

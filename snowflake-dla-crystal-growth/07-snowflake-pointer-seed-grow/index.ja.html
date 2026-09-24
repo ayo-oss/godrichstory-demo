@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터 씨앗 — 클릭한 자리에서 두 번째 결정이 같이 자라기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="round"><path d="M128 22v212"/><path d="M38.9 73.5l178.2 129"/><path d="M217.1 73.5L38.9 202.5"/><path d="M104 46l24 20 24-20"/><path d="M104 210l24-20 24 20"/></g></svg>
+    <span>中央の結晶に加えてクリックした場所ごとに種をもう一つ植えると、粒子が結晶同士の間を行き来しながら競い合って付着します — 枝が出会い絡み合う相互成長です</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="ポインター種結晶 競争成長実験版" tabindex="0">
+    <canvas class="cd__cv" id="cdCv" width="424" height="180"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdVal">1</b>個結晶 · クリックで種を追加</span>
+    <span class="cd__meta cd__meta--dim">pointermove · ImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 포인터 씨앗(07). DLA(확산제한응집) — 바깥 링에서 태어난 입자가 6각 格子 위를 랜덤워크하다
+// 결정에 닿는 순간 붙는다. 씨앗(결정 중심)을 여러 개 심으면 입자들이 어느 결정에 닿느냐를
+// 두고 경쟁하며, 가지가 만나는 지점에서 서로 얽혀 붙는다(만나도 규칙은 그대로 — 닿는 쪽에 붙는 것뿐).
+// 화면은 4겹으로 산다: ① 숨쉬는 조명·떠도는 워시 배경 ② 결정 광륜(格子 확대 blur + lighter)
+// ③ 格子 ImageData 를 2배로 확대한 결정 본체 ④ 잔광 꼬리를 남기는 부유 입자 + 반짝임.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var STICKS_PER_FRAME = 58;    // 한 프레임에 붙일 입자 수 — 늘리면 결정이 빨리 자란다
+  var RMAX             = 34;    // 결정 최대 반경(셀) — 이 안에서만 붙는다
+  var WALKER_MAX_STEPS = 420;   // 입자 하나의 최대 걸음 — 넘으면 죽고 새 입자가 태어난다
+  var ATTEMPT_CAP      = 420;   // 프레임당 입자 시도 상한 — 결정이 다 차도 루프가 안 멈추게
+  var MAX_CRYSTALS     = 5;     // 씨앗 상한
+  // 포인터가 없는 자동 렌더(측정 gif/mp4) 폴백 — [시각ms, 가로비, 세로비]마다 씨앗을 자동으로 심는다
+  var AUTO_SEEDS = [[450, 0.72, 0.34], [1150, 0.26, 0.30]];
+  // ────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var valOut = document.getElementById('cdVal');
+
+  // 내부 해상도는 424×180 로 고정 — CSS 로 축소하므로 창 크기가 바뀌어도 格子 상태가 안 흔들린다
+  var W = cv.width, H = cv.height;
+  var CELL = 2, GW = W / CELL, GH = H / CELL;   // 格子 212×90
+
+  // 시드 고정 PRNG — mulberry32. 결정의 둥근 결이 매 실행 같은 성격으로 흐른다
+  var prngState = 0x31907a >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 scss 의 --flake-* 에서 getComputedStyle 로 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK = tokRGB('--flake-ink');
+  var C_CORE = tokRGB('--flake-core');
+  var C_LILAC = tokRGB('--flake-lilac');
+  var C_MINT = tokRGB('--flake-mint');
+  var C_PINK = tokRGB('--flake-pink');
+  var TINTS = [C_LILAC, C_MINT, C_PINK];   // 결정마다 고유 파스텔 — 경쟁하는 둘을 눈으로 구분한다
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // ── 格子 상태 ──
+  var tStick = new Int32Array(GW * GH);   // 셀에 붙은 시각(ms), -1 = 빈칸
+  var owner = new Int8Array(GW * GH);     // 셀을 소유한 결정 번호
+  for (var i0 = 0; i0 < tStick.length; i0++) { tStick[i0] = -1; owner[i0] = -1; }
+
+  // 6각 인접(odd-r 행 오프셋) — 정사각 픽셀 위에 60° 방향의 가지를 세우는 눈결정 위상
+  var NX_EVEN = [1, -1, 0, -1, 0, -1], NY_EVEN = [0, 0, -1, -1, 1, 1];
+  var NX_ODD  = [1, -1, 0,  1, 0,  1], NY_ODD  = [0, 0, -1, -1, 1, 1];
+
+  var crystals = [];   // {cx, cy, maxR, born, count, id}
+  var sparkles = [];   // {x, y, t} 갓 붙은 자리의 반짝임
+  var rings = [];      // {x, y, t} 씨앗을 심은 순간의 확산 링
+  var motes = [];      // 부유 입자 — 잔광 꼬리
+
+  function idx(x, y) { return y * GW + x; }
+  function inside(x, y) { return x >= 0 && x < GW && y >= 0 && y < GH; }
+  function hexNbr(y) { return (y & 1) ? NX_ODD : NX_EVEN; }
+  function hexNbrY(y) { return (y & 1) ? NY_ODD : NY_EVEN; }
+
+  function filledNb(x, y) {
+    var nx = hexNbr(y), ny = hexNbrY(y), n = 0;
+    for (var k = 0; k < 6; k++) {
+      var ax = x + nx[k], ay = y + ny[k];
+      if (inside(ax, ay) && tStick[idx(ax, ay)] >= 0) n++;
+    }
+    return n;
+  }
+
+  function stick(x, y, own, now) {
+    var id = idx(x, y);
+    tStick[id] = now; owner[id] = own;
+    if (sparkles.length > 96) sparkles.shift();
+    sparkles.push({ x: x * CELL + 1, y: y * CELL + 1, t: now });
+  }
+
+  function plantSeed(fx, fy, now) {
+    if (crystals.length >= MAX_CRYSTALS) return;
+    var cx = Math.round(fx * GW), cy = Math.round(fy * GH);
+    if (!inside(cx, cy) || tStick[idx(cx, cy)] >= 0) return;
+    var id = crystals.length;
+    crystals.push({ cx: cx, cy: cy, maxR: 2, born: now, count: 0, id: id });
+    tStick[idx(cx, cy)] = now; owner[idx(cx, cy)] = id;
+    var nx = hexNbr(cy), ny = hexNbrY(cy);   // 씨앗 주변 한 바퀴를 얼려 출발점을 만든다
+    for (var k = 0; k < 6; k++) {
+      var ax = cx + nx[k], ay = cy + ny[k];
+      if (inside(ax, ay) && tStick[idx(ax, ay)] < 0) { tStick[idx(ax, ay)] = now; owner[idx(ax, ay)] = id; }
+    }
+    rings.push({ x: cx * CELL + 1, y: cy * CELL + 1, t: now });
+  }
+
+  // ── DLA 응집 — 씨앗 링에서 입자를 뿌려 6각 랜덤워크, 닿으면 확률로 붙는다 ──
+  function aggregate(now) {
+    if (!crystals.length) return;
+    var stuck = 0, attempts = 0;
+    while (stuck < STICKS_PER_FRAME && attempts < ATTEMPT_CAP) {
+      attempts++;
+      var cr = crystals[(rand() * crystals.length) | 0];
+      var ang = rand() * Math.PI * 2;
+      var rr = cr.maxR + 6 + rand() * 14;
+      var x = Math.round(cr.cx + Math.cos(ang) * rr);
+      var y = Math.round(cr.cy + Math.sin(ang) * rr * 0.92);
+      var steps = 0;
+      while (steps < WALKER_MAX_STEPS) {
+        steps++;
+        var dir = (rand() * 6) | 0;
+        var nb = hexNbr(y), sb = hexNbrY(y);
+        x += nb[dir]; y += sb[dir];
+        if (!inside(x, y)) break;
+        if (tStick[idx(x, y)] >= 0) { x -= nb[dir]; y -= sb[dir]; continue; }  // 언 셀엔 못 들어간다
+        var n = filledNb(x, y);
+        if (n > 0) {
+          var p = n === 1 ? 1 : n === 2 ? 0.55 : 0.14;              // 팁 바이어스 — 가지가 뻗는다
+          var dist = Math.hypot(x - cr.cx, y - cr.cy);
+          p *= 0.35 + 0.65 * Math.min(1, dist / (cr.maxR + 4));     // 바깥쪽에 더 잘 붙는다
+          if (dist < RMAX && rand() < p) {
+            var own = ownerOfNeighbor(x, y);
+            stick(x, y, own, now);
+            cr.count++; stuck++;
+            if (dist > cr.maxR) cr.maxR = dist;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  function ownerOfNeighbor(x, y) {
+    var nx = hexNbr(y), ny = hexNbrY(y);
+    for (var k = 0; k < 6; k++) {
+      var ax = x + nx[k], ay = y + ny[k];
+      if (inside(ax, ay) && tStick[idx(ax, ay)] >= 0) return owner[idx(ax, ay)];  // 닿은 결정의 소유가 된다 — 경쟁
+    }
+    return 0;
+  }
+
+  // ── 格子 → ImageData → 2배 확대 캔버스 ──
+  var gridCv = document.createElement('canvas'); gridCv.width = GW; gridCv.height = GH;
+  var gtx = gridCv.getContext('2d');
+  var img = gtx.createImageData(GW, GH);
+  var px = img.data;
+
+  function repaintGrid(now) {
+    for (var y = 0; y < GH; y++) {
+      for (var x = 0; x < GW; x++) {
+        var id = y * GW + x, o = id * 4;
+        var t0 = tStick[id];
+        if (t0 < 0) { px[o + 3] = 0; continue; }
+        var age = now - t0;
+        var tint = TINTS[owner[id] % TINTS.length];
+        var k = Math.min(1, age / 900);        // 갓 붙은 하양 → 결정 고유 파스텔로 정착
+        var lift = filledNb(x, y) <= 2 ? 30 : 0;   // 팁(인접 ≤2)은 서리 반짝임으로 더 밝다
+        px[o]     = Math.min(255, C_CORE[0] + (tint[0] - C_CORE[0]) * k + lift);
+        px[o + 1] = Math.min(255, C_CORE[1] + (tint[1] - C_CORE[1]) * k + lift);
+        px[o + 2] = Math.min(255, C_CORE[2] + (tint[2] - C_CORE[2]) * k + lift);
+        px[o + 3] = 255;
+      }
+    }
+    gtx.putImageData(img, 0, 0);
+  }
+
+  // ── 배경 — 숨쉬는 중앙 조명 + 리사주로 떠도는 민트 워시 ──
+  var bgCv = document.createElement('canvas'); bgCv.width = W; bgCv.height = H;
+  var btx = bgCv.getContext('2d');
+  function repaintBg(now) {
+    btx.globalCompositeOperation = 'source-over';
+    btx.fillStyle = rgba(C_INK, 1);
+    btx.fillRect(0, 0, W, H);
+    var a1 = 0.13 + 0.09 * Math.sin(now / 700);
+    var g1 = btx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, 235);
+    g1.addColorStop(0, rgba(C_LILAC, a1));
+    g1.addColorStop(1, rgba(C_LILAC, 0));
+    btx.fillStyle = g1; btx.fillRect(0, 0, W, H);
+    var wx = W * (0.5 + 0.30 * Math.sin(now / 2600));
+    var wy = H * (0.5 + 0.26 * Math.sin(now / 1900 + 1.7));
+    var g2 = btx.createRadialGradient(wx, wy, 0, wx, wy, 170);
+    g2.addColorStop(0, rgba(C_MINT, 0.10));
+    g2.addColorStop(1, rgba(C_MINT, 0));
+    btx.fillStyle = g2; btx.fillRect(0, 0, W, H);
+    // 반대편에서 도는 핑크 안개 — 배경 세 겹이 각기 다른 주기로 숨쉰다
+    var px2 = W * (0.5 - 0.32 * Math.sin(now / 3100));
+    var py2 = H * (0.5 - 0.24 * Math.sin(now / 2200 + 0.8));
+    var g3 = btx.createRadialGradient(px2, py2, 0, px2, py2, 160);
+    g3.addColorStop(0, rgba(C_PINK, 0.085));
+    g3.addColorStop(1, rgba(C_PINK, 0));
+    btx.fillStyle = g3; btx.fillRect(0, 0, W, H);
+  }
+
+  // ── 잔광 꼬리 레이어 — 지우지 않고 destination-out 로 녹여 꼬리를 남긴다 ──
+  var trailCv = document.createElement('canvas'); trailCv.width = W; trailCv.height = H;
+  var ttx = trailCv.getContext('2d');
+  function initMotes() {
+    var cols = [C_LILAC, C_MINT, C_PINK, C_CORE];
+    for (var m = 0; m < 44; m++) {
+      motes.push({
+        x: rand() * W, y: rand() * H,
+        vx: (rand() - 0.5) * 1.3, vy: (rand() - 0.5) * 0.85,
+        soft: rand() < 0.3, col: cols[(rand() * cols.length) | 0]
+      });
+    }
+  }
+  function repaintTrails() {
+    ttx.globalCompositeOperation = 'destination-out';
+    ttx.fillStyle = 'rgba(0,0,0,0.13)';
+    ttx.fillRect(0, 0, W, H);
+    ttx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < motes.length; i++) {
+      var mo = motes[i];
+      mo.x += mo.vx; mo.y += mo.vy;
+      if (mo.x < -8) mo.x = W + 8; else if (mo.x > W + 8) mo.x = -8;
+      if (mo.y < -8) mo.y = H + 8; else if (mo.y > H + 8) mo.y = -8;
+      if (mo.soft) {
+        var g = ttx.createRadialGradient(mo.x, mo.y, 0, mo.x, mo.y, 5);
+        g.addColorStop(0, rgba(mo.col, 0.20));
+        g.addColorStop(1, rgba(mo.col, 0));
+        ttx.fillStyle = g;
+        ttx.fillRect(mo.x - 5, mo.y - 5, 10, 10);
+      } else {
+        ttx.fillStyle = rgba(mo.col, 0.5);
+        ttx.fillRect(mo.x, mo.y, 1.6, 1.6);
+      }
+    }
+  }
+
+  // ── 포인터 — 움직이면 헤일로가 따라오고, 누르면 그 자리에 씨앗 ──
+  var ptr = { x: -99, y: -99, t: -9999, on: false };
+  function toLocal(e) {
+    var r = cv.getBoundingClientRect();
+    return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)];
+  }
+  field.addEventListener('pointermove', function (e) {
+    var p = toLocal(e);
+    ptr.x = p[0]; ptr.y = p[1]; ptr.t = perfNow(); ptr.on = true;
+  });
+  field.addEventListener('pointerleave', function () { ptr.on = false; });
+  field.addEventListener('pointerdown', function (e) {
+    var p = toLocal(e);
+    plantSeed(p[0] / W, p[1] / H, perfNow());
+    valOut.textContent = String(crystals.length);
+  });
+
+  var t0 = -1;
+  function perfNow() { return t0 < 0 ? 0 : performance.now() - t0; }
+
+  // ── 합성 ──
+  function draw(now) {
+    repaintBg(now);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1; ctx.filter = 'none';
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(bgCv, 0, 0);
+    // 결정 광륜 — 격자를 뿌옇게 확대해 lighter 로 쌓는다(호흡하는 할로)
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(5px)';
+    ctx.globalAlpha = 0.26 + 0.08 * Math.sin(now / 820);
+    ctx.drawImage(gridCv, 0, 0, W, H);
+    ctx.filter = 'none'; ctx.globalAlpha = 1;
+    // 결정 본체 — 픽셀 그대로 (셀 2px 각진 서리 결)
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(gridCv, 0, 0, W, H);
+    // 잔광 꼬리
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(trailCv, 0, 0);
+    // 씨앗 확산 링
+    for (var i = rings.length - 1; i >= 0; i--) {
+      var r = rings[i], ra = now - r.t;
+      if (ra > 620) { rings.splice(i, 1); continue; }
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, 5 + ra * 0.085, 0, Math.PI * 2);
+      ctx.strokeStyle = rgba(C_LILAC, 0.38 * (1 - ra / 620));
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+    // 갓 붙은 입자의 반짝임
+    for (var s = sparkles.length - 1; s >= 0; s--) {
+      var sp = sparkles[s], sa = now - sp.t;
+      if (sa > 340) { sparkles.splice(s, 1); continue; }
+      var fal = 1 - sa / 340;
+      ctx.fillStyle = rgba(C_CORE, 0.75 * fal);
+      ctx.fillRect(sp.x - 1.2, sp.y - 1.2, 2.4, 2.4);
+    }
+    // 포인터 헤일로 — 결정 위를 스치는 은은한 수증기
+    if (ptr.on && now - ptr.t < 420) {
+      var pg = ctx.createRadialGradient(ptr.x, ptr.y, 0, ptr.x, ptr.y, 26);
+      pg.addColorStop(0, rgba(C_CORE, 0.16));
+      pg.addColorStop(1, rgba(C_CORE, 0));
+      ctx.fillStyle = pg;
+      ctx.fillRect(ptr.x - 26, ptr.y - 26, 52, 52);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  var lastVal = 0;
+  function frame(nowRaw) {
+    if (t0 < 0) t0 = nowRaw;
+    var now = nowRaw - t0;
+    // 자동 씨앗 폴백 — 포인터가 없는 측정 렌더에서도 결정이 여럿 경쟁하게 한다
+    for (var i = 0; i < AUTO_SEEDS.length; i++) {
+      if (AUTO_SEEDS[i][0] > 0 && now >= AUTO_SEEDS[i][0]) {
+        plantSeed(AUTO_SEEDS[i][1], AUTO_SEEDS[i][2], now);
+        AUTO_SEEDS[i][0] = 0;
+      }
+    }
+    aggregate(now);
+    repaintGrid(now);
+    repaintTrails();
+    draw(now);
+    if (now - lastVal > 480) { lastVal = now; valOut.textContent = String(crystals.length); }
+    requestAnimationFrame(frame);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  initMotes();
+  plantSeed(0.46, 0.50, 0);
+  if (reduce) {
+    // 결정이 다 자란 한 장만 남긴다 — 3초치 응집을 동기로 몰아 그린다
+    for (var w = 0; w < 90; w++) aggregate(w * 16.7);
+    repaintGrid(3000);
+    repaintBg(3000);
+    draw(3000);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

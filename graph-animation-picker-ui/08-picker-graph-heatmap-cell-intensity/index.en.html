@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heatmap picker where the value becomes cell brightness — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="hm is-demo" id="hm">
+  <div class="hm__head">
+    <span class="hm__title">Selected cell brightness</span>
+    <span class="hm__stat" aria-hidden="true"><b class="hm__n" id="hm-val">62</b>%</span>
+  </div>
+
+  <div class="hm__zone">
+    <div class="hm__grid" id="grid" role="img" aria-label="A 9-cell heatmap; the large cell at the top left is the selected cell, and its brightness recomputes to match the value's ratio. The other 8 cells stay at their previous ratio.">
+      <div class="hm__cell hm__cell--hero" id="hero"></div>
+    </div>
+  </div>
+
+  <div class="hm__track" id="track">
+    <span class="hm__rail" aria-hidden="true"></span>
+    <button class="hm__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="Choose selected cell's value" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="62" aria-valuetext="Selected cell 62%">
+      <svg class="hm__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><rect x="40" y="40" width="176" height="176" rx="16" opacity=".2"/><path d="M200 32H56a24 24 0 0 0-24 24v144a24 24 0 0 0 24 24h144a24 24 0 0 0 24-24V56a24 24 0 0 0-24-24m8 168a8 8 0 0 1-8 8H56a8 8 0 0 1-8-8V56a8 8 0 0 1 8-8h144a8 8 0 0 1 8 8Z"/></g></svg>
+    </button>
+  </div>
+
+  <p class="hm__hint">Drag on the bar or press the arrow keys and the selected cell's brightness recomputes.</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="hm-live"></span>
+    <ul id="hm-legend"></ul>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown 이 Selected cell Value(0~100)을 바꾸면, 그 값을 정해둔
+// 최대값(100)으로 나눈 비율을 배경색 알파(밝기)로 바꿔 Selected cell(왼쪽 위 큰 칸)만 매 프레임
+// 다시 칠한다. 나머지 8칸은 고정 Ratio(RATIOS)로 처음 한 번만 칠하고 이후 손대지 않는다
+// ("이전 Ratio 그대로 남는다"). CSS @keyframes 없음(값이 매 프레임 실수로 바뀌어 선언형으로
+// 못 담는다, 398-01~07 과 같은 이유).
+var root = document.getElementById('hm');
+var track = document.getElementById('track');
+var grab = document.getElementById('grab');
+var grid = document.getElementById('grid');
+var hero = document.getElementById('hero');
+var valEl = document.getElementById('hm-val');
+var live = document.getElementById('hm-live');
+var legend = document.getElementById('hm-legend');
+
+var N = 8;                      // picker-graph-heatmap-cell-count — 고정 눈금 칸 수
+var MAX_V = 100;                // picker-graph-heatmap-max-value — 정해둔 최대값
+var LERP_RATE = 0.22;
+var AUTO_PERIOD = 2.0;
+var STEP = 5;
+var R = 10, G = 79, B = 232;    // $subject-blue-deep
+
+var RATIOS = [];
+for (var ri = 0; ri < N; ri++) {
+  RATIOS.push(Math.min(0.85, 0.15 + 0.55 * Math.abs(Math.sin(ri * 1.9 + 0.4))));
+}
+
+var value = 62;
+var current = 62;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var trackRect = null;
+var rafId = 0;
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function colorFor(ratio) {
+  var a = 0.12 + ratio * 0.82;
+  return 'rgba(' + R + ',' + G + ',' + B + ',' + a.toFixed(3) + ')';
+}
+
+function buildStatic() {
+  var legendHtml = '';
+  for (var i = 0; i < N; i++) {
+    var cell = document.createElement('div');
+    cell.className = 'hm__cell';
+    cell.style.background = colorFor(RATIOS[i]);
+    grid.appendChild(cell);
+    legendHtml += '<li>Fixed cell ' + (i + 1) + ': ' + Math.round(RATIOS[i] * 100) + '%</li>';
+  }
+  legend.innerHTML = legendHtml;
+}
+
+function paint() {
+  var ratio = current / MAX_V;
+  hero.style.background = colorFor(ratio);
+  var rv = Math.round(current);
+  valEl.textContent = String(rv);
+  grab.style.left = value + '%';
+  grab.setAttribute('aria-valuenow', String(Math.round(value)));
+  grab.setAttribute('aria-valuetext', 'Selected cell ' + Math.round(value) + '%');
+}
+
+function announce() {
+  live.textContent = 'Selected cell ' + Math.round(current) + '% recomputed';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(0, Math.min(MAX_V, v));
+  if (isManual) { manual = true; root.classList.remove('is-demo'); }
+}
+
+function fromPointer(clientX) {
+  if (!trackRect) trackRect = track.getBoundingClientRect();
+  var ratio = (clientX - trackRect.left) / trackRect.width;
+  setValue(ratio * MAX_V, true);
+}
+
+function reflectNow() { current = value; paint(); announce(); }
+
+function onDown(e) {
+  trackRect = track.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX);
+  if (reduced()) reflectNow();
+}
+function onMove(e) { fromPointer(e.clientX); if (reduced()) reflectNow(); }
+function onUp() { announce(); }
+function onTrackDown(e) { trackRect = track.getBoundingClientRect(); fromPointer(e.clientX); if (reduced()) reflectNow(); }
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(0, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(MAX_V, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) reflectNow();
+}
+
+function onResize() { trackRect = track.getBoundingClientRect(); if (reduced()) paint(); }
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  value = 50 + 46 * Math.sin(autoT * omega);
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) autoStep(dt);
+  current += (value - current) * LERP_RATE;
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+buildStatic();
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+grab.addEventListener('keydown', onKey);
+track.addEventListener('pointerdown', onTrackDown);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  current = value;
+  paint();
+} else {
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

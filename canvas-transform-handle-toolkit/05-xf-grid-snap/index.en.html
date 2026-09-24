@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snap-to-Background-Grid While Dragging — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="gridBg" aria-hidden="true"></div>
+  <div class="frame" id="frame">
+    <div class="guideDot" id="guideDot" aria-hidden="true"></div>
+    <div class="draggable" id="draggable" tabindex="0" aria-label="Object that snaps to a background grid intersection while dragged"></div>
+  </div>
+  <div class="readout" id="readout" aria-hidden="true"><span id="rs">free</span></div>
+</div>
+</main>
+<script>
+(function () {
+  var CELL_PX = 20;
+  var CORNER_SNAP_RADIUS_PX = 6; // 변형 05 가 16 으로 넓힌다 — 오브젝트 모서리가 격자 교차점에 붙는 자석 반경
+  var WAYPOINTS = [
+    { x: 20, y: 20 }, { x: 140, y: 60 }, { x: 63, y: 96 }, { x: 20, y: 20 }
+  ];
+  var HOP_MS = 560;
+  var HOLD_MS = 320;
+
+  var scene = document.getElementById('scene');
+  var frame = document.getElementById('frame');
+  var draggable = document.getElementById('draggable');
+  var guideDot = document.getElementById('guideDot');
+  var rs = document.getElementById('rs');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var frameW = 184, frameH = 108;
+  var tx = 20, ty = 20;
+  var dragging = false;
+  var startX = 0, startY = 0, originTx = 0, originTy = 0;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  // 오브젝트 모서리(좌상단)를 가장 가까운 격자 교차점(CELL_PX 배수)과 비교해, 그 거리가
+  // CORNER_SNAP_RADIUS_PX 안이면 손을 놓기 전에도 교차점으로 스냅한다 — 다른 오브젝트가 아니라
+  // 고정된 배경 격자 한 가지에만 붙는다(250 의 panel-snap-guides 와 다른 시연).
+  function nearestGrid(v) { return Math.round(v / CELL_PX) * CELL_PX; }
+
+  function applyPosition(rawX, rawY) {
+    var nx = nearestGrid(rawX);
+    var ny = nearestGrid(rawY);
+    var d = Math.hypot(rawX - nx, rawY - ny);
+    var snapped = d <= CORNER_SNAP_RADIUS_PX;
+    tx = clamp(snapped ? nx : rawX, 0, frameW - 44);
+    ty = clamp(snapped ? ny : rawY, 0, frameH - 32);
+    draggable.style.transform = 'matrix(1,0,0,1,' + tx.toFixed(1) + ',' + ty.toFixed(1) + ')';
+    if (snapped) {
+      guideDot.style.transform = 'matrix(1,0,0,1,' + nx.toFixed(1) + ',' + ny.toFixed(1) + ')';
+      guideDot.classList.add('isActive');
+    } else {
+      guideDot.classList.remove('isActive');
+    }
+    rs.textContent = snapped ? 'snap' : 'free';
+    draggable.classList.toggle('isSnapped', snapped);
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  draggable.addEventListener('pointerdown', function (e) {
+    human();
+    dragging = true;
+    draggable.setPointerCapture(e.pointerId);
+    startX = e.clientX; startY = e.clientY;
+    originTx = tx; originTy = ty;
+  });
+  draggable.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    applyPosition(originTx + (e.clientX - startX), originTy + (e.clientY - startY));
+  });
+  function end(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { draggable.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+  draggable.addEventListener('pointerup', end);
+  draggable.addEventListener('pointercancel', end);
+  draggable.addEventListener('keydown', function (e) {
+    var step = CELL_PX;
+    if (e.key === 'ArrowLeft') { human(); applyPosition(tx - step, ty); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { human(); applyPosition(tx + step, ty); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { human(); applyPosition(tx, ty - step); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { human(); applyPosition(tx, ty + step); e.preventDefault(); }
+  });
+
+  // reduce: 실사용 경로 적용 — 드래그·키보드는 위에서 같은 applyPosition() 으로 즉시 반영한다.
+  // 아래 hopTo()·cycle() 은 시연 게이트만 — reduce 에서는 돌지 않는다.
+  function hopTo(target, onDone) {
+    var fromX = tx, fromY = ty;
+    var start = performance.now();
+    function frame2(now) {
+      if (!scene.classList.contains('is-demo')) return;
+      var p = clamp((now - start) / HOP_MS, 0, 1);
+      var e = easeOutCubic(p);
+      applyPosition(fromX + (target.x - fromX) * e, fromY + (target.y - fromY) * e);
+      if (p < 1) requestAnimationFrame(frame2);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame2);
+  }
+
+  function cycle(i) {
+    if (!scene.classList.contains('is-demo')) return;
+    var target = WAYPOINTS[i % WAYPOINTS.length];
+    hopTo(target, function () {
+      timers.push(setTimeout(function () { cycle(i + 1); }, HOLD_MS));
+    });
+  }
+
+  applyPosition(tx, ty);
+  if (!reduce) {
+    cycle(1);
+  }
+})();
+</script>
+</body>
+</html>

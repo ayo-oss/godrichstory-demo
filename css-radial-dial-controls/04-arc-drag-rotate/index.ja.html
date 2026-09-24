@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドラッグ慣性ノブ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dr is-demo" id="dr">
+  <div class="dr__ring" id="drRing">
+    <button class="dr__knob" id="drKnob" type="button" aria-label="ドラッグして音量つまみを回す"></button>
+  </div>
+  <p class="dr__hint" id="drHint">速度: 0.0 度/フレーム</p>
+</div>
+<script>
+(function () {
+  var DRAG_DECAY = 0.92;         // 손을 뗀 뒤 매 프레임 속도에 곱하는 감쇠율 — 1에 가까울수록 오래 돈다
+  var MIN_VELOCITY = 0.15;       // 이 아래로 떨어지면 정지로 본다(度/フレーム)
+  var LOOP_MS = 2000;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var root = document.getElementById('dr');
+  var ring = document.getElementById('drRing');
+  var knob = document.getElementById('drKnob');
+  var hint = document.getElementById('drHint');
+  var isDemo = true;
+
+  var angle = 0;
+  var velocity = 0;      // 度/フレーム — 드래그 중엔 포인터 이동에서, 놓은 뒤엔 감쇠식에서 갱신
+  var dragging = false;
+  var lastAngle = 0;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  function angleAt(clientX, clientY) {
+    var r = ring.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    return Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
+  }
+  function apply() {
+    knob.style.setProperty('--angle', angle);
+    hint.textContent = '速度: ' + Math.abs(velocity).toFixed(1) + ' 度/フレーム';
+  }
+
+  knob.addEventListener('pointerdown', function (e) {
+    human();
+    dragging = true;
+    velocity = 0;
+    lastAngle = angleAt(e.clientX, e.clientY);
+    knob.setPointerCapture(e.pointerId);
+  });
+  knob.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var a = angleAt(e.clientX, e.clientY);
+    var delta = a - lastAngle;
+    if (delta > 180) delta -= 360; else if (delta < -180) delta += 360;
+    angle += delta;
+    velocity = reduce ? 0 : delta; // 이동량 자체를 프레임당 속도로 기록
+    lastAngle = a;
+    apply();
+  });
+  knob.addEventListener('pointerup', function () { dragging = false; });
+  knob.addEventListener('pointercancel', function () { dragging = false; });
+
+  // 계산 겹: 관성 감쇠. 놓은 순간의 속도가 매 프레임 DRAG_DECAY 배로 줄며 각도에 계속 더해진다.
+  // reduce 에서는(실사용 포함) 감쇠 구간을 건너뛰고 즉시 멈춘다 — human() 뒤에도 이 분기는 그대로 적용된다.
+  function decayStep() {
+    if (dragging) return;
+    if (reduce) { velocity = 0; return; }
+    if (Math.abs(velocity) < MIN_VELOCITY) { velocity = 0; return; }
+    velocity *= DRAG_DECAY;
+    angle += velocity;
+  }
+
+  // 자동 루프: 最高 속도로 "튕긴" 상태를 반복해 감쇠 곡선 전체를 계속 보여준다
+  var demoVelocity = 26;
+  function loop(ts) {
+    if (isDemo) {
+      if (!reduce) {
+        var phase = (ts % LOOP_MS) / LOOP_MS;
+        if (phase < 0.02) { velocity = demoVelocity; }
+        decayStep();
+      } else {
+        angle = 0; velocity = 0;
+      }
+      apply();
+    } else {
+      decayStep();
+      apply();
+    }
+    requestAnimationFrame(loop);
+  }
+  apply();
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

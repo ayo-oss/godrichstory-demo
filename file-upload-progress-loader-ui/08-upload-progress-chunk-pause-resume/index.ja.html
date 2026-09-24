@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>청크 일시정지·재개 — 파일 업로드 진행률 로더 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="cp is-demo" id="cpRoot">
+<div class="cp__row">
+  <span class="cp__label">送信済み <b class="cp__done" id="cpDone">0</b>/6個</span>
+  <button class="cp__toggle" id="cpToggle" type="button" aria-label="アップロードを一時停止">
+    <svg class="cp__icon-pause" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><g fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></g></svg>
+    <svg class="cp__icon-play" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"></path></svg>
+  </button>
+</div>
+<ul class="cp__segs" id="cpSegs" aria-hidden="true">
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+  <li class="cp__seg"><span class="cp__segfill"></span></li>
+</ul>
+<div class="cp__bar">
+  <span class="cp__meta">Blob.slice · fetch · AbortController</span>
+</div>
+</main>
+<script>
+// 청크 일시정지·재개 — 파일을 Blob.slice 로 고정 크기 조각으로 나눠 순서대로 fetch 로 보낸다.
+// 일시정지는 AbortController 로 진행 중인 요청만 끊고 마지막으로 확인된 조각 번호를 저장하며,
+// 재개는 그 번호부터 계산을 다시 시작해 이어붙인다(처음부터 다시 보내지 않는다).
+(function () {
+  var SEED = 0x2f81dd;
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = mulberry32(SEED);
+
+  var CHUNK_BYTES = 256 * 1024;
+  var TOTAL_CHUNKS = 6;
+
+  var root = document.getElementById('cpRoot');
+  var toggle = document.getElementById('cpToggle');
+  var segs = document.getElementById('cpSegs');
+  var doneEl = document.getElementById('cpDone');
+  if (!root || !toggle || !segs || !doneEl) return;
+
+  var blob = new Blob([new Uint8Array(CHUNK_BYTES * TOTAL_CHUNKS)]);
+  var segEls = segs.querySelectorAll('.cp__seg');
+  var lastConfirmed = 0, paused = false, controller = null, running = false;
+
+  function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+  function paint(n) {
+    doneEl.textContent = String(n);
+    for (var i = 0; i < segEls.length; i++) segEls[i].classList.toggle('is-filled', i < n);
+  }
+
+  async function sendFrom(startIdx) {
+    running = true;
+    controller = new AbortController();
+    for (var i = startIdx; i < TOTAL_CHUNKS; i++) {
+      if (paused) { running = false; return; }
+      var chunk = blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES);
+      try {
+        await fetch(location.href, { method: 'HEAD', signal: controller.signal });
+      } catch (err) {
+        // 이 데모엔 실제 업로드 서버가 없다 — 실패해도 다음 조각으로 진행한다.
+      }
+      if (paused) { running = false; return; }
+      lastConfirmed = i + 1;
+      paint(lastConfirmed);
+      await delay(160 + rand() * 140);
+    }
+    running = false;
+  }
+
+  toggle.addEventListener('click', function () {
+    if (root.classList.contains('is-demo')) root.classList.remove('is-demo');
+    if (running) {
+      paused = true;
+      root.classList.add('is-paused');
+      if (controller) controller.abort();
+    } else {
+      paused = false;
+      root.classList.remove('is-paused');
+      sendFrom(lastConfirmed);
+    }
+  });
+  ['pointerdown', 'focusin'].forEach(function (ev) {
+    root.addEventListener(ev, function () {
+      if (!root.classList.contains('is-demo')) return;
+      root.classList.remove('is-demo');
+      sendFrom(0);
+    });
+  });
+})();
+</script>
+</body>
+</html>

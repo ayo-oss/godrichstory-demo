@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投げ速度値減衰移動 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bft is-demo" id="bft">
+  <div class="bft__field" id="bftField">
+    <button class="bft__chip" id="bftChip" type="button" aria-label="フローティングボタン">↗</button>
+  </div>
+  <p class="bft__hint">軽く弾いて投げると速度の値が減って止まります</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bft');
+  var field = document.getElementById('bftField');
+  var chip = document.getElementById('bftChip');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 놓는 순간의 속도 값(vx, vy, px/s)을 물려받아 매 프레임 위치에 더하고,
+  // 그 속도 값 자체를 FRICTION 비율만큼 지수적으로 줄인다 — vel *= FRICTION**dt.
+  // 벽(WALL)에 닿으면 그 축의 속도만 0으로 죽여 멈춘 자리에서 정지한다.
+  var FRICTION = 0.05, STOP_VEL = 6, CHIP_R = 24;
+  var x = 100, y = 60, vx = 0, vy = 0, last = 0, raf = null;
+  var dragging = false, samples = [];
+
+  function bounds() { return { w: field.clientWidth, h: field.clientHeight }; }
+  function paint() { chip.style.transform = 'translate(' + (x - CHIP_R).toFixed(1) + 'px,' + (y - CHIP_R).toFixed(1) + 'px)'; }
+  function tick(now) {
+    var dt = Math.min((now - last) / 1000, 0.032);
+    last = now;
+    var decay = Math.pow(FRICTION, dt);
+    vx *= decay; vy *= decay;
+    x += vx * dt; y += vy * dt;
+    var b = bounds();
+    if (x < CHIP_R) { x = CHIP_R; vx = 0; }
+    if (x > b.w - CHIP_R) { x = b.w - CHIP_R; vx = 0; }
+    if (y < CHIP_R) { y = CHIP_R; vy = 0; }
+    if (y > b.h - CHIP_R) { y = b.h - CHIP_R; vy = 0; }
+    paint();
+    if (Math.abs(vx) < STOP_VEL && Math.abs(vy) < STOP_VEL) { vx = 0; vy = 0; raf = null; return; }
+    raf = requestAnimationFrame(tick);
+  }
+  function start() { if (raf === null) { last = performance.now(); raf = requestAnimationFrame(tick); } }
+  function throwWith(nvx, nvy) {
+    vx = nvx; vy = nvy;
+    if (reduce) { vx = 0; vy = 0; return; }
+    start();
+  }
+
+  function onDown(clientX, clientY) {
+    dragging = true; samples = [{ t: performance.now(), x: clientX, y: clientY }];
+    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+  }
+  function onMove(clientX, clientY) {
+    if (!dragging) { return; }
+    var r = field.getBoundingClientRect();
+    var b = bounds();
+    x = Math.max(CHIP_R, Math.min(b.w - CHIP_R, clientX - r.left));
+    y = Math.max(CHIP_R, Math.min(b.h - CHIP_R, clientY - r.top));
+    paint();
+    samples.push({ t: performance.now(), x: clientX, y: clientY });
+    if (samples.length > 6) { samples.shift(); }
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (samples.length >= 2) {
+      var a = samples[0], b2 = samples[samples.length - 1];
+      var dt = Math.max(1, b2.t - a.t) / 1000;
+      throwWith((b2.x - a.x) / dt, (b2.y - a.y) / dt);
+    }
+  }
+
+  function wireReal() {
+    chip.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientX, e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientX, e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  wireReal();
+  paint();
+
+  // 자동 루프: 실제 드래그 대신 정해둔 속도 값으로 곧장 던져 같은 감쇠 경로를 반복 재현한다.
+  var autoTimer = null;
+  function autoTick() {
+    x = 30; y = 30;
+    throwWith(420, 260);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTick(); autoTimer = setInterval(autoTick, 1700); }
+})();
+</script>
+</body>
+</html>

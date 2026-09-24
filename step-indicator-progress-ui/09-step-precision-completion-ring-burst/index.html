@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마지막 단계에서 링이 번지듯 퍼지며 사라지는 완료 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cb is-demo" id="cb">
+  <ol class="cb__row" id="cbRow" role="list" aria-label="결제 완료 단계">
+    <li class="cb__node" id="n0"><span class="cb__circle is-done">1</span><span class="cb__label">주문</span></li>
+    <li class="cb__connector is-done"></li>
+    <li class="cb__node" id="n1"><span class="cb__circle is-done">2</span><span class="cb__label">결제</span></li>
+    <li class="cb__connector is-done"></li>
+    <li class="cb__node" id="n2">
+      <span class="cb__cardGlow" id="cardGlow"></span>
+      <span class="cb__burstLayer" id="burstLayer"></span>
+      <span class="cb__circle" id="finalCircle">3</span>
+      <span class="cb__label">완료</span>
+    </li>
+  </ol>
+  <p class="cb__status" id="cbStatus" aria-live="polite">결제를 완료해 주세요</p>
+  <div class="cb__controls">
+    <button type="button" class="cb__btn cb__btn--primary" id="cbFinish">결제 완료</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_BURST_RING_COUNT = 3;
+  var STEP_BURST_SPEED_PX_S = 85;
+  var STEP_BURST_DURATION_S = 0.78;
+  var STEP_BURST_STAGGER_S = 0.14;
+  var BASE_RADIUS_PX = 17;
+
+  var root = document.getElementById('cb');
+  var status = document.getElementById('cbStatus');
+  var finishBtn = document.getElementById('cbFinish');
+  var burstLayer = document.getElementById('burstLayer');
+  var finalCircle = document.getElementById('finalCircle');
+  var cardGlow = document.getElementById('cardGlow');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var burstAt = null;
+  var completed = false;
+  var ringEls = [];
+  for (var i = 0; i < STEP_BURST_RING_COUNT; i++) {
+    var r = document.createElement('span');
+    r.className = 'cb__ring';
+    burstLayer.appendChild(r);
+    ringEls.push(r);
+  }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function finish() {
+    completed = true;
+    burstAt = performance.now();
+    finalCircle.classList.add('is-done');
+    status.textContent = '결제가 완료되었습니다';
+    if (reduce) { ringEls.forEach(function (el) { el.style.opacity = '0'; }); cardGlow.style.opacity = '0'; }
+  }
+
+  function reset() {
+    completed = false;
+    burstAt = null;
+    finalCircle.classList.remove('is-done');
+    finalCircle.style.boxShadow = 'none';
+    status.textContent = '결제를 완료해 주세요';
+    ringEls.forEach(function (el) { el.style.opacity = '0'; });
+    cardGlow.style.width = '0px';
+    cardGlow.style.height = '0px';
+    cardGlow.style.opacity = '0';
+  }
+
+  finishBtn.addEventListener('click', function () { root.classList.remove('is-demo'); if (!completed) finish(); });
+
+  var startTime = null;
+  var phase = 0;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2.0;
+    if (root.classList.contains('is-demo')) {
+      if (t < 0.05 && phase !== 0) { phase = 0; reset(); }
+      if (phase === 0 && t > 0.22) { finish(); phase = 1; }
+      if (phase === 1 && t > 1.05) { reset(); phase = 2; }
+      if (phase === 2 && t > 1.15) { finish(); phase = 3; }
+    }
+    if (!reduce && burstAt !== null) {
+      var small = window.innerWidth < 340;
+      var scale = small ? 0.42 : 1;
+      var elapsed = (now - burstAt) / 1000;
+      var anyAlive = false;
+      var primaryRatio = 0;
+      ringEls.forEach(function (el, idx) {
+        var tt = elapsed - idx * STEP_BURST_STAGGER_S;
+        if (tt < 0) { el.style.opacity = '0'; anyAlive = true; return; }
+        if (tt > STEP_BURST_DURATION_S) { el.style.opacity = '0'; return; }
+        anyAlive = true;
+        var radius = (BASE_RADIUS_PX + STEP_BURST_SPEED_PX_S * tt) * scale;
+        var alpha = 1 - tt / STEP_BURST_DURATION_S;
+        var d = radius * 2;
+        el.style.width = d.toFixed(1) + 'px';
+        el.style.height = d.toFixed(1) + 'px';
+        el.style.marginLeft = (-radius).toFixed(1) + 'px';
+        el.style.marginTop = (-radius).toFixed(1) + 'px';
+        el.style.opacity = alpha.toFixed(3);
+        // 계산된 시각 레이어: 첫 링(지연 없음)의 반경 진행률·알파를 카드 배경 톤·노드 글로우로 같은 함수로 전파
+        if (idx === 0) primaryRatio = alpha * clamp(tt / STEP_BURST_DURATION_S, 0, 1);
+      });
+      if (primaryRatio > 0) {
+        var glowMax = (small ? 90 : 220) * primaryRatio;
+        cardGlow.style.width = glowMax.toFixed(1) + 'px';
+        cardGlow.style.height = glowMax.toFixed(1) + 'px';
+        cardGlow.style.opacity = (0.4 * primaryRatio).toFixed(3);
+        finalCircle.style.boxShadow = '0 0 ' + (8 + primaryRatio * 26).toFixed(1) + 'px rgba(120, 224, 173, ' + (0.55 * primaryRatio).toFixed(3) + ')';
+      }
+      if (!anyAlive) burstAt = null;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

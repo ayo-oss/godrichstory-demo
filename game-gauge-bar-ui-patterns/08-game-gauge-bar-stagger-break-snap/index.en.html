@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stagger Gauge Break Transition — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gb">
+  <div class="gb__head">
+    <span class="gb__label">Stagger</span>
+    <span class="gb__value" id="gbValue">0%</span>
+  </div>
+  <div class="gb__track" role="progressbar" aria-label="Stagger" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="gbTrack">
+    <div class="gb__fill" id="gbFill"></div>
+  </div>
+  <button type="button" class="gb__hit" id="gbPoise">Build Stagger</button>
+</div>
+<script>
+(function () {
+  var STAGGER_MAX = 100;
+  var BUILD_EVENTS = [[300, 35], [1000, 30], [1700, 40]]; // ms, 자동 루프에서 기절치가 쌓이는 이벤트
+  var SPIKE_DUR = 130; // ms, 상한 도달 직후 불투명도가 튀는 구간
+  var DROP_DUR = 330; // ms, 그 뒤 0 으로 떨어지는 구간
+  var RECOVER_DUR = 950; // ms, 붕괴 후 다시 채워지는 구간
+  var PAUSE = 450;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gb = document.getElementById('gb');
+  var track = document.getElementById('gbTrack');
+  var fill = document.getElementById('gbFill');
+  var valueEl = document.getElementById('gbValue');
+  var poiseBtn = document.getElementById('gbPoise');
+
+  var isDemo = true;
+  var appliedIdx = 0;
+  var value = 0;
+  var phase = 'build'; // build → snap → recover
+  var phaseStart = 0;
+  var cycleStart = 0;
+  var hitIdx = 0;
+
+  function snapOpacity(dt) {
+    // 계산 겹: 상한에 닿는 순간 불투명도가 짧게 튀었다가(스파이크) 감쇠 없이 선형으로 0까지 떨어진다
+    if (dt < SPIKE_DUR) return 1;
+    if (dt < SPIKE_DUR + DROP_DUR) return 1 - (dt - SPIKE_DUR) / DROP_DUR;
+    return 0;
+  }
+
+  function render(ts) {
+    var dtPhase = ts - phaseStart;
+    var opacity = 1, width = value, shake = 0;
+
+    if (phase === 'snap') {
+      opacity = snapOpacity(dtPhase);
+      shake = dtPhase < SPIKE_DUR ? Math.sin(dtPhase * .9) * 4 : 0;
+      width = STAGGER_MAX;
+    } else if (phase === 'recover') {
+      var r = Math.min(1, dtPhase / RECOVER_DUR);
+      opacity = r;
+      width = r * STAGGER_MAX * 0.9; // 계산 겹: 회복은 상한 근처(90%)까지만, 다음 타격이 마저 채운다
+      value = width;
+    }
+
+    fill.style.width = Math.max(0, Math.min(100, width)).toFixed(2) + '%';
+    fill.style.opacity = Math.max(0, Math.min(1, opacity)).toFixed(3);
+    fill.style.transform = 'translateX(' + shake.toFixed(2) + 'px)';
+    var shown = Math.round(Math.max(0, Math.min(100, width)));
+    track.setAttribute('aria-valuenow', String(shown));
+    valueEl.textContent = shown + '%';
+  }
+
+  function triggerSnap(ts) {
+    phase = 'snap';
+    phaseStart = ts;
+  }
+
+  function human() {
+    if (isDemo) { gb.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  poiseBtn.addEventListener('click', function () {
+    human();
+    var now = performance.now();
+    if (phase === 'build') {
+      value = Math.min(STAGGER_MAX, value + [35, 30, 40, 35][hitIdx % 4]);
+      hitIdx++;
+      if (value >= STAGGER_MAX) triggerSnap(now);
+    } else if (phase === 'snap') {
+      // 스냅 도중엔 무시 — 붕괴가 끝나야 다시 쌓인다
+    } else {
+      phase = 'build'; value = 0; hitIdx = 0;
+    }
+  });
+  poiseBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    poiseBtn.click();
+  });
+
+  function loop(ts) {
+    if (!cycleStart) { cycleStart = ts; phaseStart = ts; }
+
+    if (isDemo) {
+      var elapsed = ts - cycleStart;
+      if (phase === 'build') {
+        while (appliedIdx < BUILD_EVENTS.length && elapsed >= BUILD_EVENTS[appliedIdx][0]) {
+          value = Math.min(STAGGER_MAX, value + BUILD_EVENTS[appliedIdx][1]);
+          appliedIdx++;
+          if (value >= STAGGER_MAX) triggerSnap(ts);
+        }
+      } else if (phase === 'snap' && ts - phaseStart >= SPIKE_DUR + DROP_DUR) {
+        phase = 'recover'; phaseStart = ts;
+      } else if (phase === 'recover' && ts - phaseStart >= RECOVER_DUR + PAUSE) {
+        cycleStart = ts; phaseStart = ts; phase = 'build'; appliedIdx = 0; value = 0;
+      }
+    }
+
+    render(ts);
+    requestAnimationFrame(loop);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  } else {
+    render(0);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

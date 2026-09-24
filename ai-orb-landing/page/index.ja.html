@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Orb Landing</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+// ai-orb-landing — 이 트렌드의 토큰. 값은 이 파일과 run/284/tokens.css 딱 두 곳.
+// 바이브코딩 프롬프트에서 그대로 붙여 넣는 설정 (run/284/prompt.md 참고)
+// 핵심 규칙: 빛나는 것은 오브뿐이다. 배경은 단색, 버튼은 솔리드 — 화면 전체가 빛나면 오브가 안 보인다.
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        ink: "#17141a", surface: "#252228", line: "#332f38",
+        cream: "#fff7e6", mute: "#beb7ad",
+        sky: "#6ec8ff", brand: "#2f6df6", lilac: "#b9a0ff",
+        flame: "#ff4d1f", paper: "#ffffff",
+        // 후기 아바타 전용 — 사람을 색조로 구분하는 자리에만 쓴다.
+        // brand·pink·mint 셋은 서로 색상환에서 멀어 오브 세 알이 한눈에 갈린다
+        pink: "#ff9ebb", mint: "#4cd4a6",
+      },
+      borderRadius: { card: "16px", control: "12px", chip: "4px", pill: "999px" },
+      boxShadow: {
+        // 카드가 무대에서 떠오른 정도 — 호버에서 raised 로 바뀐다
+        rest: "0 6px 12px rgba(23,20,26,.32)",
+        raised: "0 14px 24px rgba(23,20,26,.32)",
+        // 입력창 포커스의 빛 무리 한 겹 (두 겹 이상 쌓으면 오브와 경쟁한다)
+        // 색은 그 자리 오브와 같은 lilac — 아래 .chat-field 가 쓰는 값
+        halo: "0 0 0 4px rgba(185,160,255,.34)",
+      },
+      spacing: { gutter: "16px" },
+      transitionTimingFunction: {
+        spring: "cubic-bezier(.2,.8,.2,1)",
+        pop: "cubic-bezier(.2,1.4,.4,1)",
+      },
+    },
+  },
+};
+</script>
+<style type="text/tailwindcss">
+  body { font-family: "Inter", system-ui, sans-serif; }
+
+  /* ── 오브의 재료: 겹친 radial-gradient. 사진도 filter:blur 도 쓰지 않는다.
+     하이라이트를 30% 언저리에 두면 광원이 왼쪽 위에 있는 구로 읽힌다 */
+  .orb-hero {
+    background:
+      radial-gradient(circle at 34% 28%, rgba(255,255,255,.92), rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 28% 66%, rgba(110,200,255,.9), rgba(110,200,255,0) 58%),
+      radial-gradient(circle at 74% 72%, rgba(185,160,255,.8), rgba(185,160,255,0) 56%),
+      radial-gradient(circle at 50% 50%, rgba(47,109,246,.95) 10%, rgba(23,20,26,.96) 92%);
+    animation: heroFloat 2s ease-in-out infinite;
+  }
+  /* 빛 무리 — 오브와 같은 2초 주기. scale 최대가 1 이라 감싼 상자 밖으로 안 나간다 */
+  .orb-halo {
+    background: radial-gradient(circle at 50% 50%, rgba(110,200,255,.42), rgba(110,200,255,.16) 48%, rgba(110,200,255,0) 72%);
+    animation: heroPulse 2s ease-in-out infinite;
+  }
+  @keyframes heroFloat { 0%, 100% { transform: translateY(7px); } 50% { transform: translateY(-7px); } }
+  @keyframes heroPulse { 0%, 100% { transform: scale(.82); opacity: .5; } 50% { transform: scale(1); opacity: .9; } }
+
+  /* ── 내비 발광 점: 활성 탭 중심에 서고 translateX 로 미끄러진다.
+     --p1~--p5 는 아래 스크립트가 실제 렌더 좌표로 채운다 */
+  .nav-dot {
+    background: radial-gradient(circle at 38% 32%, rgba(255,255,255,.95), rgba(110,200,255,.95) 58%, rgba(47,109,246,.9) 100%);
+    box-shadow: 0 0 12px 4px rgba(110,200,255,.45);
+    transform: translateX(var(--p1, 0px));
+    transition: transform 300ms cubic-bezier(.2,.8,.2,1);
+  }
+  .is-demo .nav-dot { animation: navGlide 2s cubic-bezier(.2,.8,.2,1) infinite; }
+  @keyframes navGlide {
+    0%, 8% { transform: translateX(var(--p1)); }
+    24%, 34% { transform: translateX(var(--p3)); }
+    50%, 62% { transform: translateX(var(--p5)); }
+    86%, 100% { transform: translateX(var(--p1)); }
+  }
+
+  /* ── 카드 오브. 커질 땐 제 중심에서 (transform-origin 50%) */
+  .orb-card {
+    background:
+      radial-gradient(circle at 34% 28%, rgba(255,255,255,.95), rgba(255,255,255,0) 46%),
+      radial-gradient(circle at 66% 74%, rgba(185,160,255,.85), rgba(185,160,255,0) 60%),
+      radial-gradient(circle at 50% 50%, rgba(110,200,255,1) 20%, rgba(47,109,246,.95) 96%);
+    box-shadow: 0 0 10px rgba(110,200,255,.35);
+  }
+  /* animation 단축은 delay 를 0 으로 리셋한다 → 낱개 속성으로. 지연 구간 번쩍임은 backwards 로 막는다 */
+  .is-demo .lift-card, .is-demo .lift-card .orb-card {
+    animation-duration: 2s; animation-timing-function: cubic-bezier(.2,.8,.2,1);
+    animation-iteration-count: infinite; animation-fill-mode: backwards;
+  }
+  .is-demo .lift-card { animation-name: cardLift; }
+  .is-demo .lift-card .orb-card { animation-name: cardOrb; }
+  .is-demo .lift-card:nth-child(2), .is-demo .lift-card:nth-child(2) .orb-card { animation-delay: 120ms; }
+  .is-demo .lift-card:nth-child(3), .is-demo .lift-card:nth-child(3) .orb-card { animation-delay: 240ms; }
+  .is-demo .lift-card:nth-child(4), .is-demo .lift-card:nth-child(4) .orb-card { animation-delay: 360ms; }
+  @keyframes cardLift {
+    0%, 8% { transform: translateY(0); box-shadow: 0 6px 12px rgba(23,20,26,.32); }
+    22%, 46% { transform: translateY(-2px); box-shadow: 0 14px 24px rgba(23,20,26,.32); }
+    62%, 100% { transform: translateY(0); box-shadow: 0 6px 12px rgba(23,20,26,.32); }
+  }
+  @keyframes cardOrb {
+    0%, 8% { transform: scale(1); } 22%, 46% { transform: scale(1.35); } 62%, 100% { transform: scale(1); }
+  }
+
+  /* ── 미니 오브 셋: 하이라이트 한 겹 + 본체 한 겹. 색조만 바꿔 구분한다 */
+  .orb-sky {
+    background:
+      radial-gradient(circle at 34% 26%, rgba(255,255,255,.92) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 54%, #6ec8ff 0%, rgba(110,200,255,.45) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 10px rgba(110,200,255,.5);
+  }
+  .orb-lilac {
+    background:
+      radial-gradient(circle at 34% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 56%, #b9a0ff 0%, rgba(185,160,255,.5) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 12px rgba(185,160,255,.42);
+  }
+  .orb-flame {
+    background:
+      radial-gradient(circle at 34% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 56%, #ff4d1f 0%, rgba(255,77,31,.5) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 12px rgba(255,77,31,.42);
+  }
+  /* 후기 아바타 셋 — 부품 06 의 orbSkin() 과 같은 세 색(brand·pink·mint).
+     사람을 색조로 구분하는 자리라 무대 색조 사다리(sky→brand→lilac)와 따로 간다 */
+  .orb-brand {
+    background:
+      radial-gradient(circle at 32% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 56%, #2f6df6 0%, rgba(47,109,246,.5) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 12px rgba(47,109,246,.42);
+  }
+  .orb-pink {
+    background:
+      radial-gradient(circle at 32% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 56%, #ff9ebb 0%, rgba(255,158,187,.5) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 12px rgba(255,158,187,.42);
+  }
+  .orb-mint {
+    background:
+      radial-gradient(circle at 32% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 44%),
+      radial-gradient(circle at 52% 56%, #4cd4a6 0%, rgba(76,212,166,.5) 58%, rgba(23,20,26,.92) 100%);
+    box-shadow: 0 0 12px rgba(76,212,166,.42);
+  }
+
+  /* 機能 목록 — 오브가 위에서 아래로 한 칸씩 깬다. 밝은 구간 16%(320ms) 가 간격 334ms 보다 짧아 한 번에 하나만 밝다 */
+  .is-demo .feature-orb, .is-demo .feature-label {
+    animation-duration: 2s; animation-timing-function: cubic-bezier(0,0,.2,1);
+    animation-iteration-count: infinite; animation-fill-mode: backwards;
+  }
+  .is-demo .feature-orb { animation-name: featureWake; }
+  .is-demo .feature-label { animation-name: featureLabelWake; }
+  .is-demo li:nth-child(2) .feature-orb, .is-demo li:nth-child(2) .feature-label { animation-delay: 334ms; }
+  .is-demo li:nth-child(3) .feature-orb, .is-demo li:nth-child(3) .feature-label { animation-delay: 667ms; }
+  .is-demo li:nth-child(4) .feature-orb, .is-demo li:nth-child(4) .feature-label { animation-delay: 1000ms; }
+  .is-demo li:nth-child(5) .feature-orb, .is-demo li:nth-child(5) .feature-label { animation-delay: 1334ms; }
+  .is-demo li:nth-child(6) .feature-orb, .is-demo li:nth-child(6) .feature-label { animation-delay: 1667ms; }
+  @keyframes featureWake {
+    0% { opacity: .32; transform: scale(.86); } 5% { opacity: 1; transform: scale(1.18); }
+    11% { opacity: 1; transform: scale(1.06); } 16%, 100% { opacity: .32; transform: scale(.86); }
+  }
+  @keyframes featureLabelWake { 0% { opacity: .62; } 5%, 11% { opacity: 1; } 16%, 100% { opacity: .62; } }
+
+  /* 料金 배지 — 흰 무대라 가장자리를 잉크로 내려 경계를 세운다. 가로 가운데는 고정, 세로만 움직인다 */
+  .orb-badge {
+    background:
+      radial-gradient(circle at 34% 26%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 46%),
+      radial-gradient(circle at 52% 56%, #2f6df6 0%, rgba(47,109,246,.9) 54%, rgba(23,20,26,.82) 100%);
+    box-shadow: 0 4px 12px rgba(47,109,246,.45);
+    transform: translateX(-50%);
+    animation: priceBob 1s cubic-bezier(.2,.8,.2,1) infinite;
+  }
+  @keyframes priceBob {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(-6px); }
+  }
+
+  /* 후기 아바타 — 카드 순서대로 같은 반응을 지난다 */
+  .is-demo .quote-card, .is-demo .avatar-orb {
+    animation-duration: 2s; animation-timing-function: cubic-bezier(.2,.8,.2,1);
+    animation-iteration-count: infinite; animation-fill-mode: backwards;
+  }
+  .is-demo .quote-card { animation-name: quoteLift; }
+  .is-demo .avatar-orb { animation-name: avatarPop; }
+  .is-demo .quote-card:nth-child(2), .is-demo .quote-card:nth-child(2) .avatar-orb { animation-delay: 667ms; }
+  .is-demo .quote-card:nth-child(3), .is-demo .quote-card:nth-child(3) .avatar-orb { animation-delay: 1334ms; }
+  @keyframes quoteLift {
+    0% { transform: translateY(0); } 12%, 28% { transform: translateY(-4px); } 40%, 100% { transform: translateY(0); }
+  }
+  @keyframes avatarPop {
+    0% { opacity: .78; transform: scale(1); } 12% { opacity: 1; transform: scale(1.18); }
+    28% { opacity: 1; transform: scale(1.14); } 40%, 100% { opacity: .78; transform: scale(1); }
+  }
+
+  /* CTA 밴드 오브 — 핵심 알파를 .55 로 묶어 크림 글자가 한가운데를 지나도 대비 5:1 이 넘는다 */
+  .orb-drift {
+    background: radial-gradient(circle at 50% 50%,
+      rgba(185,160,255,.55) 0%, rgba(47,109,246,.40) 38%, rgba(47,109,246,0) 70%);
+    animation: orbDrift 2s ease-in-out infinite;
+  }
+  @keyframes orbDrift {
+    0%, 100% { transform: translateX(-34%); } 50% { transform: translateX(34%); }
+  }
+
+  /* 푸터 궤도 — 캐리어 폭이 궤도와 같아 translateX 의 % 가 곧 "궤도의 몇 %" 가 된다.
+     음수 지연으로 셋의 위상을 벌려 어느 순간에도 최소 하나는 궤도 안에 있다 */
+  .beacon {
+    animation-name: beaconCross; animation-timing-function: linear;
+    animation-iteration-count: infinite; animation-fill-mode: backwards;
+  }
+  .beacon-slow { animation-duration: 2s; animation-delay: -400ms; }
+  .beacon-fast { animation-duration: 1s; animation-delay: -500ms; }
+  .beacon-drift { animation-duration: 2s; animation-delay: -1200ms; }
+  @keyframes beaconCross { from { transform: translateX(-8%); } to { transform: translateX(108%); } }
+  .dot-lilac { background: radial-gradient(circle at 50% 50%, rgba(185,160,255,.92) 0%, rgba(185,160,255,.34) 42%, rgba(185,160,255,0) 72%); }
+  .dot-sky { background: radial-gradient(circle at 50% 50%, rgba(110,200,255,.92) 0%, rgba(110,200,255,.34) 42%, rgba(110,200,255,0) 72%); }
+  .dot-brand { background: radial-gradient(circle at 50% 50%, rgba(110,200,255,.88) 0%, rgba(47,109,246,.34) 42%, rgba(47,109,246,0) 72%); }
+
+  /* 챗 입력창 — 포커스 링은 box-shadow 한 겹뿐. 두 겹부터는 "빛나는 입력창" 이 된다 */
+  .chat-field { box-shadow: 0 0 0 0 rgba(185,160,255,0); transition: box-shadow 300ms cubic-bezier(0,0,.2,1), border-color 300ms cubic-bezier(0,0,.2,1); }
+  .chat-field:focus-within { border-color: rgba(185,160,255,.62); box-shadow: 0 0 0 4px rgba(185,160,255,.34); }
+  .is-demo .chat-field { animation: chatRing 2s cubic-bezier(0,0,.2,1) infinite; }
+  .is-demo .chat-ghost { animation: chatGhost 2s steps(1, end) infinite; }
+  .is-demo .chat-send { animation: chatPress 2s cubic-bezier(0,0,.2,1) infinite; }
+  .is-demo .chat-dot { animation: chatDot 2s cubic-bezier(0,0,.2,1) infinite; }
+  .is-demo .chat-input::placeholder { color: transparent; }
+  @keyframes chatRing {
+    0%, 6% { border-color: rgba(255,247,230,.18); box-shadow: 0 0 0 0 rgba(185,160,255,0); }
+    30%, 66% { border-color: rgba(185,160,255,.62); box-shadow: 0 0 0 4px rgba(185,160,255,.34); }
+    86%, 100% { border-color: rgba(255,247,230,.18); box-shadow: 0 0 0 0 rgba(185,160,255,0); }
+  }
+  @keyframes chatGhost { 0% { opacity: 0; } 12%, 86% { opacity: 1; } 87%, 100% { opacity: 0; } }
+  @keyframes chatPress { 0%, 62% { transform: translateY(0); } 66%, 74% { transform: translateY(1px); } 78%, 100% { transform: translateY(0); } }
+  @keyframes chatDot { 0%, 62% { transform: scale(1); opacity: .6; } 66%, 74% { transform: scale(1.55); opacity: 1; } 78%, 100% { transform: scale(1); opacity: .6; } }
+  .chat-dot { background: radial-gradient(circle at 50% 50%, #6ec8ff 0%, #2f6df6 70%); }
+
+  /* 장식 애니메이션은 전부 여기서 끈다. 피드백(포커스 링·고스트 글자)만 남긴다 */
+  @media (prefers-reduced-motion: reduce) {
+    .orb-hero, .orb-halo, .nav-dot, .orb-badge, .orb-drift, .beacon,
+    .is-demo .lift-card, .is-demo .lift-card .orb-card,
+    .is-demo .feature-orb, .is-demo .feature-label,
+    .is-demo .quote-card, .is-demo .avatar-orb,
+    .is-demo .chat-field, .is-demo .chat-ghost, .is-demo .chat-send, .is-demo .chat-dot {
+      animation: none !important; transition: none !important;
+    }
+    .orb-hero, .orb-badge, .orb-drift { transform: translateX(-50%) !important; }
+    .orb-hero { transform: none !important; }
+    .orb-halo { opacity: .9 !important; transform: none !important; }
+    .is-demo .feature-orb, .is-demo .feature-label, .is-demo .avatar-orb, .is-demo .chat-ghost { opacity: 1 !important; }
+    .beacon-slow { transform: translateX(20%) !important; }
+    .beacon-fast { transform: translateX(50%) !important; }
+    .beacon-drift { transform: translateX(62%) !important; }
+    .is-demo .chat-field { border-color: rgba(185,160,255,.62) !important; box-shadow: 0 0 0 4px rgba(185,160,255,.34) !important; }
+  }
+</style>
+</head>
+<body class="bg-ink text-cream antialiased is-demo" id="page">
+
+<!-- 아이콘 스프라이트 (Phosphor Duotone 인라인 — 아이콘 폰트·외부 파일 없음) -->
+<svg width="0" height="0" class="hidden" aria-hidden="true">
+  <symbol id="iconSparkle" viewBox="0 0 256 256"><path d="M194.82,151.43l-55.09,20.3-20.3,55.09a7.92,7.92,0,0,1-14.86,0l-20.3-55.09-55.09-20.3a7.92,7.92,0,0,1,0-14.86l55.09-20.3,20.3-55.09a7.92,7.92,0,0,1,14.86,0l20.3,55.09,55.09,20.3A7.92,7.92,0,0,1,194.82,151.43Z" opacity="0.2"/><path d="M197.58,129.06,146,110l-19-51.62a15.92,15.92,0,0,0-29.88,0L78,110l-51.62,19a15.92,15.92,0,0,0,0,29.88L78,178l19,51.62a15.92,15.92,0,0,0,29.88,0L146,178l51.62-19a15.92,15.92,0,0,0,0-29.88ZM137,164.22a8,8,0,0,0-4.74,4.74L112,223.85,91.78,169A8,8,0,0,0,87,164.22L32.15,144,87,123.78A8,8,0,0,0,91.78,119L112,64.15,132.22,119a8,8,0,0,0,4.74,4.74L191.85,144ZM144,40a8,8,0,0,1,8-8h16V16a8,8,0,0,1,16,0V32h16a8,8,0,0,1,0,16H184V64a8,8,0,0,1-16,0V48H152A8,8,0,0,1,144,40ZM248,88a8,8,0,0,1-8,8h-8v8a8,8,0,0,1-16,0V96h-8a8,8,0,0,1,0-16h8V72a8,8,0,0,1,16,0v8h8A8,8,0,0,1,248,88Z"/></symbol>
+  <symbol id="iconArrow" viewBox="0 0 256 256"><path d="M216,128l-72,72V56Z" opacity="0.2"/><path d="M221.66,122.34l-72-72A8,8,0,0,0,136,56v64H40a8,8,0,0,0,0,16h96v64a8,8,0,0,0,13.66,5.66l72-72A8,8,0,0,0,221.66,122.34ZM152,180.69V75.31L204.69,128Z"/></symbol>
+  <symbol id="iconChat" viewBox="0 0 256 256"><path d="M224,128A96,96,0,0,1,79.93,211.11h0L42.54,223.58a8,8,0,0,1-10.12-10.12l12.47-37.39h0A96,96,0,1,1,224,128Z" opacity="0.2"/><path d="M128,24A104,104,0,0,0,36.18,176.88L24.83,210.93a16,16,0,0,0,20.24,20.24l34.05-11.35A104,104,0,1,0,128,24Zm0,192a87.87,87.87,0,0,1-44.06-11.81,8,8,0,0,0-4-1.08,7.85,7.85,0,0,0-2.53.42L40,216,52.47,178.6a8,8,0,0,0-.66-6.54A88,88,0,1,1,128,216Zm12-88a12,12,0,1,1-12-12A12,12,0,0,1,140,128Zm-44,0a12,12,0,1,1-12-12A12,12,0,0,1,96,128Zm88,0a12,12,0,1,1-12-12A12,12,0,0,1,184,128Z"/></symbol>
+  <symbol id="iconCheck" viewBox="0 0 256 256"><path d="M224,128a96,96,0,1,1-96-96A96,96,0,0,1,224,128Z" opacity="0.2"/><path d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/></symbol>
+  <symbol id="iconBolt" viewBox="0 0 256 256"><path d="M96,240l16-80L48,136,160,16,144,96l64,24Z" opacity="0.2"/><path d="M215.79,118.17a8,8,0,0,0-5-5.66L153.18,90.9l14.66-73.33a8,8,0,0,0-13.69-7l-112,120a8,8,0,0,0,3,13l57.63,21.61L88.16,238.43a8,8,0,0,0,13.69,7l112-120A8,8,0,0,0,215.79,118.17ZM109.37,214l10.47-52.38a8,8,0,0,0-5-9.06L62,132.71l84.62-90.66L136.16,94.43a8,8,0,0,0,5,9.06l52.8,19.8Z"/></symbol>
+  <symbol id="iconBrain" viewBox="0 0 256 256"><path d="M240,124a48,48,0,0,1-32,45.27h0V176a40,40,0,0,1-80,0,40,40,0,0,1-80,0v-6.73h0a48,48,0,0,1,0-90.54V72a40,40,0,0,1,80,0,40,40,0,0,1,80,0v6.73A48,48,0,0,1,240,124Z" opacity="0.2"/><path d="M248,124a56.11,56.11,0,0,0-32-50.61V72a48,48,0,0,0-88-26.49A48,48,0,0,0,40,72v1.39a56,56,0,0,0,0,101.2V176a48,48,0,0,0,88,26.49A48,48,0,0,0,216,176v-1.41A56.09,56.09,0,0,0,248,124ZM88,208a32,32,0,0,1-31.81-28.56A55.87,55.87,0,0,0,64,180h8a8,8,0,0,0,0-16H64A40,40,0,0,1,50.67,86.27,8,8,0,0,0,56,78.73V72a32,32,0,0,1,64,0v68.26A47.8,47.8,0,0,0,88,128a8,8,0,0,0,0,16,32,32,0,0,1,0,64Zm104-44h-8a8,8,0,0,0,0,16h8a55.87,55.87,0,0,0,7.81-.56A32,32,0,1,1,168,144a8,8,0,0,0,0-16,47.8,47.8,0,0,0-32,12.26V72a32,32,0,0,1,64,0v6.73a8,8,0,0,0,5.33,7.54A40,40,0,0,1,192,164Z"/></symbol>
+  <symbol id="iconSend" viewBox="0 0 256 256"><path d="M223.69,42.18l-58.22,192a8,8,0,0,1-14.92,1.25L108,148,20.58,105.45a8,8,0,0,1,1.25-14.92l192-58.22A8,8,0,0,1,223.69,42.18Z" opacity="0.2"/><path d="M227.32,28.68a16,16,0,0,0-15.66-4.08l-.15,0L19.57,82.84a16,16,0,0,0-2.49,29.8L102,154l41.3,84.87A15.86,15.86,0,0,0,157.74,248q.69,0,1.38-.06a15.88,15.88,0,0,0,14-11.51l58.2-191.94c0-.05,0-.1,0-.15A16,16,0,0,0,227.32,28.68ZM157.83,231.85l-.05.14,0-.07-40.06-82.3,48-48a8,8,0,0,0-11.31-11.31l-48,48L24.08,98.25l-.07,0,.14,0L216,40Z"/></symbol>
+  <symbol id="iconGlobe" viewBox="0 0 256 256"><path d="M213.09,172.48a96,96,0,0,1-80.41,51.41l3.17-16.44a8,8,0,0,0-2-6.95l-19.74-20.33a8,8,0,0,1-1.44-8.69l13.7-30.74a8,8,0,0,1,8.38-4.67l22.82,3.08a8.11,8.11,0,0,1,3.12,1.11ZM116.71,95,129,88.24a7.46,7.46,0,0,0,1.5-1.07l26.91-24.33A8,8,0,0,0,159,53l-10.5-18.81A96.62,96.62,0,0,0,128,32,95.61,95.61,0,0,0,67.78,53.23L56,81.08A8,8,0,0,0,55.88,87l11.5,30.67a8,8,0,0,0,5.81,5l2.69.58L89.2,100a8,8,0,0,1,6.94-4h16.71A7.9,7.9,0,0,0,116.71,95Z" opacity="0.2"/><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm88,104a87.62,87.62,0,0,1-6.4,32.94l-44.7-27.49a15.92,15.92,0,0,0-6.24-2.23l-22.82-3.08a16.11,16.11,0,0,0-16,7.86h-8.72l-3.8-7.86a15.91,15.91,0,0,0-11-8.67l-8-1.73L96.14,104h16.71a16.06,16.06,0,0,0,7.73-2l12.25-6.76a16.62,16.62,0,0,0,3-2.14l26.91-24.34A15.93,15.93,0,0,0,166,49.1l-.36-.65A88.11,88.11,0,0,1,216,128ZM143.31,41.34,152,56.9,125.09,81.24,112.85,88H96.14a16,16,0,0,0-13.88,8l-8.73,15.23L63.38,84.19,74.32,58.32a87.87,87.87,0,0,1,69-17ZM40,128a87.53,87.53,0,0,1,8.54-37.8l11.34,30.27a16,16,0,0,0,11.62,10l21.43,4.61L96.74,143a16.09,16.09,0,0,0,14.4,9h1.48l-7.23,16.23a16,16,0,0,0,2.86,17.37l.14.14L128,205.94l-1.94,10A88.11,88.11,0,0,1,40,128Zm102.58,86.78,1.13-5.81a16.09,16.09,0,0,0-4-13.9,1.85,1.85,0,0,1-.14-.14L120,174.74,133.7,144l22.82,3.08,45.72,28.12A88.18,88.18,0,0,1,142.58,214.78Z"/></symbol>
+</svg>
+
+<!-- ① 내비 — 미끄러지는 오브 닷이 활성 탭 아래에 선다 -->
+<header class="sticky top-0 z-20 bg-ink border-b border-line">
+  <div class="max-w-6xl mx-auto px-gutter h-16 flex items-center gap-8">
+    <span class="inline-flex items-center gap-2 font-extrabold text-base tracking-tight">
+      <span class="inline-flex w-5 h-5 text-sky" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+      Orbit AI
+    </span>
+    <nav class="relative hidden md:block" aria-label="メインメニュー">
+      <ul class="flex gap-8 m-0 p-0 pb-2 list-none" id="tabList">
+        <li><a class="nav-tab block font-bold text-sm no-underline text-cream" href="#features" aria-current="page">ホーム</a></li>
+        <li><a class="nav-tab block font-semibold text-sm no-underline text-cream/70 hover:text-cream" href="#features">機能</a></li>
+        <li><a class="nav-tab block font-semibold text-sm no-underline text-cream/70 hover:text-cream" href="#models">モデル</a></li>
+        <li><a class="nav-tab block font-semibold text-sm no-underline text-cream/70 hover:text-cream" href="#pricing">料金</a></li>
+        <li><a class="nav-tab block font-semibold text-sm no-underline text-cream/70 hover:text-cream" href="#docs">ドキュメント</a></li>
+      </ul>
+      <span class="nav-dot absolute left-0 bottom-0 w-2 h-2 rounded-full" id="navDot" aria-hidden="true"></span>
+    </nav>
+    <a class="ml-auto rounded-pill bg-cream text-ink font-bold text-sm px-4 py-2 no-underline" href="#cta">はじめる</a>
+  </div>
+</header>
+
+<!-- ② 히어로 — 떠오르는 오브 + 챗 인풋(부품 09) 을 한 칸에 -->
+<section class="bg-ink">
+  <div class="max-w-6xl mx-auto px-gutter py-20 grid gap-12 md:grid-cols-[1fr_auto] items-center">
+    <div class="min-w-0">
+      <p class="flex items-center gap-2 m-0 mb-3 font-bold text-xs leading-none tracking-wide text-sky">
+        <span class="inline-flex w-4 h-4" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+        新モデル公開
+      </p>
+      <h1 class="m-0 font-extrabold text-4xl md:text-5xl leading-tight tracking-tight text-cream [word-break:keep-all]">聞くだけで下書きが出てきます</h1>
+      <p class="mt-4 m-0 font-medium text-base md:text-lg leading-relaxed text-cream/70">議事録・企画書・メールをまとめて整理します。</p>
+
+      <!-- 챗 입력창: 포커스 링은 빛 무리 한 겹. 전송 버튼 안의 작은 오브 점이 눌림을 표시한다 -->
+      <div class="chat-field mt-8 flex items-center gap-2 py-2 pr-2 pl-4 rounded-pill border border-cream/20 bg-cream/[.08]">
+        <span class="inline-flex w-5 h-5 shrink-0 text-cream/60" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconChat"/></svg></span>
+        <span class="relative block flex-1 min-w-0">
+          <input class="chat-input block w-full border-0 bg-transparent p-0 font-semibold text-sm leading-relaxed text-cream outline-none placeholder:text-cream/60" type="text" placeholder="何でも聞いてください" aria-label="AIに尋ねる内容">
+          <!-- 미리보기용 고스트 글자. 보이는 동안 placeholder 는 투명해진다 -->
+          <span class="chat-ghost absolute left-0 top-0 w-full opacity-0 font-semibold text-sm leading-relaxed text-cream truncate pointer-events-none" aria-hidden="true">このLPのコンバージョン率を上げるには？</span>
+        </span>
+        <button type="button" class="chat-send relative inline-flex items-center justify-center w-10 h-10 shrink-0 rounded-full border-0 bg-cream text-ink cursor-pointer" id="chatSend" aria-label="送信">
+          <span class="chat-dot absolute right-2 top-2 w-2 h-2 rounded-full opacity-60" aria-hidden="true"></span>
+          <span class="inline-flex w-5 h-5" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSend"/></svg></span>
+        </button>
+      </div>
+
+      <div class="mt-8 flex flex-wrap items-center gap-4">
+        <a class="inline-flex items-center gap-2 rounded-pill bg-cream text-ink font-bold text-base px-8 py-4 no-underline shadow-rest hover:shadow-raised transition-shadow duration-200 ease-spring" href="#cta" role="button">
+          無料で始める
+          <span class="inline-flex w-4 h-4" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconArrow"/></svg></span>
+        </a>
+        <p class="m-0 font-semibold text-xs leading-none text-cream/60">回答はたいてい2秒以内に届きます</p>
+      </div>
+    </div>
+
+    <div class="relative grid place-items-center justify-self-center w-[248px] h-[248px] md:w-[320px] md:h-[320px]" aria-hidden="true">
+      <span class="orb-halo absolute inset-0 rounded-full"></span>
+      <span class="orb-hero relative z-10 w-[168px] h-[168px] md:w-[224px] md:h-[224px] rounded-full"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ③ 카드 격자 — 네 장이 차례로 같은 호버 상태를 지난다 -->
+<section id="features" class="bg-ink border-t border-line">
+  <div class="max-w-6xl mx-auto px-gutter py-20">
+    <p class="flex items-center gap-2 m-0 mb-2 font-bold text-xs leading-none tracking-widest text-cream/70">
+      <span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+      AIワークスペース
+    </p>
+    <h2 class="m-0 font-extrabold text-3xl leading-tight text-cream">機能</h2>
+    <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <a class="lift-card grid gap-2 p-6 rounded-card border border-cream/10 bg-sky/[.06] shadow-rest no-underline hover:-translate-y-0.5 hover:shadow-raised transition duration-200 ease-spring" href="#features">
+        <span class="orb-card inline-flex items-center justify-center w-10 h-10 rounded-full text-ink" aria-hidden="true"><svg class="w-3/5 h-3/5" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+        <span class="font-bold text-base leading-snug text-cream">文書の要約</span>
+        <span class="font-medium text-xs leading-relaxed text-cream/70">長い議事録を3行に</span>
+      </a>
+      <a class="lift-card grid gap-2 p-6 rounded-card border border-cream/10 bg-sky/[.06] shadow-rest no-underline hover:-translate-y-0.5 hover:shadow-raised transition duration-200 ease-spring" href="#features">
+        <span class="orb-card inline-flex items-center justify-center w-10 h-10 rounded-full text-ink" aria-hidden="true"><svg class="w-3/5 h-3/5" fill="currentColor"><use href="#iconBolt"/></svg></span>
+        <span class="font-bold text-base leading-snug text-cream">下書き生成</span>
+        <span class="font-medium text-xs leading-relaxed text-cream/70">メールと企画書の骨組み</span>
+      </a>
+      <a class="lift-card grid gap-2 p-6 rounded-card border border-cream/10 bg-sky/[.06] shadow-rest no-underline hover:-translate-y-0.5 hover:shadow-raised transition duration-200 ease-spring" href="#models">
+        <span class="orb-card inline-flex items-center justify-center w-10 h-10 rounded-full text-ink" aria-hidden="true"><svg class="w-3/5 h-3/5" fill="currentColor"><use href="#iconBrain"/></svg></span>
+        <span class="font-bold text-base leading-snug text-cream">文脈を記憶</span>
+        <span class="font-medium text-xs leading-relaxed text-cream/70">前回の会話の続きから</span>
+      </a>
+      <a class="lift-card grid gap-2 p-6 rounded-card border border-cream/10 bg-sky/[.06] shadow-rest no-underline hover:-translate-y-0.5 hover:shadow-raised transition duration-200 ease-spring" href="#docs">
+        <span class="orb-card inline-flex items-center justify-center w-10 h-10 rounded-full text-ink" aria-hidden="true"><svg class="w-3/5 h-3/5" fill="currentColor"><use href="#iconChat"/></svg></span>
+        <span class="font-bold text-base leading-snug text-cream">チームチャット</span>
+        <span class="font-medium text-xs leading-relaxed text-cream/70">Slackからそのまま質問</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ④ 機能 목록 — 미니 오브가 위에서 아래로 한 칸씩 깬다 -->
+<section id="models" class="bg-ink border-t border-line">
+  <div class="max-w-6xl mx-auto px-gutter py-20 grid gap-12 md:grid-cols-2 items-center">
+    <div class="min-w-0">
+      <p class="flex items-center gap-2 m-0 font-bold text-xs leading-none tracking-widest text-cream/70">
+        <span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+        AIワークスペース
+      </p>
+      <h2 class="mt-2 m-0 font-extrabold text-3xl leading-tight text-cream [word-break:keep-all]">順に目覚める6つの機能</h2>
+      <p class="mt-4 m-0 font-medium text-sm leading-relaxed text-cream/70">議事録・企画書・メールをまとめて整理します。</p>
+    </div>
+    <ul class="list-none m-0 p-0 min-w-0">
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10 first:border-t-0"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">ドキュメントから答えを探す</span></li>
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">議事録を自動で要約</span></li>
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">表データを整える</span></li>
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">下書きを書き直す</span></li>
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">トーンを合わせて翻訳</span></li>
+      <li class="grid grid-cols-[16px_1fr] items-center gap-4 py-3 border-t border-cream/10"><span class="feature-orb orb-sky w-4 h-4 rounded-full" aria-hidden="true"></span><span class="feature-label font-semibold text-sm leading-snug text-cream">コードスニペットを作る</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ⑤ 料金プラン — 흰 무대. おすすめ 카드는 색이 아니라 테두리·그림자와 머리 위 오브 배지로만 앞에 선다 -->
+<section id="pricing" class="bg-paper text-ink">
+  <div class="max-w-5xl mx-auto px-gutter py-20">
+    <div class="text-center">
+      <h2 class="m-0 font-extrabold text-3xl leading-tight text-ink">料金プラン</h2>
+      <p class="mt-2 m-0 font-medium text-sm leading-relaxed text-ink/60">使った分だけお支払い。</p>
+    </div>
+    <div class="mt-8 pt-4 grid gap-6 md:grid-cols-3">
+      <article class="relative flex flex-col px-6 pt-8 pb-6 rounded-card border border-ink/10 bg-paper">
+        <p class="m-0 font-bold text-xs leading-snug text-ink/60">スターター</p>
+        <p class="mt-1 m-0 font-extrabold text-3xl leading-none text-ink">¥0<span class="font-semibold text-xs leading-none text-ink/60">/月</span></p>
+        <ul class="list-none grid gap-2 mt-6 m-0 p-0">
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>1日20回</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>モデル1種</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>メール対応</li>
+        </ul>
+        <button type="button" class="mt-6 w-full py-2 rounded-pill border border-ink/30 bg-transparent font-bold text-sm leading-relaxed text-ink cursor-pointer">選ぶ</button>
+      </article>
+
+      <article class="relative flex flex-col px-6 pt-8 pb-6 rounded-card border border-ink/30 bg-paper shadow-raised">
+        <span class="orb-badge absolute -top-4 left-1/2 w-8 h-8 rounded-full" aria-hidden="true"></span>
+        <p class="flex items-center gap-2 m-0 font-bold text-xs leading-snug text-ink/60">プロ <span class="px-2 rounded-pill border border-ink/30 font-bold text-[10px] leading-snug text-ink/60">おすすめ</span></p>
+        <p class="mt-1 m-0 font-extrabold text-3xl leading-none text-ink">¥1,900<span class="font-semibold text-xs leading-none text-ink/60">/月</span></p>
+        <ul class="list-none grid gap-2 mt-6 m-0 p-0">
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>1日500回</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>モデル4種</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>優先応答</li>
+        </ul>
+        <button type="button" class="mt-6 w-full py-2 rounded-pill border border-ink/30 bg-transparent font-bold text-sm leading-relaxed text-ink cursor-pointer">選ぶ</button>
+      </article>
+
+      <article class="relative flex flex-col px-6 pt-8 pb-6 rounded-card border border-ink/10 bg-paper">
+        <p class="m-0 font-bold text-xs leading-snug text-ink/60">チーム</p>
+        <p class="mt-1 m-0 font-extrabold text-3xl leading-none text-ink">¥4,900<span class="font-semibold text-xs leading-none text-ink/60">/月</span></p>
+        <ul class="list-none grid gap-2 mt-6 m-0 p-0">
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>回数無制限</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>チーム10席</li>
+          <li class="grid grid-cols-[16px_1fr] items-center gap-2 font-medium text-xs leading-relaxed text-ink/80"><span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconCheck"/></svg></span>専任担当</li>
+        </ul>
+        <button type="button" class="mt-6 w-full py-2 rounded-pill border border-ink/30 bg-transparent font-bold text-sm leading-relaxed text-ink cursor-pointer">選ぶ</button>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ⑥ 후기 — 오브 아바타. 색조만 바꿔 말하는 사람을 구분한다 -->
+<section class="bg-ink">
+  <div class="max-w-6xl mx-auto px-gutter py-20">
+    <p class="flex items-center gap-2 m-0 font-bold text-xs leading-none tracking-widest text-cream/70">
+      <span class="inline-flex w-4 h-4 text-brand" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconChat"/></svg></span>
+      先に使った人たち
+    </p>
+    <div class="mt-8 grid gap-6 md:grid-cols-3">
+      <article class="quote-card p-6 rounded-card border border-cream/10 bg-cream/[.06]">
+        <span class="avatar-orb orb-brand block w-10 h-10 rounded-full opacity-[.78]" aria-hidden="true"></span>
+        <p class="mt-4 m-0 font-semibold text-sm leading-relaxed text-cream [word-break:keep-all]">議事録を入れると、やることだけ返してくれます。</p>
+        <p class="mt-4 m-0 font-medium text-xs leading-snug text-cream/70">データアナリスト</p>
+      </article>
+      <article class="quote-card p-6 rounded-card border border-cream/10 bg-cream/[.06]">
+        <span class="avatar-orb orb-pink block w-10 h-10 rounded-full opacity-[.78]" aria-hidden="true"></span>
+        <p class="mt-4 m-0 font-semibold text-sm leading-relaxed text-cream [word-break:keep-all]">下書きを3つのトーンで受け取って選びます。</p>
+        <p class="mt-4 m-0 font-medium text-xs leading-snug text-cream/70">プロダクトデザイナー</p>
+      </article>
+      <article class="quote-card p-6 rounded-card border border-cream/10 bg-cream/[.06]">
+        <span class="avatar-orb orb-mint block w-10 h-10 rounded-full opacity-[.78]" aria-hidden="true"></span>
+        <p class="mt-4 m-0 font-semibold text-sm leading-relaxed text-cream [word-break:keep-all]">ログを貼ると、どこで落ちたか指してくれます。</p>
+        <p class="mt-4 m-0 font-medium text-xs leading-snug text-cream/70">バックエンド開発者</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ⑦ CTA 밴드 — 유영하는 오브 한 알 위에 솔리드 버튼 둘 (부품 09 의 버튼 줄) -->
+<section id="cta" class="bg-ink">
+  <div class="max-w-6xl mx-auto px-gutter pb-20">
+    <div class="relative overflow-hidden rounded-card bg-surface shadow-raised px-gutter py-16 text-center">
+      <span class="orb-drift absolute left-1/2 top-1/2 -ml-[208px] -mt-[208px] w-[416px] h-[416px] rounded-full pointer-events-none" aria-hidden="true"></span>
+      <p class="relative z-10 inline-flex items-center gap-2 m-0 font-extrabold text-xs leading-none tracking-wide text-cream/70">
+        <span class="inline-flex w-4 h-4" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconSparkle"/></svg></span>
+        無料トライアル受付中
+      </p>
+      <h2 class="relative z-10 mt-4 m-0 font-extrabold text-3xl md:text-4xl leading-tight text-cream [word-break:keep-all]">最初のプロンプトを今日のうちに動かしましょう</h2>
+      <p class="relative z-10 mt-4 m-0 font-medium text-sm md:text-base leading-relaxed text-cream/70">カード登録なし、5分でチームのワークスペースが開きます。</p>
+      <div class="relative z-10 mt-8 flex flex-wrap justify-center gap-2">
+        <button type="button" class="px-8 py-4 rounded-control border-0 bg-cream text-ink font-extrabold text-sm leading-none cursor-pointer shadow-rest hover:-translate-y-px hover:shadow-raised active:translate-y-0 transition duration-200 ease-spring">回答をもらう</button>
+        <button type="button" class="px-8 py-4 rounded-control border-0 bg-cream/10 text-cream font-extrabold text-sm leading-none cursor-pointer hover:-translate-y-px active:translate-y-0 transition duration-200 ease-spring">プロンプト例</button>
+      </div>
+      <p class="relative z-10 mt-4 m-0 font-semibold text-xs leading-none text-cream/60">いつでも解約できます</p>
+    </div>
+  </div>
+</section>
+
+<!-- ⑧ 푸터 — 구분선이 곧 오브의 궤도 -->
+<footer id="docs" class="bg-ink border-t border-line">
+  <div class="max-w-6xl mx-auto px-gutter py-12 relative overflow-hidden">
+    <div class="relative h-0.5 rounded-pill bg-cream/20" aria-hidden="true">
+      <span class="beacon beacon-slow absolute left-0 top-1/2 w-full h-0"><span class="dot-lilac absolute left-0 top-0 w-6 h-6 rounded-full -translate-x-1/2 -translate-y-1/2"></span></span>
+      <span class="beacon beacon-fast absolute left-0 top-1/2 w-full h-0"><span class="dot-sky absolute left-0 top-0 w-4 h-4 rounded-full -translate-x-1/2 -translate-y-1/2"></span></span>
+      <span class="beacon beacon-drift absolute left-0 top-1/2 w-full h-0"><span class="dot-brand absolute left-0 top-0 w-7 h-7 rounded-full -translate-x-1/2 -translate-y-1/2"></span></span>
+    </div>
+    <div class="mt-8 grid grid-cols-2 md:grid-cols-4 gap-8">
+      <section class="min-w-0">
+        <h2 class="m-0 font-extrabold text-xs leading-none tracking-wide text-cream">プロダクト</h2>
+        <ul class="list-none mt-4 m-0 p-0 grid gap-2">
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#features">機能</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#pricing">料金プラン</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">変更履歴</a></li>
+        </ul>
+      </section>
+      <section class="min-w-0">
+        <h2 class="m-0 font-extrabold text-xs leading-none tracking-wide text-cream">ドキュメント</h2>
+        <ul class="list-none mt-4 m-0 p-0 grid gap-2">
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">クイックスタート</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">API</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">サンプル</a></li>
+        </ul>
+      </section>
+      <section class="min-w-0">
+        <h2 class="m-0 font-extrabold text-xs leading-none tracking-wide text-cream">会社</h2>
+        <ul class="list-none mt-4 m-0 p-0 grid gap-2">
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">会社概要</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">採用</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">お問い合わせ</a></li>
+        </ul>
+      </section>
+      <section class="min-w-0">
+        <h2 class="m-0 font-extrabold text-xs leading-none tracking-wide text-cream">コミュニティ</h2>
+        <ul class="list-none mt-4 m-0 p-0 grid gap-2">
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">Discord</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">ブログ</a></li>
+          <li><a class="font-semibold text-xs leading-snug text-cream/70 no-underline hover:text-cream" href="#docs">ステータス</a></li>
+        </ul>
+      </section>
+    </div>
+    <p class="flex flex-wrap items-center justify-between gap-2 mt-8 pt-6 m-0 border-t border-cream/20 font-semibold text-xs leading-none text-cream/60">
+      <span>© 2026 Orbit Labs</span>
+      <span class="inline-flex items-center gap-2">
+        <span class="inline-flex w-4 h-4" aria-hidden="true"><svg class="w-full h-full" fill="currentColor"><use href="#iconGlobe"/></svg></span>
+        日本語
+      </span>
+    </p>
+  </div>
+</footer>
+
+<script>
+  // 내비 점 — 라벨 폭은 언어마다 다르므로 실제 렌더 좌표로 --p1~--p5 를 채운다
+  var page = document.getElementById("page");
+  var navDot = document.getElementById("navDot");
+  var navTabs = document.querySelectorAll(".nav-tab");
+  function dotLeft(tab) { return tab.offsetLeft + tab.offsetWidth / 2 - navDot.offsetWidth / 2; }
+  function layoutDots() {
+    for (var k = 0; k < navTabs.length; k++) {
+      navDot.style.setProperty("--p" + (k + 1), dotLeft(navTabs[k]) + "px");
+    }
+  }
+  layoutDots();
+  window.addEventListener("resize", layoutDots);
+  for (var i = 0; i < navTabs.length; i++) {
+    navTabs[i].addEventListener("click", function () {
+      page.classList.remove("is-demo");
+      for (var j = 0; j < navTabs.length; j++) {
+        navTabs[j].classList.remove("text-cream", "font-bold");
+        navTabs[j].classList.add("text-cream/70", "font-semibold");
+        navTabs[j].removeAttribute("aria-current");
+      }
+      this.classList.remove("text-cream/70", "font-semibold");
+      this.classList.add("text-cream", "font-bold");
+      this.setAttribute("aria-current", "page");
+      navDot.style.transform = "translateX(" + dotLeft(this) + "px)";
+    });
+  }
+  // 사람이 손을 대면 미리보기 루프를 끄고 진짜 호버·포커스에 넘긴다
+  // .focus() 는 부르지 않는다 — 강제 포커스는 페이지를 그 요소로 끌어당긴다
+  function stopPreview() { page.classList.remove("is-demo"); }
+  document.querySelector(".chat-field").addEventListener("pointerdown", stopPreview);
+  document.querySelector(".chat-input").addEventListener("focus", stopPreview);
+  document.getElementById("chatSend").addEventListener("pointerdown", stopPreview);
+</script>
+</body>
+</html>

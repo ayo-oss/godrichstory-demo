@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>접선 각도로 꺾이는 오리가미 폴드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">접선 각도로 꺾이는 오리가미 폴드</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var CENTER = LW / 2, TOP = 30, BOTTOM = 170;
+  var FACET_W = 92;
+  var CREASE_ANGLE_DEG = 30;
+  var ANGLE_MIN = 5, ANGLE_MAX = 150;
+  var SCENE_BG = '#17141a';
+  var PAPER = '#fff7e6';
+  var PAPER_BACK = '#caa96b';
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(41305);
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function shadeHex(hex, f) {
+    var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    r = clamp(Math.round(r * f), 0, 255); g = clamp(Math.round(g * f), 0, 255); b = clamp(Math.round(b * f), 0, 255);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  var angleDeg = CREASE_ANGLE_DEG;
+  var targetDeg = CREASE_ANGLE_DEG;
+  var pointerActive = false;
+  var keys = { left: false, right: false };
+  var CYCLE_MS = 950;
+  function autoplay(tMs) {
+    if (pointerActive || reduce) return;
+    var p = (tMs % CYCLE_MS) / CYCLE_MS;
+    var w = p < 0.5 ? p * 2 : (1 - p) * 2;
+    targetDeg = ANGLE_MIN + (ANGLE_MAX - ANGLE_MIN) * w;
+  }
+
+  function angleStep(dt) {
+    var k = 1 - Math.pow(1 - 0.2, dt * 60);
+    angleDeg += (targetDeg - angleDeg) * k;
+    if (keys.left) targetDeg -= 90 * dt;
+    if (keys.right) targetDeg += 90 * dt;
+    targetDeg = clamp(targetDeg, ANGLE_MIN, ANGLE_MAX);
+  }
+
+  function drawFacet(sign) {
+    var rad = angleDeg * Math.PI / 180;
+    var c = Math.cos(rad);
+    var frontFacing = c >= 0;
+    var h = BOTTOM - TOP;
+    ctx.save();
+    ctx.translate(CENTER, 0);
+    ctx.scale(sign * (c === 0 ? 0.001 : c), 1);
+    var brightness = frontFacing ? (0.62 + 0.38 * c) : (0.3 + 0.2 * (-c));
+    ctx.fillStyle = frontFacing ? shadeHex(PAPER, brightness) : shadeHex(PAPER_BACK, brightness);
+    ctx.fillRect(0, TOP, FACET_W, h);
+    if (frontFacing) {
+      ctx.strokeStyle = 'rgba(23,20,26,.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(FACET_W * 0.5, TOP + 8); ctx.lineTo(FACET_W * 0.5, BOTTOM - 8); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    ctx.fillRect(CENTER - FACET_W - 4, BOTTOM + 3, FACET_W * 2 + 8, 6);
+    drawFacet(-1);
+    drawFacet(1);
+    ctx.strokeStyle = 'rgba(255,209,63,.7)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(CENTER, TOP - 6); ctx.lineTo(CENTER, BOTTOM + 6); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,247,230,.85)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(Math.round(angleDeg) + '°', CENTER - 10, TOP - 10);
+  }
+
+  function update(dt, tMs) {
+    autoplay(tMs);
+    angleStep(dt);
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); angleDeg = 80; targetDeg = 80; }
+
+  function calcFromEvent(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    var relX = (t0.clientX - r.left) / r.width * LW;
+    var d = Math.abs(relX - CENTER);
+    targetDeg = clamp(ANGLE_MIN + (d / FACET_W) * (ANGLE_MAX - ANGLE_MIN), ANGLE_MIN, ANGLE_MAX);
+  }
+  wrap.addEventListener('pointerdown', function (e) { pointerActive = true; calcFromEvent(e); if (reduce) { angleStep(1); render(); } });
+  wrap.addEventListener('pointermove', function (e) { if (!pointerActive) return; calcFromEvent(e); if (reduce) { angleStep(1); render(); } });
+  window.addEventListener('pointerup', function () { pointerActive = false; });
+  wrap.addEventListener('pointerleave', function () { pointerActive = false; });
+
+  wrap.setAttribute('tabindex', '0');
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') keys.left = true;
+    else if (e.key === 'ArrowRight') keys.right = true;
+    else return;
+    pointerActive = true;
+    if (reduce) { angleStep(0.05); render(); }
+  });
+  window.addEventListener('keyup', function (e) {
+    if (e.key === 'ArrowLeft') keys.left = false;
+    else if (e.key === 'ArrowRight') keys.right = false;
+    if (!keys.left && !keys.right) pointerActive = false;
+  });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

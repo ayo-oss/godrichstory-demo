@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>영상 카드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel">
+  <p class="hint" id="hint">Try scrolling the card — it recalculates the ready-rate from the actual portion inside the viewport, and skips the preview frame by that ratio.</p>
+  <div class="scrollStage" id="scrollStage">
+    <div class="scrollSpacer" aria-hidden="true"></div>
+    <article class="card" id="card">
+      <canvas class="thumb" id="thumb" width="240" height="135" aria-hidden="true"></canvas>
+      <button class="playBtn" id="playBtn" type="button" aria-label="Play case video preview">
+        <svg class="playIcon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 256 256"><g fill="currentColor"><path d="M228.23 134.69L84.15 222.81A8 8 0 0 1 72 216.12V39.88a8 8 0 0 1 12.15-6.69l144.08 88.12a7.82 7.82 0 0 1 0 13.38" opacity=".2"/><path d="M232.4 114.49L88.32 26.35a16 16 0 0 0-16.2-.3A15.86 15.86 0 0 0 64 39.87v176.26A15.94 15.94 0 0 0 80 232a16.07 16.07 0 0 0 8.36-2.35l144.04-88.14a15.81 15.81 0 0 0 0-27ZM80 215.94V40l143.83 88Z"/></g></svg>
+      </button>
+      <p class="readyLabel" id="readyLabel">Ready 0%</p>
+    </article>
+    <div class="scrollSpacer" aria-hidden="true"></div>
+  </div>
+</section>
+</main>
+<script>
+// 영상 카드(06) — 실제 스크롤 컨테이너 안에서 카드가 뷰포트에 걸친 비율을 IntersectionObserver 로
+// 실측해 Ready (%)을 매번 다시 구하고, 그 비율로 미리보기 프레임 인덱스를 정해 캔버스에 다시 그린다
+// (계산 한 겹). 진짜 영상 파일은 없다 — 프레임은 mulberry32 시드 난수로 매번 다시 그리는 절차적 패턴이다.
+(function () {
+  var scrollStage = document.getElementById('scrollStage');
+  var card = document.getElementById('card');
+  var thumb = document.getElementById('thumb');
+  var playBtn = document.getElementById('playBtn');
+  var readyLabel = document.getElementById('readyLabel');
+  if (!scrollStage || !card || !thumb || !playBtn || !readyLabel) return;
+  var ctx = thumb.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var FRAME_COUNT = 12;
+  var READY_THRESHOLD = 0.62;
+  var lastFrame = -1;
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function drawFrame(frameIndex) {
+    if (!ctx) return;
+    var rnd = mulberry32(frameIndex * 7919 + 11);
+    var w = thumb.width, h = thumb.height;
+    var cols = 8, rows = 5;
+    var cw = w / cols, ch = h / rows;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var v = rnd();
+        var lightness = 22 + v * 34;
+        var hue = 214 + rnd() * 18;
+        ctx.fillStyle = 'hsl(' + hue.toFixed(0) + ', 38%, ' + lightness.toFixed(0) + '%)';
+        ctx.fillRect(c * cw, r * ch, cw + 1, ch + 1);
+      }
+    }
+    ctx.fillStyle = 'rgba(255,255,255,.06)';
+    for (var i = 0; i < 3; i++) {
+      var bx = rnd() * w, by = rnd() * h, br = 8 + rnd() * 18;
+      ctx.beginPath();
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function update(ratio) {
+    var percent = Math.round(ratio * 100);
+    readyLabel.textContent = 'Ready  ' + percent + '%';
+    var frameIndex = Math.min(FRAME_COUNT - 1, Math.floor(ratio * (FRAME_COUNT - 1)));
+    if (frameIndex !== lastFrame) {
+      lastFrame = frameIndex;
+      drawFrame(frameIndex);
+    }
+    if (ratio >= READY_THRESHOLD) {
+      playBtn.classList.add('playBtn--ready');
+      playBtn.disabled = false;
+    } else {
+      playBtn.classList.remove('playBtn--ready');
+      playBtn.disabled = true;
+    }
+  }
+
+  drawFrame(0);
+  update(0);
+
+  var io = new IntersectionObserver(function (entries) {
+    var entry = entries[0];
+    if (!entry) return;
+    update(entry.intersectionRatio);
+  }, {
+    root: scrollStage,
+    threshold: Array.from({ length: 51 }, function (_, i) { return i / 50; })
+  });
+  io.observe(card);
+
+  playBtn.addEventListener('click', function () {
+    if (playBtn.disabled) return;
+    playBtn.classList.add('playBtn--pressed');
+    setTimeout(function () { playBtn.classList.remove('playBtn--pressed'); }, 260);
+  });
+
+  if (!reduce) {
+    var max = 0;
+    requestAnimationFrame(function tick() {
+      max = scrollStage.scrollHeight - scrollStage.clientHeight;
+      var t = performance.now() / 1400;
+      var wave = (Math.sin(t) + 1) / 2;
+      scrollStage.scrollTop = wave * max;
+      requestAnimationFrame(tick);
+    });
+  }
+})();
+</script>
+</body>
+</html>

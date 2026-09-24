@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync Toggle That Opens Several Fields at Once — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pfs is-demo" id="pfsRoot">
+  <form class="pfs__form" id="pfsForm" novalidate>
+    <label class="pfs__field">
+      <span class="pfs__labelText">Password</span>
+      <span class="pfs__inputWrap">
+        <input class="pfs__input" id="pfsInputA" type="password" autocomplete="new-password" spellcheck="false" value="">
+        <button class="pfs__toggle" id="pfsToggleA" type="button" aria-pressed="false" aria-label="Show password">
+          <svg class="pfs__eye" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path class="pfs__lidTop" id="pfsLidTopA" d="M2,12 Q12,4 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path class="pfs__lidBottom" id="pfsLidBottomA" d="M2,12 Q12,20 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle class="pfs__pupil" id="pfsPupilA" cx="12" cy="12" r="3.2" fill="currentColor"/>
+          </svg>
+        </button>
+      </span>
+    </label>
+    <label class="pfs__field">
+      <span class="pfs__labelText">Confirm password</span>
+      <span class="pfs__inputWrap">
+        <input class="pfs__input" id="pfsInputB" type="password" autocomplete="new-password" spellcheck="false" value="">
+        <button class="pfs__toggle" id="pfsToggleB" type="button" aria-pressed="false" aria-label="Show password">
+          <svg class="pfs__eye" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path class="pfs__lidTop" id="pfsLidTopB" d="M2,12 Q12,4 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path class="pfs__lidBottom" id="pfsLidBottomB" d="M2,12 Q12,20 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle class="pfs__pupil" id="pfsPupilB" cx="12" cy="12" r="3.2" fill="currentColor"/>
+          </svg>
+        </button>
+      </span>
+    </label>
+    <p class="pfs__hint" id="pfsHint">Both boxes share one state</p>
+  </form>
+</div>
+<script>
+(function () {
+  // 기법: 두 필드가 각자 토글 버튼을 갖지만 실제로 바꾸는 값은 단 하나(shared revealed)뿐이다.
+  // 어느 버튼을 눌러도 setRevealed() 하나가 두 input·두 눈 아이콘을 동시에 갱신하고, 눈 모프는
+  // 공유 eyeProgress 값 하나로 두 SVG 를 같은 프레임에 다시 그린다(paintEyes).
+  var root = document.getElementById('pfsRoot');
+  var form = document.getElementById('pfsForm');
+  var inputA = document.getElementById('pfsInputA');
+  var inputB = document.getElementById('pfsInputB');
+  var toggleA = document.getElementById('pfsToggleA');
+  var toggleB = document.getElementById('pfsToggleB');
+  var lidTopA = document.getElementById('pfsLidTopA');
+  var lidBottomA = document.getElementById('pfsLidBottomA');
+  var pupilA = document.getElementById('pfsPupilA');
+  var lidTopB = document.getElementById('pfsLidTopB');
+  var lidBottomB = document.getElementById('pfsLidBottomB');
+  var pupilB = document.getElementById('pfsPupilB');
+
+  var SYNC_EYE_MORPH_MS = 260;
+  var LABEL_SHOW = 'Show password';
+  var LABEL_HIDE = 'Hide password';
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var pwRand = seedRand(426031);
+  var POOL_ALL = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%*?-';
+  function makeFakePassword() {
+    var len = 8 + Math.floor(pwRand() * 5);
+    var out = '';
+    for (var i = 0; i < len; i += 1) out += POOL_ALL.charAt(Math.floor(pwRand() * POOL_ALL.length));
+    return out;
+  }
+  var FAKE_PW = makeFakePassword();
+  inputA.value = FAKE_PW;
+  inputB.value = FAKE_PW;
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function paintEyes(progress) {
+    var eased = easeOutCubic(progress);
+    var topY = 12 - 8 * eased;
+    var botY = 12 + 8 * eased;
+    var d1 = 'M2,12 Q12,' + topY + ' 22,12';
+    var d2 = 'M2,12 Q12,' + botY + ' 22,12';
+    lidTopA.setAttribute('d', d1);
+    lidBottomA.setAttribute('d', d2);
+    pupilA.style.opacity = String(eased);
+    lidTopB.setAttribute('d', d1);
+    lidBottomB.setAttribute('d', d2);
+    pupilB.style.opacity = String(eased);
+  }
+
+  var eyeProgress = 0;
+  var eyeRaf = null;
+  var animT0 = null, animStart = 0, animTarget = 0;
+  paintEyes(eyeProgress);
+
+  function animateEyeStep(ts) {
+    if (animT0 === null) animT0 = ts;
+    var elapsed = ts - animT0;
+    var p = Math.min(1, elapsed / SYNC_EYE_MORPH_MS);
+    eyeProgress = animStart + (animTarget - animStart) * p;
+    paintEyes(eyeProgress);
+    if (p < 1) { eyeRaf = requestAnimationFrame(animateEyeStep); }
+    else { eyeRaf = null; eyeProgress = animTarget; paintEyes(eyeProgress); }
+  }
+  function animateEyeTo(target) {
+    if (eyeRaf) { cancelAnimationFrame(eyeRaf); eyeRaf = null; }
+    if (reduce) { eyeProgress = target; paintEyes(eyeProgress); return; }
+    animStart = eyeProgress;
+    animTarget = target;
+    animT0 = null;
+    eyeRaf = requestAnimationFrame(animateEyeStep);
+  }
+
+  var revealed = false;
+  function setRevealed(next) {
+    revealed = next;
+    var type = revealed ? 'text' : 'password';
+    inputA.type = type;
+    inputB.type = type;
+    root.classList.toggle('pfs--revealed', revealed);
+    var label = revealed ? LABEL_HIDE : LABEL_SHOW;
+    toggleA.setAttribute('aria-pressed', String(revealed));
+    toggleA.setAttribute('aria-label', label);
+    toggleB.setAttribute('aria-pressed', String(revealed));
+    toggleB.setAttribute('aria-label', label);
+    animateEyeTo(revealed ? 1 : 0);
+  }
+
+  function onToggle() {
+    root.classList.remove('is-demo');
+    setRevealed(!revealed);
+  }
+  toggleA.addEventListener('click', onToggle);
+  toggleB.addEventListener('click', onToggle);
+
+  form.addEventListener('submit', function (e) { e.preventDefault(); });
+
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function demoLoop() {
+    if (reduce) return;
+    setRevealed(true);
+    setTimeout(function () { setRevealed(false); }, 900);
+    setTimeout(demoLoop, 2000);
+  }
+  if (!reduce) { setTimeout(demoLoop, 220); }
+})();
+</script>
+</main>
+</body>
+</html>

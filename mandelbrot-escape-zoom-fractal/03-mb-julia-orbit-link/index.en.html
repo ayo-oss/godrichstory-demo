@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Julia set link — Mandelbrot escape-time fractal — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>The coordinate your pointer crosses on the Mandelbrot becomes the Julia set's c — same formula z = z² + c, only which side is fixed changes, and clouds and dendrites morph live</span>
+  </p>
+  <div class="mb__duo">
+    <div class="mb__field" role="application" aria-label="Mandelbrot c-picker" tabindex="0">
+      <canvas class="mb__cv" id="mbCvM"></canvas>
+    </div>
+    <div class="mb__field" role="application" aria-label="Julia set display" tabindex="0">
+      <canvas class="mb__cv" id="mbCvJ"></canvas>
+    </div>
+  </div>  <div class="mb__bar">
+    <span class="mb__meta">c = <span id="mbCv">-0.75, 0.00</span></span>
+    <span class="mb__meta mb__meta--dim">canvas · z = z² + c · pointermove</span>
+  </div>
+</div>
+</main>
+<script>
+// 줄리아 집합 연동(03) — 만델브로와 줄리아는 같은 식의 두 닮은 축.
+// 만델브로: c 를 픽셀로, z 를 0 에서 시작 → "어떤 c 가 집합에 드나"
+// 줄리아  : z 를 픽셀로, c 를 고정     → "고정 c 에서 어떤 z 가 집합에 드나"
+// 포인터(·자동 순항)가 만델브로 위 좌표를 고르면 오른쪽 캔버스가 그 c 로 다시 계산된다.
+// 자동 순항 경로는 가장 극적인 형태가 나오는 경계선(집합 가장자리)을 따라다닌다.
+(function () {
+  var MAXIT_M = 64, MAXIT_J = 80;   // 만델브로판은 뷰가 넓어 얕게, 줄리아판은 깊게
+  var IRES = 150;                   // 두 캔버스 각각의 내부 해상도 — 동시 계산이라 낮게 잡는다
+
+  var root = document.getElementById('mbRoot');
+  var cvM = document.getElementById('mbCvM');
+  var cvJ = document.getElementById('mbCvJ');
+  var cLabel = document.getElementById('mbCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = ['--mb-c0', '--mb-c1', '--mb-c2', '--mb-c3', '--mb-c4'].map(tokRGB);
+  var C_SET = tokRGB('--mb-set');
+  var C_CROSS = tokRGB('--mb-cross');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var WM = 0, HM = 0, WJ = 0, HJ = 0;
+  var ovM, ovJ, ctxM, ctxJ, octxM, octxJ;
+
+  // 만델브로 뷰포트
+  var MX = -0.75, MY = 0, MSPAN = 2.9;
+  // 현재 선택된 c (복소수)
+  var curC = { x: -0.75, y: 0 };
+  var pointerC = null;   // 사람 포인터가 고른 좌표(있으면 자동 순항을 이긴다)
+
+  function fit() {
+    var rM = cvM.parentElement.getBoundingClientRect();
+    WM = Math.round(rM.width); HM = Math.round(rM.height);
+    cvM.width = WM; cvM.height = HM;
+    var rJ = cvJ.parentElement.getBoundingClientRect();
+    WJ = Math.round(rJ.width); HJ = Math.round(rJ.height);
+    cvJ.width = WJ; cvJ.height = HJ;
+    ovM = document.createElement('canvas');
+    ovM.width = IRES; ovM.height = Math.max(2, Math.round(IRES * HM / WM));
+    ovJ = document.createElement('canvas');
+    ovJ.width = IRES; ovJ.height = Math.max(2, Math.round(IRES * HJ / WJ));
+    ctxM = cvM.getContext('2d'); ctxJ = cvJ.getContext('2d');
+    octxM = ovM.getContext('2d'); octxJ = ovJ.getContext('2d');
+  }
+
+  function colorOf(n, maxit) {
+    if (n >= maxit) return C_SET;
+    var u = (n / maxit) * 4;
+    var seg = u - Math.floor(u / 4) * 4;
+    var a = PAL[Math.floor(seg) % 4], b = PAL[(Math.floor(seg) + 1) % 4];
+    var f = seg - Math.floor(seg);
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  }
+
+  // 만델브로 렌더 — 한 번 그리고 고정(좌표축은 움직이지 않으니)
+  function renderM() {
+    var iw = ovM.width, ih = ovM.height;
+    var img = octxM.createImageData(iw, ih);
+    var px = img.data;
+    var dx = MSPAN / iw, dy = MSPAN / iw;
+    var oy0 = MY - (ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var ci = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var cr = MX - MSPAN / 2 + i * dx;
+        var zr = 0, zi = 0, n = 0;
+        while (n < MAXIT_M && zr * zr + zi * zi <= 4) {
+          var t = zr * zr - zi * zi + cr;
+          zi = 2 * zr * zi + ci;
+          zr = t; n++;
+        }
+        var c = colorOf(n, MAXIT_M);
+        px[k++] = c[0]; px[k++] = c[1]; px[k++] = c[2]; px[k++] = 255;
+      }
+    }
+    octxM.putImageData(img, 0, 0);
+    ctxM.imageSmoothingEnabled = true;
+    ctxM.drawImage(ovM, 0, 0, WM, HM);
+  }
+
+  // 줄리아 렌더 — z 를 픽셀로, c 고정. 반복문이 colorOf 안으로 들어온 차이가 전부
+  function renderJ(cr, ci) {
+    var iw = ovJ.width, ih = ovJ.height;
+    var img = octxJ.createImageData(iw, ih);
+    var px = img.data;
+    var span = 3.0;                     // 줄리아 뷰포트 폭 — z 평면 ±1.5
+    var dx = span / iw, dy = span / iw;
+    var oy0 = -(ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var zi0 = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var zr0 = -span / 2 + i * dx;
+        var zr = zr0, zi = zi0, n = 0;
+        while (n < MAXIT_J && zr * zr + zi * zi <= 4) {
+          var t = zr * zr - zi * zi + cr;
+          zi = 2 * zr * zi + ci;
+          zr = t; n++;
+        }
+        var c = colorOf(n, MAXIT_J);
+        px[k++] = c[0]; px[k++] = c[1]; px[k++] = c[2]; px[k++] = 255;
+      }
+    }
+    octxJ.putImageData(img, 0, 0);
+    ctxJ.imageSmoothingEnabled = true;
+    ctxJ.drawImage(ovJ, 0, 0, WJ, HJ);
+  }
+
+  // 만델브로 위 c 위치 십자 표식
+  function drawCross() {
+    var x = (curC.x - (MX - MSPAN / 2)) / MSPAN * WM;
+    var y = (curC.y - (MY - (HM / WM * MSPAN) / 2)) / (HM / WM * MSPAN) * HM;
+    ctxM.strokeStyle = 'rgba(' + C_CROSS[0] + ',' + C_CROSS[1] + ',' + C_CROSS[2] + ',0.95)';
+    ctxM.lineWidth = 1.6;
+    ctxM.beginPath();
+    ctxM.moveTo(x - 7, y); ctxM.lineTo(x + 7, y);
+    ctxM.moveTo(x, y - 7); ctxM.lineTo(x, y + 7);
+    ctxM.stroke();
+  }
+
+  // 자동 순항 c 경로 — 집합 가장자리(명치 오목부 ↔ 전구 위 안테나)를 부드럽게 왕복.
+  // 경계 근처에서 줄리아가 가장 극적으로 바뀐다(연결 dust ↔ 토끼 ↔ 가지).
+  function orbitC(t) {
+    var a = t * Math.PI * 2;
+    return {
+      x: -0.62 + 0.24 * Math.cos(a),
+      y:  0.42 * Math.sin(a) * Math.cos(a * 0.5)
+    };
+  }
+
+  function setLabel() {
+    cLabel.textContent = (Math.round(curC.x * 100) / 100) + ', ' + (Math.round(curC.y * 100) / 100).toFixed(2);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 2.0;
+    if (pointerC) { curC.x = pointerC.x; curC.y = pointerC.y; }
+    else { var o = orbitC(loop / 2.0); curC.x = o.x; curC.y = o.y; }
+    renderM(); drawCross();
+    renderJ(curC.x, curC.y);
+    setLabel();
+    raf = requestAnimationFrame(frame);
+  }
+
+  // 사람 포인터 — 만델브로 캔버스 위. pointermove 로 c 를 직접 고른다
+  function onMove(e) {
+    var r = cvM.getBoundingClientRect();
+    var x = (e.clientX - r.left) / r.width;        // 0~1
+    var y = (e.clientY - r.top) / (r.height * (r.width / r.height) * (HM / WM) / (HM / WM));
+    y = (e.clientY - r.top) / r.height;
+    // 세로 span 은 화면 비율과 동일하게 종횡비 보정
+    var vspan = MSPAN * (r.height / r.width);
+    pointerC = { x: MX - MSPAN / 2 + x * MSPAN, y: MY - vspan / 2 + y * vspan };
+  }
+  cvM.addEventListener('pointermove', onMove);
+  cvM.addEventListener('pointerdown', onMove);
+  cvM.addEventListener('pointerleave', function () { pointerC = null; });
+
+  window.addEventListener('resize', function () {
+    fit(); renderM(); drawCross(); renderJ(curC.x, curC.y); setLabel();
+  });
+
+  fit();
+  renderM();
+  if (reduce) {
+    // reduce — 순항 대신 대표 c 두 개 중 토끼 근처 한 점을 고정
+    curC = { x: -0.62, y: 0.38 };
+    drawCross(); renderJ(curC.x, curC.y); setLabel();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>그림을 파티클로 다시 그리기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pd" id="pd">
+  <p class="pd__hint">
+    <svg class="pd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="68" cy="68" r="28"/><circle cx="188" cy="68" r="28" opacity=".55"/><circle cx="68" cy="188" r="28" opacity=".55"/><circle cx="188" cy="188" r="28" opacity=".3"/></g></svg>
+    <span>Push the dots and they ripple; let go and the picture returns</span>
+  </p>
+  <div class="pd__field" id="field" role="application" aria-label="Landscape particle test board" tabindex="0">
+    <canvas class="pd__cv" id="cv"></canvas>
+  </div>
+</div>
+</main>
+<script>
+// 그림을 파티클로 다시 그리기 — 외부 이미지를 쓰지 않는다.
+// 풍경을 화면 밖 캔버스에 직접 그리고, 그 밝기를 격자 간격으로 샘플링해 점의 크기와 진하기로 옮긴다.
+var root = document.getElementById('pd');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var SPRING = 16;                                    // 집으로 당기는 스프링 힘
+var PUSH = 2300;                                    // 포인터가 밀어내는 최대 가속
+var RADIUS = 56;                                    // 포인터 영향 Radius
+var W = 0, H = 0, dpr = 1;
+var dots = [];
+var pointer = { x: -9999, y: -9999, on: false };
+
+// 풍경 원본 — 고정 크기로 그린 뒤 drawImage 로 판 크기에 맞춰 옮긴다
+var SCENE_W = 420, SCENE_H = 190;
+var scene = document.createElement('canvas');
+scene.width = SCENE_W;
+scene.height = SCENE_H;
+var sceneCtx = scene.getContext('2d');
+// 샘플링용 캔버스 — 판과 같은 크기. 여기서 getImageData 로 픽셀을 읽는다
+var sample = document.createElement('canvas');
+var sampleCtx = sample.getContext('2d', { willReadFrequently: true });
+
+// 산 능선 하나 — 정현파 세 개를 겹쳐 자연스러운 능선실을 만든다
+function ridge(c, baseY, amp, seed, fill) {
+  c.beginPath();
+  c.moveTo(0, SCENE_H);
+  for (var x = 0; x <= SCENE_W; x += 4) {
+    var t = x / SCENE_W * Math.PI * 2;
+    var y = baseY
+      - Math.sin(t * 1.7 + seed) * amp
+      - Math.sin(t * 3.1 + seed * 2.3) * amp * 0.45
+      - Math.sin(t * 5.3 + seed * 4.1) * amp * 0.18;
+    c.lineTo(x, y);
+  }
+  c.lineTo(SCENE_W, SCENE_H);
+  c.closePath();
+  c.fillStyle = fill;
+  c.fill();
+}
+
+function paintScene() {
+  var c = sceneCtx;
+  // 밤하늘 — 잉크색 하늘이 지평선으로 내려갈수록 옅은 파랑에 젖는다
+  var sky = c.createLinearGradient(0, 0, 0, SCENE_H);
+  sky.addColorStop(0, '#17141a');
+  sky.addColorStop(1, '#2c2f4d');
+  c.fillStyle = sky;
+  c.fillRect(0, 0, SCENE_W, SCENE_H);
+  // 달과 달무리 — 노랑 원 하나와 그 주위로 번지는 빛
+  var mx = SCENE_W * 0.72, my = SCENE_H * 0.26, mr = 20;
+  var halo = c.createRadialGradient(mx, my, mr * 0.4, mx, my, mr * 5);
+  halo.addColorStop(0, 'rgba(255, 210, 63, 0.30)');
+  halo.addColorStop(1, 'rgba(255, 210, 63, 0)');
+  c.fillStyle = halo;
+  c.fillRect(0, 0, SCENE_W, SCENE_H);
+  c.fillStyle = '#ffd23f';
+  c.beginPath();
+  c.arc(mx, my, mr, 0, Math.PI * 2);
+  c.fill();
+  // 별 — 크림과 노랑 알갱이를 하늘에 흩뿌린다
+  for (var s = 0; s < 46; s++) {
+    c.globalAlpha = 0.35 + Math.random() * 0.65;
+    c.fillStyle = Math.random() < 0.3 ? '#ffd23f' : '#fff7e6';
+    c.fillRect(Math.random() * SCENE_W, Math.random() * SCENE_H * 0.5, 1.6, 1.6);
+  }
+  c.globalAlpha = 1;
+  // 산 능선 세 겹 — 멀수록 옅고 가까울수록 진한 크림
+  ridge(c, SCENE_H * 0.56, 18, 1.2, 'rgba(255, 247, 230, 0.32)');
+  ridge(c, SCENE_H * 0.71, 14, 4.7, 'rgba(255, 247, 230, 0.55)');
+  ridge(c, SCENE_H * 0.86, 10, 8.3, 'rgba(255, 247, 230, 0.80)');
+}
+
+function build() {
+  var r = field.getBoundingClientRect();
+  W = r.width; H = r.height;
+  dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  paintScene();
+  // 원본 풍경을 판 크기로 축소·확대해 샘플링 캔버스에 옮긴다 — drawImage 한 번으로 끝난다
+  sample.width = Math.max(1, Math.round(W));
+  sample.height = Math.max(1, Math.round(H));
+  sampleCtx.clearRect(0, 0, sample.width, sample.height);
+  sampleCtx.drawImage(scene, 0, 0, sample.width, sample.height);
+
+  var gap = W < 360 ? 4 : 5;                        // 좁은 판은 간격을 줄여 그림이 뭉개지지 않게 한다
+  var img = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
+  dots = [];
+  for (var y = gap / 2; y < H; y += gap) {
+    var iy = Math.min(sample.height - 1, Math.round(y)) * sample.width;
+    for (var x = gap / 2; x < W; x += gap) {
+      var ix = Math.min(sample.width - 1, Math.round(x));
+      var k = (iy + ix) * 4;
+      // 루마 — 사람 눈이 느끼는 밝기 가중치. 밝은 곳은 크고 진한 점, 어두운 곳은 작고 연한 점이 된다
+      var lum = (img[k] * 0.2126 + img[k + 1] * 0.7152 + img[k + 2] * 0.0722) / 255;
+      // 어두운 색은 하늘색 기운을 남겨 밤하늘의 결로 보이게 한다
+      var rr = Math.round(91 + (img[k] - 91) * lum);
+      var gg = Math.round(140 + (img[k + 1] - 140) * lum);
+      var bb = Math.round(248 + (img[k + 2] - 248) * lum);
+      dots.push({
+        hx: x, hy: y, x: x, y: y, vx: 0, vy: 0,
+        r: 0.7 + lum * 2.0,
+        alpha: 0.28 + lum * 0.72,
+        fill: 'rgb(' + rr + ',' + gg + ',' + bb + ')',
+        ph: Math.random() * Math.PI * 2,
+        sp: 0.4 + Math.random() * 0.8
+      });
+    }
+  }
+}
+
+function step(dt) {
+  var damp = Math.exp(-4.5 * dt);                   // 마찰을 약하게 두면 점이 물결처럼 출렁이고 돌아온다
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var ax = (d.hx - d.x) * SPRING;
+    var ay = (d.hy - d.y) * SPRING;
+    if (pointer.on) {
+      var dx = d.x - pointer.x;
+      var dy = d.y - pointer.y;
+      var dist2 = dx * dx + dy * dy;
+      if (dist2 < RADIUS * RADIUS) {
+        var dist = Math.sqrt(dist2) || 0.001;
+        var force = (1 - dist / RADIUS) * PUSH;
+        ax += (dx / dist) * force;
+        ay += (dy / dist) * force;
+      }
+    }
+    d.vx = (d.vx + ax * dt) * damp;
+    d.vy = (d.vy + ay * dt) * damp;
+    d.x += d.vx * dt;
+    d.y += d.vy * dt;
+  }
+}
+
+function draw(nowSec) {
+  ctx.clearRect(0, 0, W, H);
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var ox = Math.sin(nowSec * d.sp + d.ph) * 0.9;
+    var oy = Math.cos(nowSec * d.sp * 0.7 + d.ph) * 0.9;
+    ctx.globalAlpha = d.alpha * (0.82 + 0.18 * Math.sin(nowSec * d.sp * 1.6 + d.ph));
+    ctx.fillStyle = d.fill;
+    ctx.beginPath();
+    ctx.arc(d.x + ox, d.y + oy, d.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw(now / 1000);
+  requestAnimationFrame(frame);
+}
+
+// 키보드 대체 — 판에 포커스를 두고 Enter 나 Space 를 누르면 중심에서부터 물결이 번져 나간다
+function wave() {
+  var cx = W / 2, cy = H / 2;
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var dx = d.x - cx, dy = d.y - cy;
+    var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    var s = 300 + Math.random() * 200;
+    d.vx += (dx / dist) * s;
+    d.vy += (dy / dist) * s;
+  }
+}
+
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  pointer.x = e.clientX - r.left;
+  pointer.y = e.clientY - r.top;
+  pointer.on = true;
+});
+field.addEventListener('pointerleave', function () { pointer.on = false; });
+field.addEventListener('pointerup', function () { pointer.on = false; });
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); wave(); }
+});
+window.addEventListener('resize', function () { build(); draw(0); });
+
+build();
+if (reduce) {
+  // reduce — 루프를 돌리지 않고 풍경이 온전히 점으로 그려진 한 장만 남긴다
+  root.classList.add('is-still');
+  draw(0);
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

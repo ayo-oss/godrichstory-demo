@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drag-to-confirm — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ctadcs is-demo" id="ctadcs">
+  <div class="ctadcs__panel">
+    <div class="ctadcs__track" id="ctadcsTrack">
+      <span class="ctadcs__trackLabel">Slide to confirm payment</span>
+      <button class="ctadcs__thumb" id="ctadcsThumb" type="button" aria-label="Slide to confirm"></button>
+    </div>
+    <span class="ctadcs__hint" id="ctadcsHint">Must pass the 70% threshold to confirm</span>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('ctadcs');
+  var track = document.getElementById('ctadcsTrack');
+  var thumb = document.getElementById('ctadcsThumb');
+  var hint = document.getElementById('ctadcsHint');
+
+  // 계산 겹: 끄는 위치 값을 트랙 폭 대비 비율(0~1)로 clamp 하고, THRESH(0.7)를 넘겼는지로
+  // 확정 여부를 가른다. 기준 미달로 놓이면 목표(0)까지 매 프레임 lerp(관성 없는 스프링 복귀)한다.
+  var THRESH = 0.7;
+  var pos = 0, target = 0, raf = null, confirmed = false;
+  var THUMB_W = 40;
+
+  function maxTravel() { return track.clientWidth - THUMB_W - 8; }
+
+  function apply(p) {
+    var mt = maxTravel();
+    thumb.style.transform = 'translateX(' + (p * mt).toFixed(1) + 'px)';
+  }
+
+  function settle() {
+    var diff = target - pos;
+    pos += diff * 0.3;
+    if (Math.abs(diff) < 0.002) { pos = target; }
+    apply(pos);
+    if (Math.abs(target - pos) > 0.002) {
+      raf = requestAnimationFrame(settle);
+    } else {
+      raf = null;
+    }
+  }
+  function goTo(p) {
+    target = p;
+    if (raf === null) { raf = requestAnimationFrame(settle); }
+  }
+
+  function release(p) {
+    if (p >= THRESH) {
+      confirmed = true;
+      goTo(1);
+      hint.textContent = 'Confirmed';
+      setTimeout(function () { confirmed = false; goTo(0); hint.textContent = 'Must pass the 70% threshold to confirm'; }, 500);
+    } else {
+      goTo(0);
+    }
+  }
+
+  var dragging = false, startX = 0, startPos = 0;
+  function onDown(clientX) {
+    if (confirmed) { return; }
+    dragging = true; startX = clientX; startPos = pos;
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+  }
+  function onMove(clientX) {
+    if (!dragging) { return; }
+    var mt = maxTravel();
+    var dp = (clientX - startX) / mt;
+    pos = Math.max(0, Math.min(1, startPos + dp));
+    apply(pos);
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    release(pos);
+  }
+
+  function wireReal() {
+    thumb.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientX); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientX); });
+    window.addEventListener('pointerup', onUp);
+  }
+  wireReal();
+  apply(0);
+
+  // 자동 루프: 실제 드래그 대신 목표 값을 단계적으로 옮겨 같은 release() 판정 로직을 탄다.
+  var autoTarget = 0, autoTimer = null;
+  function autoTick() {
+    autoTarget = autoTarget >= 1 ? 0 : Math.min(1, autoTarget + 0.35);
+    pos = autoTarget;
+    apply(pos);
+    if (autoTarget >= 1) { release(1); }
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 220); }
+})();
+</script>
+</body>
+</html>

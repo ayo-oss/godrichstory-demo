@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transition that spreads as a circle from the pressed point value — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cr is-demo" id="cr">
+  <div class="cr__panel" id="crPanel">
+    <p class="cr__label" id="crLabel">Light mode</p>
+    <div class="cr__swatches">
+      <span class="cr__sw"></span><span class="cr__sw"></span><span class="cr__sw"></span>
+    </div>
+  </div>
+  <button type="button" class="cr__toggle" id="crToggle" aria-label="Toggle theme — the circle spreads from the pressed coordinate value">
+    <span class="cr__toggleDot" id="crDot"></span>
+  </button>
+</div>
+</main>
+<script>
+(function () {
+  var SUPPORTS_VT = 'startViewTransition' in document;
+
+  var root = document.getElementById('cr');
+  var panel = document.getElementById('crPanel');
+  var label = document.getElementById('crLabel');
+  var toggle = document.getElementById('crToggle');
+  var dot = document.getElementById('crDot');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var dark = false;
+  var isDemo = true;
+  var CLIP_START_RADIUS_PX = 0;
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function renderState() {
+    panel.classList.toggle('is-dark', dark);
+    label.textContent = dark ? 'Dark mode' : 'Light mode';
+  }
+
+  // 계산 겹: 누른 좌표 값(x, y)에서 패널의 네 꼭짓점까지 거리 중 가장 먼 값을 반지름으로 쓴다 —
+  // 그래야 원이 다 자랐을 때 패널 전체를 남김없이 덮는다.
+  function farthestCornerRadius(x, y, rect) {
+    var corners = [
+      [0, 0], [rect.width, 0], [0, rect.height], [rect.width, rect.height]
+    ];
+    var r = 0;
+    for (var i = 0; i < corners.length; i++) {
+      var dx = x - corners[i][0];
+      var dy = y - corners[i][1];
+      r = Math.max(r, Math.hypot(dx, dy));
+    }
+    return r;
+  }
+
+  function playClip(x, y, rect) {
+    if (!SUPPORTS_VT || !panel.animate) { renderState(); return; }
+    var radius = farthestCornerRadius(x, y, rect);
+    panel.style.viewTransitionName = 'cr-panel';
+    var t = document.startViewTransition(function () { renderState(); });
+    t.ready.then(function () {
+      document.documentElement.animate(
+        { clipPath: ['circle(' + CLIP_START_RADIUS_PX + 'px at ' + x + 'px ' + y + 'px)', 'circle(' + radius.toFixed(1) + 'px at ' + x + 'px ' + y + 'px)'] },
+        { duration: 520, easing: 'ease-in', pseudoElement: '::view-transition-new(cr-panel)' }
+      );
+    });
+    t.finished.then(function () { panel.style.viewTransitionName = ''; });
+  }
+
+  function toggleAt(x, y) {
+    dark = !dark;
+    var rect = panel.getBoundingClientRect();
+    var lx = x - rect.left;
+    var ly = y - rect.top;
+    playClip(lx, ly, rect);
+  }
+
+  toggle.addEventListener('click', function (e) {
+    human();
+    toggleAt(e.clientX, e.clientY);
+  });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      human();
+      var r = toggle.getBoundingClientRect();
+      e.preventDefault();
+      toggleAt(r.left + r.width / 2, r.top + r.height / 2);
+    }
+  });
+
+  var corners = [
+    function () { var r = panel.getBoundingClientRect(); return [r.left + 8, r.top + 8]; },
+    function () { var r = panel.getBoundingClientRect(); return [r.right - 8, r.bottom - 8]; }
+  ];
+  var ci = 0;
+  var HOLD_MS = 1000;
+  function loop() {
+    if (!isDemo) return;
+    var p = corners[ci % corners.length](); ci++;
+    dark = !dark;
+    playClip(p[0] - panel.getBoundingClientRect().left, p[1] - panel.getBoundingClientRect().top, panel.getBoundingClientRect());
+    window.setTimeout(loop, HOLD_MS);
+  }
+
+  if (!reduce) {
+    window.setTimeout(loop, HOLD_MS);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</body>
+</html>

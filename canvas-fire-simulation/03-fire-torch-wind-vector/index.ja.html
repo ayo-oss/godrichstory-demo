@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>松明 — 風ベクトルに流される聖火 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tc is-demo" id="tcRoot">
+  <p class="tc__hint">
+    <svg class="tc__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 1 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>一定の風ベクトルと緩やかなsin揺れで聖火全体が一方向へ流れます — ポインターxは風の強さ、yは方向</span>
+  </p>
+  <div class="tc__field" id="tcField" role="application" aria-label="松明の風ベクトル実験盤" tabindex="0">
+    <canvas class="tc__cv" id="tcCv"></canvas>
+  </div>
+  <div class="tc__bar">
+    <span class="tc__meta">風 <b class="tc__val" id="tcW">0.62</b> ・sin基準の揺れ</span>
+    <span class="tc__meta tc__meta--dim">requestAnimationFrame・色温度ラダー</span>
+  </div>
+</div>
+</main>
+<script>
+// 횃불(03). 불꽃 전체를 기울이는 힘은 두 겹이다:
+//   1) 일정한 風 벡터(WIND_VX, WIND_VY) — 매 프레임 변하지 않는 상수 방향
+//   2) 느린 요동 — sin(t * 저주파) 로 벡터 자체가 아주 천천히 흔들려 성화가 "숨쉬며" 쏠린다
+// 입자는 연료 k(1→0) 로 gold→amber→ember 색온도 사다리를 타고 부력으로 오르며,
+// k 가 낮을수록(위로 갈수록) 바람을 더 많이 받는다 — 근원(횃불 머리)은 곧고 끝은 크게 눕는다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var WIND_VX = 46;      // 風 벡터 x(px/s) — 변형 "風 세기" 축(20 → 70)
+  var WIND_VY = -6;      // 風 벡터 y(px/s) — 살짝 위로 미는 성분
+  var WOBBLE  = 0.35;    // 느린 요동 진폭(라디안) — 변형 "요동 폭" 축
+  var TONE    = 0;       // 코어 색 변형 — 0: amber(#f0a868), 1: rose(#eca0a8)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('tcRoot');
+  var field = document.getElementById('tcField');
+  var cv = document.getElementById('tcCv');
+  var ctx = cv.getContext('2d');
+  var wOut = document.getElementById('tcW');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 성화로 살아 움직인다
+  var SEED = 0x5eed03;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+  var C_CORE  = TONE ? C_ROSE : C_AMBER;   // 색 변형 — 코어 톤 교체
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;   // 가상 風 세기/방향 포인터(0..1)
+  var manual = false;
+
+  // ── 연료 입자 — 횃불 머리에서 태어나 부력 + 風 벡터로 오르내리며 식는다 ──
+  var N_PART = 220;
+  var parts = [];
+  function spawn(p) {
+    p.x = (rand() - 0.5) * 8;
+    p.y = 0;
+    p.vx = (rand() - 0.5) * 8;
+    p.vy = -22 - rand() * 30;
+    p.k = 1;
+    p.ph = rand() * TAU;
+  }
+  for (var i = 0; i < N_PART; i++) {
+    var p = {}; spawn(p); p.y = -rand() * 46; p.k = rand();
+    parts.push(p);
+  }
+
+  var K_BURN = 2.1;      // 연료 소모율 (1/s)
+  var STILL_T = 1.55;    // reduce 에서 그리는 시각 — 성화가 가장 기운 순간
+
+  function draw(tSec, dt) {
+    // 1) 무대 — 어두운 야외
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    var cx = W * 0.5;
+    var ground = H * 0.90;
+    var poleTop = ground - 96;          // 횃불 자루 윗면 = 머리 밑동
+    var strength = 0.5 + px01;          // 포인터 x — 風 세기 배율(0.5~1.5)
+    var dirTilt = (py01 - 0.5) * 0.7;   // 포인터 y — 風 방향 미세 회전
+
+    // ── 두 겹 힘 ──
+    // 1) 일정한 風 벡터: (WIND_VX, WIND_VY) * strength, dirTilt 만큼 회전
+    // 2) 느린 요동: 벡터 각도에 WOBBLE * sin(t * 0.35) 를 더해 성화가 천천히 숨쉬며 쏠린다
+    var baseAng = Math.atan2(WIND_VY, WIND_VX) + dirTilt;
+    var wobAng = baseAng + WOBBLE * Math.sin(tSec * 0.35);
+    var windMag = Math.hypot(WIND_VX, WIND_VY) * strength;
+    var windVX = Math.cos(wobAng) * windMag;
+    var windVY = Math.sin(wobAng) * windMag;
+
+    // ── 2) 앙비언트 글로우 — 성화는 밤의 벌판을 밝힌다 ──
+    // 반경별 감쇠 빛 겹 LAYERS 장을 lighter 로 쌓는다. 반경은 R0→RMAX(대각선 끝까지),
+    // 앞은 촘촘히(밝은 코어)·뒤는 성기게(넓은 은은함). 알파 바닥 0.05 — 가장 바깥 겹도 산다.
+    // A0 는 살아있는 연료 총합 flick 과 느린 sin 펄스로 매 프레임 재계산 —
+    // 중심(hx,hy)도 요동 각도를 그대로 받아 그 자리에서 움직인다.
+    var flick = 0;
+    for (var f = 0; f < N_PART; f++) flick += parts[f].k;
+    flick = flick / N_PART;
+    // 반경 자체가 느리게 부풀었다 줄어든다(breathe) — 겹마다 지름이 진동해 그라디언트 정지점이
+    // 프레임마다 재배치되므로, 화면 넓은 영역이(중심에서 멀어도) 실제로 값이 바뀐다.
+    var breathe = (0.5 + 0.5 * flick) * (0.72 + 0.28 * Math.sin(tSec * 1.9));
+    var hx = cx + windVX * 0.5 + Math.sin(tSec * 1.4) * 6;
+    var hy = poleTop - 22 + windVY * 0.5 + Math.cos(tSec * 1.1) * 4;
+    var R0 = Math.min(W, H) * 0.16 * breathe;
+    var A0 = 0.85 * (0.55 + 0.45 * flick) * (0.62 + 0.38 * Math.sin(tSec * 2.4 + 0.6));
+    var RMAX = Math.hypot(W, H) * 0.99;
+    var LAYERS = 15;
+    var FALLOFF = 0.9;
+    ctx.globalCompositeOperation = 'lighter';
+    for (var L = 0; L < LAYERS; L++) {
+      var Lt = L / (LAYERS - 1);                     // 0..1
+      var R = R0 + (RMAX - R0) * Math.pow(Lt, 0.72); // 앞은 촘촘, 뒤는 성기게
+      var a = Math.max(0.06, A0 * Math.pow(R0 / R, FALLOFF));
+      var m1 = Lt;                                   // 안쪽 gold → 바깥 코어 톤으로 식는다
+      var lr = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m1;
+      var lg = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m1;
+      var lb = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m1;
+      var rg = ctx.createRadialGradient(hx, hy, R * 0.04, hx, hy, R);
+      rg.addColorStop(0, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + a.toFixed(3) + ')');
+      rg.addColorStop(0.72, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + (a * 0.6).toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(hx - R, hy - R, R * 2, R * 2);
+    }
+
+    // ── 잔열 바닥 띠 — 캔버스 전체 폭이 순수 검정으로 죽지 않게, 벌판 전체가
+    // 은은한 잔열로 미세하게 맥동한다(중심이 좌우로 느리게 흘러 폭 전체가 실제로 변한다).
+    var hb = ground - 4;
+    var hbW = W * 0.78;
+    var hbX = cx + Math.sin(tSec * 0.55) * W * 0.3;
+    var hbA = 0.12 * (0.6 + 0.4 * flick) * (0.7 + 0.3 * Math.sin(tSec * 1.25 + 2.0));
+    var hbg = ctx.createRadialGradient(hbX, hb, 2, hbX, hb, hbW);
+    hbg.addColorStop(0, 'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',' + hbA.toFixed(3) + ')');
+    hbg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg;
+    ctx.fillRect(0, hb - hbW, W, hbW * 2);
+    var hb2X = cx - Math.sin(tSec * 0.55) * W * 0.3;
+    var hbg2 = ctx.createRadialGradient(hb2X, hb, 2, hb2X, hb, hbW * 0.7);
+    hbg2.addColorStop(0, 'rgba(' + C_ROSE[0] + ',' + C_ROSE[1] + ',' + C_ROSE[2] + ',' + (hbA * 0.7).toFixed(3) + ')');
+    hbg2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg2;
+    ctx.fillRect(0, hb - hbW * 0.7, W, hbW * 1.4);
+
+    // ── 3) 연료 입자 — 위로 갈수록(k 가 작을수록) 바람을 더 많이 받아 크게 눕는다 ──
+    for (var j = 0; j < N_PART; j++) {
+      var q = parts[j];
+      q.k -= K_BURN * dt;
+      if (q.k <= 0) { spawn(q); continue; }
+      var lean = (1 - q.k);                     // 0(태생) → 1(다 탐) — 風 노출 정도
+      var sway = Math.sin(tSec * 6.6 + q.ph) * 6 * q.k;
+      var fx = cx + q.x + q.vx * q.k + sway + windVX * lean * 0.55 * dt * 60;
+      var fy = poleTop + q.y * q.k + windVY * lean * 0.4 * dt * 60;
+      q.x += (q.vx + windVX * lean * 0.4) * dt;
+      q.y += (q.vy + windVY * lean * 0.3) * dt;
+      var rC, gC, bC, rad;
+      if (q.k > 0.66) {
+        rC = C_GOLD[0]; gC = C_GOLD[1]; bC = C_GOLD[2];
+        rad = 2.3 + 1.5 * (q.k - 0.66) / 0.34;
+      } else if (q.k > 0.33) {
+        var m2 = (q.k - 0.33) / 0.33;
+        rC = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m2;
+        gC = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m2;
+        bC = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m2;
+        rad = 1.8 + 0.5 * m2;
+      } else {
+        var m3 = q.k / 0.33;
+        rC = C_CORE[0] + (C_EMBER[0] - C_CORE[0]) * (1 - m3);
+        gC = C_CORE[1] + (C_EMBER[1] - C_CORE[1]) * (1 - m3);
+        bC = C_CORE[2] + (C_EMBER[2] - C_CORE[2]) * (1 - m3);
+        rad = 1.0 + 0.7 * m3;
+      }
+      ctx.fillStyle = 'rgba(' + (rC | 0) + ',' + (gC | 0) + ',' + (bC | 0) + ',' + (0.16 + 0.5 * q.k).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(fx, fy, rad, 0, TAU);
+      ctx.fill();
+    }
+
+    // ── 4) 횃불 자루·묶음 머리 — 면 계산(source-over) 마감 ──
+    ctx.globalCompositeOperation = 'source-over';
+    var poleAng = wobAng * 0.10;      // 자루는 살짝만 따라 기운다(단단한 나무)
+    ctx.save();
+    ctx.translate(cx, ground);
+    ctx.rotate(poleAng);
+    // 자루
+    ctx.fillStyle = 'rgb(' + ((C_INK[0] + C_EMBER[0] * 0.3) | 0) + ',' + ((C_INK[1] + C_EMBER[1] * 0.3) | 0) + ',' + ((C_INK[2] + C_EMBER[2] * 0.3) | 0) + ')';
+    ctx.fillRect(-6, -(ground - poleTop), 12, ground - poleTop);
+    // 묶음 머리(연기 톤 헝겊)
+    ctx.fillStyle = 'rgba(' + C_SMOKE[0] + ',' + C_SMOKE[1] + ',' + C_SMOKE[2] + ',0.6)';
+    ctx.beginPath();
+    ctx.ellipse(0, -(ground - poleTop) - 2, 12, 16, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    wOut.textContent = (0.5 + px01).toFixed(2);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    if (!manual) {
+      // 미리보기 가상 風 — 시드 고정 Lissajous. x 가 세기, y 가 방향
+      var ph = t * TAU / 3.6;
+      px01 = 0.5 + 0.34 * Math.sin(ph + 0.4);
+      py01 = 0.5 + 0.24 * Math.sin(2 * ph + 0.7);
+    }
+    draw(t, dt);
+    wOut.textContent = (0.5 + px01).toFixed(2);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T, 0.016); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 성화가 가장 기운 한 장만 그린다
+    draw(STILL_T, 0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

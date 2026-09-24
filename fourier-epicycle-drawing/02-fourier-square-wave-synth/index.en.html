@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구형파 합성 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>Stack just the 1st, 3rd, 5th harmonics and the sum of smooth circular motion turns into a sharp square wave — the moment Fourier series proves even corners are sums of sines, put on screen</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="Square-Wave Synthesis Demo" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> 4 odd harmonics · cosine series</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · odd harmonics · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 구형파 합성(02). 푸리에 급수의 고전 증명 장면 —
+// 구형파는 홀수 배음만 남긴 코사인 급수 f(t) = (4/π)·Σ_{k 홀수} sin(k t)/k 로分解된다.
+// 각 항 sin(k t)/k 는 반지름 1/k 인 원이 k 배속으로 도는 것과 같다(오일러 공식의 허수부).
+// 왼쪽에서 그 원 체인을 세로로 쌓으면 맨 끝점의 높이가 f(t) — 오른쪽 파형 영역에 t 축으로 펼쳐
+// 쌓는다. 원들이 합쳐져 각진 계단이 되는 순간이 매 프레임 계산으로 그려진다.
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 왼쪽 체인 뒤 극격자 스포크가 천천히 돌고 오른쪽 파형 영역에 시간 눈금이 흐른다(매 프레임 재계산).
+//  · 파형은 t 가 전진하며 투명 누적 캔버스에 쌓이고 혜성 감쇠로 사라진다(절대 clear 없음).
+//  · 링 체인 + 링크 + 가이드 수평선 + 맥동 절정 점이 매 프레임 다시 그려진다(23/23).
+(function () {
+  // ── 변형 상수 블록 ──
+  var TERMS = 4;      // 사용할 홀수 배음 개수 (1·3·5·7차)
+  var SPEED = 0.55;   // 시간 전진 속도
+  // ──────────────────
+  var AMP = 1.2732395;  // 4/π — 구형파 진폭 정규화
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var waveCv, waveCtx;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    waveCv = document.createElement('canvas');
+    waveCv.width = W * dpr; waveCv.height = H * dpr;
+    waveCtx = waveCv.getContext('2d');
+    waveCtx.scale(dpr, dpr);
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // 밑바탕 — 왼쪽 극격자(회전 스포크) + 오른쪽 흐르는 시간 눈금 + 스캔 밴드. 매 프레임 재계산
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.24, cy = H * 0.5;
+    var maxR = Math.min(W, H) * 0.52;
+    var spin = t * 0.3;
+    for (var i = 0; i < 12; i++) {
+      var a = spin + (i / 12) * Math.PI * 2;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.12 : 0.06);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 10, cy + Math.sin(a) * 10);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+    // 오른쪽 시간 눈금 — 세로선이 왼쪽으로 흐른다
+    var x0 = W * 0.46;
+    var flow = (t * 26) % 24;
+    for (var x = x0 + flow; x < W; x += 24) {
+      ctx.strokeStyle = rgba(C_GLOW, 0.082);
+      ctx.beginPath();
+      ctx.moveTo(x, 4); ctx.lineTo(x, H - 4);
+      ctx.stroke();
+    }
+    // 스캔 밴드 — 파형 영역을 가로질러 흐르는 계단 밴드(그라디언트 아님 — 12단).
+    // 2초 안에 오른쪽 영역 전체를 한 번 쓸고 지나가는 속도
+    var bx = W * 0.46 + ((t * 60) % (W * 0.58));
+    for (var sb = 0; sb < 12; sb++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.095 * (1 - sb / 12));
+      ctx.fillRect(bx - sb * 6, 0, 6, H);
+    }
+    // 기준 레벨선(진폭 ±1) — 숨쉰다
+    ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.03 * Math.sin(t * 1.7));
+    ctx.beginPath();
+    ctx.moveTo(W * 0.44, cy - H * 0.36); ctx.lineTo(W, cy - H * 0.36);
+    ctx.moveTo(W * 0.44, cy + H * 0.36); ctx.lineTo(W, cy + H * 0.36);
+    ctx.stroke();
+  }
+
+  function computeChain(t) {
+    // 세로 스택: 원 k 반지름 = AMP/k, 각속도 = k
+    var pts = [];
+    var cx = W * 0.24, cy = H * 0.5;
+    var base = H * 0.36;
+    pts.push({ x: cx, y: cy });
+    for (var k = 1; k <= TERMS * 2; k += 2) {
+      var y = pts[pts.length - 1].y + Math.sin(k * t) * (AMP / k) * base;
+      pts.push({ x: cx, y: y });
+    }
+    return pts;
+  }
+
+  function draw(t, pulse) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(t);
+    ctx.drawImage(waveCv, 0, 0, W, H);
+
+    var pts = computeChain(t);
+    var base = H * 0.36;
+    var cx = W * 0.24;
+
+    // 파형 영역 구분선
+    ctx.strokeStyle = rgba(C_GLOW, 0.14);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.42, 0); ctx.lineTo(W * 0.42, H);
+    ctx.stroke();
+
+    // 원 체인(세로 스택)
+    for (var i = 0; i < pts.length - 1; i++) {
+      var k = i * 2 + 1;
+      var r = (AMP / k) * base;
+      ctx.strokeStyle = rgba(C_GLOW, 0.15 + 0.06 * i);
+      ctx.beginPath();
+      ctx.arc(cx, pts[i].y, Math.abs(r), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = rgba(C_GLOW, 0.6);
+      ctx.beginPath();
+      ctx.moveTo(cx, pts[i].y);
+      ctx.lineTo(cx, pts[i + 1].y);
+      ctx.stroke();
+    }
+
+    var penY = pts[pts.length - 1].y;
+
+    // 펜 → 파형 절정을 잇는 가이드 수평선
+    ctx.strokeStyle = rgba(C_HOT, 0.4);
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(cx + 4, penY);
+    ctx.lineTo(W * 0.46, penY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 파형의 현재 끝점 — 맥동 절정 점
+    var wx = W * 0.46 + (t * W * 0.5) % (W * 0.5);
+    if (wx > W - 3) wx = W - 3;
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(wx, penY, pr * 2.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(wx, penY, pr, 0, Math.PI * 2);
+    ctx.fill();
+    return penY;
+  }
+
+  function stampWave(penY, prevY, t) {
+    var wx = W * 0.46 + (t * W * 0.5) % (W * 0.5);
+    if (wx > W - 3) return;
+    if (prevY === null) { prevY = penY; }
+    waveCtx.strokeStyle = rgba(C_GLOW, 0.85);
+    waveCtx.lineWidth = 1.8;
+    waveCtx.lineCap = 'round';
+    waveCtx.beginPath();
+    waveCtx.moveTo(wx - W * 0.5 * SPEED * (1 / 60), prevY);
+    waveCtx.lineTo(wx, penY);
+    waveCtx.stroke();
+    waveCtx.strokeStyle = rgba(C_GLOW, 0.18);
+    waveCtx.lineWidth = 4.8;
+    waveCtx.stroke();
+  }
+
+  function decayWave() {
+    waveCtx.setTransform(1, 0, 0, 1, 0, 0);
+    waveCtx.globalCompositeOperation = 'destination-out';
+    waveCtx.fillStyle = 'rgba(0,0,0,0.02)';
+    waveCtx.fillRect(0, 0, W * dpr, H * dpr);
+    waveCtx.globalCompositeOperation = 'source-over';
+    waveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var prevY = null;
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = ((now - t0) / 1000) * SPEED * 4.2;
+    var pulse = 0.5 + 0.5 * Math.sin(t * 7.0);
+    decayWave();
+    var penY = draw(t, pulse);
+    stampWave(penY, prevY, t);
+    prevY = penY;
+    if (nOut) nOut.textContent = String(TERMS);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    var prev = null;
+    for (var i = 0; i <= 340; i++) {
+      var tt = (i / 340) * 6.4;
+      var y = computeChain(tt)[computeChain(0).length - 1];
+      stampWave(y, prev, tt);
+      prev = y;
+    }
+    draw(2.2, 0.5);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevY = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

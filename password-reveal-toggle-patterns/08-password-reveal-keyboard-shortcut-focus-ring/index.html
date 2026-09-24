@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ctrl+Shift+H 를 누르면 값이 토글되며 초점 링이 밝아진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pkf is-demo" id="pkfRoot">
+  <label class="pkf__label" for="pkfInput">비밀번호</label>
+  <div class="pkf__field">
+    <input class="pkf__input" id="pkfInput" type="password" aria-describedby="pkfHint">
+    <button class="pkf__eyeBtn" id="pkfEyeBtn" type="button" aria-pressed="false" aria-label="비밀번호 보기">
+      <svg class="pkf__eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path class="pkf__eyeOpen" d="M2,12 Q12,4 22,12 Q12,20 2,12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+        <circle class="pkf__eyeOpen" cx="12" cy="12" r="3.2" fill="currentColor"/>
+        <path class="pkf__eyeShut" d="M2,12 Q12,18 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+  <p class="pkf__hint" id="pkfHint">
+    <span class="pkf__hintText">단축키로도 전환할 수 있다</span>
+    <span class="pkf__combo"><kbd class="pkf__kbd">Ctrl</kbd>+<kbd class="pkf__kbd">Shift</kbd>+<kbd class="pkf__kbd">H</kbd></span>
+  </p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: input 자체에 건 keydown 이 Ctrl+Shift+H 를 잡아 toggleReveal() 로 type 을 바꾸고
+  // flashFocusRing() 이 호출 시각부터 rAF 로 t 를 늘려 envelope = max(0, 1 - t/FOCUS_RING_FLASH_MS)
+  // (선형 감쇠 — 튕김 없는 단조 감쇠라 사인·지수보다 이 값에 맞다)를 계산해 CSS 변수
+  // --ring-alpha 에 매 프레임 써 넣는다. scss 는 box-shadow 확장을 그 변수로만 읽는다.
+  var root = document.getElementById('pkfRoot');
+  var input = document.getElementById('pkfInput');
+  var eyeBtn = document.getElementById('pkfEyeBtn');
+
+  var FOCUS_RING_FLASH_MS = 500;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var pwRand = seedRand(426081);
+  var PW_POOL = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
+  function pickPassword(len) {
+    var out = '';
+    for (var i = 0; i < len; i += 1) out += PW_POOL[Math.floor(pwRand() * PW_POOL.length)];
+    return out;
+  }
+  input.value = pickPassword(11);
+
+  function toggleReveal() {
+    var willShow = input.type === 'password';
+    input.type = willShow ? 'text' : 'password';
+    eyeBtn.setAttribute('aria-pressed', String(willShow));
+    root.classList.toggle('is-open', willShow);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var flashStart = 0;
+  var flashRaf = null;
+  var reduceFlashTimer = null;
+
+  function step(ts) {
+    var t = ts - flashStart;
+    var envelope = Math.max(0, 1 - t / FOCUS_RING_FLASH_MS);
+    input.style.setProperty('--ring-alpha', String(envelope));
+    if (envelope > 0) {
+      flashRaf = requestAnimationFrame(step);
+    } else {
+      flashRaf = null;
+    }
+  }
+
+  function flashFocusRing() {
+    if (reduce) {
+      input.style.setProperty('--ring-alpha', '1');
+      window.clearTimeout(reduceFlashTimer);
+      reduceFlashTimer = window.setTimeout(function () {
+        input.style.setProperty('--ring-alpha', '0');
+      }, FOCUS_RING_FLASH_MS);
+      return;
+    }
+    flashStart = performance.now();
+    if (flashRaf !== null) return;
+    flashRaf = requestAnimationFrame(step);
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyH') {
+      e.preventDefault();
+      toggleReveal();
+      flashFocusRing();
+    }
+  });
+
+  eyeBtn.addEventListener('click', function () {
+    toggleReveal();
+    flashFocusRing();
+    input.focus({ preventScroll: true });
+  });
+
+  if (reduce) root.classList.remove('is-demo');
+
+  function demoLoop() {
+    if (!root.classList.contains('is-demo')) return;
+    toggleReveal();
+    flashFocusRing();
+    setTimeout(demoLoop, 2000);
+  }
+  if (!reduce) setTimeout(demoLoop, 200);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Black hole tunnel demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bh" id="bh">
+  <p class="bh__hint">
+    <svg class="bh__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>Lower the zoom and the tunnel pulls deeper and slower</span>
+  </p>
+  <div class="bh__field">
+    <canvas class="bh__cv" id="cv"></canvas>
+  </div>
+  <div class="bh__bar">
+    <label class="bh__dial">Zoom
+      <input type="range" id="zoom" min="102" max="110" step="1" value="106" aria-label="Zoom">
+      <b class="bh__val" id="zoomVal">×1.06</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 블랙홀 터널 — 되먹임 확대 하나로 만든다. 매 프레임 캔버스 자기 자신(직전 프레임)을
+// 보조 캔버스에 복사한 뒤 중심 기준 scale 배로 키워 자기 위에 다시 drawImage 한다.
+// 자기 위에 겹쳐 그리면 읽는 도중 내용이 바뀌므로 반드시 보조 캔버스를 거친다.
+// 키워진 지난 그림 위에 매 프레임 새 얼룩(밝은 점·호)을 lighter 합성으로 조금씩 뿌리면
+// 얼룩이 바깥으로 흘러 나가며 끝없이 빨려 드는 터널 벽이 된다.
+var root = document.getElementById('bh');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var zoomIn = document.getElementById('zoom');
+var zoomOut = document.getElementById('zoomVal');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var BG0 = v('--bg-0'), BG1 = v('--bg-1');
+var SPECKS = [v('--speck-cream'), v('--speck-blue'), v('--speck-yellow'), v('--speck-orange')];
+var GLOW0 = v('--glow-0'), GLOW1 = v('--glow-1');
+var RING = v('--ring');
+var HOLE = v('--hole');
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var zoom = 1.06;                  // 되먹임 배율 — 편 변형 1번(1.06 에서 1.02 로)과 같은 축
+var SEEDS = 4;                    // 프레임마다 뿌리는 얼룩 수
+var raf = 0;
+var aux = document.createElement('canvas');
+var actx = aux.getContext('2d');
+
+function fit() {
+  var r = cv.parentElement.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  // 이 데모는 되먹임 drawImage 이 좌표계가 흐트러지지 않게 장치 픽셀로만 그린다(변환 없음)
+  cv.width = Math.round(r.width * dpr);
+  cv.height = Math.round(r.height * dpr);
+  aux.width = cv.width; aux.height = cv.height;
+}
+
+// 바닥 — 짙은 방사 배경과 옅은 동심 원 몇 개. 첫 프레임이 빈 화면이 되지 않게 한다
+function base() {
+  var w = cv.width, h = cv.height;
+  var g = ctx.createRadialGradient(w * 0.5, h * 0.5, 4, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
+  g.addColorStop(0, BG0);
+  g.addColorStop(1, BG1);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = SPECKS[1];
+  for (var i = 1; i <= 4; i++) {
+    ctx.globalAlpha = 0.05 + i * 0.015;
+    ctx.beginPath();
+    ctx.arc(w * 0.5, h * 0.5, horizonR() * (1 + i * 0.85), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function horizonR() { return Math.max(12, Math.round(Math.min(cv.width, cv.height) * 0.15)); }
+
+// 새 얼룩 — 터널 벽의 밥알. 지평선 바로 바깥에서 태어나 확대되며 바깥으로 흘러 나간다
+function speck() {
+  var w = cv.width, h = cv.height, r = horizonR();
+  var ang = Math.random() * Math.PI * 2;
+  var dist = r * (1.12 + Math.random() * 1.7);
+  var x = w * 0.5 + Math.cos(ang) * dist;
+  var y = h * 0.5 + Math.sin(ang) * dist;
+  ctx.fillStyle = SPECKS[(Math.random() * SPECKS.length) | 0];
+  if (Math.random() < 0.3) {
+    // 호 얼룩 — 훑고 지나가는 빛의 자국
+    ctx.lineWidth = 1 + Math.random() * 1.6;
+    ctx.beginPath();
+    ctx.arc(w * 0.5, h * 0.5, dist, ang - 0.18, ang + 0.18);
+    ctx.stroke();
+  } else {
+    ctx.globalAlpha = 0.5 + Math.random() * 0.5;
+    ctx.beginPath();
+    ctx.arc(x, y, 0.8 + Math.random() * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 사건의 지평선 + 광자 구 — 매 프레임 마지막에 얹는다. 검은 원은 방사 그라디언트로
+// 가장자리만 물러지게 지우고, 그 둘레를 도는 얇은 링이 흐르는 방향을 알려 준다.
+function horizon(now) {
+  var w = cv.width, h = cv.height, r = horizonR();
+  var cx = w * 0.5, cy = h * 0.5;
+  // 강착 빛 — 지평선 바로 바깥의 따뜻한 안개
+  ctx.globalCompositeOperation = 'lighter';
+  var glow = ctx.createRadialGradient(cx, cy, r * 0.9, cx, cy, r * 2.1);
+  glow.addColorStop(0, GLOW0);
+  glow.addColorStop(1, GLOW1);
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 2.1, 0, Math.PI * 2);
+  ctx.fill();
+  // 검은 원
+  ctx.globalCompositeOperation = 'source-over';
+  var disc = ctx.createRadialGradient(cx, cy, r * 0.6, cx, cy, r);
+  disc.addColorStop(0, HOLE);
+  disc.addColorStop(0.82, HOLE);
+  disc.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = disc;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  // 광자 구 — 링 전체를 옅게, 그 위에 대시 한토막을 돌려 보인다
+  ctx.strokeStyle = RING;
+  ctx.lineWidth = Math.max(1, r * 0.05);
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.06, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  var circ = 2 * Math.PI * r * 1.06;
+  ctx.setLineDash([circ * 0.22, circ * 0.78]);
+  ctx.lineDashOffset = -(now / 1000 % 1) * circ;
+  ctx.lineWidth = Math.max(1.4, r * 0.09);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.06, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function frame(now) {
+  var w = cv.width, h = cv.height;
+  // ① 직전 프레임을 보조 캔버스에 복사
+  actx.clearRect(0, 0, w, h);
+  actx.drawImage(cv, 0, 0);
+  // ② 중심 기준 확대해 다시 깐다 — 이 한 번의 drawImage 가 터널 전부다
+  var dw = w * zoom, dh = h * zoom;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(aux, 0, 0, w, h, (w - dw) * 0.5, (h - dh) * 0.5, dw, dh);
+  // ③ 새 얼룩을 더한다 — 겹치는 곳이 밝아지는 lighter 합성
+  ctx.globalCompositeOperation = 'lighter';
+  for (var i = 0; i < SEEDS; i++) speck();
+  // ④ 지평선과 광자 구
+  horizon(now);
+  raf = requestAnimationFrame(frame);
+}
+
+function setZoom(val) {
+  zoom = Number(val) / 100;
+  zoomOut.textContent = '×' + zoom.toFixed(2);
+}
+
+zoomIn.addEventListener('input', function () { setZoom(zoomIn.value); });
+window.addEventListener('resize', function () { fit(); if (reduce) still(); else base(); });
+
+// 정지판 — 루프 없이 얼룩·확대를 몇십 번만 몰아 그려 이미 다 만들어진 터널 한 장을 얻는다
+function still() {
+  base();
+  for (var i = 0; i < 60; i++) {
+    var w = cv.width, h = cv.height;
+    actx.clearRect(0, 0, w, h);
+    actx.drawImage(cv, 0, 0);
+    var dw = w * zoom, dh = h * zoom;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(aux, 0, 0, w, h, (w - dw) * 0.5, (h - dh) * 0.5, dw, dh);
+    ctx.globalCompositeOperation = 'lighter';
+    for (var k = 0; k < SEEDS; k++) speck();
+  }
+  horizon(0);
+}
+
+fit();
+setZoom(zoomIn.value);
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 완성된 터널의 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  still();
+} else {
+  base();
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

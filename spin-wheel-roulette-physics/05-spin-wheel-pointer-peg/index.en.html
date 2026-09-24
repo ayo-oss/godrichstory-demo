@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The ticking pointer — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tk" id="tk">
+  <p class="tk__hint">The pointer flicks and springs back at every sector edge — the frame the quotient changes is the crossing</p>
+  <div class="tk__row">
+    <div class="tk__field" id="field" role="application" aria-label="Tick physics lab" tabindex="0">
+      <canvas class="tk__cv" id="cv"></canvas>
+    </div>
+    <div class="tk__side">
+      <b class="tk__num" id="ticks">0</b>
+      <span class="tk__unit">pegs passed — crossings of sector edges</span>
+      <div class="tk__bar" id="bar" aria-hidden="true"></div>
+      <p class="tk__meta">4px amplitude spring decay — the feel of a real peg catching</p>
+      <p class="tk__meta">Sound is off for now — capture frames would skip ticks</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 포인터 딸깍(05) — 회전 각도를 sectors 경계 각도로 나눈 몫이 바뀌는 프레임을 감지하면
+// 포인터가 핀을 지나간 순간이다. 그 프레임에 포인터를 경계 방향으로 살짝 밀었다가
+// 스프링 감쇠로 되돌리면 실물 핀이 걸리는 촉각이 난다. 손으로 돌릴 때는
+// OscillatorNode 짧은 틱 사운드도 같이 난다(자동 루프·캡처에서는 무음)
+(function () {
+  var root = document.getElementById('tk');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var ticksEl = document.getElementById('ticks');
+  var barEl = document.getElementById('bar');
+  if (!root || !field || !cv || !ticksEl || !barEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 8; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var N = 8, SEG = TAU / N;
+
+  var ang = 0, vel = 0, ticks = 0;
+  var FRICTION = 0.30, STOP = 0.5;
+  // 포인터 스프링 — 위치 px, 속도 px/s, 스프링 상수 k, 감쇠 c. 몫이 바뀌면 속도를 얻는다
+  var pk = 340, pc = 14, pX = 0, pV = 0;
+  var AMP = 4;                       // 진폭 상수 (px) — 변형 3 이 값으로 논다
+  var flicks = [12, -9, 15];
+  var fi = 1, idle = 0, settle = -1, pulse = -1, dpr = 1, lastQ = 0;
+  // 틱 사운드 — OscillatorNode 짧은 삼각파. 사용자가 직접 돌릴 때만 소리가 난다
+  // (첫 pointerdown 에서 AudioContext 를 만든다 — 자동재생 정책·캡처 환경 둘 다 안전)
+  var ac = null;
+  function tickSound() {
+    if (!ac) return;
+    try {
+      var osc = ac.createOscillator();
+      var gain = ac.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = 1750;
+      gain.gain.setValueAtTime(0.045, ac.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.03);
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.start(); osc.stop(ac.currentTime + 0.035);
+    } catch (err) { /* 오디오 기기 없음 — 시각 틱에는 영향 없다 */ }
+  }
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+
+  function draw() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 10;
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    for (var k = 0; k < N; k++) {
+      var a0 = k * SEG;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a0 + SEG); ctx.closePath();
+      ctx.fillStyle = PAL[k]; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.22)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    // 핀 — sectors 경계마다 둥근 점
+    for (var p = 0; p < N; p++) {
+      var pa = p * SEG;
+      ctx.beginPath();
+      ctx.arc(Math.cos(pa) * (R - 4), Math.sin(pa) * (R - 4), 3, 0, TAU);
+      ctx.fillStyle = CREAM; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.4)'; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill(); ctx.strokeStyle = 'rgba(23,20,26,.4)'; ctx.stroke();
+    if (pulse >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 13 + pulse * 20, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,247,230,' + (1 - pulse) * 0.7 + ')';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+    // 12시 고정 포인터 — 스프링 변위 pX 를 접선 방향(가로)으로 받는다
+    var tipY = cy - R + 7;
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - R - 7);
+    ctx.lineTo(cx + 7, cy - R - 7);
+    ctx.lineTo(cx + pX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = CREAM; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.stroke();
+    // 틱 순간 번쩍 — 핀을 지나갈 때 포인터 끝이 밝아진다
+    if (Math.abs(pV) > 40) {
+      ctx.beginPath(); ctx.arc(cx + pX, tipY, 4 + Math.min(6, Math.abs(pV) / 60), 0, TAU);
+      ctx.fillStyle = 'rgba(255,247,230,.5)'; ctx.fill();
+    }
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (!ac) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) { try { ac = new AC(); } catch (err) { ac = null; } }
+    }
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+    tickCheck();
+    idle = 0;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-24, Math.min(24, drag.v));
+    settle = -1; pulse = -1;
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      vel = flicks[fi++ % flicks.length]; settle = -1; pulse = -1; idle = 0;
+    }
+  });
+
+  // 몫이 바뀌면 핀 1개 통과 — 틱 카운트·스프링 속도를 준다
+  function tickCheck() {
+    var q = Math.floor(ang / SEG);
+    if (q !== lastQ) {
+      var d = q - lastQ;
+      ticks += Math.abs(d);
+      pV += (d > 0 ? 1 : -1) * Math.abs(vel || drag.v || 6) * 26;
+      if (drag.on) tickSound();        // 소리는 사람 손으로 돌릴 때만
+      ticksEl.textContent = String(ticks);
+      lastQ = q;
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    // 포인터 스프링 적분 — a = -k·x - c·v (질량 1)
+    var a = -pk * pX - pc * pV;
+    pV += a * dt; pX += pV * dt;
+    if (Math.abs(pX) < 0.02 && Math.abs(pV) < 1) { pX = 0; pV = 0; }
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt;
+        vel *= Math.pow(FRICTION, dt);
+        tickCheck();
+        if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; }
+      } else if (idle > 0) { idle -= dt; }
+      else if (settle >= 0) {
+        settle += dt; pulse = Math.min(1, settle / 0.3);
+        if (settle > 0.4) { vel = flicks[fi++ % flicks.length]; settle = -1; pulse = -1; }
+      }
+    }
+    draw();
+    // 진폭 바 — 스프링 변위를 5칸으로 (transform 이라 레이아웃이 흔들리지 않는다)
+    var lv = Math.min(5, Math.ceil(Math.abs(pX) / (AMP / 5)));
+    for (var b2 = 0; b2 < barEl.children.length; b2++) {
+      barEl.children[b2].className = b2 < lv ? 'tk__seg is-on' : 'tk__seg';
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  for (var s = 0; s < 5; s++) {
+    var seg = document.createElement('span');
+    seg.className = 'tk__seg';
+    barEl.appendChild(seg);
+  }
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 포인터가 살짝 튕긴 상태로 고정하고 루프는 돌지 않는다
+    pX = AMP * 0.7; pulse = 0.4;
+    draw();
+    ticksEl.textContent = '17';
+    for (var z = 0; z < barEl.children.length; z++) barEl.children[z].className = z < 3 ? 'tk__seg is-on' : 'tk__seg';
+    root.classList.add('is-still');
+  } else {
+    vel = flicks[0];
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

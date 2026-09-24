@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Transition Where Block-Coordinate Value Scatters and Settles — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rv">
+  <p class="rv__hint"><span>Click or press Enter and each block's coordinate value converges back to its original spot as the screen settles</span></p>
+  <div class="rv__panel" id="panel" tabindex="0" role="button" aria-label="Replay screen transition where block-coordinate value scatters and settles">
+    <canvas class="rv__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('rv');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면·블록 좌표 값을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BG = tok('--scene-bg', '#fff7e6');
+  var CARD1 = tok('--scene-card1', '#2f6df6');
+  var CARD2 = tok('--scene-card2', '#b9a0ff');
+  var CARD3 = tok('--scene-card3', '#4cd4a6');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(갤러리 카드 그리드 자리) — 전부 캔버스로 직접 그린다. 외부 사진·파일 0.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    bc.fillStyle = BG;
+    bc.fillRect(0, 0, w, h);
+    var cols = 4, rows = 3, pad = w * 0.03;
+    var cw = (w - pad * (cols + 1)) / cols, ch = (h - pad * (rows + 1)) / rows;
+    var palette = [CARD1, CARD2, CARD3];
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        bc.fillStyle = palette[Math.floor(rng() * palette.length)];
+        var x = pad + c * (cw + pad), y = pad + r * (ch + pad);
+        bc.beginPath();
+        if (bc.roundRect) bc.roundRect(x, y, cw, ch, Math.min(cw, ch) * 0.12);
+        else bc.rect(x, y, cw, ch);
+        bc.fill();
+      }
+    }
+  }
+
+  var SEED = 501;
+  var PLAY_MS = 640;
+  var BLOCK_COLS = 8, BLOCK_ROWS = 6;
+  var BLOCK_OFFSET_MAX = 46; // 블록 뒤섞임 좌표 최댓값(px) — 변형: 46 -> 70(더 멀리 흩어졌다 모인다)
+  var data, outImg, iw, ih, blockW, blockH, blockDx, blockDy;
+
+  function PRECOMPUTE() {
+    iw = cv.width; ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+    blockW = iw / BLOCK_COLS; blockH = ih / BLOCK_ROWS;
+    var n = BLOCK_COLS * BLOCK_ROWS;
+    var rng = makeLcg(SEED + 13);
+    blockDx = new Float32Array(n); blockDy = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      blockDx[i] = (rng() * 2 - 1) * BLOCK_OFFSET_MAX * dpr;
+      blockDy[i] = (rng() * 2 - 1) * BLOCK_OFFSET_MAX * dpr;
+    }
+  }
+
+  function clampI(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function RENDER(p) {
+    var o = outImg.data;
+    for (var y = 0; y < ih; y++) {
+      var by = Math.min(BLOCK_ROWS - 1, Math.floor(y / blockH));
+      for (var x = 0; x < iw; x++) {
+        var bx = Math.min(BLOCK_COLS - 1, Math.floor(x / blockW));
+        var bi = by * BLOCK_COLS + bx;
+        var sx = clampI(Math.round(x - blockDx[bi] * p), 0, iw - 1);
+        var sy = clampI(Math.round(y - blockDy[bi] * p), 0, ih - 1);
+        var k = (y * iw + x) * 4;
+        var sk = (sy * iw + sx) * 4;
+        o[k] = data[sk]; o[k + 1] = data[sk + 1]; o[k + 2] = data[sk + 2]; o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    buf.width = cv.width; buf.height = cv.height;
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

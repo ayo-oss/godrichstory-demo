@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>관람차 미니어처 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fw is-demo" id="fwRoot">
+  <p class="fw__hint">
+    <svg class="fw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M96.26 37a8 8 0 0 1 5.74-9.71a104.1 104.1 0 0 1 52 0a8 8 0 0 1-2 15.75a8.2 8.2 0 0 1-2-.26a88.1 88.1 0 0 0-44 0A8 8 0 0 1 96.26 37M53.79 55.14a104 104 0 0 0-26 45a8 8 0 1 0 15.42 4.26a87.9 87.9 0 0 1 22-38.08a8 8 0 0 0-11.42-11.18m-10.58 96.41a8 8 0 1 0-15.42 4.28a104 104 0 0 0 26 45a8 8 0 1 0 11.41-11.21a88.14 88.14 0 0 1-21.99-38.07M150 213.22a88 88 0 0 1-44 0a8 8 0 1 0-4 15.49a104.1 104.1 0 0 0 52 0a8 8 0 0 0-4-15.49M222.65 146a8 8 0 0 0-9.85 5.57a87.9 87.9 0 0 1-22 38.09a8 8 0 1 0 11.42 11.21a104.05 104.05 0 0 0 26-45a8 8 0 0 0-5.57-9.87m-9.86-41.54a8 8 0 0 0 15.42-4.28a104 104 0 0 0-26-45a8 8 0 1 0-11.41 11.21a88.14 88.14 0 0 1 21.99 38.06Z"/></g></svg>
+    <span>ポインターを左右で回転速度、上下でカメラが傾きます — ゴンドラは常に下向きにぶら下がります</span>
+  </p>
+  <div class="fw__field" id="fwField" role="application" aria-label="観覧車遠近実験盤" tabindex="0">
+    <canvas class="fw__cv" id="fwCv"></canvas>
+  </div>
+  <div class="fw__bar">
+    <label class="fw__dial">焦点距離
+      <input type="range" id="fwFocal" min="140" max="520" step="20" value="240" aria-label="焦点距離">
+      <b class="fw__val" id="fwFocalVal">240px</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 관람차 미니어처 — 바퀴살 16개·곤돌라 8개를 원 주위 점 (cos, sin, 0) 에서 출발해
+// x축 기울기로 바퀴면을 뒤로 눕히고 y축으로 틀어 원판이 화면을 향하지 않게 만든다.
+// 살마다 z 가 생기므로 z 내림차순(화가 알고리즘) 한 번으로 겹침이 정리된다.
+// 곤돌라는 매달린 점 아래 重力 방향(하단 정렬) — 바퀴가 돌아도 몸통은 늘 아래를 향한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var SPEED = 0.55;      // 바퀴 회전 기본 속도(라디안/초) — 포인터 좌우로 배율이 변한다
+  var TILT = 0.46;       // 바퀴면의 x축 기울기(라디안) — 누울수록 원이 타원으로 납작해진다
+  var SWAY = 1.0;        // 곤돌라 진자 흔들림 배율
+  var LOOP_MS = 2000;    // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('fwRoot');
+  var field = document.getElementById('fwField');
+  var cv = document.getElementById('fwCv');
+  var ctx = cv.getContext('2d');
+  var focalIn = document.getElementById('fwFocal');
+  var focalOut = document.getElementById('fwFocalVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var PAL = [tok('--fw-pink'), tok('--fw-mint'), tok('--fw-lilac')];   // 곤돌라 캔디 순환
+  var CREAM = tok('--fw-cream');
+  var SKY = tok('--fw-sky');
+  var RIM = tok('--fw-rim');
+  var SHADOW = tok('--fw-shadow');
+
+  var SPEAKS = 16, CARS = 8, TAU = Math.PI * 2;
+  var YAW = 0.62;                 // 바퀴면의 y축 틀어짐 — 원판이 화면을 비스듬히 벗어난다
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var focal = Number(focalIn.value);
+  var spin = 0;
+  var px01 = 0.5, py01 = 0.5;         // 포인터 위치 비율(0~1) — 자동재생 중엔 가상 경로가 채운다
+  var camTilt = 0;
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 바퀴 위 한 점 — 자전 θ 를 원에 얹고 x축 기울기 → y축 틀기 순서로 바퀴면을 배치한다
+  function wheelPoint(theta, radius) {
+    var x = Math.cos(theta) * radius;
+    var y = Math.sin(theta) * radius;
+    var z = 0;
+    var ct = Math.cos(TILT), st = Math.sin(TILT);          // x축 기울기 — 바퀴를 뒤로 눕힌다
+    var y1 = y * ct, z1 = y * st;
+    var ca = Math.cos(YAW), sa = Math.sin(YAW);            // y축 틀기 — 원판이 화면을 향하지 않는다
+    return { x: x * ca + z1 * sa, y: y1, z: -x * sa + z1 * ca };
+  }
+
+  // 카메라 기울기(포인터 상하) — 장면 전체를 x축으로 추가 회전
+  function camRotate(p) {
+    var a = camTilt;
+    var ca = Math.cos(a), sa = Math.sin(a);
+    return { x: p.x, y: p.y * ca - p.z * sa, z: p.y * sa + p.z * ca };
+  }
+
+  function project(p) {                                   // 원근 투영 — 이 한 줄이 전부다
+    var s = focal / (focal + p.z);
+    return { sx: W * 0.5 + p.x * s, sy: H * 0.56 - p.y * s, s: s };
+  }
+
+  function step(dt, now) {
+    var speedMul = 0.25 + 2.1 * px01;                     // 포인터 좌우 = 回転速度
+    spin += SPEED * speedMul * dt;
+    var aimTilt = (py01 - 0.5) * 0.5;                     // 포인터 상하 = 카메라 기울기
+    camTilt += (aimTilt - camTilt) * 0.1;
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+
+    var R = Math.min(H * 0.56, W * 0.32);                  // 바퀴 반경 — 화면이 씬이다
+    var hubW = { x: 0, y: R * 0.62, z: 0 };               // 바퀴 중심(월드)
+    var hub = project(camRotate(hubW));
+
+    // ── 지면: 바닥 타원 스케일 힌트 + 바퀴 그림자 ──
+    var ground = [];
+    for (var g = 0; g <= 40; g++) {
+      var ga = g / 40 * TAU;
+      ground.push(project(camRotate({ x: Math.cos(ga) * R * 1.28, y: 0, z: Math.sin(ga) * R * 1.28 })));
+    }
+    ctx.beginPath();
+    ctx.moveTo(ground[0].sx, ground[0].sy);
+    for (var gi = 1; gi < ground.length; gi++) ctx.lineTo(ground[gi].sx, ground[gi].sy);
+    ctx.closePath();
+    ctx.fillStyle = SHADOW;
+    ctx.fill();
+
+    // ── 그릴 아이템을 모아 z 내림차순(먼 것 먼저) — 화가 알고리즘 ──
+    var items = [];
+
+    // 받침 기둥 — A자 두 짝(앞뒤). 허브까지 4선
+    var legSpread = R * 0.55;
+    [[1, legSpread], [1, -legSpread], [-1, legSpread], [-1, -legSpread]].forEach(function (leg) {
+      var foot = project(camRotate({ x: leg[0] * legSpread * 0.72, y: 0, z: leg[1] }));
+      items.push({ z: camRotate({ x: 0, y: R * 0.62, z: leg[1] }).z, fn: function () {
+        ctx.strokeStyle = RIM;
+        ctx.lineWidth = Math.max(1.5, 4 * foot.s);
+        ctx.beginPath();
+        ctx.moveTo(foot.sx, foot.sy);
+        ctx.lineTo(hub.sx, hub.sy);
+        ctx.stroke();
+      }});
+    });
+
+    // 바퀴 살 16개 — 중심에서 테까지
+    for (var s2 = 0; s2 < SPEAKS; s2++) {
+      (function (idx) {
+        var th = spin + idx / SPEAKS * TAU;
+        var pw = camRotate(wheelPoint(th, R));
+        var tip = project(pw);
+        items.push({ z: pw.z, fn: function () {
+          ctx.strokeStyle = RIM;
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          ctx.moveTo(hub.sx, hub.sy);
+          ctx.lineTo(tip.sx, tip.sy);
+          ctx.stroke();
+        }});
+      })(s2);
+    }
+
+    // 바퀴 테두리 — 원을 40분해한 폴리라인(살과 같은 회전)
+    (function () {
+      var ring = [];
+      var ringZ = 0;
+      for (var r2 = 0; r2 <= 40; r2++) {
+        var th = spin + r2 / 40 * TAU;
+        var pw = camRotate(wheelPoint(th, R));
+        ring.push(project(pw));
+        ringZ += pw.z;
+      }
+      items.push({ z: ringZ / 41, fn: function () {
+        ctx.strokeStyle = RIM;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ring[0].sx, ring[0].sy);
+        for (var k = 1; k < ring.length; k++) ctx.lineTo(ring[k].sx, ring[k].sy);
+        ctx.stroke();
+      }});
+    })();
+
+    // 곤돌라 8개 — 매달린 점 아래 重力 방향(하단 정렬) + 진자 흔들림
+    for (var c = 0; c < CARS; c++) {
+      (function (idx) {
+        var th = spin + idx / CARS * TAU;
+        var pw = camRotate(wheelPoint(th, R));
+        var hang = project(pw);
+        var swayAng = Math.sin(now / 900 + idx * 1.7) * 0.09 * SWAY;
+        var bodyW = R * 0.44 * hang.s;
+        var bodyH = R * 0.40 * hang.s;
+        var cx = hang.sx + Math.sin(swayAng) * bodyH * 1.5;
+        var cy = hang.sy + Math.cos(swayAng) * bodyH * 1.5 + bodyH * 0.1;
+        items.push({ z: pw.z - 0.5, fn: function () {
+          var col = PAL[idx % PAL.length];
+          // 링크 — 매달린 점과 몸통을 잇는 짧은 막대
+          ctx.strokeStyle = RIM;
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          ctx.moveTo(hang.sx, hang.sy);
+          ctx.lineTo(cx, cy - bodyH * 0.55);
+          ctx.stroke();
+          // 몸통 — 아래가 살짝 넓은 캡슐
+          ctx.beginPath();
+          ctx.moveTo(cx - bodyW * 0.5, cy - bodyH * 0.45);
+          ctx.lineTo(cx + bodyW * 0.5, cy - bodyH * 0.45);
+          ctx.lineTo(cx + bodyW * 0.62, cy + bodyH * 0.55);
+          ctx.quadraticCurveTo(cx, cy + bodyH * 0.78, cx - bodyW * 0.62, cy + bodyH * 0.55);
+          ctx.closePath();
+          ctx.fillStyle = col;
+          ctx.fill();
+          // 창 두 줄 — 크림 반점으로 캔디 무늬
+          ctx.fillStyle = CREAM;
+          ctx.beginPath();
+          ctx.arc(cx - bodyW * 0.22, cy + bodyH * 0.05, bodyW * 0.11, 0, TAU);
+          ctx.arc(cx + bodyW * 0.22, cy + bodyH * 0.05, bodyW * 0.11, 0, TAU);
+          ctx.fill();
+        }});
+      })(c);
+    }
+
+    // 허브 — 중심 크림 구슬(가장 나중에 그려도 안 가려지게 z 를 앞으로)
+    items.push({ z: camRotate(hubW).z - 1, fn: function () {
+      ctx.beginPath();
+      ctx.arc(hub.sx, hub.sy, 5.5 * hub.s, 0, TAU);
+      ctx.fillStyle = CREAM;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(hub.sx - 1.6 * hub.s, hub.sy - 1.6 * hub.s, 1.8 * hub.s, 0, TAU);
+      ctx.fillStyle = SKY;
+      ctx.fill();
+    }});
+
+    items.sort(function (a, b) { return b.z - a.z; });
+    for (var q = 0; q < items.length; q++) items[q].fn();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. 표 영역을 벗어난 자연스러운 경로
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt, now);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setFocal(v) {
+    focal = Number(v);
+    focalOut.textContent = focal + 'px';
+    if (reduce) draw(t0 < 0 ? 0 : last);
+  }
+
+  focalIn.addEventListener('input', function () { setFocal(focalIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0, last); draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0, last); draw(last); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 곤돌라가 둘러앉은 한 장만 남는다(빈 화면이 아니다)
+    px01 = 0.62; py01 = 0.4;
+    step(0, 0);
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

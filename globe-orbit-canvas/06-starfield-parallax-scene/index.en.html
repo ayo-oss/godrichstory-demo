@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A starfield built from parallax — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sf" id="sf">
+  <p class="sf__hint">
+    <svg class="sf__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a104 104 0 1 0 104 104A104.12 104.12 0 0 0 128 24" opacity=".2"/><path d="M144 48l-6.6 19.8a8 8 0 0 1-5.1 5.1L113 80l19.3 7.1a8 8 0 0 1 5.1 5.1L144 112l6.6-19.8a8 8 0 0 1 5.1-5.1L175 80l-19.3-7.1a8 8 0 0 1-5.1-5.1Z" fill-rule="evenodd"/><path d="M80 128l-4.4 13.2a4 4 0 0 1-2.6 2.6L60 148l13 4.2a4 4 0 0 1 2.6 2.6L80 168l4.4-13.2a4 4 0 0 1 2.6-2.6L100 148l-13-4.2a4 4 0 0 1-2.6-2.6Z" fill-rule="evenodd"/><path d="M188 136l-5.5 16.5a6 6 0 0 1-3.8 3.8L162 162l16.7 6.7a6 6 0 0 1 3.8 3.8L188 189l5.5-16.5a6 6 0 0 1 3.8-3.8L214 162l-16.7-6.7a6 6 0 0 1-3.8-3.8Z" fill-rule="evenodd"/><path d="M116 180l-3.3 9.9a3 3 0 0 1-1.9 1.9L101 195l9.8 4a3 3 0 0 1 1.9 1.9l3.3 9.9l3.3-9.9a3 3 0 0 1 1.9-1.9l9.8-4l-9.8-3.2a3 3 0 0 1-1.9-1.9Z" fill-rule="evenodd"/></g></svg>
+    <span>Same seed, same sky — change it and the stars are drawn anew</span>
+  </p>
+  <div class="sf__field" id="field" role="application" aria-label="Starfield parallax test board" tabindex="0">
+    <canvas class="sf__cv" id="cv"></canvas>
+  </div>
+  <div class="sf__bar">
+    <label class="sf__lab" for="seed">Seed</label>
+    <input class="sf__dial" id="seed" type="number" min="1" max="99999" step="1" value="42" inputmode="numeric">
+    <button class="sf__shuffle" id="shuffle" type="button">New sky</button>
+  </div>
+</div>
+</main>
+<script>
+// 별바다 시차 — 같은 Seed(seeded mulberry32)으로 3개 층의 별을 결정적으로 뽑는다.
+// 층마다 시차 배율이 달라 화면이 천천히 흐를 때 멀리 있는 별은 느리게, 가까운 별은 빠르게 움직인다.
+// 실제 마우스를 올리면 그 방향으로 시점이 기운다(헤드리스 렌더에서는 자동 스윕이 대신한다).
+var root = document.getElementById('sf');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedInput = document.getElementById('seed');
+var shuffleBtn = document.getElementById('shuffle');
+
+var TAU = Math.PI * 2;
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var last = 0, raf = 0;
+
+// 결정적 PRNG — mulberry32. 같은 seed 는 같은 별 배치를 보장한다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+var layers = [];      // [{ stars:[{x,y,r,tw,ph}], par, drift }]
+var px = 0, py = 0;   // 시점 오프셋(-1..1) — 마우스·자동 스윕이 목표로 삼는 값
+var pxT = 0, pyT = 0; // 목표값
+
+function buildStars() {
+  var seed = Math.max(1, Math.min(99999, parseInt(seedInput.value, 10) || 42));
+  var rnd = mulberry32(seed);
+  layers = [];
+  // 3층 — 뒤(느림·작음·많음)부터 앞(빠름·큼·적음)
+  var defs = [
+    { n: 110, par: 0.35, size: [0.6, 1.4], drift: 4 },
+    { n: 70,  par: 0.75, size: [1.0, 2.0], drift: 9 },
+    { n: 34,  par: 1.25, size: [1.5, 2.8], drift: 16 }
+  ];
+  for (var li = 0; li < defs.length; li++) {
+    var d = defs[li];
+    var stars = [];
+    for (var i = 0; i < d.n; i++) {
+      stars.push({
+        x: rnd(),                        // 0..1 정규화 좌표 — 리사이즈에도 배치 유지
+        y: rnd(),
+        r: d.size[0] + rnd() * (d.size[1] - d.size[0]),
+        base: 0.25 + rnd() * 0.75,       // 기본 밝기
+        tw: 0.5 + rnd() * 2.2,           // 반짝임 주파수
+        ph: rnd() * TAU                  // 반짝임 위상
+      });
+    }
+    layers.push({ stars: stars, par: d.par, drift: d.drift });
+  }
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function draw(t) {
+  ctx.clearRect(0, 0, W, H);
+  var cs = getComputedStyle(root);
+  var C_back = cs.getPropertyValue('--sf-back').trim();
+  var C_far = cs.getPropertyValue('--sf-far').trim();
+  var C_mid = cs.getPropertyValue('--sf-mid').trim();
+  var C_near = cs.getPropertyValue('--sf-near').trim();
+  var C_haze = cs.getPropertyValue('--sf-haze').trim();
+  var layerCols = [C_far, C_mid, C_near];
+
+  // 배경 — 아주 어두운 저채도 남보라
+  ctx.fillStyle = C_back;
+  ctx.fillRect(0, 0, W, H);
+  // 성운 안개 — 두 개의 큰 방사형 그라디언트 (시점과 함께 살짝 이동 — 깊이감)
+  var g1 = ctx.createRadialGradient(W * (0.3 + px * 0.05), H * (0.35 + py * 0.05), 0, W * 0.3, H * 0.35, Math.max(W, H) * 0.7);
+  g1.addColorStop(0, C_haze);
+  g1.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = g1;
+  ctx.fillRect(0, 0, W, H);
+  var g2 = ctx.createRadialGradient(W * (0.75 - px * 0.04), H * (0.7 - py * 0.04), 0, W * 0.75, H * 0.7, Math.max(W, H) * 0.55);
+  g2.addColorStop(0, C_haze);
+  g2.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalAlpha = 0.10;
+  ctx.fillStyle = g2;
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+
+  // 층별 별 — 시차 오프셋 = (자동 흐름 + 시점 기울기) × 층 배율
+  var flow = t * 11;      // 전체가 천천히 왼쪽으로 흐른다(하늘 회전 느낌)
+  for (var li = 0; li < layers.length; li++) {
+    var L = layers[li];
+    var offX = (flow + px * 58) * L.par;
+    var offY = py * 34 * L.par;
+    ctx.fillStyle = layerCols[li];
+    var stars = L.stars;
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      // x 는 흐르고 화면 밖으로 나가면 반대편에서 다시 등장 (wrap)
+      var sx = ((s.x * W - offX) % W + W) % W;
+      var sy = s.y * H + offY;
+      if (sy < -4 || sy > H + 4) continue;
+      var tw = s.base + Math.sin(t * s.tw + s.ph) * 0.35;   // 반짝임
+      var a = Math.max(0.08, Math.min(1, tw));
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(sx, sy, s.r, 0, TAU);
+      ctx.fill();
+      // 가까운 층의 밝은 별에 십자 반짝임 + 헤일로 — 면적 기여를 키운다
+      if (li >= 1 && s.r > 1.4 && a > 0.7) {
+        ctx.globalAlpha = (a - 0.7) * 1.2;
+        ctx.strokeStyle = layerCols[li];
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(sx - s.r * 3.4, sy); ctx.lineTo(sx + s.r * 3.4, sy);
+        ctx.moveTo(sx, sy - s.r * 3.4); ctx.lineTo(sx, sy + s.r * 3.4);
+        ctx.stroke();
+      }
+      if (li === 2) {
+        ctx.globalAlpha = a * 0.22;
+        ctx.fillStyle = layerCols[li];
+        ctx.beginPath();
+        ctx.arc(sx, sy, s.r * 2.6, 0, TAU);
+        ctx.fill();
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+var sweep = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  sweep += dt * 0.20;
+  // 자동 스윕 — 마우스가 없어도(헤드리스 렌더) 시차가 보이게 느리게 8자를 그린다
+  pxT = Math.sin(sweep) * 0.8;
+  pyT = Math.cos(sweep * 0.7) * 0.5;
+  // 시점은 목표를 부드럽게 쫓는다
+  px += (pxT - px) * Math.min(1, dt * 2.2);
+  py += (pyT - py) * Math.min(1, dt * 2.2);
+  draw(now * 0.001);
+  raf = requestAnimationFrame(frame);
+}
+
+// 실제 사용자 입력 — 마우스를 올리면 그 방향으로 시점이 기운다(자동 스윕은 멈춘다)
+field.addEventListener('pointermove', function (e) {
+  userTook = true;
+  var r = field.getBoundingClientRect();
+  pxT = ((e.clientX - r.left) / r.width - 0.5) * 2;
+  pyT = ((e.clientY - r.top) / r.height - 0.5) * 2;
+});
+var userTook = false;
+field.addEventListener('pointerleave', function () {
+  userTook = false;   // 마우스가 나가면 다시 자동 스윕
+});
+
+// Seed 조작 — 값 변경·버튼 모두 즉시 재생성
+seedInput.addEventListener('change', function () { buildStars(); });
+shuffleBtn.addEventListener('click', function () {
+  var s = Math.floor(Math.random() * 99999) + 1;
+  seedInput.value = String(s);
+  buildStars();
+});
+
+window.addEventListener('resize', function () { fit(); draw(0); });
+
+fit();
+buildStars();
+if (reduce) {
+  draw(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Email, password, and a generate button all move together on one signup card — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="phs is-demo" id="phsRoot">
+  <form class="phs__card" id="phsForm">
+    <p class="phs__title">Sign up</p>
+    <div class="phs__row">
+      <label class="phs__label" for="phsEmail">Email</label>
+      <div class="phs__staticField" id="phsEmail">you@example.com</div>
+    </div>
+    <div class="phs__row">
+      <label class="phs__label" for="phsPw">Password</label>
+      <div class="phs__field" id="phsField">
+        <input class="phs__input" id="phsPw" type="password" aria-describedby="phsHint">
+        <button class="phs__eyeBtn" id="phsEyeBtn" type="button" aria-pressed="false" aria-label="Show password">
+          <svg class="phs__eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path class="phs__lidTop" id="phsLidTop" d="M2,12 Q12,4 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path class="phs__lidBottom" id="phsLidBottom" d="M2,12 Q12,20 22,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle class="phs__pupil" id="phsPupil" cx="12" cy="12" r="3.2" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="phs__actions">
+      <button class="phs__autofillBtn" id="phsAutofillBtn" type="button">Simulate autofill</button>
+      <button class="phs__generateBtn" id="phsGenerateBtn" type="button">
+        <span>Generate</span>
+        <span class="phs__icoWrap" aria-hidden="true">
+          <svg class="phs__copyIcon" width="1em" height="1em" viewBox="0 0 256 256"><g fill="currentColor"><path d="M216 40v128h-48V88H88V40Z" opacity=".2"/><path d="M216 32H88a8 8 0 0 0-8 8v40H40a8 8 0 0 0-8 8v128a8 8 0 0 0 8 8h128a8 8 0 0 0 8-8v-40h40a8 8 0 0 0 8-8V40a8 8 0 0 0-8-8m-56 176H48V96h112Zm48-48h-32V88a8 8 0 0 0-8-8H96V48h112Z"/></g></svg>
+          <span class="phs__checkIcon">
+            <span class="phs__checkBar phs__checkBar--short"></span>
+            <span class="phs__checkBar phs__checkBar--long"></span>
+          </span>
+        </span>
+      </button>
+    </div>
+    <p class="phs__hint" id="phsHint">The simulate-autofill and generate buttons call the exact same functions a real click would.</p>
+  </form>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 눈 모프·글로우 펄스·Generate 캐스케이드 세 계산을 이 파일 안에서 독립적으로 다시 구현한다
+  // (01/05/06 과 이름이 겹치지 않도록 hero* 접두 함수·HERO_* 상수로 새로 짓는다). 눈은 progress
+  // 를 목표까지 rAF 로 보간해 베지어 ctrlY 를 다시 계산하고, 글로우는 sin(경과비*PI)*exp(-경과비*k)
+  // 엔벌로프로 자동입력 하이라이트를 표현하며, 생성은 누적 타이머로 글자를 한 자씩 채운 뒤
+  // 복사 아이콘을 체크로 크로스페이드한다.
+  var root = document.getElementById('phsRoot');
+  var form = document.getElementById('phsForm');
+  var emailField = document.getElementById('phsEmail');
+  var pwField = document.getElementById('phsField');
+  var pwInput = document.getElementById('phsPw');
+  var eyeBtn = document.getElementById('phsEyeBtn');
+  var lidTop = document.getElementById('phsLidTop');
+  var lidBottom = document.getElementById('phsLidBottom');
+  var pupil = document.getElementById('phsPupil');
+  var autofillBtn = document.getElementById('phsAutofillBtn');
+  var generateBtn = document.getElementById('phsGenerateBtn');
+
+  var HERO_EYE_MORPH_MS = 260;
+  var HERO_GLOW_PULSE_MS = 900;
+  var HERO_CASCADE_STEP_MS = 70;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var pwRand = seedRand(426091);
+  var cascadeRand = seedRand(426092);
+  var PW_POOL = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
+  function pickPassword(len, rand) {
+    var out = '';
+    for (var i = 0; i < len; i += 1) out += PW_POOL[Math.floor(rand() * PW_POOL.length)];
+    return out;
+  }
+  pwInput.value = pickPassword(9, pwRand);
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function heroMorphEye(progress) {
+    var eased = easeOutCubic(progress);
+    var lift = 8 * eased;
+    lidTop.setAttribute('d', 'M2,12 Q12,' + (12 - lift) + ' 22,12');
+    lidBottom.setAttribute('d', 'M2,12 Q12,' + (12 + lift) + ' 22,12');
+    pupil.style.opacity = String(eased);
+  }
+  heroMorphEye(0);
+
+  var eyeProgress = 0, eyeFrom = 0, eyeTarget = 0, eyeStart = 0, eyeRafId = null;
+  function eyeStep(ts) {
+    var t = Math.min(1, (ts - eyeStart) / HERO_EYE_MORPH_MS);
+    eyeProgress = eyeFrom + (eyeTarget - eyeFrom) * easeOutCubic(t);
+    heroMorphEye(eyeProgress);
+    if (t < 1) { eyeRafId = requestAnimationFrame(eyeStep); } else { eyeRafId = null; }
+  }
+  function animateEyeTo(target) {
+    eyeFrom = eyeProgress;
+    eyeTarget = target;
+    eyeStart = performance.now();
+    if (eyeRafId) cancelAnimationFrame(eyeRafId);
+    eyeRafId = requestAnimationFrame(eyeStep);
+  }
+
+  function toggleEye() {
+    var willShow = pwInput.type === 'password';
+    pwInput.type = willShow ? 'text' : 'password';
+    eyeBtn.setAttribute('aria-pressed', String(willShow));
+    animateEyeTo(willShow ? 1 : 0);
+  }
+
+  var glowStart = 0, glowRafId = null;
+  function setGlow(v) {
+    emailField.style.setProperty('--glow', String(v));
+    pwField.style.setProperty('--glow', String(v));
+  }
+  function glowStep(ts) {
+    var frac = (ts - glowStart) / HERO_GLOW_PULSE_MS;
+    if (frac >= 1) { setGlow(0); glowRafId = null; return; }
+    var envelope = Math.max(0, Math.sin(frac * Math.PI) * Math.exp(-frac * 2.2));
+    setGlow(envelope);
+    glowRafId = requestAnimationFrame(glowStep);
+  }
+  function heroSimulateAutofill() {
+    glowStart = performance.now();
+    if (glowRafId) return;
+    glowRafId = requestAnimationFrame(glowStep);
+  }
+
+  var cascadeTimer = null;
+  function heroRunCascade() {
+    var target = pickPassword(9, cascadeRand);
+    var i = 0;
+    pwInput.type = 'text';
+    eyeBtn.setAttribute('aria-pressed', 'true');
+    animateEyeTo(1);
+    pwInput.value = '';
+    root.classList.remove('is-generated');
+    window.clearTimeout(cascadeTimer);
+    function step() {
+      i += 1;
+      pwInput.value = target.slice(0, i);
+      if (i < target.length) {
+        cascadeTimer = window.setTimeout(step, HERO_CASCADE_STEP_MS);
+      } else {
+        root.classList.add('is-generated');
+        cascadeTimer = window.setTimeout(function () {
+          root.classList.remove('is-generated');
+        }, 500);
+      }
+    }
+    step();
+  }
+
+  eyeBtn.addEventListener('click', function () { toggleEye(); });
+  autofillBtn.addEventListener('click', function () { heroSimulateAutofill(); });
+  generateBtn.addEventListener('click', function () { heroRunCascade(); });
+  form.addEventListener('submit', function (e) { e.preventDefault(); });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var demoTimers = [];
+  function clearDemoTimers() {
+    for (var i = 0; i < demoTimers.length; i += 1) window.clearTimeout(demoTimers[i]);
+    demoTimers = [];
+  }
+  function demoLoop() {
+    if (!root.classList.contains('is-demo')) return;
+    clearDemoTimers();
+    demoTimers.push(window.setTimeout(function () { toggleEye(); }, 150));
+    demoTimers.push(window.setTimeout(function () { toggleEye(); }, 650));
+    demoTimers.push(window.setTimeout(function () { heroSimulateAutofill(); }, 900));
+    demoTimers.push(window.setTimeout(function () { heroRunCascade(); }, 1500));
+    demoTimers.push(window.setTimeout(function () {
+      pwInput.type = 'password';
+      eyeBtn.setAttribute('aria-pressed', 'false');
+      animateEyeTo(0);
+    }, 2600));
+    demoTimers.push(window.setTimeout(demoLoop, 2800));
+  }
+  if (!reduce) demoTimers.push(window.setTimeout(demoLoop, 200));
+})();
+</script>
+</body>
+</html>

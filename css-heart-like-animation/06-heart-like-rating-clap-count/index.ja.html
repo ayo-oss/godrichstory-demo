@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clap count — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <button class="clap is-demo" type="button" aria-label="拍手">
+    <span class="clap__icon" aria-hidden="true">👏</span>
+    <span class="clap__plus" aria-hidden="true">+1</span>
+    <span class="clap__count"><span aria-live="polite">128</span></span>
+    <span class="clap__fx" aria-hidden="true"><span class="clap__spark"></span><span class="clap__spark"></span><span class="clap__spark"></span><span class="clap__spark"></span><span class="clap__spark"></span></span>
+  </button>
+</main>
+<script>
+// 누를 때마다 카운트가 1 오르고 아이콘이 튄다. .is-demo 인 동안은 타이머가 대신 누른다.
+// 한 겹: 박수마다 질량-감쇠 물리 스파크 버스트 — 미니 별이 아이콘 중심에서 흩어진다 (拍手 리듬에 맞춰 빠르고 짧게).
+// 각 파티클은 초기 속도(위쪽 좁은 부채꼴·크기 랜덤)와 개별 질량을 갖고, 매 프레임 준암시 오일러 적분으로
+// 감쇠(-k/m·v — 질량이 클수록 덜 감속)와 중력(질량 무관)을 받아 흩어졌다 멈춘다 (keyframes 아님).
+var b = document.querySelector(".clap"), n = b.querySelector(".clap__count span");
+var fx = b.querySelector(".clap__fx"), icon = b.querySelector(".clap__icon");
+var sparks = [].slice.call(fx.querySelectorAll(".clap__spark"));
+var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+var alive = false, raf = 0, last = 0;
+
+function fire() {
+  if (reduce || !sparks.length) return;
+  fx.style.left = (icon.offsetLeft + icon.offsetWidth / 2) + "px"; // 아이콘 중심으로 발사 원점 이동
+  var now = performance.now();
+  for (var i = 0; i < sparks.length; i++) {
+    var m = .6 + Math.random() * .6;                            // 개별 질량 0.6~1.2
+    var ang = -Math.PI / 2 + (Math.random() - .5) * 2.4;        // 위쪽 좁은 부채꼴 ±69°
+    var v0 = (100 + Math.random() * 70) * (1.15 - m * .2);      // 무거울수록 느게 출발
+    sparks[i]._p = { x: 0, y: 0, vx: Math.cos(ang) * v0, vy: Math.sin(ang) * v0,
+      m: m, k: 3.8, g: 320, rot: (Math.random() - .5) * 40, spin: (Math.random() - .5) * 840,
+      s: .4 + m * .3, born: now + i * 18, life: 550 + Math.random() * 300 };
+  }
+  if (!alive) { alive = true; last = now; raf = requestAnimationFrame(step); }
+}
+
+function step(t) {
+  var dt = Math.min((t - last) / 1000, .05); last = t;          // 탭 복귀 시 폭주 방지 클램프
+  var any = false;
+  for (var i = 0; i < sparks.length; i++) {
+    var el = sparks[i], p = el._p; if (!p) continue;
+    var age = t - p.born;
+    if (age < 0) { any = true; continue; }                       // 방출 전 지연(순차 분사)
+    if (age >= p.life) { el.style.opacity = '0'; el._p = null; continue; } // 수명 끝 → 정지
+    p.vx += (-p.k / p.m * p.vx) * dt;                            // 감쇠 가속도 = -k/m·v
+    p.vy += (p.g - p.k / p.m * p.vy) * dt;                       // 중력 가속도 = g (질량 무관)
+    p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt;
+    var o = age / p.life;                                        // 수명 후반 45%에서 페이드아웃
+    el.style.opacity = o < .55 ? '1' : (1 - (o - .55) / .45).toFixed(3);
+    el.style.transform = 'translate(' + p.x.toFixed(1) + 'px,' + p.y.toFixed(1) + 'px) rotate(' + p.rot.toFixed(1) + 'deg) scale(' + p.s.toFixed(3) + ')';
+    any = true;
+  }
+  if (any) raf = requestAnimationFrame(step); else alive = false; // 전부 정지하면 루프 종료
+}
+
+function clap() {
+  n.textContent = String(Number(n.textContent) + 1);
+  b.classList.remove("is-clap"); void b.offsetWidth; b.classList.add("is-clap");
+  fire();                                                        // 실제 클릭·데모 루프 둘 다 박수마다 발사
+}
+b.addEventListener("pointerdown", function () { b.classList.remove("is-demo"); clap(); });
+var demoClap = function () { if (!b.classList.contains("is-demo")) return; clap(); };
+setInterval(demoClap, 900);
+setTimeout(demoClap, 100);                                       // 첫 사이클부터 녹화 창 안에 잡힌다
+</script>
+</body>
+</html>

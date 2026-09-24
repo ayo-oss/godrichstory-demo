@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>잔광 拡散 — 번개의 헤일로 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M150 14 66 146h49l-24 96 99-138h-52l28-90z"/></svg>
+    <span>稲妻が通った跡の輝度バッファを毎フレーム近傍ピクセルの平均で混ぜて書き直します — 線が消えた後もハローが広がりながら冷めていきます</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="稲妻 残光拡散 実験パネル" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">拡散 <b class="cd__val" id="cdSpread"></b> ・冷却 <b class="cd__val" id="cdCool"></b></span>
+    <span class="cd__meta cd__meta--dim">キャンバス・ImageData・putImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 잔광 拡散(04). 밝기 버퍼 lum(픽셀당 실수 1채널)을 매 프레임 이웃 4픽셀 平均 쪽으로 섞고(diffuse)
+// 냉각 계수를 곱해 식힌다. 낙뢰는 살아 있는 동안 매 프레임 새 중점변위 경로로 버퍼에 도장찍는다(max 갱신).
+// 화면 재구성은 LUT(잉크-진보라-라일락-코어)를 통한 ImageData 한 장 putImageData 로 끝낸다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var SPREAD = 0.44;   // 拡散 계수 — 변형 "번짐" 축(0.38 → 0.62)
+  var COOL   = 0.986;  // 냉각 계수 — 변형 "잔광 시간" 축(0.975 → 0.988)
+  var GAP_MS = 430;    // 平均 낙뢰 간격(ms) — 변형 "하늘 리듬" 축(640 → 1500)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  document.getElementById('cdSpread').textContent = String(SPREAD);
+  document.getElementById('cdCool').textContent = String(COOL);
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 흐름으로 번친다
+  var SEED = 0x3160404;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--bolt-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--bolt-ink');
+  var C_HALO = tokRGB('--bolt-halo');
+  var C_CORE = tokRGB('--bolt-core');
+
+  // LUT — 밝기 t 0(잉크) 부터 1(코어 위 흰끼) 까지 4구간 색 ramp. compose 에서 픽셀당 조회만 한다
+  var lutR = new Uint8ClampedArray(256), lutG = new Uint8ClampedArray(256), lutB = new Uint8ClampedArray(256);
+  function buildLUT() {
+    var m = [0, 0.32, 0.62, 0.88, 1];
+    var cs = [
+      [C_INK[0], C_INK[1], C_INK[2]],
+      [C_INK[0] + (C_HALO[0] - C_INK[0]) * 0.42, C_INK[1] + (C_HALO[1] - C_INK[1]) * 0.42, C_INK[2] + (C_HALO[2] - C_INK[2]) * 0.42],
+      [C_HALO[0], C_HALO[1], C_HALO[2]],
+      [C_CORE[0], C_CORE[1], C_CORE[2]],
+      [255, 252, 255]
+    ];
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255, k = 0;
+      while (k < 3 && t > m[k + 1]) k++;
+      var f = (t - m[k]) / (m[k + 1] - m[k] || 1);
+      lutR[i] = cs[k][0] + (cs[k + 1][0] - cs[k][0]) * f;
+      lutG[i] = cs[k][1] + (cs[k + 1][1] - cs[k][1]) * f;
+      lutB[i] = cs[k][2] + (cs[k + 1][2] - cs[k][2]) * f;
+    }
+  }
+
+  var W = 0, H = 0;
+  var lum = null, lum2 = null, img = null;   // 밝기 이중 버퍼 + 출력 ImageData
+  var strikes = [], timer = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, prev = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+    lum = new Float32Array(W * H);
+    lum2 = new Float32Array(W * H);
+    img = ctx.createImageData(W, H);
+    var d = img.data;
+    for (var i = 3; i < d.length; i += 4) d[i] = 255;   // 알파는 한 번 채운 뒤 건드리지 않는다
+    prngState = SEED >>> 0;
+    strikes = [];
+    timer = 0;   // 첫 프레임에 곧장 낙뢰 — 로드 직후 화면이 이미 산다
+  }
+
+  // 拡散 — 각 픽셀을 이웃 4개 平均 쪽으로 SPREAD 만큼 끌고 COOL 로 식힌다. 두 버퍼를 교대로 써 편향을 없앤다
+  function diffuse() {
+    for (var y = 0; y < H; y++) {
+      var row = y * W;
+      var up = (y > 0 ? y - 1 : y) * W;
+      var dn = (y < H - 1 ? y + 1 : y) * W;
+      for (var x = 0; x < W; x++) {
+        var i = row + x;
+        var l = lum[i];
+        var av = (lum[row + (x > 0 ? x - 1 : x)] + lum[row + (x < W - 1 ? x + 1 : x)] +
+                  lum[up + x] + lum[dn + x]) * 0.25;
+        lum2[i] = (l + SPREAD * (av - l)) * COOL;
+      }
+    }
+    var tmp = lum; lum = lum2; lum2 = tmp;
+  }
+
+  // 중점변위 — 선분을 depth 번 반분하며 중점을 법선 방향으로 무작위 오프셋. 호출마다 새 경로가 나온다
+  function genBolt(ax, ay, bx, by, mag, depth) {
+    var pts = [{ x: ax, y: ay }, { x: bx, y: by }];
+    var dx = bx - ax, dy = by - ay;
+    var len = Math.hypot(dx, dy) || 1;
+    var nx = -dy / len, ny = dx / len;   // 법선 — 변위가 놓이는 방향
+    var off = mag;
+    for (var d = 0; d < depth; d++) {
+      var next = [pts[0]];
+      for (var i = 0; i < pts.length - 1; i++) {
+        var p = pts[i], q = pts[i + 1];
+        var r = (rand() * 2 - 1) * off;
+        next.push({ x: (p.x + q.x) * 0.5 + nx * r, y: (p.y + q.y) * 0.5 + ny * r }, q);
+      }
+      pts = next;
+      off *= 0.55;
+    }
+    return pts;
+  }
+
+  // 점 하나를 밝기 버퍼에 도장 — 코어는 과노출(1.25), 둘레는 거리 비례 감쇠. 기존 값과 비교해 max 만 취한다
+  function stampPoint(px, py, radius) {
+    var cx = Math.round(px), cy = Math.round(py);
+    for (var yy = cy - radius; yy <= cy + radius; yy++) {
+      if (yy < 0 || yy >= H) continue;
+      for (var xx = cx - radius; xx <= cx + radius; xx++) {
+        if (xx < 0 || xx >= W) continue;
+        var dxx = xx - cx, dyy = yy - cy;
+        var d = Math.sqrt(dxx * dxx + dyy * dyy);
+        if (d > radius) continue;
+        var v = d <= 1 ? 1.25 : (1 - d / radius) * 0.62;
+        var idx = yy * W + xx;
+        if (v > lum[idx]) lum[idx] = v;
+      }
+    }
+  }
+
+  // 경로 도장 — 선분을 2px 간격으로 보간해 찍어 끊김 없는 줄기를 만든다
+  function stampPath(pts, radius) {
+    for (var i = 0; i < pts.length - 1; i++) {
+      var p = pts[i], q = pts[i + 1];
+      var seg = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / 2));
+      for (var s = 0; s < seg; s++) {
+        var f = s / seg;
+        stampPoint(p.x + (q.x - p.x) * f, p.y + (q.y - p.y) * f, radius);
+      }
+    }
+    stampPoint(pts[pts.length - 1].x, pts[pts.length - 1].y, radius);
+  }
+
+  // 낙뢰 정의 — 메인 줄기(상단→하단)와 본 줄기 중간에서 갈라지는 곁가지 2~3개
+  function newStrike() {
+    var ax = W * (0.12 + rand() * 0.76);
+    var bx = W * (0.12 + rand() * 0.76);
+    var s = { ax: ax, bx: bx, life: 4 + (rand() * 3 | 0), branches: [] };
+    var nb = 2 + (rand() * 2 | 0);
+    for (var k = 0; k < nb; k++) {
+      var t = 0.3 + rand() * 0.45;
+      var dir = rand() < 0.5 ? -1 : 1;
+      s.branches.push({
+        sx: ax + (bx - ax) * t,
+        sy: H * t,
+        ex: ax + (bx - ax) * t + dir * (W * 0.1 + rand() * W * 0.2),
+        ey: H * (0.7 + rand() * 0.35),
+        mag: H * 0.1
+      });
+    }
+    return s;
+  }
+
+  // 살아 있는 낙뢰는 매 프레임 새 경로로 다시 도장 — 줄기가 몇 프레임 떨리다 지워진다
+  function stepStrikes(dtMs) {
+    timer -= dtMs;
+    if (timer <= 0) {
+      strikes.push(newStrike());
+      timer = GAP_MS * (0.5 + rand());   // 몰아치다 쉬는 불규칙 간격
+    }
+    for (var i = strikes.length - 1; i >= 0; i--) {
+      var s = strikes[i];
+      stampPath(genBolt(s.ax, -8, s.bx, H + 8, H * 0.14, 5), 6);
+      for (var k = 0; k < s.branches.length; k++) {
+        var b = s.branches[k];
+        stampPath(genBolt(b.sx, b.sy, b.ex, b.ey, b.mag, 4), 5);
+      }
+      s.life--;
+      if (s.life <= 0) strikes.splice(i, 1);
+    }
+  }
+
+  // LUT 로 픽셀 색을 매기고 한 장에 뿌린다
+  function compose() {
+    var d = img.data, n = W * H;
+    for (var i = 0; i < n; i++) {
+      var v = lum[i];
+      var li = v >= 1 ? 255 : (v <= 0 ? 0 : (v * 255) | 0);
+      var j = i << 2;
+      d[j] = lutR[li]; d[j + 1] = lutG[li]; d[j + 2] = lutB[li];
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // reduce 용 한 장 — rAF 없이 낙뢰 직후 잔광이 번진 상태를 시뮬레이션으로 만들어 찍는다
+  function stillDraw() {
+    fit();
+    diffuse();
+    stepStrikes(1000);
+    for (var w = 0; w < 6; w++) { diffuse(); stepStrikes(16); }
+    compose();
+  }
+
+  function frame(now) {
+    var dt = Math.min(50, now - (prev || now));
+    prev = now;
+    diffuse();
+    stepStrikes(dt);
+    compose();
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { if (reduce) stillDraw(); });
+
+  fit();
+  buildLUT();
+  if (reduce) {
+    stillDraw();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

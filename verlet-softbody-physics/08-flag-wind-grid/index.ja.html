@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>바람에 흔들리는 깃발 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fl" id="fl">
+  <p class="fl__hint">
+    <svg class="fl__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>カーソルを盤に乗せるとその場所が風源になり、格子の旗が距離減衰の突風に揺れます</span>
+  </p>
+  <div class="fl__field" id="field" role="application" aria-label="旗風実験盤" tabindex="0">
+    <canvas class="fl__cv" id="cv"></canvas>
+    <b class="fl__badge" aria-hidden="true"><span class="fl__badgeNum" id="windVal">0</span><span class="fl__badgeUnit">m/s</span></b>
+  </div>
+  <div class="fl__bar">
+    <label class="fl__dial">風
+      <input type="range" id="wind" min="0" max="2" step="0.05" value="1" aria-label="風の強さ">
+    </label>
+    <button class="fl__reset" id="reset" type="button">最初から</button>
+  </div>
+</div>
+</main>
+<script>
+// 바람에 흔들리는 깃발 — 13×9 점 격자를 위치 기반 Verlet(next = pos + (pos - prev)·damp + accel·dt²)로
+// 적분하고, 이웃 거리 제약(가로·세로 + 대각 보강 1개)을 프레임마다 3회 반복해 천의 형태를 지킨다.
+// 첫 열(깃대 쪽)만 고정. 바람은 각 점에 위상이 위치마다 다른 사인파 힘
+//   Fx = sin(t·f + y·0.9 + x·0.35) × 세기 × (0.35 + 0.65·x/cols)
+// 을 주고 깃대에서 멀수록 진폭이 커지게 가중한다. 커서는 곧 風 원 — pointermove 로 좌표를 받아
+// 거리 감쇠하는 돌풍 힘을 겹친다. 시드 고정(난수 없음)이라 자동 시연이 항상 같은 바람에 돈다.
+var root = document.getElementById('fl');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var windIn = document.getElementById('wind');
+var windVal = document.getElementById('windVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var BG = css.getPropertyValue('--bg').trim();
+var INK = css.getPropertyValue('--ink').trim();
+var CREAM = css.getPropertyValue('--cream').trim();
+var CLOTH = css.getPropertyValue('--cloth').trim();
+var CLOTH2 = css.getPropertyValue('--cloth2').trim();
+var POLE = css.getPropertyValue('--pole').trim();
+
+var COLS = 13, ROWS = 9;  // 점 격자
+var GRID = 0;             // 점 간 목표 間隔(fit 에서 정한다)
+var GRAV = 360;           // 중력(px/s²) — 깃발은 가벼워 바람에 쉽게 뜬다
+var DAMP = 0.985;         // 속도 보존률(천의 공기 저항)
+var ITER = 3;             // 制約反復数
+
+var grid = [];            // 점: { x, y, px, py, pin }
+var gustX = -1, gustY = -1, gustOn = false; // 커서 風 원
+var manual = false;
+var W = 0, H = 0, dpr = 1;
+var t0 = performance.now();
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  grid = [];
+  // 판 폭에서 깃대+깃발 폭을 계산해 격자 간격을 정한다 — 340px 미만에서도 옆으로 넘치지 않는다
+  var usableW = W - 84;
+  GRID = Math.min(21, usableW / (COLS - 1), (H - 58) / (ROWS - 1));
+  var x0 = 34, y0 = (H - GRID * (ROWS - 1)) / 2;
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      grid.push({
+        x: x0 + c * GRID, y: y0 + r * GRID,
+        px: x0 + c * GRID, py: y0 + r * GRID,
+        pin: c === 0 // 깃대 쪽 첫 세로줄만 고정
+      });
+    }
+  }
+  gustOn = false;
+}
+function pt(r, c) { return grid[r * COLS + c]; }
+
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var t = now / 1000;
+  var base = Number(windIn.value); // 슬라이더 風の強さ(0~2)
+  // 배지 — 사인파+돌풍을 합친 순간 세기를 m/s 연출로 환산
+  var gustExtra = 0;
+  if (gustOn) {
+    var mid = pt(Math.floor(ROWS / 2), Math.floor(COLS / 2));
+    var gd = Math.hypot(mid.x - gustX, mid.y - gustY);
+    gustExtra = 2.6 * Math.exp(-gd / 90);
+  }
+  windVal.textContent = (base * 4.2 + gustExtra + Math.abs(Math.sin(t * 1.3)) * 1.1).toFixed(1);
+
+  // (1) 적분 — 사인파 風 + 커서 돌풍 + 중력
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      var p = pt(r, c);
+      if (p.pin) continue;
+      var fall = 0.35 + 0.65 * (c / (COLS - 1)); // 깃대에서 멀수록 바람을 많이 받는다
+      var fx = Math.sin(t * 2.2 + r * 0.9 + c * 0.35) * 520 * base * fall + 90 * base; // 위상 변조 사인파 + 약한 정상시류
+      var fy = Math.sin(t * 1.6 + c * 0.5) * 140 * base * fall;
+      if (gustOn) {
+        var dx = p.x - gustX, dy = p.y - gustY;
+        var d2 = Math.hypot(dx, dy);
+        var g = 3200 * Math.exp(-d2 / 90); // 거리 감쇠 돌풍
+        if (d2 > 0.5) { fx += dx / d2 * g; fy += dy / d2 * g * 0.35; }
+      }
+      var vx = (p.x - p.px) * DAMP, vy = (p.y - p.py) * DAMP;
+      p.px = p.x; p.py = p.y;
+      p.x += vx + fx * dt * dt;
+      p.y += vy + (fy + GRAV) * dt * dt;
+    }
+  }
+  // (2) 制約反復 — 가로·세로 목표 間隔 + 대각(전행) 보강. 3회면 천 결이 살아남는다
+  for (var k = 0; k < ITER; k++) {
+    for (var rr = 0; rr < ROWS; rr++) {
+      for (var cc = 0; cc < COLS; cc++) {
+        var a = pt(rr, cc);
+        if (cc < COLS - 1) solve(a, pt(rr, cc + 1), GRID);
+        if (rr < ROWS - 1) solve(a, pt(rr + 1, cc), GRID);
+        if (cc < COLS - 1 && rr < ROWS - 1) solve(a, pt(rr + 1, cc + 1), GRID * Math.SQRT2);
+      }
+    }
+  }
+}
+function solve(a, b, rest) {
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+  var off = (d - rest) / d * 0.5;
+  var ax = dx * off, ay = dy * off;
+  if (a.pin && b.pin) return;
+  if (a.pin) { b.x -= ax * 2; b.y -= ay * 2; }
+  else if (b.pin) { a.x += ax * 2; a.y += ay * 2; }
+  else { a.x += ax; a.y += ay; b.x -= ax; b.y -= ay; }
+}
+
+function draw(now) {
+  var t = now / 1000;
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, W, H);
+  // 먼 風 궤적 — 황금각 배치의 가는 획이 사인파로 흐른다(시드 고정)
+  for (var s = 0; s < 9; s++) {
+    var wy = H * (0.12 + 0.09 * s);
+    var ph = t * (0.5 + 0.07 * s) + s * 1.7;
+    ctx.strokeStyle = CREAM;
+    ctx.globalAlpha = 0.10 + 0.05 * Math.sin(s * 2.3 + t);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var wx = 0; wx <= W; wx += 8) {
+      var yy = wy + Math.sin(wx * 0.03 + ph) * 5;
+      if (wx === 0) ctx.moveTo(wx, yy); else ctx.lineTo(wx, yy);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // 깃대
+  var topY = (H - GRID * (ROWS - 1)) / 2;
+  ctx.strokeStyle = POLE;
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(34, topY - 16);
+  ctx.lineTo(34, topY + GRID * (ROWS - 1) + 14);
+  ctx.stroke();
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.arc(34, topY - 18, 3.5, 0, Math.PI * 2); ctx.fill();
+  // 천 — 4점 폴리곤 채우기(소프트바디 질감). 열 사이를 색 두 겹으로 그린다
+  for (var c = 0; c < COLS - 1; c++) {
+    for (var r2 = 0; r2 < ROWS - 1; r2++) {
+      var p00 = pt(r2, c), p10 = pt(r2, c + 1), p01 = pt(r2 + 1, c), p11 = pt(r2 + 1, c + 1);
+      ctx.beginPath();
+      ctx.moveTo(p00.x, p00.y); ctx.lineTo(p10.x, p10.y);
+      ctx.lineTo(p11.x, p11.y); ctx.lineTo(p01.x, p01.y);
+      ctx.closePath();
+      ctx.fillStyle = (r2 + c) % 2 ? CLOTH : CLOTH2; // 체커 두 색 — 격자의 뒤집힘이 눈에 보인다
+      ctx.fill();
+    }
+  }
+  // 결 — 가로 제약선을 얇게 얹는다
+  ctx.strokeStyle = INK;
+  ctx.globalAlpha = 0.12;
+  ctx.lineWidth = 1;
+  for (var r3 = 0; r3 < ROWS; r3++) {
+    ctx.beginPath();
+    ctx.moveTo(pt(r3, 0).x, pt(r3, 0).y);
+    for (var c3 = 1; c3 < COLS; c3++) ctx.lineTo(pt(r3, c3).x, pt(r3, c3).y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // 자유단 꿰맨 점
+  for (var r4 = 0; r4 < ROWS; r4++) {
+    var pe = pt(r4, COLS - 1);
+    ctx.fillStyle = INK;
+    ctx.beginPath(); ctx.arc(pe.x, pe.y, 2, 0, Math.PI * 2); ctx.fill();
+  }
+  // 커서 風 원 — 반짝이는 링
+  if (gustOn) {
+    var pulse = 12 + Math.sin(t * 6) * 2.5;
+    ctx.strokeStyle = CREAM;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(gustX, gustY, pulse, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath(); ctx.arc(gustX, gustY, pulse + 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function frame(now) {
+  if (!manual && !reduce.matches) demoGust(now);
+  step(now);
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+// 자동 시연 — 커서가 없을 땐 가상 風 원이 판을 큰 원으로 한 바퀴 돈다(시드 고정).
+// pointermove/down 이 오면 manual=true 로 넘어가 진짜 커서를 따라간다.
+function demoGust(now) {
+  var ph = now / 4200 * Math.PI * 2;
+  gustX = W * 0.5 + Math.cos(ph) * W * 0.34;
+  gustY = H * 0.5 + Math.sin(ph * 2) * H * 0.26;
+  gustOn = true;
+}
+var hadPointer = false;
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  gustX = e.clientX - r.left; gustY = e.clientY - r.top;
+  gustOn = true; manual = true;
+});
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  gustX = e.clientX - r.left; gustY = e.clientY - r.top;
+  gustOn = true; manual = true;
+});
+field.addEventListener('pointerleave', function () { gustOn = false; });
+document.getElementById('reset').addEventListener('click', function () { manual = false; build(); });
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

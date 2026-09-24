@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>格子座標変換 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gp" id="gp">
+  <p class="gp__hint">各タイルでx=(col-row)×タイル幅/2、y=(col+row)×タイル高さ/2を計算しひし形格子に並べ、波のように持ち上げます</p>
+  <div class="gp__field" role="img" aria-label="碁盤目座標をひし形格子に変え、波のように持ち上げる場面">
+    <div class="gp__world" id="world"></div>
+  </div>
+  <p class="gp__meta"><b class="gp__count" id="n">36</b><span class="gp__metaUnit">マス · 2:1 等角格子</span></p>
+</div>
+</main>
+<script>
+// 격자 좌표 변환(02) — 바둑판 (col,row) 를 등각 화면 좌표 (x,y) 로 바꾸는 공식은
+// x=(col-row)*타일폭/2, y=(col+row)*타일높이/2 다. 값은 CSS 변수(--tx·--ty·--tz)로 두고
+// calc() 로 실제 px 를 만들어 translate3d 에 넣는다. 세로로 들어 올리는 파도(--tz)만
+// 매 프레임 새로 계산해 갱신한다 — 격자 자체의 좌표식은 한 번만 계산해 고정한다.
+(function () {
+  var root = document.getElementById('gp');
+  var world = document.getElementById('world');
+  var nEl = document.getElementById('n');
+  if (!root || !world || !nEl) return;
+
+  function mat4RotateX(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  }
+  function mat4RotateZ(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+  function mat4Mul(a, b) {
+    var out = new Array(16);
+    for (var col = 0; col < 4; col++) {
+      for (var row = 0; row < 4; row++) {
+        var sum = 0;
+        for (var k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+  function mat4ToCss(m) {
+    var s = '';
+    for (var i = 0; i < m.length; i++) s += (i ? ',' : '') + m[i].toFixed(6);
+    return 'matrix3d(' + s + ')';
+  }
+
+  var TILT = -35.264;   // 정확한 등각 각도
+  world.style.transform = mat4ToCss(mat4Mul(mat4RotateX(TILT), mat4RotateZ(45)));
+
+  var N = 6;                 // 한 변 칸 수 — N*N 격자
+  var TILE_W = 34, TILE_H = 17;   // 등각 2:1 비율 — 폭이 높이의 두 배
+  nEl.textContent = String(N * N);
+
+  var tiles = [];
+  var minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (var row = 0; row < N; row++) {
+    for (var col = 0; col < N; col++) {
+      var x = (col - row) * TILE_W / 2;
+      var y = (col + row) * TILE_H / 2;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      tiles.push({ col: col, row: row, x: x, y: y });
+    }
+  }
+  var shiftX = -(minX + maxX) / 2;
+  var shiftY = -maxY / 2;
+
+  var els = [];
+  for (var i = 0; i < tiles.length; i++) {
+    var tdata = tiles[i];
+    var el = document.createElement('div');
+    el.className = 'gp__tile';
+    el.style.setProperty('--tw', String(TILE_W));
+    el.style.setProperty('--th', String(TILE_H));
+    el.style.setProperty('--tx', (tdata.x + shiftX).toFixed(2) + 'px');
+    el.style.setProperty('--ty', (tdata.y + shiftY).toFixed(2) + 'px');
+    el.style.setProperty('--tz', '0px');
+    world.appendChild(el);
+    els.push({ el: el, col: tdata.col, row: tdata.row });
+  }
+
+  var AMP = 13;
+  function paint(t) {
+    for (var i = 0; i < els.length; i++) {
+      var it = els[i];
+      var phase = (it.col + it.row) * 0.9 - t * 3.1;
+      var z = Math.max(0, Math.sin(phase)) * AMP;
+      it.el.style.setProperty('--tz', z.toFixed(2) + 'px');
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    paint(0.6);
+    root.classList.add('is-still');
+  } else {
+    var start = performance.now();
+    (function step(now) {
+      paint((now - start) / 1000);
+      requestAnimationFrame(step);
+    })(start);
+  }
+})();
+</script>
+</body>
+</html>

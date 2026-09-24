@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>넘침 접힘 더보기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ovm is-demo" id="ovm">
+  <div class="ovm__resizer" id="ovmBox" style="width: 260px;">
+    <div class="ovm__track" id="ovmTrack" role="toolbar" aria-label="서식 도구"></div>
+    <button class="ovm__more" id="ovmMore" aria-haspopup="true" aria-expanded="false" hidden>더보기 ▾</button>
+    <ul class="ovm__menu" id="ovmMenu" hidden></ul>
+  </div>
+  <span class="ovm__handle" id="ovmHandle" aria-hidden="true"></span>
+</div>
+<script>
+(function () {
+  var LABELS = ['굵게', '기울임', '밑줄', '취소선', '정렬', '색상', '링크'];
+  var OVERFLOW_BUFFER = 24; // 계산 겹 상수: 더보기 버튼 폭까지 계산한 뒤 남기는 안전 여유(px)
+  var MIN_W = 150, MAX_W = 320;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('ovm');
+  var box = document.getElementById('ovmBox');
+  var track = document.getElementById('ovmTrack');
+  var more = document.getElementById('ovmMore');
+  var menu = document.getElementById('ovmMenu');
+  var handle = document.getElementById('ovmHandle');
+  var isDemo = true;
+
+  var btns = LABELS.map(function (label, i) {
+    var b = document.createElement('button');
+    b.className = 'ovm__btn';
+    b.type = 'button';
+    b.textContent = label;
+    b.dataset.i = String(i);
+    return b;
+  });
+
+  // 계산 겹: 각 버튼의 실제 폭을 한 번 실측해 캐시한다(추측 px 를 쓰지 않는다) — track 에 전부 넣고 잰 뒤
+  // 넘치는 만큼만 더보기로 옮긴다.
+  btns.forEach(function (b) { track.appendChild(b); });
+  var widths = btns.map(function (b) { return b.getBoundingClientRect().width; });
+  var gap = 8;
+  var moreWidth = 0;
+
+  function recompute() {
+    var avail = box.getBoundingClientRect().width - OVERFLOW_BUFFER;
+    moreWidth = moreWidth || (function () { more.hidden = false; var w = more.getBoundingClientRect().width; more.hidden = true; return w; })();
+
+    var sumAll = widths.reduce(function (s, w) { return s + w; }, 0) + gap * (widths.length - 1);
+    var cutoff = widths.length;
+    if (sumAll > avail) {
+      var sum = 0;
+      cutoff = 0;
+      for (var i = 0; i < widths.length; i++) {
+        var add = widths[i] + (i > 0 ? gap : 0);
+        if (sum + add + moreWidth > avail) break;
+        sum += add;
+        cutoff = i + 1;
+      }
+      cutoff = Math.max(1, cutoff);
+    }
+
+    btns.forEach(function (b, i) { b.hidden = i >= cutoff; });
+    var overflowCount = widths.length - cutoff;
+    more.hidden = overflowCount === 0;
+    more.textContent = '더보기 ▾ (' + overflowCount + ')';
+
+    menu.innerHTML = '';
+    for (var j = cutoff; j < widths.length; j++) {
+      var li = document.createElement('li');
+      var mb = document.createElement('button');
+      mb.type = 'button';
+      mb.className = 'ovm__menuBtn';
+      mb.textContent = LABELS[j];
+      li.appendChild(mb);
+      menu.appendChild(li);
+    }
+  }
+
+  more.addEventListener('click', function () {
+    human();
+    var open = menu.hidden;
+    menu.hidden = !open;
+    more.setAttribute('aria-expanded', String(open));
+  });
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  var dragging = false, dragStartX = 0, dragStartW = 0;
+  handle.addEventListener('pointerdown', function (e) {
+    human();
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartW = box.getBoundingClientRect().width;
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var w = Math.min(MAX_W, Math.max(MIN_W, dragStartW + (e.clientX - dragStartX)));
+    box.style.width = w + 'px';
+    recompute();
+  });
+  handle.addEventListener('pointerup', function () { dragging = false; });
+
+  var ro = new ResizeObserver(function () { recompute(); });
+  ro.observe(box);
+
+  var start = 0;
+  function demoWidth(ts) {
+    var t = (ts - start) / 1900;
+    var wave = (Math.sin(t * Math.PI * 2) + 1) / 2; // 0~1
+    return MIN_W + wave * (MAX_W - MIN_W);
+  }
+
+  function loop(ts) {
+    if (!start) start = ts;
+    if (isDemo && !reduce) {
+      box.style.width = demoWidth(ts).toFixed(1) + 'px';
+      recompute();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  recompute();
+  if (reduce) { box.style.width = MAX_W + 'px'; recompute(); }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

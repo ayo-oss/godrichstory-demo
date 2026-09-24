@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>タブの値が変わると重なって流れるフィルターリスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="tf is-demo" id="tf">
+    <div class="tf__tabs" role="tablist" aria-label="通知の種類">
+      <button class="tf__tab" id="tfTabAll" role="tab" type="button" aria-selected="true" aria-controls="tfBody" tabindex="0" data-cat="all">すべて</button>
+      <button class="tf__tab" id="tfTabMention" role="tab" type="button" aria-selected="false" aria-controls="tfBody" tabindex="-1" data-cat="mention">メンション</button>
+      <button class="tf__tab" id="tfTabSystem" role="tab" type="button" aria-selected="false" aria-controls="tfBody" tabindex="-1" data-cat="system">システム</button>
+    </div>
+    <div class="tf__body" id="tfBody" role="tabpanel">
+      <ul class="tf__list tf__list--a" id="tfListA" role="list"></ul>
+      <ul class="tf__list tf__list--b" id="tfListB" role="list" hidden></ul>
+    </div>
+    <p class="tf__sr" id="tfSr" aria-live="polite"></p>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var ITEMS = [
+    { name: "決済が承認されました", cat: "system" },
+    { name: "ジスさんがあなたをメンションしました", cat: "mention" },
+    { name: "会議まであと10分です", cat: "system" },
+    { name: "ウジンさんがコメントでメンションしました", cat: "mention" },
+    { name: "アップロードが完了しました", cat: "system" },
+    { name: "ハウンさんが返信を残しました", cat: "mention" }
+  ];
+  var CATS = ["all", "mention", "system"];
+  var LABEL = { all: "すべて", mention: "メンション", system: "システム" };
+
+  var root = document.getElementById("tf");
+  var tabs = Array.prototype.slice.call(root.querySelectorAll(".tf__tab"));
+  var body = document.getElementById("tfBody");
+  var listA = document.getElementById("tfListA");
+  var listB = document.getElementById("tfListB");
+  var sr = document.getElementById("tfSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function makeRow(name) {
+    var li = document.createElement("li");
+    li.className = "tf__item";
+    li.setAttribute("role", "listitem");
+    li.textContent = name;
+    return li;
+  }
+
+  // 계산 겹: 필터 결과 값(항목 수)에 따라 목록을 채운 뒤, 이전 목록은 위로 이동하며(opacity·
+  // translateY 를 함께) 빠지고 새 목록은 아래에서 올라오며 들어온다 — 두 층(list--a/--b)을
+  // 번갈아 앞뒤로 써서 정지 사진 한 장이 "반쯤 섞인 유령"처럼 안 보이게 한다(item 07 과 같은
+  // 원리, 탭 값이 바뀔 때마다 앞/뒤 층을 서로 바꿔 끼운다).
+  var front = listA, back = listB, active = "all";
+
+  function filterCount(cat) {
+    return cat === "all" ? ITEMS.length : ITEMS.filter(function (it) { return it.cat === cat; }).length;
+  }
+
+  function fill(el, cat) {
+    el.innerHTML = "";
+    var rows = cat === "all" ? ITEMS : ITEMS.filter(function (it) { return it.cat === cat; });
+    rows.forEach(function (it) { el.appendChild(makeRow(it.name)); });
+    return rows.length;
+  }
+
+  function selectTab(cat, viaKeyboard) {
+    if (cat === active) return;
+    var incoming = back;
+    var outgoing = front;
+    var n = fill(incoming, cat);
+    incoming.style.transition = "none";
+    incoming.style.opacity = "0";
+    incoming.style.transform = "translateY(12px)";
+    incoming.removeAttribute("hidden");
+    // 강제 리플로우 뒤 다음 프레임에서 최종 값을 건다 — 시작 값(0)이 한 번 그려지기 전에
+    // 끝 값(1)으로 바로 덮으면 전환이 안 보인다(실측 2026-09-24, 항목 08 과 같은 원인).
+    void incoming.offsetHeight;
+    incoming.style.transition = "";
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        outgoing.classList.add("tf__list--out");
+        incoming.style.opacity = "1";
+        incoming.style.transform = "translateY(0)";
+      });
+    });
+    window.setTimeout(function () {
+      outgoing.setAttribute("hidden", "");
+      outgoing.classList.remove("tf__list--out");
+      outgoing.style.opacity = "";
+      outgoing.style.transform = "";
+      incoming.style.opacity = "";
+      incoming.style.transform = "";
+      front = incoming; back = outgoing;
+    }, reduce ? 0 : 260);
+    tabs.forEach(function (t) {
+      var on = t.dataset.cat === cat;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.tabIndex = on ? 0 : -1;
+    });
+    active = cat;
+    sr.textContent = LABEL[cat] + " " + n + "件";
+    if (viaKeyboard) {
+      var el = tabs.filter(function (t) { return t.dataset.cat === cat; })[0];
+      if (el) el.focus({ preventScroll: true });
+    }
+  }
+
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      human();
+      selectTab(t.dataset.cat, false);
+    });
+  });
+
+  root.querySelector(".tf__tabs").addEventListener("keydown", function (e) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    human();
+    var idx = CATS.indexOf(active);
+    var next = e.key === "ArrowRight" ? (idx + 1) % CATS.length : (idx - 1 + CATS.length) % CATS.length;
+    e.preventDefault();
+    selectTab(CATS[next], true);
+  });
+
+  fill(front, "all");
+  sr.textContent = LABEL.all + " " + filterCount("all") + "件";
+
+  if (reduce) {
+    // 정지 상태만 보인다 — 전환 없이 탭 값만 최종으로 확정
+  } else {
+    var idx = 0;
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      synthetic = true;
+      idx = (idx + 1) % CATS.length;
+      selectTab(CATS[idx], false);
+      synthetic = false;
+      window.setTimeout(loop, 1500);
+    }
+    window.setTimeout(loop, 800);
+  }
+})();
+</script>
+</body>
+</html>

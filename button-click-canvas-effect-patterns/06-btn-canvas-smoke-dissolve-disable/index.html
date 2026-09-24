@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>비활성 값이 켜지면 연기처럼 흩어지는 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sd is-demo" id="root">
+  <canvas class="sd__cv" id="cv" width="480" height="300"></canvas>
+  <button class="sd__btn" id="btn" type="button">구매하기</button>
+  <p class="sd__hint">버튼을 누르면 품절 처리되며 연기처럼 흩어집니다</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var W = 480, H = 300;
+  var SEED = 60611;
+  var rnd = makeLcg(SEED);
+
+  var BW = 224, BH = 68;
+  var BX = (W - BW) / 2, BY = (H - BH) / 2;
+  var CELL = 7;
+  var COLS = Math.ceil(BW / CELL), ROWS = Math.ceil(BH / CELL);
+
+  var ASSEMBLE_SPEED = 2.6; // 초당 조립도(0~1)가 목표를 따라가는 속도
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  // 버튼을 한 번 오프스크린에 그려 실제 픽셀을 격자 단위로 표본한다.
+  var off = document.createElement('canvas');
+  off.width = BW; off.height = BH;
+  var octx = off.getContext('2d');
+  octx.fillStyle = '#17141a';
+  roundRect(octx, 0, 0, BW, BH, 12);
+  octx.fill();
+  octx.fillStyle = '#fff7e6';
+  octx.font = '700 18px system-ui, sans-serif';
+  octx.textAlign = 'center';
+  octx.textBaseline = 'middle';
+  octx.fillText('구매하기', BW / 2, BH / 2 + 1);
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  var offData = octx.getImageData(0, 0, BW, BH).data;
+
+  var shards = [];
+  for (var gy = 0; gy < ROWS; gy++) {
+    for (var gx = 0; gx < COLS; gx++) {
+      var sx = gx * CELL, sy = gy * CELL;
+      var sw = Math.min(CELL, BW - sx), sh = Math.min(CELL, BH - sy);
+      if (sw <= 0 || sh <= 0) continue;
+      var cxp = Math.min(BW - 1, sx + (sw / 2 | 0));
+      var cyp = Math.min(BH - 1, sy + (sh / 2 | 0));
+      var pi = (cyp * BW + cxp) * 4;
+      var a = offData[pi + 3];
+      if (a < 10) continue;
+      var ang = rnd() * Math.PI * 2;
+      var driftMag = 26 + rnd() * 54;
+      shards.push({
+        ox: BX + sx, oy: BY + sy, w: sw, h: sh,
+        r: offData[pi], g: offData[pi + 1], b: offData[pi + 2],
+        dirX: Math.cos(ang) * driftMag,
+        dirY: Math.sin(ang) * driftMag - 40 - rnd() * 46,
+        spin: (rnd() - 0.5) * 2.4,
+        delay: rnd() * 0.28
+      });
+    }
+  }
+
+  var assembly = 1, target = 1;
+
+  function render(dt) {
+    assembly += (target - assembly) * Math.min(1, dt * ASSEMBLE_SPEED);
+    ctx.clearRect(0, 0, W, H);
+    for (var i = 0; i < shards.length; i++) {
+      var s = shards[i];
+      var local = Math.max(0, Math.min(1, (assembly - s.delay) / (1 - s.delay)));
+      var scatter = 1 - local;
+      var px = s.ox + s.dirX * scatter * scatter;
+      var py = s.oy + s.dirY * scatter * scatter - scatter * 18;
+      var alpha = local;
+      if (alpha <= 0.01) continue;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(px + s.w / 2, py + s.h / 2);
+      ctx.rotate(s.spin * scatter);
+      ctx.fillStyle = 'rgb(' + s.r + ',' + s.g + ',' + s.b + ')';
+      ctx.fillRect(-s.w / 2, -s.h / 2, s.w, s.h);
+      ctx.restore();
+    }
+  }
+
+  function toggle() {
+    root.classList.remove('is-demo');
+    target = target === 1 ? 0 : 1;
+    if (reduceMQ.matches) render(0.05);
+  }
+
+  btn.addEventListener('click', toggle);
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    toggle();
+  });
+  cv.addEventListener('pointerdown', function () { toggle(); });
+  window.addEventListener('resize', function () { render(0.016); });
+
+  var lastT = null;
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      var dt = lastT === null ? 0.016 : Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      if (root.classList.contains('is-demo')) {
+        var t = now % 2200;
+        target = t < 1100 ? 0 : 1;
+      }
+      render(dt);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    target = 0.4; assembly = 0.4;
+    render(0.05);
+  } else {
+    target = 0;
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

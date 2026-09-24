@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>オーバースクロール弾性ヘッダー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="eoh is-demo" id="eoh">
+  <div class="eoh__frame" id="eohFrame" role="application" aria-label="オーバースクロールヘッダー実験パネル">
+    <div class="eoh__header" id="eohHeader">ヘッダー</div>
+    <div class="eoh__body" id="eohBody">
+      <div class="eoh__row">通知01</div>
+      <div class="eoh__row">通知02</div>
+      <div class="eoh__row">通知03</div>
+    </div>
+  </div>
+  <p class="eoh__hint">上から下へ引っ張って離すと、ヘッダーが伸びてから戻ります</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('eoh');
+  var frame = document.getElementById('eohFrame');
+  var header = document.getElementById('eohHeader');
+  var body = document.getElementById('eohBody');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 당긴 거리(dist)는 제곱근으로 저항을 걸어 늘어난 값(stretch)을 만든다(고무줄 저항).
+  // 손을 놓으면 stretch 를 목표 1 로 스프링 적분(SPRING_K·SPRING_C)해 되돌린다 — 속성 트윈이 아니라
+  // 매 프레임 가속도를 계산해 쌓는 진짜 스프링.
+  var PULL_RESIST = 9;
+  var MAX_STRETCH = 1.85;
+  var SPRING_K = 210;
+  var SPRING_C = 15;
+  var HEADER_H = 56;
+
+  var stretch = 1, sVel = 0, raf = null;
+
+  function paint() {
+    header.style.transform = 'scaleY(' + stretch.toFixed(3) + ')';
+    var extra = HEADER_H * (stretch - 1);
+    body.style.transform = 'translateY(' + extra.toFixed(1) + 'px)';
+  }
+  function stopSpring() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } }
+  function springTick() {
+    var force = -SPRING_K * (stretch - 1) - SPRING_C * sVel;
+    sVel += force * (1 / 60) * 0.06;
+    stretch += sVel;
+    paint();
+    if (Math.abs(stretch - 1) < 0.003 && Math.abs(sVel) < 0.003) {
+      stretch = 1; sVel = 0; paint(); raf = null; return;
+    }
+    raf = requestAnimationFrame(springTick);
+  }
+  function release() {
+    if (reduce) { stretch = 1; sVel = 0; paint(); return; }
+    stopSpring();
+    raf = requestAnimationFrame(springTick);
+  }
+  function pullTo(dist) {
+    var d = Math.max(0, dist);
+    stretch = Math.min(MAX_STRETCH, 1 + Math.sqrt(d) / PULL_RESIST);
+    paint();
+  }
+
+  function wireReal() {
+    var dragging = false, startY = 0;
+    frame.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay(); stopSpring();
+      dragging = true; startY = e.clientY; sVel = 0;
+      frame.setPointerCapture(e.pointerId);
+    });
+    frame.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      pullTo(e.clientY - startY);
+    });
+    frame.addEventListener('pointerup', function () {
+      if (!dragging) { return; }
+      dragging = false;
+      release();
+    });
+    frame.addEventListener('wheel', function (e) {
+      if (e.deltaY >= 0) { return; }
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay(); stopSpring();
+      pullTo((stretch - 1) * PULL_RESIST * PULL_RESIST + (-e.deltaY) * 1.4);
+      release();
+    }, { passive: false });
+  }
+  wireReal();
+  paint();
+
+  // 자동 루프: 당김 거리를 늘렸다가 놓기를 반복해 같은 저항→스프링 경로를 재현한다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    phase += 1;
+    var d = 58 + Math.sin(phase * 1.1) * 20;
+    pullTo(d);
+    setTimeout(function () { if (!root.classList.contains('is-demo')) { return; } release(); }, 260);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 900); autoTick(); }
+})();
+</script>
+</body>
+</html>

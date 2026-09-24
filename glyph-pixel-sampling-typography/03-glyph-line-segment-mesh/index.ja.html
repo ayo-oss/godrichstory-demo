@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>글리프 선분 메시 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gm" id="gm">
+  <p class="gm__hint">
+    <svg class="gm__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"><path d="M36 64l48-24 48 24 48-24" opacity=".9"/><path d="M36 128l48-24 48 24 48-24" opacity=".6"/><path d="M36 192l48-24 48 24 48-24" opacity=".35"/><path d="M60 40v128M108 64v128M156 40v128" stroke-width="6" opacity=".5"/></g></svg>
+    <span>言葉を変えると糸が組み直されます</span>
+  </p>
+  <div class="gm__field" id="field" role="application" aria-label="線分メッシュの実験盤" tabindex="0">
+    <canvas class="gm__cv" id="cv"></canvas>
+    <b class="gm__badge" aria-hidden="true" id="badge">0 pts</b>
+  </div>
+  <div class="gm__bar">
+    <label class="gm__dial">単語
+      <input type="text" id="word" value="MESH" maxlength="12" spellcheck="false" aria-label="単語">
+    </label>
+    <label class="gm__dial">シード
+      <input type="number" id="seed" min="1" max="9999" value="7" aria-label="シード">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 선분 메시 — 글자를 픽셀로 샘플링해, 이웃한 샘플쌍을 잇는 실로 실루엣을 띄운다.
+// 1) 오프스크린 캔버스에 fillText 로 단어를 그려 getImageData 로 알파 마스크를 뽑는다
+// 2) 격자 간격 STEP 로 걸어 알파>128 인 칸을 샘플점으로 삼는다
+// 3) 각 점에서 오른쪽·아래 이웃이 마스크 안이면 moveTo·lineTo 로 실을 긋는다
+//    선 알파 = 두 점 알파의 곱 * (0.3 + 0.7 * 흐르는 위상) — 위상이 지나가면 실이 반짝인다
+// 무작위 요소는 점마다의 위상 흔들림이고 전부 mulberry32(シード) 로 돌린다.
+var root = document.getElementById('gm');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var wordIn = document.getElementById('word');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+
+var SW = 252, SH = 108;          // 샘플 해상도
+var STEP = 4;                    // 격자 간격(px)
+var LINK = STEP * 1.6;           // 이웃 판정 거리 — 이 안의 쌍만 실로 잇는다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0;
+var pts = [];                    // 샘플점 { x, y, a(알파), ph(위상), gx, gy }
+var seed = 7, word = 'MESH';
+var t0 = 0, raf = 0;
+
+var css = getComputedStyle(root);
+function hexOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return '#' + v;
+}
+var colA = hexOf('--g0'), colB = hexOf('--g1'), colC = hexOf('--g2');
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── 1) 글자 → 알파 마스크 ────────────────────────────────────────
+function buildMask(text) {
+  var off = document.createElement('canvas');
+  off.width = SW; off.height = SH;
+  var oc = off.getContext('2d', { willReadFrequently: true });
+  oc.textAlign = 'center'; oc.textBaseline = 'middle';
+  var fs = 200;
+  oc.font = '900 ' + fs + 'px Arial';
+  var w = oc.measureText(text).width || 1;
+  fs = Math.min(fs * ((SW - 8) / w), SH - 6);
+  oc.font = '900 ' + Math.round(fs) + 'px Arial';
+  oc.fillStyle = '#fff';
+  oc.fillText(text, SW / 2, SH / 2);
+  return oc.getImageData(0, 0, SW, SH).data;
+}
+
+// ── 2) 격자 샘플점 — (x,y,알파,시드위상) ────────────────────────
+function samplePoints(data, rnd) {
+  var out = [];
+  for (var y = 0; y < SH; y += STEP) {
+    for (var x = 0; x < SW; x += STEP) {
+      var a = data[(y * SW + x) * 4 + 3] / 255;
+      if (a > 0.5) out.push({ x: x, y: y, a: a, ph: rnd() * 6.2832, gx: x / STEP, gy: y / STEP });
+    }
+  }
+  return out;
+}
+
+// 점 인덱스 격자 — 이웃 찾기를 O(1) 로. key = gx + gy * 4096
+var grid = {};
+function gkey(gx, gy) { return gx + gy * 4096; }
+
+function resample(nextWord, nextSeed) {
+  var w = String(nextWord == null ? word : nextWord).trim().toUpperCase();
+  if (w) word = w;
+  var sv = Math.floor(Number(nextSeed));
+  if (sv >= 1) seed = sv;
+  var rnd = mulberry32(seed);
+  pts = samplePoints(buildMask(word), rnd);
+  grid = {};
+  for (var i = 0; i < pts.length; i++) grid[gkey(pts[i].gx, pts[i].gy)] = i;
+  window.__sampleInfo = { targets: pts.length, particles: pts.length };
+  badge.textContent = pts.length + ' pts';
+  if (reduce) paint(0);
+  else t0 = performance.now();
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  var d = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+
+// ── 3) 매 프레임: 이웃쌍 실 그리기 ──────────────────────────────
+// 위상 파동이 격자를 흐른다 — 파동 앞을 지나는 선이 밝아졌다 어두워진다
+function paint(t) {
+  ctx.clearRect(0, 0, W, H);
+  var sx = W / SW, sy = H / SH;
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 2.6 * sx;
+  var i, p, q;
+  // 파동 원점이 판을 빠르게 크게 돈다 — 마루가 지나가는 자리가 넓게 바뀐다
+  var wx = SW * (0.5 + 0.46 * Math.sin(t * 3.9));
+  var wy = SH * (0.5 + 0.44 * Math.cos(t * 3.1));
+  for (i = 0; i < pts.length; i++) {
+    p = pts[i];
+    // 오른쪽·아래 두 이웃만 본다(중복 선 방지) — 격자라 거리 계산이 필요 없다
+    var nbs = [grid[gkey(p.gx + 1, p.gy)], grid[gkey(p.gx, p.gy + 1)],
+               grid[gkey(p.gx + 1, p.gy + 1)], grid[gkey(p.gx + 1, p.gy - 1)]];
+    for (var k = 0; k < nbs.length; k++) {
+      var j = nbs[k];
+      if (j === undefined || j <= i) continue;
+      q = pts[j];
+      var dx = q.x - p.x, dy = q.y - p.y;
+      if (dx * dx + dy * dy > LINK * LINK) continue;
+      // 실의 끝이 시간에 따라 2.6px 안팎으로 숨쉰다(breath) — 전 실루엣이 매 프레임 미세하게 움직인다
+      var breath = 1 + 0.34 * Math.sin(t * 2.2 + p.ph * 0.5);
+      var jx1 = p.x + Math.sin(t * 3.1 + p.ph) * 5.0 * breath;
+      var jy1 = p.y + Math.cos(t * 2.7 + p.ph) * 5.0 * breath;
+      var jx2 = q.x + Math.sin(t * 3.1 + q.ph) * 5.0 / breath;
+      var jy2 = q.y + Math.cos(t * 2.7 + q.ph) * 5.0 / breath;
+      var mx = (p.x + q.x) * 0.5, my = (p.y + q.y) * 0.5;
+      var d = Math.sqrt((mx - wx) * (mx - wx) + (my - wy) * (my - wy));
+      var wave = 0.26 + 0.74 * Math.max(0, Math.cos(d * 0.11 - t * 2.6));  // 파동 마루
+      var tw = 0.82 + 0.18 * Math.sin(t * 4.4 + p.ph * 0.7 + q.ph * 0.3);  // 점쌍 위상 반짝임
+      var al = p.a * q.a * wave * tw;
+      if (al < 0.05) continue;
+      ctx.strokeStyle = al > 0.62 ? colA : (al > 0.32 ? colB : colC);
+      ctx.globalAlpha = Math.min(1, 0.2 + al);
+      ctx.lineWidth = (1.8 + al * 3.4) * sx;      // 밝은 실일수록 굵다 — 파동 마루가 부피로 보인다
+      ctx.beginPath();
+      ctx.moveTo(jx1 * sx, jy1 * sy);
+      ctx.lineTo(jx2 * sx, jy2 * sy);
+      ctx.stroke();
+    }
+  }
+  // 매듭 — 실이 만나는 샘플점에 작은 점 하나. 실루엣이 또렷해진다
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = colA;
+  for (i = 0; i < pts.length; i++) {
+    p = pts[i];
+    var d2 = Math.sqrt((p.x - wx) * (p.x - wx) + (p.y - wy) * (p.y - wy));
+    var g = Math.max(0, Math.cos(d2 * 0.11 - t * 2.6));
+    var r = (0.9 + p.a * 1.6 + g * 1.4) * sx;
+    var br2 = 1 + 0.34 * Math.sin(t * 2.2 + p.ph * 0.5);
+    ctx.globalAlpha = 0.5 + p.a * 0.5 + g * 0.15;
+    ctx.beginPath();
+    ctx.arc((p.x + Math.sin(t * 3.1 + p.ph) * 5.0 * br2) * sx, (p.y + Math.cos(t * 2.7 + p.ph) * 5.0 * br2) * sy, r, 0, 6.2832);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function frame(now) {
+  paint((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+wordIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+seedIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+fit();
+resample(wordIn.value, seedIn.value);
+if (reduce) {
+  root.classList.add('is-still');                  // 루프 없이 정지 한 장
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightbox Whose Caption Slides Up From Below — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--a"></span><span class="thumbLabel">Photo 1</span></button></li>
+    <li><button class="thumb" id="thumb1" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--b"></span><span class="thumbLabel">Photo 2</span></button></li>
+    <li><button class="thumb" id="thumb2" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--c"></span><span class="thumbLabel">Photo 3</span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="View photo with caption">
+    <span class="fullImg" id="fullImg"></span>
+    <p class="caption" id="caption"></p>
+    <button class="closeBtn" id="closeBtn" type="button">Close</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var IMAGE_MS = 550;
+  var CAPTION_GAP_MS = 120;
+  var CAPTION_MS = 420;
+  var HOLD_MS = 480;
+  var CLOSE_MS = 380;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var fullImg = document.getElementById('fullImg');
+  var caption = document.getElementById('caption');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumbs = [].slice.call(document.querySelectorAll('.thumb'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var imgClassByIdx = ['fullImg--a', 'fullImg--b', 'fullImg--c'];
+  // 문구.json 에서 en·ja 로 함께 옮겨지도록 문자열 리터럴로 둔다(html data-* 속성은 문구치환 대상 밖)
+  var captionByIdx = ['A shot taken on an autumn walk', 'City night view', 'A day at the beach, the moment the waves could be heard'];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  // reduce: 실사용 경로 적용 — 트윈 없이 최종 상태로 즉시 전환한다
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  var open = false;
+  var activeIdx = 1;
+  var timers = [];
+
+  function openFrom(idx) {
+    if (open) return;
+    open = true;
+    caption.textContent = captionByIdx[idx];
+    caption.style.transform = 'translateY(0px)';
+    caption.style.opacity = '0';
+    fullImg.className = 'fullImg ' + imgClassByIdx[idx];
+    fullImg.style.transform = 'scale(.86)';
+    fullImg.style.opacity = '0';
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+
+    animate(IMAGE_MS, function (e) {
+      fullImg.style.transform = 'scale(' + (0.86 + 0.14 * e).toFixed(4) + ')';
+      fullImg.style.opacity = e.toFixed(3);
+      backdrop.style.opacity = (0.7 * e).toFixed(3);
+    }, function () {
+      // 캡션 자신의 실제 렌더 높이를 측정해 그 높이만큼 아래서 밀어 올린다 — 텍스트 길이마다 시작 위치가 다르다
+      caption.style.visibility = 'hidden';
+      caption.style.opacity = '1';
+      var capH = caption.getBoundingClientRect().height;
+      caption.style.transform = 'translateY(' + capH.toFixed(1) + 'px)';
+      caption.style.visibility = 'visible';
+      timers.push(setTimeout(function () {
+        animate(CAPTION_MS, function (e2) {
+          caption.style.transform = 'translateY(' + (capH * (1 - e2)).toFixed(1) + 'px)';
+        }, function () {
+          closeBtn.focus({ preventScroll: true });
+        });
+      }, CAPTION_GAP_MS));
+    });
+  }
+
+  function closeLightbox() {
+    if (!open) return;
+    animate(CLOSE_MS, function (e) {
+      fullImg.style.opacity = (1 - e).toFixed(3);
+      caption.style.opacity = (1 - e).toFixed(3);
+      backdrop.style.opacity = (0.7 * (1 - e)).toFixed(3);
+    }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumbs[activeIdx].focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumbs.forEach(function (t, i) {
+    t.addEventListener('click', function () {
+      human();
+      activeIdx = i;
+      openFrom(i);
+    });
+  });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && open) { human(); closeLightbox(); }
+  });
+
+  function cycle() {
+    activeIdx = 2;
+    openFrom(2);
+    timers.push(setTimeout(closeLightbox, IMAGE_MS + CAPTION_GAP_MS + CAPTION_MS + HOLD_MS));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

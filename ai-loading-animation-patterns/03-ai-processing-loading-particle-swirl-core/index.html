@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>궤도 반경 값이 좁아지며 코어에 모이는 입자 소용돌이 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld" id="ld">
+  <p class="ld__hint">
+    <svg class="ld__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 56v56a8 8 0 0 1-16 0V91.3l-25.6 25.7A80 80 0 1 1 174 60a8 8 0 1 1-9 13.2A64 64 0 1 0 179.7 128H216a8 8 0 0 1 0 16h-56a8 8 0 0 1-8-8V80a8 8 0 0 1 16 0v20.7L192.7 76A80.1 80.1 0 0 0 64 128a8 8 0 0 1-16 0a96 96 0 0 1 163.6-68.3L224 71.3V56a8 8 0 0 1 8 8" opacity=".2"/><path d="M224 48a8 8 0 0 0-8 8v15.3l-11.7-11.6a96 96 0 1 0 27.6 51.6a8 8 0 0 0-15.8 2.5a80 80 0 1 1-23-43l-25.7 25.7A8 8 0 0 0 173 112h56a8 8 0 0 0 8-8V56a8 8 0 0 0-13-8"/></g></svg>
+    <span>클릭하거나 스페이스바를 누르면 멈추거나 다시 갑니다</span>
+  </p>
+  <div class="ld__field" id="field" role="application" aria-label="입자 소용돌이 코어 수렴 실험판" tabindex="0">
+    <canvas class="ld__cv" id="cv"></canvas>
+    <b class="ld__badge" aria-hidden="true"><span class="ld__badgeNum" id="pct">0%</span><span class="ld__badgeUnit">진행</span></b>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var LOOP = 2.0;
+  var N = 26;                                   // 입자 수
+  var GOLDEN = 137.508 * Math.PI / 180;         // 입자 초기 각도 간격
+  var CORE_R = 14;                              // 코어 반경(px)
+  var MAX_R = 128;                              // 궤도 반경 값 최대(px)
+  var AI_LOADER_ORBIT_SHRINK_EASE = 2.2;        // 입자 궤도 반경 축소 이징 값(전)
+
+  var root = document.getElementById('ld');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var pctEl = document.getElementById('pct');
+  var paused = false;
+  var t0 = performance.now();
+  var raf = 0;
+  var W = 0, H = 0, DPR = 1;
+
+  function reduced() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  function seeded(i) {                          // 고정 시드 의사난수(Math.random 미사용)
+    var v = Math.sin(i * 12.9898) * 43758.5453;
+    return v - Math.floor(v);
+  }
+
+  var particles = [];
+  for (var i = 0; i < N; i++) {
+    particles.push({
+      baseAngle: i * GOLDEN,
+      jitter: 0.7 + seeded(i) * 0.5,
+      speed: 0.55 + seeded(i + 31) * 0.5,
+      size: 4.2 + seeded(i + 71) * 3.4
+    });
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    DPR = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * DPR);
+    cv.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  var cs = getComputedStyle(root);
+  var PAPER = cs.getPropertyValue('--paper').trim();
+  var TRAIL = cs.getPropertyValue('--trail').trim();
+  var CORE = cs.getPropertyValue('--core').trim();
+  var DOT = cs.getPropertyValue('--dot').trim();
+  var DOT_DEEP = cs.getPropertyValue('--dot-deep').trim();
+
+  function draw(sec) {
+    ctx.fillStyle = TRAIL;
+    ctx.fillRect(0, 0, W, H);
+
+    var cx = W / 2, cy = H / 2;
+    var p = (sec % LOOP) / LOOP;
+    var shrink = Math.pow(p, 1 / AI_LOADER_ORBIT_SHRINK_EASE);   // 궤도 반경 값 축소 이징
+
+    for (var i = 0; i < particles.length; i++) {
+      var q = particles[i];
+      var angle = q.baseAngle + sec * q.speed;
+      var r = CORE_R + (MAX_R - CORE_R) * (1 - shrink) * q.jitter;
+      var x = cx + r * Math.cos(angle);
+      var y = cy + r * Math.sin(angle) * 0.86;
+      ctx.beginPath();
+      ctx.arc(x, y, q.size, 0, Math.PI * 2);
+      ctx.fillStyle = i % 2 === 0 ? DOT : DOT_DEEP;
+      ctx.shadowColor = DOT;
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    var coreR = CORE_R * (0.85 + 0.3 * (1 - shrink));
+    ctx.beginPath();
+    ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+    ctx.fillStyle = CORE;
+    ctx.fill();
+
+    var pct = Math.round(p * 100);
+    pctEl.textContent = pct + '%';
+  }
+
+  function togglePause() {
+    paused = !paused;
+    root.classList.toggle('is-paused', paused);
+  }
+  function restart() { t0 = performance.now(); draw(0); }
+  function onKey(e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePause(); }
+    else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+  }
+  field.addEventListener('click', togglePause);
+  field.addEventListener('keydown', onKey);
+
+  function onResize() {
+    fit();
+    if (paused || reduced()) draw((performance.now() - t0) / 1000);
+  }
+  window.addEventListener('resize', onResize);
+
+  function frame(now) {
+    if (!paused) draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  fit();
+  if (reduced()) {
+    root.classList.add('is-still');
+    draw(LOOP * 0.62);
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

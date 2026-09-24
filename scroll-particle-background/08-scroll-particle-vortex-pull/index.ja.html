@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>渦の引き込み — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>スクロール位置が深いほど、渦は中心へ強く締め込まれます。</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="パーティクル渦 スクロール領域">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">0%</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(31415926);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#0a4fe8';
+
+  // 계산 겹: 소용돌이 극좌표 벡터장(vortex polar vector field) — 각속도는 1/r 법칙(각속도 = VORTEX_K / r)을
+  // 따르는 진짜 소용돌이 장이라 중심에 가까울수록 빠르게 돈다. 스크롤 위치가 반지름의 목표값을 정해
+  // 깊이 끌수록 장이 조여들고(반지름↓ → 각속도↑), 손을 떼면 다시 풀린다.
+  var VORTEX_K = 3400;   // 각속도 상수 (px·rad/s) — 각속도 = VORTEX_K / r
+  var PULL_RATE = 5.5;   // 반지름이 목표값을 쫓는 완화율 (1/s)
+  var REST_SHRINK = 0.62; // 스크롤 100% 일 때 반지름이 줄어드는 비율
+  var COUNT = 48;
+
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, restR = 60;
+  var particles = [];
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = W / 2; cy = H / 2;
+    restR = Math.min(W, H) * 0.44;
+    if (particles.length === 0) initParticles();
+  }
+
+  function initParticles() {
+    particles = [];
+    for (var i = 0; i < COUNT; i++) {
+      particles.push({
+        theta: rng() * Math.PI * 2,
+        r: restR * (0.25 + rng() * 0.75),
+        size: 1.3 + rng() * 2.1
+      });
+    }
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, spinDir = 1, idleMs = 0, lastTop = 0, lastT = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.3;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; spinDir = scrollDir; idleMs = 0; } else { idleMs += dt; }
+    lastTop = top; lastT = now;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function step(dtSec) {
+    var target = restR * (1 - scrollPos * REST_SHRINK);
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      p.r += (target - p.r) * PULL_RATE * dtSec;
+      var angVel = VORTEX_K / Math.max(p.r, 8);
+      p.theta += angVel * dtSec * 0.01 * spinDir;
+    }
+  }
+
+  function drawParticles() {
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var x = cx + Math.cos(p.theta) * p.r;
+      var y = cy + Math.sin(p.theta) * p.r * 0.72;
+      var near = 1 - Math.min(1, p.r / restR);
+      ctx.globalAlpha = 0.4 + near * 0.5;
+      ctx.beginPath(); ctx.arc(x, y, p.size * (1 + near * 0.6), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function paint() {
+    ctx.clearRect(0, 0, W, H);
+    drawParticles();
+  }
+
+  function updateVal() { val.textContent = Math.round(scrollPos * 100) + '%'; }
+
+  function paintStatic() {
+    var target = restR * (1 - scrollPos * REST_SHRINK);
+    for (var i = 0; i < particles.length; i++) particles[i].r += (target - particles[i].r) * 0.3;
+    paint();
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(dtSec);
+    paint();
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = triangle(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

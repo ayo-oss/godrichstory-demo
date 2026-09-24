@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>円ピン基本 — 스트링아트 실 감기 기하 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sa is-demo" id="saRoot" role="application" aria-label="円ピン巻き板" tabindex="0">
+  <canvas class="sa__cv" id="saCv"></canvas>
+  <p class="sa__hint">
+    <span class="sa__title">円ピン基本</span>
+    <span class="sa__desc">円周のピンの間を決まった数だけ飛ばして糸を巻くと、曲線の花がひとりでに咲きます</span>
+  </p>
+  <div class="sa__bar">
+    <span class="sa__meta">ピン120本 · スキップ49 · 糸120本</span>
+    <span class="sa__meta sa__meta--dim">sin·cos · lineTo</span>
+  </div>
+</div>
+</main>
+<script>
+// 스트링아트 기본(01) — 원 둘레 핀 + 일정 칸 건너뛰기의 최소 구현.
+// 핀 i 의 좌표는 (cx + R cos(2πi/N), cy + R sin(2πi/N)).
+// 실은 i 번 핀에서 i + SKIP 번 핀으로 한 올씩 감긴다. 직선 현만 그리는데
+// 현들이 겹치는 밝기가 원판 안에 장미꼴 포락선을 띄운다.
+// 감기 진행량 progress 0→1 이 주기 안에 차오르고, 감는 손이 지나간 올은
+// 최근일수록 밝다(광택) — 감기가 어디까지 왔는지 눈이 따라간다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N     = 120;   // 핀 개수 — 더 올리면 곡선이 매끈해진다
+  var SKIP  = 49;    // 건너뛰기 칸수 — 2로 내리면 꽃잎이 크고 무늬가 성기다(변형 1)
+  var CYCLE = 2.0;   // 감기 완료 주기(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('saRoot');
+  var cvEl = document.getElementById('saCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var COL_THRD = tokRGB('--sa-thread');
+  var COL_PIN  = tokRGB('--sa-pin');
+  var COL_GLOW = tokRGB('--sa-glow');
+  var COL_PANEL = tokRGB('--sa-panel');
+  var COL_DIM  = tokRGB('--sa-dim');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var R = 0;
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    R = Math.min(W, H) * 0.46;
+  }
+
+  function pinXY(i) {
+    var a = Math.PI * 2 * i / N - Math.PI / 2;   // 0번 핀을 12시에 두고 시계 방향
+    return [W / 2 + Math.cos(a) * R, H / 2 + Math.sin(a) * R];
+  }
+
+  function draw(progress, t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + COL_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 실 — 감기 순서대로. progress 만큼의 올이 걸려 있다.
+    var total = N;                      // 한 바퀴 = N 올 (i → i+SKIP, N번)
+    var seg = progress * total;
+    var full = Math.floor(seg);
+    var frac = seg - full;
+
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 5;                 // 실 광택 — 올 주위 헤일로그가 겹침 밝기를 더한다
+    for (var i = 0; i < full; i++) {
+      var a = pinXY(i), b = pinXY(i + SKIP);
+      // 감기 근처의 최근 올은 진하게 — 감는 손이 지나가는 자리가 밝다
+      var recency = (full - i) / total;           // 1(방금) → 0(처음)
+      var alpha = 0.34 + 0.62 * Math.pow(recency, 1.6);
+      ctx.strokeStyle = 'rgba(' + COL_THRD.join(',') + ',' + alpha.toFixed(3) + ')';
+      ctx.shadowColor = 'rgba(' + COL_GLOW.join(',') + ',' + (alpha * 0.5).toFixed(3) + ')';
+      ctx.lineWidth = 1 + recency * 1.4;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    // 이어지는 한 올 — 부드러운 진행
+    if (full < total && frac > 0) {
+      var a = pinXY(full), b = pinXY(full + SKIP);
+      ctx.strokeStyle = 'rgba(' + COL_GLOW.join(',') + ',0.95)';
+      ctx.shadowColor = 'rgba(' + COL_GLOW.join(',') + ',0.8)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // 핀 — 감긴 실이 지나간 핀은 밝게 숨쉰다(유지 구간에도 순차 맥동)
+    for (var p = 0; p < N; p++) {
+      var xy = pinXY(p);
+      var done = p <= full;
+      if (done) {
+        var pulse = 0.5 + 0.5 * Math.sin(t * 4 - p * 0.3);
+        ctx.fillStyle = 'rgba(' + COL_PIN.join(',') + ',' + (0.65 + 0.35 * pulse).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(xy[0], xy[1], 1.4 + 1.2 * pulse, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.fillStyle = 'rgb(' + COL_DIM.join(',') + ')';
+        ctx.beginPath(); ctx.arc(xy[0], xy[1], 1.2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // 활 실 끝의 광택 — 현재 감는 지점을 알린다(다 감긴 뒤엔 꽃 중심이 숨쉰다)
+    if (full < total) {
+      var tip = pinXY(full);
+      ctx.fillStyle = 'rgba(' + COL_GLOW.join(',') + ',0.9)';
+      ctx.beginPath(); ctx.arc(tip[0], tip[1], 3.2, 0, Math.PI * 2); ctx.fill();
+    } else {
+      var breathe = 0.5 + 0.5 * Math.sin(t * 5);
+      ctx.fillStyle = 'rgba(' + COL_GLOW.join(',') + ',' + (0.35 + 0.45 * breathe).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(W / 2, H / 2, 4 + 2.5 * breathe, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = ((now - t0) / 1000) % CYCLE;
+    // 0→0.78 감기 · 0.78→1 유지(다 감긴 꽃을 볼 시간)
+    var progress = Math.min(1, t / CYCLE / 0.78);
+    draw(progress, t);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(1, 0);
+  });
+  fit();
+  if (reduce) {
+    draw(1, 0);   // reduce — 다 감긴 꽃 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

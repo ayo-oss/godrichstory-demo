@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>실패·빈 데이터·재시도를 오가는 차트 로딩 상태 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cx is-demo" id="cx">
+  <div class="cx__panel" id="cxPanel" aria-live="polite" aria-busy="true">
+    <div class="cx__state cx__state--loading is-active" data-state="loading">
+      <div class="cx__skbar"></div>
+      <div class="cx__skbar"></div>
+      <div class="cx__skbar"></div>
+    </div>
+    <div class="cx__state cx__state--fail" data-state="fail">
+      <span class="cx__icon cx__icon--fail" aria-hidden="true"></span>
+      <p class="cx__msg">그래프를 불러오지 못했습니다</p>
+    </div>
+    <div class="cx__state cx__state--empty" data-state="empty">
+      <span class="cx__icon cx__icon--empty" aria-hidden="true"></span>
+      <p class="cx__msg">표시할 데이터가 없습니다</p>
+    </div>
+    <div class="cx__state cx__state--success" data-state="success">
+      <div class="cx__bar cx__bar--a"></div>
+      <div class="cx__bar cx__bar--b"></div>
+      <div class="cx__bar cx__bar--c"></div>
+    </div>
+  </div>
+  <button type="button" class="cx__retry" id="cxRetry">다시 시도</button>
+</div>
+<script>
+(function () {
+  var STATE_MS = { loading: 420, fail: 420, empty: 420, success: 420 };
+  var AUTO_ORDER = ['loading', 'fail', 'empty', 'success'];
+  var BASE_BACKOFF_MS = 240;
+  var BACKOFF_FACTOR = 1.6;
+  var RETRY_OUTCOMES = ['fail', 'empty', 'success'];
+
+  var root = document.getElementById('cx');
+  var panel = document.getElementById('cxPanel');
+  var retry = document.getElementById('cxRetry');
+  var states = {};
+  ['loading', 'fail', 'empty', 'success'].forEach(function (name) {
+    states[name] = panel.querySelector('[data-state="' + name + '"]');
+  });
+  var autoTimers = [];
+  var attempt = 0;
+
+  function reduceMotion() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+
+  // 계산 겹: 재시도 횟수(attempt)로 지수 백오프 대기 시간을 계산한다 — 실패가 반복될수록 다음 시도까지 더 오래 기다린다
+  function backoffDelay(n) { return Math.round(BASE_BACKOFF_MS * Math.pow(BACKOFF_FACTOR, n)); }
+
+  function showState(name) {
+    Object.keys(states).forEach(function (key) {
+      states[key].classList.toggle('is-active', key === name);
+    });
+    panel.setAttribute('aria-busy', name === 'loading' ? 'true' : 'false');
+  }
+
+  function clearAutoTimers() {
+    autoTimers.forEach(function (id) { window.clearTimeout(id); });
+    autoTimers = [];
+  }
+
+  function runAutoCycle() {
+    if (!root.classList.contains('is-demo') || reduceMotion()) { return; }
+    clearAutoTimers();
+    var t = 0;
+    AUTO_ORDER.forEach(function (name) {
+      autoTimers.push(window.setTimeout(function () { showState(name); }, t));
+      t += STATE_MS[name];
+    });
+  }
+
+  runAutoCycle();
+
+  function human() {
+    if (root.classList.contains('is-demo')) {
+      root.classList.remove('is-demo');
+      clearAutoTimers();
+    }
+    attempt += 1;
+    showState('loading');
+    var wait = backoffDelay(attempt);
+    window.setTimeout(function () {
+      var outcome = RETRY_OUTCOMES[(attempt - 1) % RETRY_OUTCOMES.length];
+      showState(outcome);
+    }, wait);
+  }
+
+  retry.addEventListener('click', human);
+  retry.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); }
+  });
+}());
+</script>
+</main>
+</body>
+</html>

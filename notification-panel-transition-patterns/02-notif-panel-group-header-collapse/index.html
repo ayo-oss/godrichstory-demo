@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>그룹 헤더를 접으면 항목이 순서대로 접히는 알림 패널 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="gh is-demo" id="gh">
+    <section class="gh__group">
+      <button class="gh__header" id="ghHeaderToday" type="button" aria-expanded="true" aria-controls="ghListToday">
+        <svg class="gh__caret" id="ghCaretToday" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
+          <path d="m208 96l-80 80l-80-80Z" opacity=".2"/>
+          <path d="M215.39 92.94A8 8 0 0 0 208 88H48a8 8 0 0 0-5.66 13.66l80 80a8 8 0 0 0 11.32 0l80-80a8 8 0 0 0 1.73-8.72M128 164.69L67.31 104h121.38Z"/>
+        </svg>
+        <span class="gh__headerLabel">오늘 · <span id="ghCountToday">3</span></span>
+      </button>
+      <ul class="gh__list" id="ghListToday" role="list"></ul>
+    </section>
+    <section class="gh__group">
+      <button class="gh__header" id="ghHeaderYesterday" type="button" aria-expanded="true" aria-controls="ghListYesterday">
+        <svg class="gh__caret" id="ghCaretYesterday" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
+          <path d="m208 96l-80 80l-80-80Z" opacity=".2"/>
+          <path d="M215.39 92.94A8 8 0 0 0 208 88H48a8 8 0 0 0-5.66 13.66l80 80a8 8 0 0 0 11.32 0l80-80a8 8 0 0 0 1.73-8.72M128 164.69L67.31 104h121.38Z"/>
+        </svg>
+        <span class="gh__headerLabel">어제 · <span id="ghCountYesterday">2</span></span>
+      </button>
+      <ul class="gh__list" id="ghListYesterday" role="list"></ul>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var NOTIF_GROUP_COLLAPSE_DELAY_MS = 80; // 항목마다 접히는 시작 시각이 이 값 x 순번만큼 밀린다
+
+  var GROUPS = {
+    today: ["결제가 승인됐어요", "새 댓글이 달렸어요", "회의 10분 전이에요"],
+    yesterday: ["업로드가 끝났어요", "초대장이 도착했어요"]
+  };
+
+  var root = document.getElementById("gh");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function buildList(key) {
+    var ul = document.getElementById("ghList" + (key === "today" ? "Today" : "Yesterday"));
+    GROUPS[key].forEach(function (name) {
+      var li = document.createElement("li");
+      li.className = "gh__item";
+      li.setAttribute("role", "listitem");
+      li.textContent = name;
+      ul.appendChild(li);
+    });
+  }
+  buildList("today");
+  buildList("yesterday");
+
+  var state = { today: true, yesterday: true };
+
+  function groupEls(key) {
+    var suffix = key === "today" ? "Today" : "Yesterday";
+    return {
+      header: document.getElementById("ghHeader" + suffix),
+      caret: document.getElementById("ghCaret" + suffix),
+      list: document.getElementById("ghList" + suffix)
+    };
+  }
+
+  // 계산 겹: 항목마다 실제 높이를 getBoundingClientRect 로 재고, 순번(index) x
+  // NOTIF_GROUP_COLLAPSE_DELAY_MS 를 transitionDelay 로 걸어 위에서 아래로(펼 때는 아래에서
+  // 위로) 순서대로 접히고 펼쳐지는 계단식 흐름을 만든다.
+  function setGroup(key, expand) {
+    state[key] = expand;
+    var els = groupEls(key);
+    els.header.setAttribute("aria-expanded", expand ? "true" : "false");
+    var items = Array.prototype.slice.call(els.list.children);
+    var n = items.length;
+    items.forEach(function (li, i) {
+      var order = expand ? (n - 1 - i) : i;
+      var delay = reduce ? 0 : order * NOTIF_GROUP_COLLAPSE_DELAY_MS;
+      var h = li.dataset.h ? parseFloat(li.dataset.h) : null;
+      if (h === null) {
+        li.style.height = "auto";
+        h = li.getBoundingClientRect().height;
+        li.dataset.h = String(h);
+      }
+      li.style.transitionDelay = delay + "ms";
+      if (expand) {
+        li.style.height = "0px";
+        li.style.opacity = "0";
+        requestAnimationFrame(function () {
+          li.style.height = h + "px";
+          li.style.opacity = "1";
+        });
+      } else {
+        li.style.height = h + "px";
+        li.style.opacity = "1";
+        requestAnimationFrame(function () {
+          li.style.height = "0px";
+          li.style.opacity = "0";
+        });
+      }
+    });
+  }
+
+  function toggleGroup(key) {
+    human();
+    setGroup(key, !state[key]);
+  }
+
+  groupEls("today").header.addEventListener("click", function () { toggleGroup("today"); });
+  groupEls("yesterday").header.addEventListener("click", function () { toggleGroup("yesterday"); });
+  [groupEls("today").header, groupEls("yesterday").header].forEach(function (btn, i) {
+    btn.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggleGroup(i === 0 ? "today" : "yesterday");
+      }
+    });
+  });
+
+  // 화면 폭이 바뀌면 줄바꿈 여부가 달라져 캐시해둔 실측 높이가 더는 맞지 않는다 — 지운다.
+  window.addEventListener("resize", function () {
+    Array.prototype.forEach.call(root.querySelectorAll(".gh__item"), function (li) {
+      delete li.dataset.h;
+    });
+  });
+
+  if (reduce) {
+    setGroup("today", false);
+  } else {
+    var step = 0;
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      synthetic = true;
+      if (step === 0) setGroup("today", false);
+      else if (step === 1) setGroup("today", true);
+      else if (step === 2) setGroup("yesterday", false);
+      else setGroup("yesterday", true);
+      synthetic = false;
+      step = (step + 1) % 4;
+      window.setTimeout(loop, 1500);
+    }
+    window.setTimeout(loop, 500);
+  }
+})();
+</script>
+</body>
+</html>

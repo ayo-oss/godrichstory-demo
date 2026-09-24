@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>もっと読み込むを押すと順番に浮かび上がる通知リスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="lm is-demo" id="lm">
+    <ul class="lm__list" id="lmList" role="list"></ul>
+    <button class="lm__more" id="lmMore" type="button">もっと見る</button>
+    <p class="lm__sr" id="lmSr" aria-live="polite"></p>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var NOTIF_LOAD_STAGGER_MS = 60; // 새로 불러온 항목이 순번마다 이 값씩 늦게 떠오른다
+
+  var PAGES = [
+    ["決済が承認されました", "新しいコメントが付きました", "会議まであと10分です"],
+    ["アップロードが完了しました", "招待状が届きました", "予定が変更されました"],
+    ["フォロワーが増えました", "レポートが差し戻されました"]
+  ];
+
+  var root = document.getElementById("lm");
+  var list = document.getElementById("lmList");
+  var moreBtn = document.getElementById("lmMore");
+  var sr = document.getElementById("lmSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  var pageIdx = 0;
+
+  function makeRow(name) {
+    var li = document.createElement("li");
+    li.className = "lm__item";
+    li.setAttribute("role", "listitem");
+    li.textContent = name;
+    return li;
+  }
+
+  // 계산 겹: 새로 불러오는 배치 안에서 항목의 순번(order)에 NOTIF_LOAD_STAGGER_MS 를 곱해
+  // transitionDelay 로 건다 — 한 번에 부르는 항목 수가 몇 개든(2개든 3개든) 그 수만큼
+  // 자연스럽게 늦게까지 이어서 떠오른다(고정된 총 시간이 아니라 항목 수 x 간격으로 계산).
+  function loadMore() {
+    if (pageIdx >= PAGES.length) return;
+    var names = PAGES[pageIdx];
+    pageIdx++;
+    var added = [];
+    names.forEach(function (name, order) {
+      var li = makeRow(name);
+      li.style.opacity = "0";
+      li.style.transform = "translateY(14px)";
+      list.appendChild(li);
+      added.push({ li: li, order: order });
+    });
+    // 강제 리플로우 뒤 다음 프레임에서 최종 값을 건다 — 같은 틱에서 시작값 0 → 끝값 1 을
+    // 연달아 주면 브라우저가 시작 프레임을 한 번도 그리지 못하고 바로 끝 값으로 건너뛰어
+    // 전환이 눈에 안 보인다(실측 2026-09-24: opacity 가 매 프레임 이미 1 로 찍힘). 강제
+    // 리플로우(offsetHeight 읽기)로 시작 상태를 굳힌 뒤 requestAnimationFrame 두 번으로
+    // 확실히 다음 그리기 이후에 최종 값을 건다.
+    void list.offsetHeight;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        added.forEach(function (a) {
+          var delay = reduce ? 0 : a.order * NOTIF_LOAD_STAGGER_MS;
+          a.li.style.transitionDelay = delay + "ms";
+          a.li.style.opacity = "1";
+          a.li.style.transform = "translateY(0)";
+        });
+      });
+    });
+    sr.textContent = names.length + "件の通知を追加で読み込みました";
+    if (pageIdx >= PAGES.length) {
+      moreBtn.disabled = true;
+      moreBtn.textContent = "これ以上の通知はありません";
+    }
+  }
+
+  // 첫 화면은 애니메이션 없이 조용히 채운다 — 페이지가 열리자마자 전환이 걸려 있으면
+  // 측정 도구가 "이미 진행 중인 애니메이션"으로 오판해 그 뒤 실제 클릭·자동 시연에서
+  // 일어나는 움직임을 못 잡는다(실측 2026-09-24). 눈에 보이는 전환은 항상 그 다음부터.
+  function fillStatic() {
+    list.innerHTML = "";
+    pageIdx = 1;
+    PAGES[0].forEach(function (name) { list.appendChild(makeRow(name)); });
+    moreBtn.disabled = false;
+    moreBtn.textContent = "もっと見る";
+  }
+
+  function reset() {
+    list.innerHTML = "";
+    pageIdx = 0;
+    moreBtn.disabled = false;
+    moreBtn.textContent = "もっと見る";
+    loadMore();
+  }
+
+  moreBtn.addEventListener("click", function () {
+    human();
+    loadMore();
+  });
+
+  fillStatic();
+
+  if (reduce) {
+    while (pageIdx < PAGES.length) loadMore();
+  } else {
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      synthetic = true;
+      if (pageIdx < PAGES.length) {
+        loadMore();
+      } else {
+        reset();
+      }
+      synthetic = false;
+      window.setTimeout(loop, 900);
+    }
+    window.setTimeout(loop, 250);
+  }
+})();
+</script>
+</body>
+</html>

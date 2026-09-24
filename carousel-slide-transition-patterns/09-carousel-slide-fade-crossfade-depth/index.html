@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사라지는 카드는 뒤로 가라앉고 나오는 카드는 떠오르는 크로스페이드 캐러셀 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="carousel is-demo" id="carousel" role="region" aria-roledescription="carousel" aria-label="카드 캐러셀">
+  <div class="viewport" id="viewport" tabindex="0">
+    <div class="layers" id="layers">
+      <div class="card card--0"><span class="num">1</span></div>
+      <div class="card card--1"><span class="num">2</span></div>
+      <div class="card card--2"><span class="num">3</span></div>
+      <div class="card card--3"><span class="num">4</span></div>
+      <div class="card card--4"><span class="num">5</span></div>
+    </div>
+  </div>
+  <button type="button" class="navBtn navBtn--prev" id="prevBtn" aria-label="이전 카드">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="M112 56v144l-72-72Z" opacity=".2"/><path d="M216 120h-96V56a8 8 0 0 0-13.66-5.66l-72 72a8 8 0 0 0 0 11.32l72 72A8 8 0 0 0 120 200v-64h96a8 8 0 0 0 0-16m-112 60.69L51.31 128L104 75.31Z"/></g></svg>
+  </button>
+  <button type="button" class="navBtn navBtn--next" id="nextBtn" aria-label="다음 카드">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="m216 128l-72 72V56Z" opacity=".2"/><path d="m221.66 122.34l-72-72A8 8 0 0 0 136 56v64H40a8 8 0 0 0 0 16h96v64a8 8 0 0 0 13.66 5.66l72-72a8 8 0 0 0 0-11.32M152 180.69V75.31L204.69 128Z"/></g></svg>
+  </button>
+  <div class="dots" id="dots" role="tablist" aria-label="카드 바로가기"></div>
+  <div class="readout" id="readout" aria-live="polite"></div>
+</section>
+</main>
+<script>
+(function () {
+  var TOTAL = 5;
+  var CROSSFADE_MS = 480;
+  var DEPTH_SCALE = 0.18;   // 페이드 도중 줄었다 늘어나는 scale 폭
+  var DEPTH_PUSH = 70;      // 페이드 도중 밀려나는 translateZ(px) 깊이
+  var DEMO_HOLD_MS = 620;
+
+  var carousel = document.getElementById('carousel');
+  var viewport = document.getElementById('viewport');
+  var layers = document.getElementById('layers');
+  var cards = Array.prototype.slice.call(layers.querySelectorAll('.card'));
+  var dotsWrap = document.getElementById('dots');
+  var readout = document.getElementById('readout');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var LABEL_PREFIX = '카드 ';
+  var LABEL_SEP = ' / ';
+  var GOTO_LABEL_PREFIX = '카드 ';
+  var GOTO_LABEL_SUFFIX = '로 이동';
+
+  var current = 0;
+  var fadeFrame = null;
+  var demoTimers = [];
+  var dots = [];
+
+  for (var i = 0; i < TOTAL; i++) {
+    var d = document.createElement('button');
+    d.type = 'button';
+    d.className = 'dot';
+    d.setAttribute('role', 'tab');
+    d.setAttribute('aria-label', GOTO_LABEL_PREFIX + (i + 1) + GOTO_LABEL_SUFFIX);
+    (function (idx) { d.addEventListener('click', function () { human(); goTo(idx); }); })(i);
+    dotsWrap.appendChild(d);
+    dots.push(d);
+  }
+
+  // 이징 겹 — CSS 트랜지션이 아니라 매 프레임 p 를 직접 삼차 이징으로 굽혀
+  // opacity·scale·translateZ 세 값을 동시에 계산한다.
+  function easeInOutCubic(p) {
+    return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+  }
+
+  function paintStatic() {
+    cards.forEach(function (el, n) {
+      var active = n === current;
+      el.style.opacity = active ? '1' : '0';
+      el.style.transform = active ? 'translateZ(0) scale(1)' : 'translateZ(' + (-DEPTH_PUSH) + 'px) scale(' + (1 - DEPTH_SCALE).toFixed(3) + ')';
+      el.style.zIndex = active ? '2' : '1';
+    });
+    dots.forEach(function (el, n) { el.classList.toggle('isActive', n === current); });
+    readout.textContent = LABEL_PREFIX + (current + 1) + LABEL_SEP + TOTAL;
+  }
+
+  function stopFade() {
+    if (fadeFrame) { cancelAnimationFrame(fadeFrame); fadeFrame = null; }
+  }
+
+  function goTo(target) {
+    target = ((target % TOTAL) + TOTAL) % TOTAL;
+    if (target === current) return;
+    stopFade();
+    var from = current, to = target;
+    var fromEl = cards[from], toEl = cards[to];
+    toEl.style.zIndex = '2';
+    fromEl.style.zIndex = '1';
+    var start = performance.now();
+    function frame(now) {
+      var raw = Math.min(1, (now - start) / CROSSFADE_MS);
+      var p = easeInOutCubic(raw);
+      fromEl.style.opacity = (1 - p).toFixed(3);
+      fromEl.style.transform = 'translateZ(' + (-p * DEPTH_PUSH).toFixed(1) + 'px) scale(' + (1 - p * DEPTH_SCALE).toFixed(3) + ')';
+      toEl.style.opacity = p.toFixed(3);
+      toEl.style.transform = 'translateZ(' + (-(1 - p) * DEPTH_PUSH).toFixed(1) + 'px) scale(' + (1 - DEPTH_SCALE + p * DEPTH_SCALE).toFixed(3) + ')';
+      if (raw < 1) {
+        fadeFrame = requestAnimationFrame(frame);
+      } else {
+        current = to;
+        fadeFrame = null;
+        dots.forEach(function (el, n) { el.classList.toggle('isActive', n === current); });
+        readout.textContent = LABEL_PREFIX + (current + 1) + LABEL_SEP + TOTAL;
+      }
+    }
+    fadeFrame = requestAnimationFrame(frame);
+  }
+
+  function human() {
+    if (carousel.classList.contains('is-demo')) {
+      carousel.classList.remove('is-demo');
+      demoTimers.forEach(function (t) { clearTimeout(t); });
+      demoTimers = [];
+    }
+  }
+
+  prevBtn.addEventListener('click', function () { human(); goTo(current - 1); });
+  nextBtn.addEventListener('click', function () { human(); goTo(current + 1); });
+  function onKeydown(e) {
+    if (e.key === 'ArrowLeft') { human(); goTo(current - 1); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { human(); goTo(current + 1); e.preventDefault(); }
+  }
+  viewport.addEventListener('keydown', onKeydown);
+
+  // reduce: 실사용 경로 적용 — 점·버튼·키보드는 위 리스너가 그대로 이징 계산을 돌린다.
+  // 아래 demoCycle() 은 시연 게이트만이고 reduce 에서는 돌지 않는다.
+  function demoCycle(i) {
+    if (!carousel.classList.contains('is-demo')) return;
+    goTo(current + 1);
+    demoTimers.push(setTimeout(function () { demoCycle(i + 1); }, DEMO_HOLD_MS));
+  }
+
+  function init() {
+    paintStatic();
+    if (!reduce) demoCycle(0);
+  }
+  init();
+})();
+</script>
+</body>
+</html>

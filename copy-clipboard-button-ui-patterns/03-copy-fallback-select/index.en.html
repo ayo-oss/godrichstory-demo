@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fallback selection — a card that leaves a manual path when the fast one fails — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="card" id="card">
+  <div class="statusRow">
+    <p class="status" id="status">Checking the fast copy path</p>
+    <span class="spinner" id="spinner" aria-hidden="true">
+      <span class="dot" data-dot></span>
+      <span class="dot" data-dot></span>
+      <span class="dot" data-dot></span>
+    </span>
+  </div>
+  <div class="field" id="field">
+    <span class="text" id="selText">example.com/invite/9f21c</span>
+  </div>
+  <p class="notice" id="notice">This text is already selected — press Ctrl+C to copy</p>
+  <button class="retryBtn" id="retryBtn" type="button">Retry</button>
+</section>
+</main>
+<script>
+// 폴백 선택 안내 — 빠른 복사 길이 막히면 안내 문구를 미리 범위로 선택해 두고,
+// 선택 영역의 실측 폭과 안내 문구의 실측 폭을 더해 카드 너비 안에 들어가는지 계산해
+// 한 줄(inline)·두 줄(stack) 레이아웃을 고른다. 확인 중에는 점 3개가 매 프레임 위상을
+// 다시 계산해(사인파) 파동으로 움직이고, 전환은 CSS 트랜지션으로 이어 붙인다.
+// 계산 겹: 매 프레임 사인파 위상 재계산(스피너) + Range.getBoundingClientRect 로 선택 폭
+// 실측 → 안내문 폭 실측 → 합산 비교(레이아웃). 실사용자 리스너 있음(Retry 버튼).
+// 실 클립보드 API 호출 없음 — Selection API 만 사용.
+(function () {
+  var card = document.getElementById('card');
+  var status = document.getElementById('status');
+  var dots = Array.prototype.slice.call(document.querySelectorAll('[data-dot]'));
+  var field = document.getElementById('field');
+  var selText = document.getElementById('selText');
+  var notice = document.getElementById('notice');
+  var retryBtn = document.getElementById('retryBtn');
+  if (!card || !status || !dots.length || !field || !selText || !notice || !retryBtn) return;
+
+  var SPIN_PERIOD_MS = 900;
+
+  function spin(t) {
+    for (var i = 0; i < dots.length; i++) {
+      var phase = (t / SPIN_PERIOD_MS + i / dots.length) * Math.PI * 2;
+      var wave = Math.abs(Math.sin(phase));
+      dots[i].style.opacity = (0.32 + wave * 0.68).toFixed(3);
+      dots[i].style.transform = 'translateY(' + (-wave * 3).toFixed(2) + 'px)';
+    }
+  }
+
+  function selectRangeWidth() {
+    var range = document.createRange();
+    range.selectNodeContents(selText);
+    var sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    var rect = range.getBoundingClientRect();
+    return rect.width;
+  }
+
+  function layoutFallback() {
+    var rangeWidth = selectRangeWidth();
+    var noticeWidth = notice.scrollWidth;
+    var containerWidth = field.clientWidth;
+    var fits = rangeWidth <= containerWidth && noticeWidth <= containerWidth;
+    card.classList.toggle('stack', !fits);
+    card.classList.toggle('inline', fits);
+    return fits;
+  }
+
+  function setPhase(phase) {
+    card.dataset.phase = phase;
+    if (phase === 'checking') {
+      status.textContent = 'Checking the fast copy path';
+      notice.style.opacity = '0';
+      notice.style.transform = 'translateY(4px)';
+    } else if (phase === 'fallback') {
+      status.textContent = 'The fast copy path didn\'t open';
+      var fits = layoutFallback();
+      notice.style.opacity = '1';
+      notice.style.transform = 'translateY(0)';
+      notice.textContent = fits
+        ? 'This text is already selected — press Ctrl+C to copy'
+        : 'The text is selected' + String.fromCharCode(10) + 'Press Ctrl+C to copy';
+    }
+  }
+
+  setPhase('checking');
+
+  var CYCLE_MS = 2000;
+  var CHECK_MS = 650;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var start = null;
+
+  function autoLoop(ts) {
+    if (start === null) start = ts;
+    var t = (ts - start) % CYCLE_MS;
+    var phase = t < CHECK_MS ? 'checking' : 'fallback';
+    if (card.dataset.phase !== phase) setPhase(phase);
+    if (phase === 'checking') spin(t);
+    requestAnimationFrame(autoLoop);
+  }
+
+  var autoRaf = 0;
+  if (!reduce) autoRaf = requestAnimationFrame(autoLoop);
+
+  retryBtn.addEventListener('click', function () {
+    if (autoRaf) { cancelAnimationFrame(autoRaf); autoRaf = 0; }
+    setPhase('checking');
+    var clickStart = null;
+    function userSpin(ts) {
+      if (clickStart === null) clickStart = ts;
+      var t = ts - clickStart;
+      if (t < CHECK_MS) {
+        spin(t);
+        requestAnimationFrame(userSpin);
+      } else {
+        setPhase('fallback');
+      }
+    }
+    requestAnimationFrame(userSpin);
+  });
+})();
+</script>
+</body>
+</html>

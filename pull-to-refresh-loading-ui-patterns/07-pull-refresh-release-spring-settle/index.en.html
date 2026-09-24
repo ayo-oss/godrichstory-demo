@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Release spring settle — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prsp is-demo" id="prsp">
+  <div class="prsp__panel">
+    <div class="prsp__track" id="prspTrack">
+      <span class="prsp__rest"></span>
+      <span class="prsp__marker" id="prspMarker"></span>
+    </div>
+    <div class="prsp__phone" id="prspPhone">
+      <div class="prsp__list" id="prspList">
+        <div class="prsp__row"></div>
+        <div class="prsp__row"></div>
+      </div>
+    </div>
+  </div>
+  <span class="prsp__hint" id="prspHint">Pull down</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prspPhone');
+  var marker = document.getElementById('prspMarker');
+  var list = document.getElementById('prspList');
+  var hint = document.getElementById('prspHint');
+  var root = document.getElementById('prsp');
+
+  // 계산 겹: 놓는 순간부터는 값을 보간(lerp)하는 게 아니라 위치·속도를 매 프레임 적분한다
+  // (스프링 힘 -K*(pos-target) + 감쇠 -C*vel). 임계감쇠보다 C 가 작아 목표를 지나쳐 반동한 뒤 잦아든다.
+  var SCALE = 0.35, REF = 110, MAX = 150;
+  var K = 170, C = 9;
+
+  var pos = 0, vel = 0, target = 0, integrating = false, dragging = false;
+  var startY = 0, startPos = 0;
+  var committing = false, pendingCommit = false, commitTimer = null;
+
+  function render() {
+    var y = -(pos * SCALE);
+    marker.style.transform = 'translateY(' + y.toFixed(1) + 'px)';
+    list.style.transform = 'translateY(' + (Math.max(0, pos) * 0.3).toFixed(1) + 'px)';
+    if (committing) { hint.textContent = 'Refreshing'; }
+    else if (pos > 4) { hint.textContent = 'Displaced ' + Math.round(pos) + 'px'; }
+    else if (pos < -2) { hint.textContent = 'Rebound ' + Math.round(-pos) + 'px'; }
+    else { hint.textContent = 'Pull down'; }
+  }
+
+  function commit() {
+    committing = true;
+    hint.textContent = 'Refreshing';
+    commitTimer = setTimeout(function () {
+      committing = false;
+      hint.textContent = 'Pull down';
+    }, 560);
+  }
+
+  var last = null;
+  function frame(now) {
+    if (last === null) { last = now; }
+    var dt = Math.min(0.032, (now - last) / 1000);
+    last = now;
+    if (integrating) {
+      var accel = -K * (pos - target) - C * vel;
+      vel += accel * dt;
+      pos += vel * dt;
+      if (Math.abs(pos - target) < 0.5 && Math.abs(vel) < 5) {
+        pos = target; vel = 0; integrating = false;
+        if (pendingCommit) { pendingCommit = false; commit(); }
+      }
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  function onDown(y) {
+    if (committing) { return; }
+    dragging = true; integrating = false; vel = 0; startY = y; startPos = pos;
+  }
+  function onMove(y) {
+    if (!dragging) { return; }
+    pos = Math.max(0, Math.min(MAX, startPos + (y - startY)));
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    pendingCommit = pos >= REF;
+    target = 0; integrating = true;
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (committing || integrating || dragging) { return; }
+    autoRaw += 14;
+    if (autoRaw >= REF) {
+      pos = autoRaw; pendingCommit = pos >= REF; target = 0; integrating = true; autoRaw = 0; return;
+    }
+    pos = autoRaw;
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } if (commitTimer) { clearTimeout(commitTimer); } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 160); }
+})();
+</script>
+</body>
+</html>

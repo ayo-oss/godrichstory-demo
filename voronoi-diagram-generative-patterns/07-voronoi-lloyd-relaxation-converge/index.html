@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>반복 횟수 값이 늘수록 고르게 정돈되는 셀 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">반복 횟수 값이 늘수록 고르게 정돈되는 셀</p> <span class="vd__step" id="vdStep">정리 진행 0/6</span>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var LLOYD_RELAXATION_STEPS = 6;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(409071);
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function hexToRgb(hex) {
+    var v = parseInt(hex.slice(1), 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+
+  var NEI = -1, ND = 0, ND2 = 0;
+  function nearestTwo(px, py, arr) {
+    var bd = Infinity, bd2 = Infinity, bi = -1;
+    for (var i = 0; i < arr.length; i += 1) {
+      var dx = px - arr[i].x, dy = py - arr[i].y, d = dx * dx + dy * dy;
+      if (d < bd) { bd2 = bd; bd = d; bi = i; } else if (d < bd2) { bd2 = d; }
+    }
+    NEI = bi; ND = Math.sqrt(bd); ND2 = Math.sqrt(bd2);
+  }
+
+  var relaxPalette = ['#2f6df6', '#ff9ebb', '#4cd4a6', '#b9a0ff', '#6ec8ff', '#fff7e6'];
+  var paletteRgb = {};
+  relaxPalette.forEach(function (h) { paletteRgb[h] = hexToRgb(h); });
+  var SEED_COUNT07 = 22;
+  var baseSeeds = [];
+  for (var i7 = 0; i7 < SEED_COUNT07; i7 += 1) {
+    baseSeeds.push({ x: rand() * CALC_W, y: rand() * CALC_H, c: relaxPalette[i7 % relaxPalette.length] });
+  }
+
+  function computeCentroids(positions) {
+    var sumX = new Array(positions.length).fill(0);
+    var sumY = new Array(positions.length).fill(0);
+    var cnt = new Array(positions.length).fill(0);
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        nearestTwo(x + 0.5, y + 0.5, positions);
+        sumX[NEI] += x + 0.5; sumY[NEI] += y + 0.5; cnt[NEI] += 1;
+      }
+    }
+    return positions.map(function (p, i) {
+      if (!cnt[i]) return { x: p.x, y: p.y, c: p.c };
+      return { x: sumX[i] / cnt[i], y: sumY[i] / cnt[i], c: p.c };
+    });
+  }
+
+  var relaxationStates = [baseSeeds];
+  (function buildStates() {
+    var cur = baseSeeds;
+    for (var k = 0; k < LLOYD_RELAXATION_STEPS; k += 1) {
+      cur = computeCentroids(cur);
+      relaxationStates.push(cur);
+    }
+  })();
+
+  var stepLabels = ['정리 진행 0/6', '정리 진행 1/6', '정리 진행 2/6', '정리 진행 3/6', '정리 진행 4/6', '정리 진행 5/6', '정리 진행 6/6'];
+  var stepEl = document.getElementById('vdStep');
+
+  function renderField(t) {
+    var frac = (t % LOOP_MS) / LOOP_MS;
+    var segFloat = frac * LLOYD_RELAXATION_STEPS;
+    var seg = Math.min(LLOYD_RELAXATION_STEPS - 1, Math.floor(segFloat));
+    var local = segFloat - seg;
+    var a = relaxationStates[seg], b = relaxationStates[seg + 1];
+    var cur = a.map(function (p, i) {
+      return { x: p.x + (b[i].x - p.x) * local, y: p.y + (b[i].y - p.y) * local, c: p.c };
+    });
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        nearestTwo(x + 0.5, y + 0.5, cur);
+        var rgb = paletteRgb[cur[NEI].c];
+        var edge = ND2 - ND;
+        var dark = edge < 1.5 ? 0.5 + edge / 3 : 1;
+        offBuf[idx] = rgb[0] * dark; offBuf[idx + 1] = rgb[1] * dark; offBuf[idx + 2] = rgb[2] * dark; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+    if (stepEl) stepEl.textContent = stepLabels[Math.min(LLOYD_RELAXATION_STEPS, seg + (local > 0.5 ? 1 : 0))];
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.97 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

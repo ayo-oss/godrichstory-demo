@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>비트 반응 입자 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-waveform" viewBox="0 0 256 256" fill="currentColor"><path d="M208 96v64H48V96Z" opacity=".2"/><path d="M56 96v64a8 8 0 0 1-16 0V96a8 8 0 0 1 16 0m32-72a8 8 0 0 0-8 8v192a8 8 0 0 0 16 0V32a8 8 0 0 0-8-8m40 32a8 8 0 0 0-8 8v128a8 8 0 0 0 16 0V64a8 8 0 0 0-8-8m40 32a8 8 0 0 0-8 8v64a8 8 0 0 0 16 0V96a8 8 0 0 0-8-8m40-16a8 8 0 0 0-8 8v96a8 8 0 0 0 16 0V72a8 8 0 0 0-8-8"/></symbol>
+    <symbol id="ico-play" viewBox="0 0 256 256" fill="currentColor"><path d="M228.23 134.69L84.15 222.81A8 8 0 0 1 72 216.12V39.88a8 8 0 0 1 12.15-6.69l144.08 88.12a7.82 7.82 0 0 1 0 13.38" opacity=".2"/><path d="M232.4 114.49L88.32 26.35a16 16 0 0 0-16.2-.3A15.86 15.86 0 0 0 64 39.87v176.26A15.94 15.94 0 0 0 80 232a16.07 16.07 0 0 0 8.36-2.35l144.04-88.14a15.88 15.88 0 0 0 0-27.02M80 215.94V40l143.83 88Z"/></symbol>
+    <symbol id="ico-pause" viewBox="0 0 256 256" fill="currentColor"><path d="M208 48v160a8 8 0 0 1-8 8h-40a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8h40a8 8 0 0 1 8 8M96 40H56a8 8 0 0 0-8 8v160a8 8 0 0 0 8 8h40a8 8 0 0 0 8-8V48a8 8 0 0 0-8-8" opacity=".2"/><path d="M200 32h-40a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176h-40V48h40zM96 32H56a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176H56V48h40z"/></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="bp is-demo" id="bp">
+  <p class="bp__hint"><svg class="bp__ico" aria-hidden="true"><use href="#ico-waveform"/></svg><span>Press play and it moves with real sound</span></p>
+  <div class="bp__field" id="field" aria-hidden="true"><div class="bp__core" id="core"><svg class="bp__coreIco" aria-hidden="true"><use href="#ico-waveform"/></svg></div></div>
+  <div class="bp__foot">
+    <button class="bp__play" id="play" type="button" aria-pressed="false">
+      <svg class="bp__ico bp__ico--play" aria-hidden="true"><use href="#ico-play"/></svg>
+      <svg class="bp__ico bp__ico--pause" aria-hidden="true"><use href="#ico-pause"/></svg>
+      <span id="playLabel">Play</span>
+    </button>
+    <p class="bp__count">
+      <span class="bp__countLabel">Beats caught</span>
+      <b class="bp__countBox">
+        <span class="bp__countText" id="beatText" aria-live="polite">0</span>
+        <span class="bp__loop" aria-hidden="true"><i>1</i><i>3</i><i>5</i><i>7</i></span>
+      </b>
+    </p>
+  </div>
+</div>
+</main>
+<script>
+var root = document.getElementById('bp');
+var field = document.getElementById('field');
+var core = document.getElementById('core');
+var playBtn = document.getElementById('play');
+var playLabel = document.getElementById('playLabel');
+var beatText = document.getElementById('beatText');
+var RING_COUNT = 4, DOT_COUNT = 8;
+var rings = [];
+// 겹 넷 × 점 여덟. 겹마다 시작 각을 11.25도 민다 — 쉬는 상태에서는 점 서른두 개가 동그란 헤일로가 되고,
+// 터질 때는 겹마다 다른 방향으로 흩어진다. --i 는 겹 번호이자 미리보기 루프의 음수 지연 배수다.
+for (var r = 0; r < RING_COUNT; r++) {
+  var ring = document.createElement('div');
+  ring.className = 'bp__ring';
+  for (var d = 0; d < DOT_COUNT; d++) {
+    var dot = document.createElement('i');
+    dot.className = 'bp__dot';
+    dot.style.setProperty('--a', (((d * 45 + r * 11.25) % 360)).toFixed(2) + 'deg');
+    dot.style.setProperty('--i', String(r));
+    ring.appendChild(dot);
+  }
+  field.insertBefore(ring, core);
+  rings.push(ring);
+}
+var ctx = null, analyser = null, freq = null, timer = 0, playing = false;
+var bassAvg = 0, lastBeatAt = 0, beats = 0, ringTurn = 0;
+function buildAudio() {
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 128;
+  analyser.smoothingTimeConstant = 0.5;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  var out = ctx.createGain();
+  out.gain.value = 0.08;
+  out.connect(analyser);
+  analyser.connect(ctx.destination);
+  // 킥 — 낮은 사인파를 0.5초마다 한 번씩 쳐서 2초에 네 번 비트(120BPM). Bass 대역을 명확히 치고 빠진다.
+  var kick = ctx.createOscillator();
+  var kickAmp = ctx.createGain();
+  kick.type = 'sine';
+  kick.frequency.value = 70;
+  kickAmp.gain.value = 0;
+  for (var b = 0; b < 128; b++) {
+    var at = ctx.currentTime + b * 0.5;
+    kickAmp.gain.setValueAtTime(1, at);
+    kickAmp.gain.exponentialRampToValueAtTime(0.004, at + 0.3);
+  }
+  kick.connect(kickAmp); kickAmp.connect(out); kick.start();
+  // 패드 — "평균보다 큰 순간"이 성립하려면 바닥 에너지가 필요하다. 킥이 없는 사이 저음의 평균을 만든다.
+  [110, 164.81, 220].forEach(function (hz) {
+    var pad = ctx.createOscillator();
+    var padAmp = ctx.createGain();
+    pad.type = 'sawtooth';
+    pad.frequency.value = hz;
+    padAmp.gain.value = 0.035;
+    pad.connect(padAmp); padAmp.connect(out); pad.start();
+  });
+}
+function fire(el, hitClass) {
+  el.classList.remove(hitClass);
+  void el.offsetWidth; // 같은 클래스를 다시 걸어 일회성 애니메이션을 처음부터 돌린다
+  el.classList.add(hitClass);
+}
+function draw() {
+  analyser.getByteFrequencyData(freq);
+  var bass = 0;
+  for (var k = 0; k < 4; k++) { bass += freq[k]; }
+  bass = bass / (4 * 255);
+  var now = performance.now();
+  // 비트 판정: Bass 에너지가 직전 구간의 이동 평균 × 1.3 을 넘는 순간이다.
+  // 고정 문턱(예: "에너지 0.5 이상")은 곡이 조용해지면 비트를 아예 못 잡고 시끄러워지면 매 순간을 비트로 만든다 —
+  // 평균 대비 계수여야 셈여림이 바뀌어도 비트를 놓치지 않는다. 220ms 최소 간격은 한 번 친 킥을 두 번 세는 것을 막는다.
+  if (bass > bassAvg * 1.3 && bass > 0.14 && now - lastBeatAt > 220) {
+    lastBeatAt = now;
+    beats += 1;
+    beatText.textContent = String(beats);
+    fire(rings[ringTurn % RING_COUNT], 'bp__ring--hit');
+    fire(core, 'bp__core--hit');
+    ringTurn += 1;
+  }
+  bassAvg += (bass - bassAvg) * 0.12;
+  timer = requestAnimationFrame(draw);
+}
+playBtn.addEventListener('click', function () {
+  root.classList.remove('is-demo');
+  if (!ctx) { buildAudio(); }
+  playing = !playing;
+  playBtn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+  playLabel.textContent = playing ? 'Stop' : 'Play';
+  // 자동재생 정책: AudioContext 는 사용자 제스처 안에서 resume() 해야 소리가 난다.
+  if (playing) { ctx.resume(); timer = requestAnimationFrame(draw); }
+  else { ctx.suspend(); cancelAnimationFrame(timer); }
+});
+</script>
+</body>
+</html>

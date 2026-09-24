@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>가로줄마다 색이 어긋나며 번지는 스캔라인 배경 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">가로줄마다 색이 어긋나며 번지는 스캔라인 배경</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 가로줄(y)마다 hue 오프셋과 좌우 표본 위치(xs)를 다르게 밀어
+  // 옛날 브라운관처럼 줄마다 색이 살짝 어긋나 보이게 만든다. 표본은 정수 픽셀 그대로 둬 날카롭게 유지한다.
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_ROW_HUE_STEP = 5.5;
+  var PLASMA_ROW_SHIFT_PX = 6;
+  var PLASMA_ROW_SPEED = Math.PI * 2 / LOOP_MS;
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function renderField(t) {
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      var rowShift = Math.sin(y * 0.35 + t * PLASMA_ROW_SPEED) * PLASMA_ROW_SHIFT_PX;
+      var rowHue = y * PLASMA_ROW_HUE_STEP + t * PLASMA_ROW_SPEED * 30;
+      var rowLight = 0.44 + 0.1 * Math.sin(y * 0.6);
+      for (var x = 0; x < CALC_W; x += 1) {
+        var xs = x + rowShift;
+        var hue = rowHue + xs * 1.2;
+        var rgb = hslToRgb(hue, 0.7, rowLight);
+        offBuf[idx] = rgb[0]; offBuf[idx + 1] = rgb[1]; offBuf[idx + 2] = rgb[2]; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

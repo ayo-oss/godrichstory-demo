@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구이 병합 — 끈적 경로 합체 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>ブラーフィルターなしで計算した実際のパスを塗って縁取ると、インクが引きずられるようにボールが粘っこく合体します — 通った跡には色が残り、経路に沿って移り変わります</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="グーイー合体 粘着結合 実験パネル" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">3</b>ボール・粘着合体パス</span>
+    <span class="cd__meta cd__meta--dim">canvas・Path2D・setAttribute</span>
+  </div>
+</div>
+</main>
+<script>
+// 구이 병합(03). 02 와 같은 마칭 스퀘어 경계 추출(4비트 16경우 + 선형 보간 + quadraticCurveTo
+// 평활)로 닫힌 윤곽을 Path2D 로 만들되, 채움을 "색이 경로를 따라 전환되는" 스티키 방식으로 얹는다:
+// 각 고리의 도심(무게중심)에서 가장 가까운 볼의 색이 그 고리를 칠하고, 볼마다 잔광 트레일을
+// 오프스크린 트레일 캔버스에 축적(알파 감쇠)해 경로를 따라 색이 흘러간다.
+// SVG goo 필터(feGaussianBlur + feColorMatrix)를 전혀 쓰지 않는다 — 병합은 전부 실제 경로 계산.
+// 고리 개수를 aria 로 내보내고 title 요소 setAttribute 로 갱신해 접근성 메타를 살린다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N_BALL = 3;      // ボール 개수 — 2 는 대화 장면, 5 는 군무
+  var THRESH = 1.0;    // 필드 임계값 — 낮으면 더 끈적하게 늘어난다
+  var CELL = 8;        // 격자 셀 픽셀 크기
+  var TRAIL = 0.965;   // 트레일 잔광 감쇠(프레임당) — 1 에 가까울수록 길게 남는다
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+  nOut.textContent = String(N_BALL);
+
+  // 접근성 메타 — 고리 개수를 title data 특성으로 내보낸다(setAttribute)
+  var liveMeta = document.createElement('span');
+  liveMeta.setAttribute('aria-hidden', 'false');
+  liveMeta.setAttribute('data-loops', '0');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var C_BODY = tok('--gm-body');
+  var C_GLOW = tok('--gm-glow');
+  var C_SKY = tok('--gm-sky');
+  var C_LILAC = tok('--gm-lilac');
+  var C_CREAM = tok('--gm-cream');
+  // 볼마다 고유 파스텔 — 경로를 따라 색이 전환되는 축
+  var BALL_COLS = [C_BODY, C_GLOW, C_SKY];
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, COLS = 0, ROWS = 0;
+  var grid = null;
+  var trailCv = document.createElement('canvas');
+  var trailCtx = null;
+  var raf = 0, t0 = -1;
+
+  // 시드 고정 PRNG — 미리보기가 항상 같은 ボール 궤도로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x317A03);
+
+  var balls = [];
+  function buildBalls() {
+    balls = [];
+    for (var i = 0; i < N_BALL; i++) {
+      balls.push({
+        fx: 0.3 + rand() * 0.4, fy: 0.26 + rand() * 0.4,
+        ph: rand() * Math.PI * 2, ax: 0.3 + rand() * 0.2, ay: 0.28 + rand() * 0.2,
+        cx: 0.5, cy: 0.5, rad: 34 + rand() * 16
+      });
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    trailCv.width = cv.width; trailCv.height = cv.height;
+    trailCtx = trailCv.getContext('2d');
+    COLS = Math.max(16, Math.round(W / CELL));
+    ROWS = Math.max(12, Math.round(H / CELL));
+    grid = new Float32Array((COLS + 1) * (ROWS + 1));
+  }
+
+  function ballPos(b, t) {
+    return [
+      (b.cx + Math.sin(t * b.fx + b.ph) * b.ax) * W,
+      (b.cy + Math.cos(t * b.fy + b.ph * 1.4) * b.ay) * H
+    ];
+  }
+
+  function fieldAt(px, py, t) {
+    var sum = 0;
+    for (var i = 0; i < balls.length; i++) {
+      var p = ballPos(balls[i], t);
+      var dx = px - p[0], dy = py - p[1];
+      var d2 = dx * dx + dy * dy;
+      if (d2 < 1) d2 = 1;
+      var r2 = balls[i].rad * balls[i].rad * 0.5;
+      sum += r2 / d2;
+    }
+    return sum;
+  }
+
+  function sampleGrid(t) {
+    var cw = W / COLS, ch = H / ROWS;
+    for (var gy = 0; gy <= ROWS; gy++) {
+      for (var gx = 0; gx <= COLS; gx++) {
+        grid[gy * (COLS + 1) + gx] = fieldAt(gx * cw, gy * ch, t);
+      }
+    }
+  }
+
+  var EDGES = { T: 0, R: 1, B: 2, L: 3 };
+  function caseSegments(cs) {
+    switch (cs) {
+      case 0: case 15: return [];
+      case 1: case 14: return [[EDGES.T, EDGES.L]];
+      case 2: case 13: return [[EDGES.T, EDGES.R]];
+      case 3: case 12: return [[EDGES.L, EDGES.R]];
+      case 4: case 11: return [[EDGES.R, EDGES.B]];
+      case 6: case 9:  return [[EDGES.T, EDGES.B]];
+      case 7: case 8:  return [[EDGES.L, EDGES.B]];
+      case 5:  return 'AMB-x';
+      case 10: return 'AMB-+';
+    }
+    return [];
+  }
+
+  function lerpPt(gx, gy, edge, cw, ch) {
+    var vTL = grid[gy * (COLS + 1) + gx];
+    var vTR = grid[gy * (COLS + 1) + gx + 1];
+    var vBR = grid[(gy + 1) * (COLS + 1) + gx + 1];
+    var vBL = grid[(gy + 1) * (COLS + 1) + gx];
+    var x0 = gx * cw, y0 = gy * ch;
+    function ip(a, b) { return (THRESH - a) / (b - a); }
+    switch (edge) {
+      case EDGES.T: return [x0 + cw * ip(vTL, vTR), y0];
+      case EDGES.B: return [x0 + cw * ip(vBL, vBR), y0 + ch];
+      case EDGES.L: return [x0, y0 + ch * ip(vTL, vBL)];
+      case EDGES.R: return [x0 + cw, y0 + ch * ip(vTR, vBR)];
+    }
+    return [x0, y0];
+  }
+
+  function collectSegments(t) {
+    var cw = W / COLS, ch = H / ROWS;
+    var pts = [];
+    for (var gy = 0; gy < ROWS; gy++) {
+      for (var gx = 0; gx < COLS; gx++) {
+        var vTL = grid[gy * (COLS + 1) + gx];
+        var vTR = grid[gy * (COLS + 1) + gx + 1];
+        var vBR = grid[(gy + 1) * (COLS + 1) + gx + 1];
+        var vBL = grid[(gy + 1) * (COLS + 1) + gx];
+        var cs = (vTL > THRESH ? 1 : 0) | (vTR > THRESH ? 2 : 0) | (vBR > THRESH ? 4 : 0) | (vBL > THRESH ? 8 : 0);
+        if (cs === 0 || cs === 15) continue;
+        var segs = caseSegments(cs);
+        if (typeof segs === 'string') {
+          var mc = fieldAt((gx + 0.5) * cw, (gy + 0.5) * ch, t);
+          var flip = (cs === 5) === (mc <= THRESH);
+          var a = flip ? [[EDGES.T, EDGES.R], [EDGES.L, EDGES.B]]
+                       : [[EDGES.T, EDGES.L], [EDGES.R, EDGES.B]];
+          for (var k = 0; k < 2; k++) {
+            pts.push([lerpPt(gx, gy, a[k][0], cw, ch), lerpPt(gx, gy, a[k][1], cw, ch)]);
+          }
+        } else {
+          for (var s = 0; s < segs.length; s++) {
+            pts.push([lerpPt(gx, gy, segs[s][0], cw, ch), lerpPt(gx, gy, segs[s][1], cw, ch)]);
+          }
+        }
+      }
+    }
+    return pts;
+  }
+
+  function chainSegments(segs) {
+    var eps2 = (CELL * 1.5) * (CELL * 1.5);
+    var used = new Uint8Array(segs.length);
+    var loops = [];
+    for (var i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      used[i] = 1;
+      var loop = [segs[i][0], segs[i][1]];
+      var guard = 0;
+      while (guard++ < 4000) {
+        var tail = loop[loop.length - 1];
+        var found = -1;
+        for (var j = 0; j < segs.length; j++) {
+          if (used[j]) continue;
+          var dx = segs[j][0][0] - tail[0], dy = segs[j][0][1] - tail[1];
+          if (dx * dx + dy * dy < eps2) { found = j; loop.push(segs[j][1]); break; }
+          dx = segs[j][1][0] - tail[0]; dy = segs[j][1][1] - tail[1];
+          if (dx * dx + dy * dy < eps2) { loop.push(segs[j][0]); found = j; break; }
+        }
+        if (found < 0) break;
+        used[found] = 1;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    return loops;
+  }
+
+  function smoothLoop(path, loop) {
+    var n = loop.length;
+    path.moveTo((loop[0][0] + loop[1][0]) / 2, (loop[0][1] + loop[1][1]) / 2);
+    for (var i = 1; i <= n; i++) {
+      var cur = loop[i % n];
+      var nxt = loop[(i + 1) % n];
+      path.quadraticCurveTo(cur[0], cur[1], (cur[0] + nxt[0]) / 2, (cur[1] + nxt[1]) / 2);
+    }
+    path.closePath();
+  }
+
+  // 고리 도심 — 무게중심에서 가장 가까운 볼의 색으로 고리를 칠한다(색이 경로를 따라 전환)
+  function loopCentroid(loop) {
+    var sx = 0, sy = 0;
+    for (var i = 0; i < loop.length; i++) { sx += loop[i][0]; sy += loop[i][1]; }
+    return [sx / loop.length, sy / loop.length];
+  }
+  function nearestBall(cx, cy, t) {
+    var best = 0, bd = 1e9;
+    for (var i = 0; i < balls.length; i++) {
+      var p = ballPos(balls[i], t);
+      var d = (p[0] - cx) * (p[0] - cx) + (p[1] - cy) * (p[1] - cy);
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+
+  function draw(t) {
+    sampleGrid(t);
+    var loops = chainSegments(collectSegments(t));
+    liveMeta.setAttribute('data-loops', String(loops.length));
+
+    // ① 트레일 캔버스 — 이전 프레임을 살짝 어둡게 해 잔광을 축적
+    if (trailCtx) {
+      trailCtx.globalCompositeOperation = 'source-over';
+      trailCtx.fillStyle = 'rgba(23,20,26,' + (1 - TRAIL) * 1.6 + ')';
+      trailCtx.fillRect(0, 0, W, H);
+      // ボール 궤적 잔광 — 볼마다 자기 색 알파 원을 찍는다
+      trailCtx.globalCompositeOperation = 'lighter';
+      for (var i = 0; i < balls.length; i++) {
+        var p = ballPos(balls[i], t);
+        var g = trailCtx.createRadialGradient(p[0], p[1], 0, p[0], p[1], balls[i].rad * 1.5);
+        var col = BALL_COLS[i % BALL_COLS.length];
+        g.addColorStop(0, hexA(col, 0.2));
+        g.addColorStop(1, hexA(col, 0));
+        trailCtx.fillStyle = g;
+        trailCtx.fillRect(0, 0, W, H);
+      }
+      trailCtx.globalCompositeOperation = 'source-over';
+    }
+
+    // ② 본 캔버스 — 트레일 위에 구이 몸통
+    ctx.fillStyle = '#17141a';
+    ctx.fillRect(0, 0, W, H);
+    if (trailCtx) { ctx.drawImage(trailCv, 0, 0); }
+
+    // 배경 잔광 드리프트 — 느린 안개(누적면적)
+    var mist = ctx.createRadialGradient(
+      W * (0.5 + Math.sin(t * 0.14 + 2) * 0.3), H * (0.5 + Math.cos(t * 0.12) * 0.3), 0,
+      W * 0.5, H * 0.5, Math.max(W, H) * 0.78
+    );
+    mist.addColorStop(0, 'rgba(110,200,255,0.08)');
+    mist.addColorStop(1, 'rgba(23,20,26,0)');
+    ctx.fillStyle = mist;
+    ctx.fillRect(0, 0, W, H);
+
+    // 고리별 스티키 채움 — 도심에서 가장 가까운 ボール 색, stroke 는 라일락 하이라이트
+    for (var li = 0; li < loops.length; li++) {
+      var path = new Path2D();
+      smoothLoop(path, loops[li]);
+      var c = loopCentroid(loops[li]);
+      var bi = nearestBall(c[0], c[1], t);
+      ctx.fillStyle = BALL_COLS[bi % BALL_COLS.length];
+      ctx.globalAlpha = 0.92;
+      ctx.fill(path);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = C_LILAC;
+      ctx.lineWidth = 1.6;
+      ctx.lineJoin = 'round';
+      ctx.stroke(path);
+    }
+
+    // ボール 코어 — 크림 점
+    for (var b2 = 0; b2 < balls.length; b2++) {
+      var p2 = ballPos(balls[b2], t);
+      ctx.fillStyle = C_CREAM;
+      ctx.beginPath(); ctx.arc(p2[0], p2[1], 2.6, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // '#rrggbb' + 알파 → rgba 문자열 (캔버스 그라디언트용)
+  function hexA(hex, a) {
+    if (hex.charAt(0) !== '#') return hex;
+    var r = parseInt(hex.slice(1, 3), 16);
+    var g = parseInt(hex.slice(3, 5), 16);
+    var b = parseInt(hex.slice(5, 7), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  }
+
+  function stillFrame() { draw(0.6); }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  buildBalls();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

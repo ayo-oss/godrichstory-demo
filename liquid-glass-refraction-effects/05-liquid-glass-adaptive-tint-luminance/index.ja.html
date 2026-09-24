@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>背景の明るさに合わせて色調が変わるガラス — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">板の内側はピクセルごとに背景の明るさを測り、暗ければ明るく、明るければ暗く自動で色調を加える</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 판 안쪽 픽셀마다 배경 휘도(0.299R+0.587G+0.114B)를 재고, 중간값(128)과의 차에
+  // 비례해 밝기를 보정한다(어두운 곳은 밝게, 밝은 곳은 어둡게) — 적응형 색조. 보정 강도는
+  // 삼각파로 0→최대→0 을 오가며 항상 값이 바뀌게 한다.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var SCENE_W = 220;
+  var scene = document.createElement('canvas');
+  scene.width = SCENE_W; scene.height = CALC_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421051);
+    var sky = pctx.createLinearGradient(0, 0, SCENE_W, 0);
+    sky.addColorStop(0, '#241f2c');
+    sky.addColorStop(0.5, '#5b8cf8');
+    sky.addColorStop(1, '#fff2da');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, SCENE_W, CALC_H);
+    for (var i = 0; i < 3; i += 1) {
+      pctx.beginPath();
+      pctx.arc(SCENE_W * (0.15 + i * 0.35), CALC_H * (0.3 + (i % 2) * 0.35), CALC_H * 0.22, 0, Math.PI * 2);
+      pctx.fillStyle = i === 0 ? '#b9a0ff' : (i === 1 ? '#ffd23f' : '#ff9ebb');
+      pctx.globalAlpha = 0.5;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 48; k += 1) {
+      var px = rand() * SCENE_W, py = rand() * CALC_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.08 + rand() * 0.16) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, SCENE_W, CALC_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > SCENE_W - 1 ? SCENE_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * SCENE_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var PANEL_X0 = 20, PANEL_Y0 = 16, PANEL_X1 = 140, PANEL_Y1 = 84;
+  var EDGE_BAND = 14;
+  var GLASS_EDGE_BEND = 4;
+  var TINT_STRENGTH = 0.85;
+  var SCENE_OFFSET_X = (SCENE_W - CALC_W) / 2;
+  var PAN_AMP = 40;
+  var PERIOD_MS = 2000;
+
+  function boxEdgeSample(x, y, x0, y0, x1, y1, band) {
+    var dl = x - x0, dr = x1 - x, dt = y - y0, db = y1 - y;
+    var dmin = Math.min(dl, dr, dt, db);
+    if (dmin >= band || dmin < 0) return { f: 0, nx: 0, ny: 0 };
+    var nx = 0, ny = 0;
+    if (dl < band) nx -= (band - dl);
+    if (dr < band) nx += (band - dr);
+    if (dt < band) ny -= (band - dt);
+    if (db < band) ny += (band - db);
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len > 0.0001) { nx /= len; ny /= len; }
+    return { f: Math.max(0, (band - dmin) / band), nx: nx, ny: ny };
+  }
+
+  function panX(t) {
+    return PAN_AMP * Math.sin(t * 2 * Math.PI / PERIOD_MS);
+  }
+
+  function triangleWave(t, period) {
+    var p = (t % period) / period;
+    return p < 0.5 ? p * 2 : (1 - p) * 2;
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function renderFrame(t) {
+    var pan = panX(t);
+    var adaptivity = triangleWave(t, PERIOD_MS);
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var baseSx = x + SCENE_OFFSET_X + pan;
+        var rgb;
+        if (x >= PANEL_X0 && x <= PANEL_X1 && y >= PANEL_Y0 && y <= PANEL_Y1) {
+          var e = boxEdgeSample(x, y, PANEL_X0, PANEL_Y0, PANEL_X1, PANEL_Y1, EDGE_BAND);
+          var bendMag = e.f * GLASS_EDGE_BEND;
+          rgb = sampleScene(baseSx - e.nx * bendMag, y - e.ny * bendMag);
+          var lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+          var delta = (128 - lum) * TINT_STRENGTH * adaptivity * 0.5;
+          rgb = [rgb[0] + delta, rgb[1] + delta * 0.94, rgb[2] + delta * 0.86];
+          var shine = e.f * 18;
+          rgb = [
+            Math.max(0, Math.min(255, rgb[0] + shine)),
+            Math.max(0, Math.min(255, rgb[1] + shine)),
+            Math.max(0, Math.min(255, rgb[2] + shine))
+          ];
+        } else {
+          rgb = sampleScene(baseSx, y);
+        }
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

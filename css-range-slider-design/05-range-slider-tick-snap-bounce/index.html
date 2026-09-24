@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>눈금 스냅 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ts" id="ts">
+  <p class="ts__hint">가장 가까운 눈금을 round() 로 찾아 복원력으로 튕겨 붙입니다 — 눈금 10개</p>
+  <div class="ts__wrap" id="tsWrap" role="img" aria-label="드래그가 가장 가까운 눈금에 자석처럼 튕겨 붙는 장면">
+    <div class="ts__ticks" id="tsTicks"></div>
+    <input class="ts__range" id="tsRange" type="range" min="0" max="100" step="1" value="50" aria-label="값 슬라이더">
+  </div>
+  <p class="ts__meta"><b class="ts__tag" id="tsTick">50</b><span class="ts__unit">가장 가까운 눈금 (간격 10)</span></p>
+</div>
+</main>
+<script>
+// 눈금 스냅(05) — 원시 드래그 목표(rawTarget)를 매 프레임 계산하고, 그 값을 눈금
+// 간격(STEP=10)으로 나눈 round() 결과를 "이산 목표(tickTarget)" 로 삼는다. pos 는
+// 항상 tickTarget 을 스프링(-k(pos-tick)-c·속도)으로 뒤쫓으므로, tickTarget 이 한
+// 칸 건너뛸 때마다 pos 가 살짝 지나쳤다가 튕겨 붙는다. CSS @keyframes 는 없다.
+(function () {
+  var root = document.getElementById('ts');
+  var wrap = document.getElementById('tsWrap');
+  var ticksEl = document.getElementById('tsTicks');
+  var range = document.getElementById('tsRange');
+  var tickEl = document.getElementById('tsTick');
+  if (!root || !wrap || !ticksEl || !range || !tickEl) return;
+
+  var MIN = 0, MAX = 100;
+  var STEP = (MAX - MIN) / 10; // 변형: max/20 이면 STEP = (MAX-MIN)/20
+  var K = 260, C = 22; // 스냅 스프링 상수 · 감쇠 (오버슈트 약 5%)
+  var TAU = 0.16;
+
+  for (var i = 0; i <= 10; i++) {
+    var d = document.createElement('span');
+    d.className = 'ts__tick';
+    d.style.left = (i * 10) + '%';
+    ticksEl.appendChild(d);
+  }
+
+  var rawTarget = 50;
+  var pos = 50, vel = 0;
+
+  function paint() {
+    var pct = (pos - MIN) / (MAX - MIN) * 100;
+    wrap.style.setProperty('--pct', pct.toFixed(2));
+    var tick = Math.round(rawTarget / STEP) * STEP;
+    tickEl.textContent = String(Math.round(tick));
+    range.setAttribute('aria-valuenow', String(Math.round(pos)));
+  }
+  paint();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var playing = true;
+  function stop() { playing = false; }
+  range.addEventListener('pointerdown', stop);
+  range.addEventListener('keydown', stop);
+  range.addEventListener('input', function () {
+    rawTarget = Number(range.value);
+    pos = Math.round(rawTarget / STEP) * STEP;
+    vel = 0;
+    range.value = String(Math.round(pos));
+  });
+
+  var segTargets = [50, 8, 77, 24, 96, 50];
+  var seg = 0, segFrom = rawTarget;
+  var SEG_MS = 380;
+  var segStart = performance.now();
+  var last = segStart;
+
+  if (reduce) {
+    rawTarget = segTargets[0];
+    pos = Math.round(rawTarget / STEP) * STEP;
+    range.value = String(pos);
+    paint();
+  } else {
+    (function step(now) {
+      var dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      if (playing) {
+        var elapsed = now - segStart;
+        if (elapsed >= SEG_MS) {
+          seg = (seg + 1) % segTargets.length;
+          segStart = now; elapsed = 0; segFrom = rawTarget;
+        }
+        var target = segTargets[seg];
+        var t = elapsed / 1000;
+        var k = 1 - Math.exp(-t / TAU);
+        rawTarget = segFrom + (target - segFrom) * k;
+      }
+      var tickTarget = Math.round(rawTarget / STEP) * STEP;
+      var acc = -K * (pos - tickTarget) - C * vel;
+      vel += acc * dt;
+      pos += vel * dt;
+      range.value = String(Math.round(pos));
+      paint();
+      requestAnimationFrame(step);
+    })(last);
+  }
+})();
+</script>
+</body>
+</html>

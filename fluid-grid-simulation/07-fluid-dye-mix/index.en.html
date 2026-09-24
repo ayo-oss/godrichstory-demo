@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>유체 염료 혼합 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage stage--yellow">
+<div class="dm" id="dm">
+  <p class="dm__hint">
+    <svg class="dm__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,184a80,80,0,1,1,80-80A80.09,80.09,0,0,1,128,208ZM112,72v56a16,16,0,0,0,32,0V72a16,16,0,0,0-32,0Z" opacity=".2"/><path d="M128,16A112,112,0,1,0,240,128,112.12,112.12,0,0,0,128,16Zm0,192a80,80,0,1,1,80-80A80.09,80.09,0,0,1,128,208ZM112,72v56a16,16,0,0,0,32,0V72a16,16,0,0,0-32,0Z"/></g></svg>
+    <span>Three channels flow on their own and blend together — stir between the two colors with the cursor</span>
+  </p>
+  <div class="dm__field" id="field" role="application" aria-label="Dye mix board" tabindex="0">
+    <canvas class="dm__cv" id="cv"></canvas>
+    <b class="dm__badge" aria-hidden="true">3<span class="dm__badgeUnit">channel</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 유체 염료 혼합 — 밀도 채널을 하나가 아니라 셋(R,G,B 역할)으로 두고 각각 독립 이류한다.
+// 속도장은 하나를 공유하므로 세 염료는 같은 물 위에서 움직이고, 겹치는 곳의 중간색은
+// 색을 미리 섞어 그린 결과가 아니라 channel 값의 합이 렌더식을 통과한 결과다.
+var root = document.getElementById('dm');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { willReadFrequently: true });
+
+var css = getComputedStyle(root);
+var ROSE = css.getPropertyValue('--dye-r').trim();
+var SAGE = css.getPropertyValue('--dye-g').trim();
+var COBALT = css.getPropertyValue('--dye-b').trim();
+var CREAM = css.getPropertyValue('--dye-paper').trim();
+function hex(c) { return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]; }
+var CR = hex(CREAM), K1 = hex(ROSE), K2 = hex(SAGE), K3 = hex(COBALT);
+
+// N=48 — 채널이 셋이라 32보다 살짝 올려도 한 프레임 계산이 가볍다(칸 2,500 × 3channel)
+var N = 48;
+var SIZE = (N + 2) * (N + 2);
+var IX = function (x, y) { return x + (N + 2) * y; };
+var u = new Float32Array(SIZE), v = new Float32Array(SIZE);
+var u0 = new Float32Array(SIZE), v0 = new Float32Array(SIZE);
+var r = new Float32Array(SIZE), r0 = new Float32Array(SIZE);
+var g = new Float32Array(SIZE), g0 = new Float32Array(SIZE);
+var b = new Float32Array(SIZE), b0 = new Float32Array(SIZE);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, raf = 0, seedT = 0, spin = 0;
+
+function fit() {
+  var rect = field.getBoundingClientRect();
+  W = rect.width; H = rect.height;
+  cv.width = Math.round(W); cv.height = Math.round(H);
+}
+
+// 후방 이류 — 한 칸의 새 값을 속도를 dt 만큼 거슬러 간 좌표의 옛 값으로 채운다(channel 공통)
+function advect(dst, src, dt) {
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var x = i - dt * N * u0[IX(i, j)];
+      var y = j - dt * N * v0[IX(i, j)];
+      if (x < 0.5) x = 0.5; else if (x > N + 0.5) x = N + 0.5;
+      var i0 = x | 0, i1 = i0 + 1;
+      if (y < 0.5) y = 0.5; else if (y > N + 0.5) y = N + 0.5;
+      var j0 = y | 0, j1 = j0 + 1;
+      var s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+      dst[IX(i, j)] = s0 * (t0 * src[IX(i0, j0)] + t1 * src[IX(i0, j1)]) +
+                      s1 * (t0 * src[IX(i1, j0)] + t1 * src[IX(i1, j1)]);
+    }
+  }
+}
+
+// 확산 — 옆칸과의 평균으로 번지게 한다. 이 항이 있어야 색이 스르 녹듯 섞인다
+function diffuse(dst, src, k) {
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var idx = IX(i, j);
+      dst[idx] = src[idx] + k * (src[IX(i - 1, j)] + src[IX(i + 1, j)] + src[IX(i, j - 1)] + src[IX(i, j + 1)] - 4 * src[idx]);
+    }
+  }
+}
+
+// channel 경계 — 벽으로 새어나간 염료는 절반으로 감쇠
+function dyeBounds(d) {
+  var n2 = N + 2;
+  for (var i = 1; i <= N; i++) {
+    d[IX(i, 0)] = d[IX(i, 1)] * 0.5; d[IX(i, N + 1)] = d[IX(i, N)] * 0.5;
+  }
+  for (var j = 1; j <= N; j++) {
+    d[IX(0, j)] = d[IX(1, j)] * 0.5; d[IX(N + 1, j)] = d[IX(N, j)] * 0.5;
+  }
+}
+function velBounds() {
+  var n2 = N + 2;
+  for (var i = 1; i <= N; i++) {
+    u[IX(i, 0)] = u[IX(i, 1)] * 0.5; u[IX(i, N + 1)] = u[IX(i, N)] * 0.5;
+    v[IX(i, 0)] = v[IX(i, 1)] * 0.5; v[IX(i, N + 1)] = v[IX(i, N)] * 0.5;
+  }
+  for (var j = 1; j <= N; j++) {
+    u[IX(0, j)] = u[IX(1, j)] * 0.5; u[IX(N + 1, j)] = u[IX(N, j)] * 0.5;
+    v[IX(0, j)] = v[IX(1, j)] * 0.5; v[IX(N + 1, j)] = v[IX(N, j)] * 0.5;
+  }
+}
+
+// 공통 속도장 — 중심 회전(와지) + 왼쪽에서 오른쪽 흐름. 두 염료를 계속 서로 쪽으로 밀어낸다
+function velSource() {
+  var cx = N * 0.5, cy = N * 0.52;
+  for (var j = 2; j <= N - 1; j++) {
+    for (var i = 2; i <= N - 1; i++) {
+      var dx = i - cx, dy = j - cy;
+      var q = Math.sqrt(dx * dx + dy * dy) / (N * 0.5);
+      var w = Math.exp(-q * q * 2.2) * 0.55;
+      u[IX(i, j)] += (-dy * 0.05 + 0.16) * w;
+      v[IX(i, j)] += (dx * 0.05) * w;
+    }
+  }
+  spin += 1;
+}
+
+// 시드 주입 — 좌상단에서 도는 로즈(R), 우하단에서 도는 코발트(B), 가운데를 지나는 세이지(G).
+// seedT 로 결정적: 같은 편의 gif·poster 는 언제나 같은 흐름이 담긴다.
+function inject(t) {
+  var ax = N * 0.27 + Math.sin(t * 1.1) * N * 0.09;
+  var ay = N * 0.3 + Math.cos(t * 0.9) * N * 0.08;
+  var bx = N * 0.7 + Math.sin(t * 0.8 + 2.1) * N * 0.08;
+  var by = N * 0.7 + Math.cos(t * 1.3 + 1.4) * N * 0.07;
+  var mx = N * 0.5 + Math.sin(t * 0.55 + 4.0) * N * 0.13;
+  var my = N * 0.5 + Math.cos(t * 0.62 + 1.0) * N * 0.12;
+  splatDye(r0, ax, ay, 1.3);
+  splatDye(b0, bx, by, 1);
+  splatDye(g0, mx, my, 0.8);
+}
+function splatDye(d, cx, cy, amp) {
+  var rad = 3;
+  for (var j = -rad; j <= rad; j++) {
+    for (var i = -rad; i <= rad; i++) {
+      var q = (i * i + j * j) / (rad * rad);
+      if (q > 1) continue;
+      var gi = Math.round(cx) + i, gj = Math.round(cy) + j;
+      if (gi < 1 || gi > N || gj < 1 || gj > N) continue;
+      d[IX(gi, gj)] += Math.exp(-q * 2.4) * amp;
+    }
+  }
+}
+
+function step(dt) {
+  velSource();
+  u0.set(u); v0.set(v);
+  advect(u, u0, dt); u0.set(u);
+  advect(v, v0, dt); v0.set(v);
+  velBounds();
+
+  r0.set(r); g0.set(g); b0.set(b);
+  inject(seedT);
+  diffuse(r, r0, 0.09); diffuse(g, g0, 0.09); diffuse(b, b0, 0.09);
+  r0.set(r); g0.set(g); b0.set(b);
+  advect(r, r0, dt); advect(g, g0, dt); advect(b, b0, dt);
+  dyeBounds(r); dyeBounds(g); dyeBounds(b);
+  for (var k = 0; k < SIZE; k++) { r[k] *= 0.996; g[k] *= 0.996; b[k] *= 0.996; }
+  seedT += dt;
+}
+
+// 렌더 — finalRGB = base + R*colorR + G*colorG + B*colorB. 중간색은 이 식을 통과하며 자연히 파생한다
+function render() {
+  var img = ctx.createImageData(cv.width, cv.height);
+  var px = img.data;
+  var cellW = cv.width / N, cellH = cv.height / N;
+  for (var py = 0; py < cv.height; py++) {
+    var gy = Math.min(N - 1, (py / cellH) | 0);
+    for (var pxx = 0; pxx < cv.width; pxx++) {
+      var gx = Math.min(N - 1, (pxx / cellW) | 0);
+      var idx = IX(gx + 1, gy + 1);
+      var qr = Math.min(1.6, r[idx]) / 1.6;
+      var qg = Math.min(1.6, g[idx]) / 1.6;
+      var qb = Math.min(1.6, b[idx]) / 1.6;
+      var o = (py * cv.width + pxx) * 4;
+      px[o]     = Math.min(255, CR[0] + qr * (K1[0] - CR[0]) + qg * (K2[0] - CR[0]) + qb * (K3[0] - CR[0]));
+      px[o + 1] = Math.min(255, CR[1] + qr * (K1[1] - CR[1]) + qg * (K2[1] - CR[1]) + qb * (K3[1] - CR[1]));
+      px[o + 2] = Math.min(255, CR[2] + qr * (K1[2] - CR[2]) + qg * (K2[2] - CR[2]) + qb * (K3[2] - CR[2]));
+      px[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function frame() {
+  step(1 / 30);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+// 사람이 휘젓기 — 프레임 간 위치 차이를 지수 반경으로 공통 속도장에 얹는다(01 splat 확대판)
+function splat(gx, gy, fx, fy, amt) {
+  var rad = 4;
+  for (var j = -rad; j <= rad; j++) {
+    for (var i = -rad; i <= rad; i++) {
+      var q = (i * i + j * j) / (rad * rad);
+      if (q > 1) continue;
+      if (gx + i < 1 || gx + i > N || gy + j < 1 || gy + j > N) continue;
+      var f = Math.exp(-q * 3) * amt;
+      var idx = IX(gx + i, gy + j);
+      u[idx] += fx * f; v[idx] += fy * f;
+    }
+  }
+}
+var last = null;
+field.addEventListener('pointermove', function (e) {
+  var rect = field.getBoundingClientRect();
+  var gx = 1 + Math.round((e.clientX - rect.left) / rect.width * (N - 1));
+  var gy = 1 + Math.round((e.clientY - rect.top) / rect.height * (N - 1));
+  if (last) {
+    var fx = (e.clientX - last.x) * 0.18, fy = (e.clientY - last.y) * 0.18;
+    splat(gx, gy, fx, fy, Math.min(2, Math.hypot(fx, fy)));
+  } else {
+    splat(gx, gy, 0, 0, 0.9);
+  }
+  last = { x: e.clientX, y: e.clientY };
+  if (reduce) render();
+});
+field.addEventListener('pointerleave', function () { last = null; });
+field.addEventListener('keydown', function (e) {
+  var dir = { ArrowLeft: [-2, 0], ArrowRight: [2, 0], ArrowUp: [0, -2], ArrowDown: [0, 2] }[e.key];
+  if (!dir) return;
+  e.preventDefault();
+  splat(N >> 1, N >> 1, dir[0], dir[1], 1.2);
+  if (reduce) render();
+});
+window.addEventListener('resize', function () { fit(); if (reduce) render(); });
+
+fit();
+if (reduce) {
+  // reduce — 시뮬레이션을 44 걸음만 앞으로 감아 두 색이 만난 한 장을 그린다(빈 화면이 아니다)
+  for (var k = 0; k < 44; k++) step(1 / 30);
+  render();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

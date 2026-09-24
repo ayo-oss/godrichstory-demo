@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>エラーの波線と吹き出し — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lint is-demo" id="lint">
+  <div class="lint__bar">
+    <span class="lint__ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 256 256"><g fill="currentColor"><path d="M215.46 216H40.54c-12.62 0-20.54-13.21-14.41-23.91l87.46-151.87c6.3-11 22.52-11 28.82 0l87.46 151.87c6.13 10.7-1.79 23.91-14.41 23.91" opacity=".2"/><path d="M236.8 188.09L149.35 36.22a24.76 24.76 0 0 0-42.7 0L19.2 188.09a23.51 23.51 0 0 0 0 23.72A24.35 24.35 0 0 0 40.55 224h174.9a24.35 24.35 0 0 0 21.33-12.19a23.51 23.51 0 0 0 .02-23.72m-13.87 15.71a8.5 8.5 0 0 1-7.48 4.2H40.55a8.5 8.5 0 0 1-7.48-4.2a7.59 7.59 0 0 1 0-7.72l87.45-151.87a8.75 8.75 0 0 1 15 0l87.45 151.87a7.59 7.59 0 0 1-.04 7.72M120 144v-40a8 8 0 0 1 16 0v40a8 8 0 0 1-16 0m20 36a12 12 0 1 1-12-12a12 12 0 0 1 12 12"/></g></svg></span>
+    <span class="lint__name">style.scss</span>
+  </div>
+  <div class="lint__wrap" id="wrap">
+    <span class="lint__scan" aria-hidden="true"></span>
+    <pre class="lint__hl" id="hl" aria-hidden="true"></pre>
+    <div class="lint__tip" id="tip0" aria-hidden="true"></div>
+    <div class="lint__tip" id="tip1" aria-hidden="true"></div>
+    <textarea class="lint__ta" id="ta" wrap="off" spellcheck="false" autocomplete="off" aria-label="コード入力欄" aria-describedby="lintStatus">/* badge colors */
+.badge {
+  color: #ff41;
+}
+.card {
+  color: #ff412;
+</textarea>
+  </div>
+  <p class="lint__status" id="lintStatus" role="status">
+    <span class="lint__chip" id="chip" data-n="2"><span class="lint__count" id="count">エラー 2件</span><span class="lint__countd" aria-hidden="true"><b>エラー 0件</b><b>エラー 1件</b><b>エラー 2件</b></span></span>
+    <span class="lint__hint">波線に重ねて理由を見る</span>
+  </p>
+</div>
+</main>
+<script>
+var lintEl = document.getElementById('lint');
+var ta = document.getElementById('ta');
+var hl = document.getElementById('hl');
+var wrap = document.getElementById('wrap');
+var chip = document.getElementById('chip');
+var count = document.getElementById('count');
+var TIP = [document.getElementById('tip0'), document.getElementById('tip1')];
+var MSG_BRACKET = ['閉じていない括弧', '開き括弧に閉じる対がありません'];
+var MSG_HEX = ['桁数が違う色コード', '16進数で3・4・6・8桁のみ有効です'];
+var COUNT_TPL = 'エラー {n}件';
+var HEX_DIGITS = [3, 4, 6, 8];  // 유효한 색 코드 자릿수. 4자리(#ff41 처럼 알파 1바이트)도 유효하고 5·7자리가 아니다
+var lineStarts = [], errsCache = [];
+
+// 간이 린트 — 두 규칙만. ① 색 코드: # 뒤가 16진수이고 자릿수가 3·4·6·8 중 하나여야 한다
+// (# 뒤에 16진수가 아닌 글자가 붙어도 묶어서 오류로 잡는다). ② 괄호 짝: 스택으로 짝을 짓고
+// 끝까지 안 닫힌 여는 괄호를 오류로 남긴다. 결과는 글자 인덱스 오름차순.
+function lint(text) {
+  var errs = [], m;
+  var hexRe = /#[0-9a-zA-Z]+/g;
+  while ((m = hexRe.exec(text)) !== null) {
+    var body = m[0].slice(1);
+    var ok = /^[0-9a-fA-F]+$/.test(body) && HEX_DIGITS.indexOf(body.length) >= 0;
+    if (!ok) errs.push({ start: m.index, end: m.index + m[0].length, msg: MSG_HEX });
+  }
+  var stack = [];
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charAt(i);
+    if (ch === '{' || ch === '(' || ch === '[') stack.push(i);
+    else if (ch === '}' || ch === ')' || ch === ']') {
+      if (stack.length) stack.pop();
+      else errs.push({ start: i, end: i + 1, msg: MSG_BRACKET });
+    }
+  }
+  stack.forEach(function (p) { errs.push({ start: p, end: p + 1, msg: MSG_BRACKET }); });
+  errs.sort(function (a, b) { return a.start - b.start; });
+  return errs;
+}
+
+function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+// 투명 textarea 아래 pre 를 다시 그린다. 주석 줄은 흐리게, 오류 범위는 물결 span 으로 감싼다
+function render() {
+  var text = ta.value;
+  errsCache = lint(text);
+  var lines = text.split('\n');
+  lineStarts = [0];
+  lines.forEach(function (l, i) { if (i) lineStarts.push(lineStarts[i - 1] + lines[i - 1].length + 1); });
+  hl.innerHTML = lines.map(function (line, ln) {
+    var lead = lineStarts[ln];
+    // 주석 줄 판정은 정규식으로 한다 — 소스에 여는 주석 문자열을 리터럴로 남기면 이 파일을 읽는
+    // 도구(게이트의 주석 제거기)가 거기서 주석이 열린 줄 알고 뒤를 통째로 삼킨다 (실측 2026-09-13)
+    var com = /^\s*\/\*/.test(line);
+    var local = [];
+    errsCache.forEach(function (e, ei) {
+      if (e.start >= lead && e.end <= lead + line.length) local.push({ s: e.start - lead, t: e.end - lead, ei: ei });
+    });
+    var out = '', pos = 0;
+    local.forEach(function (x) {
+      out += esc(line.slice(pos, x.s)) + '<span class="lint__err" data-e="' + x.ei + '">' + esc(line.slice(x.s, x.t)) + '</span>';
+      pos = x.t;
+    });
+    out += esc(line.slice(pos));
+    return '<span class="lint__ln' + (com ? ' lint__ln--com' : '') + '">' + (out || '​') + '</span>';
+  }).join('');
+  placeTips();
+  chip.dataset.n = String(errsCache.length);
+  count.textContent = COUNT_TPL.replace('{n}', String(errsCache.length));
+}
+
+// 한 글자 폭과 줄 높이를 pre 안에서 실측한다 — 폰 폭에서 서체 크기가 줄어도 따라간다
+function metric() {
+  var probe = document.createElement('span');
+  probe.className = 'lint__probe';
+  probe.textContent = '0000000000';
+  hl.appendChild(probe);
+  var cs = getComputedStyle(hl);
+  var M = { w: probe.getBoundingClientRect().width / 10, lh: parseFloat(cs.lineHeight), x: parseFloat(cs.paddingLeft), y: parseFloat(cs.paddingTop) };
+  probe.remove();
+  return M;
+}
+
+// 툴팁 두 개를 각 오류 줄 위(래핑 상자 안)에 둔다 — 아래로 삐져나오면 scrollHeight 가 커진다.
+// 가로는 오른쪽 끝을 넘지 않게 묶는다.
+function placeTips() {
+  var M = metric();
+  errsCache.slice(0, TIP.length).forEach(function (e, i) {
+    var ln = 0;
+    while (ln + 1 < lineStarts.length && lineStarts[ln + 1] <= e.start) ln++;
+    var tip = TIP[i];
+    tip.innerHTML = '<b>' + e.msg[0] + '</b>' + e.msg[1];
+    tip.style.left = '0px';
+    var left = M.x + (e.start - lineStarts[ln]) * M.w;
+    var top = M.y + ln * M.lh - tip.offsetHeight - 4;
+    var maxL = wrap.clientWidth - tip.offsetWidth - 4;
+    tip.style.left = Math.max(4, Math.min(left, maxL)) + 'px';
+    tip.style.top = Math.max(0, top) + 'px';
+    tip.classList.remove('is-open');
+  });
+}
+
+// 포인터 위치를 글자 인덱스로 바꾼다 — 고정폭 서체라 한 글자 폭으로 열을 잃는다
+function charIndex(px, py) {
+  var M = metric();
+  var ln = Math.floor((py - M.y) / M.lh);
+  if (ln < 0 || ln >= lineStarts.length) return -1;
+  var col = Math.round((px - M.x) / M.w);
+  var lineLen = ta.value.split('\n')[ln].length;
+  return lineStarts[ln] + Math.max(0, Math.min(col, lineLen));
+}
+function openAt(idx) {
+  var hit = -1;
+  errsCache.forEach(function (e, i) { if (idx >= e.start && idx <= e.end) hit = i; });
+  TIP.forEach(function (t, i) { t.classList.toggle('is-open', i === hit); });
+}
+
+ta.addEventListener('input', function () { lintEl.classList.remove('is-demo'); render(); });
+ta.addEventListener('scroll', function () { hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; });
+ta.addEventListener('focus', function () { lintEl.classList.remove('is-demo'); });
+ta.addEventListener('pointermove', function (ev) {
+  var r = ta.getBoundingClientRect();
+  openAt(charIndex(ev.clientX - r.left, ev.clientY - r.top));
+});
+ta.addEventListener('pointerleave', function () { TIP.forEach(function (t) { t.classList.remove('is-open'); }); });
+// 키보드로도 이유를 본다 — 커서가 오류 범위에 있으면 그 툴팁이 열린다
+ta.addEventListener('keyup', function () { openAt(ta.selectionStart); });
+wrap.addEventListener('pointerdown', function () { lintEl.classList.remove('is-demo'); });
+// 창 폭이 바뀌면 줄 높이가 달라진다 — 툴팁 자리를 다시 잡는다
+window.addEventListener('resize', placeTips);
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사용 빈도 값으로 순서가 바뀌는 최근 사용 탭 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ep is-demo" id="ep">
+  <div class="ep__head">
+    <span class="ep__label">최근 사용</span>
+    <span class="ep__sub" id="epSub">순위는 사용 횟수 값이 정한다</span>
+  </div>
+  <ul class="ep__recent" id="epRecent" role="listbox" aria-label="최근 사용 이모지, 사용 빈도 순"></ul>
+  <div class="ep__all" role="listbox" aria-label="전체 이모지" id="epAll"></div>
+  <p class="ep__sr" role="status" aria-live="polite" id="epLive"></p>
+</div>
+<script>
+(function () {
+  var EMOJIS = [
+    { ch: '\u{1F600}', key: 'smile', seed: 2 }, { ch: '\u{1F602}', key: 'joy', seed: 5 },
+    { ch: '\u{1F60D}', key: 'heart-eyes', seed: 1 }, { ch: '\u{1F389}', key: 'party', seed: 4 },
+    { ch: '\u{1F525}', key: 'fire', seed: 0 }, { ch: '\u{1F44D}', key: 'thumbs-up', seed: 3 },
+    { ch: '\u{1F64F}', key: 'pray', seed: 0 }, { ch: '\u{1F60E}', key: 'cool', seed: 1 },
+    { ch: '\u{1F973}', key: 'celebrate', seed: 0 }, { ch: '\u{1F914}', key: 'think', seed: 0 },
+    { ch: '\u{1F44F}', key: 'clap', seed: 2 }, { ch: '\u{2764}\u{FE0F}', key: 'love', seed: 0 }
+  ];
+  var RECENT_MAX = 6;
+  var counts = {}, lastPicked = {}, seq = 0;
+  EMOJIS.forEach(function (e) { counts[e.key] = e.seed; });
+
+  var recentEl = document.getElementById('epRecent');
+  var allEl = document.getElementById('epAll');
+  var live = document.getElementById('epLive');
+  var root = document.getElementById('ep');
+
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  // 계산 겹: 사용 횟수 값 내림차순, 동률이면 가장 최근에 고른 순으로 다시 줄을 세운다
+  function rank() {
+    return EMOJIS.slice().sort(function (a, b) {
+      var d = (counts[b.key] || 0) - (counts[a.key] || 0);
+      return d !== 0 ? d : (lastPicked[b.key] || 0) - (lastPicked[a.key] || 0);
+    }).slice(0, RECENT_MAX);
+  }
+
+  function fillItem(li, e, idx) {
+    li.dataset.key = e.key;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', 'false');
+    li.setAttribute('aria-label', e.key + ', 사용 ' + (counts[e.key] || 0) + '회, 순위 ' + (idx + 1));
+    li.innerHTML = '<b class="ep__rank">' + (idx + 1) + '</b><span class="ep__ch">' + e.ch + '</span><span class="ep__count">' + (counts[e.key] || 0) + '</span>';
+  }
+
+  // 계산 겹: FLIP — 재배치 전 위치를 실측(getBoundingClientRect)해 두고, 재배치 후 그 차이만큼
+  // transform 으로 되돌린 뒤 transition 으로 0 까지 풀어 "움직여 자리를 바꾸는" 것처럼 보이게 한다.
+  function renderRecent() {
+    var before = {};
+    Array.prototype.forEach.call(recentEl.children, function (li) { before[li.dataset.key] = li.getBoundingClientRect(); });
+    var list = rank();
+    recentEl.innerHTML = '';
+    list.forEach(function (e, idx) {
+      var li = document.createElement('li');
+      li.className = 'ep__item';
+      fillItem(li, e, idx);
+      li.addEventListener('click', function () { human(); pick(e); });
+      recentEl.appendChild(li);
+    });
+    Array.prototype.forEach.call(recentEl.children, function (li) {
+      var b = before[li.dataset.key];
+      if (!b) { li.classList.add('ep__item--enter'); requestAnimationFrame(function () { li.classList.remove('ep__item--enter'); }); return; }
+      var a = li.getBoundingClientRect(), dx = b.left - a.left, dy = b.top - a.top;
+      if (Math.abs(dx) > .5 || Math.abs(dy) > .5) {
+        li.style.transition = 'none';
+        li.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        li.offsetHeight;
+        li.style.transition = '';
+        li.style.transform = '';
+      }
+    });
+  }
+
+  function pick(e) {
+    counts[e.key] = (counts[e.key] || 0) + 1;
+    lastPicked[e.key] = ++seq;
+    renderRecent();
+    live.textContent = e.ch + ' 사용 ' + counts[e.key] + '회 · 최근 사용 순위 갱신';
+  }
+
+  EMOJIS.forEach(function (e) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'ep__all-btn'; b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', 'false'); b.setAttribute('aria-label', e.key);
+    b.textContent = e.ch;
+    b.addEventListener('click', function () { human(); pick(e); });
+    allEl.appendChild(b);
+  });
+
+  renderRecent();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var SEQ = [4, 6, 9, 4, 8, 6];
+  var i = 0, timer = 0;
+  function loop() {
+    if (!root.classList.contains('is-demo')) return;
+    pick(EMOJIS[SEQ[i % SEQ.length]]);
+    i++;
+    timer = window.setTimeout(loop, 420);
+  }
+  if (!reduce) { timer = window.setTimeout(loop, 380); }
+  else { root.classList.remove('is-demo'); }
+})();
+</script>
+</main>
+</body>
+</html>

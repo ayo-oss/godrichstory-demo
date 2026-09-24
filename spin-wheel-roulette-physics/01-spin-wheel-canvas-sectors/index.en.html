@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sector wheel — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ww" id="ww">
+  <p class="ww__hint">moveTo, arc, closePath draw each wedge while a cycling palette keeps neighbors from sharing a color</p>
+  <div class="ww__row">
+    <div class="ww__field" id="field" role="application" aria-label="Sector wheel" tabindex="0">
+      <canvas class="ww__cv" id="cv"></canvas>
+    </div>
+    <div class="ww__side">
+      <b class="ww__num" id="num">8</b>
+      <span class="ww__unit">sectors · arc 45°</span>
+      <div class="ww__dots" id="dots"></div>
+      <p class="ww__meta">Drag to spin, release and it coasts</p>
+      <p class="ww__meta"><b class="ww__count" id="deg">0</b><span class="ww__metaUnit">° accumulated spin</span></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// Sector wheel(01) — sectors 하나는 moveTo(중심) → arc(시작각, 끝각) → closePath 의 판때기다.
+// 각도는 2π/n 으로 균등 분할하고 색은 팔레트 배열을 순환시켜 이웃 칸이 같은 색으로 붙지 않게 한다.
+// 움직임은 전부 rAF 캔버스 — 정지 뒤 허브 링 펄스로 마지막 프레임까지 화면이 산다.
+(function () {
+  var root = document.getElementById('ww');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var dotsEl = document.getElementById('dots');
+  var degEl = document.getElementById('deg');
+  var numEl = document.getElementById('num');
+  if (!root || !field || !cv || !dotsEl || !degEl || !numEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 8; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var N = 8, SEG = TAU / N;
+  numEl.textContent = String(N);
+
+  var ang = -0.62, vel = 0, total = 0;
+  var FRICTION = 0.30;            // 감쇠 비율 (매초 곱한다) — 각속도 ×= FRICTION^dt
+  var STOP = 0.45;                // 이 밑으로 떨어지면 정지로 본다 (rad/s)
+  var settle = -1;                // 정지 뒤 펄스 타이머 (-1 = 회전 중)
+  var pulse = -1;                 // 허브 링 펄스 진행 (0~1)
+  var FLICKS = [9.6, -7.4, 12.6]; // 자동 데모 튕김 세 자루 — 시드 없이 고정, 항상 같은 시연
+  var fi = 0, lastIdx = -1, dpr = 1;
+
+  for (var d = 0; d < N; d++) {
+    var s = document.createElement('span');
+    s.className = 'ww__dot';
+    dotsEl.appendChild(s);
+  }
+  var dots = dotsEl.children;
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+
+  function norm(a) { a %= TAU; return a < 0 ? a + TAU : a; }
+
+  // 12시 고정 포인터 기준 Winner sectors — 판 좌표에서 -π/2 를 되돌린 뒤 sectors 각도로 나눈다
+  function judge() {
+    return Math.floor(norm(-Math.PI / 2 - ang) / SEG) % N;
+  }
+
+  function drawWheel() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 8;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ang);
+    for (var k = 0; k < N; k++) {
+      var a0 = k * SEG, a1 = a0 + SEG;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = PAL[k];
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.22)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // sectors 번호 — 가운데 각도 반지름 방향으로 바깥에서 안으로 읽힌다
+      ctx.save();
+      ctx.rotate(a0 + SEG / 2);
+      ctx.fillStyle = INK;
+      ctx.font = '700 13px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(k + 1), R - 14, 0);
+      ctx.restore();
+    }
+    // 테두리 핀 — sectors 경계마다 하나
+    for (var p = 0; p < N; p++) {
+      var pa = p * SEG;
+      ctx.beginPath();
+      ctx.arc(Math.cos(pa) * (R - 3), Math.sin(pa) * (R - 3), 2.6, 0, TAU);
+      ctx.fillStyle = CREAM;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.35)';
+      ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill();
+    ctx.strokeStyle = 'rgba(23,20,26,.35)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 5, 0, TAU);
+    ctx.fillStyle = INK; ctx.fill();
+    // 정지 펄스 링 — 멈춘 뒤 0.3초 퍼졌다 사라진다
+    if (pulse >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 15 + pulse * 26, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,247,230,' + (1 - pulse) * 0.8 + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+    // 12시 고정 포인터 — 판과 함께 돌지 않는다
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - R - 6);
+    ctx.lineTo(cx + 7, cy - R - 6);
+    ctx.lineTo(cx, cy - R + 9);
+    ctx.closePath();
+    ctx.fillStyle = CREAM; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA; total += Math.abs(dA) * 180 / Math.PI;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.7 * drag.v + 0.3 * (dA / dt);   // 최근 이동의 지수 평균 — 손을 뗄 때 각속도가 된다
+    drag.lastA = a; drag.lastT = now;
+    idle = 0;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-22, Math.min(22, drag.v));
+    settle = -1; pulse = -1; idle = 0;
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      vel = FLICKS[fi++ % FLICKS.length]; settle = -1; pulse = -1; idle = 0;
+    } else if (e.key === 'ArrowLeft') { ang -= SEG / 2; total += 22.5; idle = 0; }
+    else if (e.key === 'ArrowRight') { ang += SEG / 2; total += 22.5; idle = 0; }
+  });
+
+  var idle = 0;   // 손 입력 뒤 자동 시연을 잠시 쉬게 하는 타이머 (초)
+  function auto(dt) {
+    if (idle > 0) { idle -= dt; return; }
+    if (settle >= 0) {
+      settle += dt; pulse = Math.min(1, settle / 0.3);
+      if (settle > 0.34) { vel = FLICKS[fi++ % FLICKS.length]; settle = -1; pulse = -1; }
+      return;
+    }
+    vel *= Math.pow(FRICTION, dt);
+    if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt; total += Math.abs(vel) * dt * 180 / Math.PI;
+        vel *= Math.pow(FRICTION, dt);
+        if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; }
+      } else { auto(dt); }
+    }
+    drawWheel();
+    var idx = judge();
+    if (idx !== lastIdx) {
+      for (var q = 0; q < N; q++) dots[q].className = q === idx ? 'ww__dot is-on' : 'ww__dot';
+      lastIdx = idx;
+    }
+    degEl.textContent = String(Math.round(total));
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 펄스 링이 퍼진 상태로 고정하고 루프는 돌지 않는다
+    pulse = 0.45;
+    drawWheel();
+    var idx0 = judge();
+    for (var z = 0; z < N; z++) dots[z].className = z === idx0 ? 'ww__dot is-on' : 'ww__dot';
+    root.classList.add('is-still');
+  } else {
+    vel = FLICKS[0]; fi = 1;
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

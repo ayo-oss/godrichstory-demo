@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>離す速度で分かれるスワイプ判定 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vf is-demo" id="vf">
+  <p class="vf__caption">離す速度で分かれるスワイプ判定</p>
+  <div class="vf__scene" id="vfScene">
+    <div class="vf__card" id="vfCard" tabindex="0" role="group" aria-roledescription="スワイプカード">
+      <p class="vf__label" id="vfLabel">夕方の散歩</p>
+      <p class="vf__hint" id="vfHint">速度 0.00 px/ms</p>
+    </div>
+    <button class="vf__btn vf__btn--nope" id="vfNope" type="button" aria-label="いいえ">✕</button>
+    <button class="vf__btn vf__btn--like" id="vfLike" type="button" aria-label="いいね">♥</button>
+  </div>
+  <p class="vf__status" id="vfStatus" aria-live="polite">待機中</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 변형 3: 02 폴더에 SWIPE_ROTATE_LERP_RATIO 를 실재시킨다 — 드래그 중 카드가 이 비율로 살짝 기운다.
+  var SWIPE_ROTATE_LERP_RATIO = 0.05; // deg per px
+  var ROTATE_MAX_DEG = 14;
+  // 값 하나: 놓는 순간의 速度(px/ms)가 이 값을 넘지 못하면 카드는 날아가지 않는다.
+  var FLING_VELOCITY_MIN = 0.42;
+  var INERTIA_DECAY = 0.85;
+  var SETTLE_RATE = 0.2;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("vf");
+  var card = document.getElementById("vfCard");
+  var label = document.getElementById("vfLabel");
+  var hint = document.getElementById("vfHint");
+  var status = document.getElementById("vfStatus");
+  var btnLike = document.getElementById("vfLike");
+  var btnNope = document.getElementById("vfNope");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["夕方の散歩", "週末のカフェ", "宅トレ記録", "読書リスト", "旅行メモ", "朝のルーティン"];
+  var rand = seedRand(23);
+  var idx = Math.floor(rand() * CARDS.length);
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vx = 0;
+  var x = 0, phase = "idle", exitDir = 1;
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  function render() {
+    var rot = clamp(x * SWIPE_ROTATE_LERP_RATIO, -ROTATE_MAX_DEG, ROTATE_MAX_DEG);
+    card.style.transform = "translateX(" + x.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
+  }
+
+  function nextCard() {
+    idx += 1; setCard();
+    x = 0; vx = 0; phase = "idle";
+    render();
+    status.textContent = "待機中";
+  }
+
+  function judge(velocity, dir) {
+    root.classList.remove("is-demo");
+    hint.textContent = "速度 " + Math.abs(velocity).toFixed(2) + " px/ms";
+    var flung = Math.abs(velocity) >= FLING_VELOCITY_MIN;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "「いいね」処理済み" : "「いいえ」処理済み"; nextCard(); }
+      else { x = 0; render(); status.textContent = "基準速度未満 — 元に戻った"; phase = "idle"; }
+      return;
+    }
+    if (flung) {
+      phase = "exit"; exitDir = dir;
+      status.textContent = dir > 0 ? "「いいね」処理済み" : "「いいえ」処理済み";
+    } else {
+      phase = "settle";
+      status.textContent = "基準速度未満 — 元に戻った";
+    }
+  }
+
+  function startDrag(clientX) {
+    root.classList.remove("is-demo");
+    dragging = true;
+    startX = clientX; lastX = clientX; lastT = performance.now(); vx = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vx = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    x = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vx, x >= 0 ? 1 : -1);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function keyVerdict(dir) {
+    root.classList.remove("is-demo");
+    x = dir * 40; render();
+    judge(dir * (FLING_VELOCITY_MIN + 0.15), dir);
+  }
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { e.preventDefault(); keyVerdict(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); keyVerdict(-1); }
+  });
+  btnLike.addEventListener("click", function () { keyVerdict(1); });
+  btnNope.addEventListener("click", function () { keyVerdict(-1); });
+
+  function step(dt) {
+    if (phase === "exit") {
+      var speed = Math.max(Math.abs(vx), FLING_VELOCITY_MIN * 1.4);
+      x += exitDir * speed * dt;
+      render();
+      if (Math.abs(x) > EXIT_PX) nextCard();
+    } else if (phase === "settle") {
+      x += vx * dt;
+      vx *= INERTIA_DECAY;
+      x += (0 - x) * SETTLE_RATE;
+      render();
+      if (Math.abs(x) < 0.5 && Math.abs(vx) < 0.01) { x = 0; phase = "idle"; render(); }
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 pointer 없이 x·judge() 를 같은 경로로 호출한다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.45 && t < 0.7 && synthPhase === "wait") synthPhase = "weak";
+    if (synthPhase === "weak") {
+      var p = clamp((t - 0.45) / 0.25, 0, 1);
+      x = p * 30; render();
+      if (t >= 0.7) { synthPhase = "afterWeak"; judge(0.15, 1); }
+    }
+    if (t > 1.05 && t < 1.35 && synthPhase === "afterWeak") synthPhase = "strong";
+    if (synthPhase === "strong") {
+      var q = clamp((t - 1.05) / 0.3, 0, 1);
+      x = q * 130; render();
+      if (t >= 1.35) { synthPhase = "done"; judge(FLING_VELOCITY_MIN + 0.5, 1); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

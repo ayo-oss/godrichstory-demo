@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>영역 채움 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ar" id="ar">
+  <p class="ar__hint">
+    <svg class="ar__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 64v144H32V48h176a16 16 0 0 1 16 16" opacity=".2"/><path d="M232 208a8 8 0 0 1-8 8H32a8 8 0 0 1-8-8V48a8 8 0 0 1 16 0v108.69l50.34-50.35a8 8 0 0 1 11.32 0L128 132.69L180.69 80H160a8 8 0 0 1 0-16h40a8 8 0 0 1 8 8v40a8 8 0 0 1-16 0V91.31l-58.34 58.35a8 8 0 0 1-11.32 0L96 123.31l-56 56V200h184a8 8 0 0 1 8 8"/></g></svg>
+    <span>2つの系列の面が下から満ち、交差する月は上の系列が明るくなります — <code>clip</code>·<code>quadraticCurveTo</code>·<code>平均線</code></span>
+  </p>
+  <div class="ar__field" id="field" role="application" aria-label="面グラフの実験台" tabindex="0">
+    <canvas class="ar__cv" id="cv" role="img" aria-label="12か月の訪問・注文の面グラフ — 下から満ちる面、交差する月に明るくなる上の系列、遅れて横切る平均線の姿"></canvas>
+  </div>
+  <div class="ar__bar">
+    <button class="ar__btn" id="replay" type="button">
+      <svg class="ar__bico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 128a88 88 0 1 1-88-88a88 88 0 0 1 88 88" opacity=".2"/><path d="M224 128a96 96 0 0 1-94.71 96H128a95.38 95.38 0 0 1-65.9-26.2a8 8 0 0 1 11-11.63a80 80 0 1 0-1.67-114.78a3 3 0 0 1-.26.25L44.59 96H72a8 8 0 0 1 0 16H24a8 8 0 0 1-8-8V56a8 8 0 0 1 16 0v29.8L60.25 60A96 96 0 0 1 224 128"/></g></svg>
+      <span>再描画</span>
+    </button>
+    <table class="sr-only">
+      <caption>12か月の訪問数・注文数（単位：人）</caption>
+      <thead><tr><th scope="col">月</th><th scope="col">訪問数</th><th scope="col">注文数</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">1月</th><td>210</td><td>96</td></tr>
+        <tr><th scope="row">2月</th><td>248</td><td>118</td></tr>
+        <tr><th scope="row">3月</th><td>226</td><td>142</td></tr>
+        <tr><th scope="row">4月</th><td>292</td><td>176</td></tr>
+        <tr><th scope="row">5月</th><td>334</td><td>208</td></tr>
+        <tr><th scope="row">6月</th><td>306</td><td>236</td></tr>
+        <tr><th scope="row">7月</th><td>368</td><td>272</td></tr>
+        <tr><th scope="row">8月</th><td>412</td><td>308</td></tr>
+        <tr><th scope="row">9月</th><td>384</td><td>344</td></tr>
+        <tr><th scope="row">10月</th><td>446</td><td>386</td></tr>
+        <tr><th scope="row">11月</th><td>482</td><td>424</td></tr>
+        <tr><th scope="row">12月</th><td>456</td><td>468</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</main>
+<script>
+// 영역 채움 — 12개월 두 계열(訪問·注文)의 면이 바닥에서 위로 차오른다.
+// 세 겹이 함께 움직인다:
+//   1) 클리핑 사각형이 아래에서 위로 열린다(01 의 좌→우 clip 과 축만 다른 같은 기법).
+//   2) 면의 꼭짓점 높이를 같은 진행률로 (値-바닥)*s+바닥 으로 눌러, 클립과 면이 함께 위로 차오르는
+//      키가 큰 면을 만든다(누적면적). 곡선은 quadraticCurveTo 중점 제어로 부드럽게.
+//   3) 두 계열이 교차하는 달(11~12月)은 채움이 그 달에 닿은 순간부터 위 계열의 면을 리프트 톤(한 단 밝게)으로.
+// 채움이 끝나면(0.85) 두 계열 평균의 수평선이 왼쪽에서 오른쪽으로 그 위를 가로질러 긋는다(--ink 점선).
+var root = document.getElementById('ar');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var replayBtn = document.getElementById('replay');
+
+var css = getComputedStyle(root);
+var C_1 = css.getPropertyValue('--chart-1').trim();
+var C_2 = css.getPropertyValue('--chart-2').trim();
+var C_1F = css.getPropertyValue('--fill-1').trim();
+var C_2F = css.getPropertyValue('--fill-2').trim();
+var C_1L = css.getPropertyValue('--fill-1-lift').trim();
+var C_2L = css.getPropertyValue('--fill-2-lift').trim();
+var C_INK = css.getPropertyValue('--ink').trim();
+var C_MUTE = css.getPropertyValue('--mute').trim();
+var C_GRID = css.getPropertyValue('--grid').trim();
+var C_PAPER = css.getPropertyValue('--paper').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+// 고정 시드 데이터 — 손으로 쓴 배열이라 다시 그려도 같은 그림.
+// 연말(12月)에 주문이 방문을 앞지른다 — 11→12月 구간이 교차 구간이 되어 리프트가 목격된다
+var A = [210, 248, 226, 292, 334, 306, 368, 412, 384, 446, 482, 456];   // 訪問(계열 1)
+var B = [ 96, 118, 142, 176, 208, 236, 272, 308, 344, 386, 424, 468];   // 注文(계열 2)
+var MONTHS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
+var PAD_L = 40, PAD_R = 16, PAD_T = 18, PAD_B = 30;   // 軸 라벨 여백(CSS px)
+var LOOP = 2;               // 한 사이클 2초 — 캡처 창과 같아 gif 가 이어진다
+var FILL_AT = 0.85;         // 전체 2초의 85% 동안 차오르고, 그 뒤 평균선이 그 위를 지나간다
+var LINE_AT = 0.93;         // 平均線 그리기가 끝나는 지점 — 이후 확정 상태로 쉰다
+var Y_TOP = 50, Y_SPAN = 500;   // y 軸 스케일 고정(50~500명)
+
+// 두 계열의 전 기간 平均 — 平均線(확정선)의 y 値
+var sumA = 0, sumB = 0;
+for (var q = 0; q < 12; q++) { sumA += A[q]; sumB += B[q]; }
+var AVG_A = Math.round(sumA / 12);
+var AVG_B = Math.round(sumB / 12);
+var AVG = Math.round((AVG_A + AVG_B) / 2);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var t0 = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 데이터 인덱스 → 플롯 x. 월은 12칸 균등
+function xAt(i) { return PAD_L + (W - PAD_L - PAD_R) * (i / (A.length - 1)); }
+// 데이터 値 → 플롯 y. 위로 갈수록 크다
+function yAt(v) { return PAD_T + (H - PAD_T - PAD_B) * (1 - (v - Y_TOP) / (Y_SPAN - Y_TOP)); }
+// 채움 진행 s(0..1) 가 누른 꼭짓점 높이 — 바닥(Y_TOP) 기준 (v-바닥)*s+바닥. s=1 이면 제값
+function vAt(v, s) { return Y_TOP + (v - Y_TOP) * s; }
+
+// 계열의 윗가장자리 곡선 — 꼭짓점을 중점 제어로 눌러 부드럽게 이은 열린 경로
+function linePath(S, s) {
+  var n = S.length;
+  ctx.beginPath();
+  ctx.moveTo(xAt(0), yAt(vAt(S[0], s)));
+  for (var j = 1; j < n - 1; j++) {
+    ctx.quadraticCurveTo(xAt(j), yAt(vAt(S[j], s)),
+      (xAt(j) + xAt(j + 1)) / 2, (yAt(vAt(S[j], s)) + yAt(vAt(S[j + 1], s))) / 2);
+  }
+  ctx.lineTo(xAt(n - 1), yAt(vAt(S[n - 1], s)));
+}
+
+// 면 경로 — 윗가장자리 곡선을 바닥까지 닫는다
+function areaPath(S, s) {
+  linePath(S, s);
+  ctx.lineTo(xAt(S.length - 1), H - PAD_B);
+  ctx.lineTo(xAt(0), H - PAD_B);
+  ctx.closePath();
+}
+
+// 감속 이징 — 1 - (1-t)^3. 채움이 끝에서 뭉툭해지며 멈춘다
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+function draw(p) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C_PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  // 가로 그리드 + y 라벨 — 100~500 다섯 줄. 첫 12% 동안 아래에서 위로 떠오른다
+  var axisP = Math.min(1, p / 0.12);
+  ctx.lineWidth = 1;
+  ctx.font = '600 10px ' + FONT;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  for (var g = 100; g <= Y_SPAN; g += 100) {
+    var gy = yAt(g) + (1 - axisP) * 14;
+    ctx.strokeStyle = C_GRID;
+    ctx.beginPath();
+    ctx.moveTo(PAD_L, Math.round(gy) + 0.5);
+    ctx.lineTo(W - PAD_R, Math.round(gy) + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = C_MUTE;
+    ctx.globalAlpha = axisP;
+    ctx.fillText(String(g), PAD_L - 6, gy);
+    ctx.globalAlpha = 1;
+  }
+
+  // x 라벨(月) — 축이 뜬 뒤 왼쪽부터 차례로 나타난다
+  ctx.textAlign = 'center';
+  for (var m = 0; m < MONTHS.length; m++) {
+    var mp = Math.max(0, Math.min(1, (p - 0.10 - m * 0.018) / 0.10));
+    if (mp <= 0) continue;
+    ctx.fillStyle = C_MUTE;
+    ctx.globalAlpha = mp;
+    ctx.fillText(MONTHS[m], xAt(m), H - PAD_B + 13);
+    ctx.globalAlpha = 1;
+  }
+
+  // 채움 진행률 — 감속 이징 하나로 클립과 면 높이를 함께 누른다
+  var f = easeOutCubic(Math.min(1, p / FILL_AT));
+  var s = f * f;                                   // 면 높이 — 시작이 급하고 끝에 붙는 감
+  // 클리핑 사각형 — 바닥에서 위로 열린다. 이 안에서만 면과 선이 보인다
+  var cutY = (H - PAD_B) - (H - PAD_T - PAD_B) * f;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, cutY - 1, W, H);
+  ctx.clip();
+
+  // 계열 2(注文) 면 — 아래 깔리는 쪽. 채움 내내 채워진다
+  areaPath(B, s);
+  ctx.fillStyle = C_2F;
+  ctx.fill();
+
+  // 계열 1(訪問) 면 — 위에 겹친다
+  areaPath(A, s);
+  ctx.fillStyle = C_1F;
+  ctx.fill();
+
+  // 교차 리프트 — 두 계열의 순서가 바뀌는 구간에서, 채움이 닿은 순간부터
+  // 그 달 구간의 위 계열 면을 리프트 톤(한 단 밝게)으로 다시 깐다
+  var reachI = Math.floor(Math.min(1, p / FILL_AT) * (A.length - 1));   // 채움이 닿은 마지막 달
+  for (var c = 0; c < A.length - 1; c++) {
+    if (c > reachI) break;                          // 아직 채움이 닿지 않은 달은 두지 않는다
+    var topNow = A[c + 1] >= B[c + 1] ? 1 : 2;      // 구간 끝 월에서 위에 있는 계열
+    var topPrev = A[c] >= B[c] ? 1 : 2;             // 구간 시작 월에서 위에 있는 계열
+    if (topNow === topPrev) continue;               // 교차가 없는 구간은 그대로
+    var S2 = topNow === 1 ? A : B;
+    var lift = topNow === 1 ? C_1L : C_2L;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(xAt(c), 0, xAt(c + 1) - xAt(c) + 1, H);   // 그 달 구간만
+    ctx.clip();
+    areaPath(S2, s);
+    ctx.fillStyle = lift;
+    ctx.globalAlpha = 0.4;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // 계열 2 윤곽선 — 면 위 가장자리만 얇게(2px. 마크 규격)
+  ctx.strokeStyle = C_2;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  linePath(B, s);
+  ctx.stroke();
+
+  // 계열 1 윤곽선
+  ctx.strokeStyle = C_1;
+  linePath(A, s);
+  ctx.stroke();
+  ctx.restore();
+
+  // 범례 — 계열 1·2 색점과 이름. 왼쪽 위(초반 저값 구간)에 채움과 함께 뜬다
+  if (f > 0.15) {
+    ctx.globalAlpha = Math.min(1, (f - 0.15) / 0.2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = '700 10px ' + FONT;
+    ctx.beginPath();
+    ctx.arc(PAD_L + 8, PAD_T + 8, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = C_1;
+    ctx.fill();
+    ctx.fillStyle = C_INK;
+    ctx.fillText('訪問', PAD_L + 16, PAD_T + 8);
+    ctx.beginPath();
+    ctx.arc(PAD_L + 52, PAD_T + 8, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = C_2;
+    ctx.fill();
+    ctx.fillStyle = C_INK;
+    ctx.fillText('注文', PAD_L + 60, PAD_T + 8);
+    ctx.globalAlpha = 1;
+  }
+
+  // 平均線 — 채움 완료(0.85) 뒤 왼쪽에서 오른쪽으로 그 위를 가로질러 긋는다(--ink 점선)
+  if (p > FILL_AT) {
+    var lp = Math.min(1, (p - FILL_AT) / (LINE_AT - FILL_AT));
+    var ly = yAt(AVG);
+    var lx = PAD_L + (W - PAD_L - PAD_R) * easeOutCubic(lp);
+    ctx.beginPath();
+    ctx.moveTo(PAD_L, ly);
+    ctx.lineTo(lx, ly);
+    ctx.strokeStyle = C_INK;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 平均 라벨 — 선 끝에 붙어 따라간다
+    ctx.font = '700 10px ' + FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = C_INK;
+    ctx.fillText('平均 ' + AVG, Math.min(W - PAD_R - 52, PAD_L + 6), ly - 7);
+  }
+}
+
+function frame(now) {
+  if (!t0) t0 = now;
+  var p = ((now - t0) / 1000 % LOOP) / LOOP;      // 0..1, 2초 루프
+  draw(p);
+  raf = requestAnimationFrame(frame);
+}
+
+replayBtn.addEventListener('click', function () { t0 = 0; });
+window.addEventListener('resize', function () { fit(); if (reduce) draw(1); });
+
+fit();
+if (reduce) {
+  // reduce — 루프 없이 완성 상태(두 면이 가득 차고 평균선이 끝까지 그어진 한 장)만 그린다
+  draw(1);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

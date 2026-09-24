@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radial gauge picker where the arc fills to match the value — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<figure class="rg is-demo" id="rg">
+  <div class="rg__zone" id="zone">
+    <svg class="rg__chart" id="chart" viewBox="0 0 480 300" role="img" aria-label="A radial gauge whose arc fills to match the value's ratio; turning the handle redraws the arc every instant.">
+      <path class="rg__track" id="track"></path>
+      <path class="rg__fill" id="fill"></path>
+      <text class="rg__num" id="num" x="240" y="170" text-anchor="middle" dominant-baseline="central">62%</text>
+    </svg>
+    <button class="rg__grab" id="grab" type="button" role="slider" aria-orientation="horizontal"
+            aria-label="Choose level" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="62" aria-valuetext="Level 62%">
+      <svg class="rg__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="128" cy="128" r="96" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88 88.1 88.1 0 0 1-88 88"/></g></svg>
+    </button>
+    <b class="rg__badge" aria-hidden="true">Level <span id="rg-val">62</span>%</b>
+  </div>
+
+  <p class="rg__hint">Drag the handle or press arrow keys — arc length recomputes.</p>
+
+  <div class="sr">
+    <span aria-live="polite" id="rg-live"></span>
+  </div>
+</figure>
+</main>
+<script>
+// 실제 동작: pointerdown/move/up 과 keydown(화살표·Home·End) 이 Value(0~100)을 바꾸면
+// 손잡이 각도가 다시 계산되고, 원호 경로(d 속성)를 시작각→현재각으로 매 프레임 다시 그린다.
+// 값은 매 프레임 목표값으로 관성 보간(lerp)된다 — CSS @keyframes 없음(어느 각도인지 매 순간
+// 바뀌는 실수라 선언형으로 못 담는다, 395·398-01 과 같은 이유로 실시간 캡처 경로를 쓴다).
+var root = document.getElementById('rg');
+var zone = document.getElementById('zone');
+var chart = document.getElementById('chart');
+var track = document.getElementById('track');
+var fill = document.getElementById('fill');
+var numEl = document.getElementById('num');
+var valEl = document.getElementById('rg-val');
+var grab = document.getElementById('grab');
+var live = document.getElementById('rg-live');
+
+var CX = 240, CY = 170, R = 118;       // picker-graph-gauge-radius — 게이지 반지름
+var START = 135, SWEEP = 270;          // 시작각( degrees)·전체 스윕각 — END = START + SWEEP
+var END = START + SWEEP;
+var LERP_RATE = 0.20;
+var AUTO_PERIOD = 1.7;
+var STEP = 5;
+
+var value = 62;
+var current = 62;
+var manual = false;
+var autoT = 0;
+var lastTs = 0;
+var zoneRect = null;
+var rafId = 0;
+
+function reduced() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function polar(cx, cy, r, deg) {
+  var rad = deg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(cx, cy, r, a0, a1) {
+  if (Math.abs(a1 - a0) < 0.5) return '';
+  var s = polar(cx, cy, r, a0), e = polar(cx, cy, r, a1);
+  var large = (a1 - a0) > 180 ? 1 : 0;
+  return 'M ' + s.x + ' ' + s.y + ' A ' + r + ' ' + r + ' 0 ' + large + ' 1 ' + e.x + ' ' + e.y;
+}
+
+function angleOf(v) { return START + (SWEEP * v) / 100; }
+
+function paint() {
+  track.setAttribute('d', arcPath(CX, CY, R, START, END));
+  fill.setAttribute('d', arcPath(CX, CY, R, START, angleOf(current)));
+  var p = polar(CX, CY, R, angleOf(current));
+  grab.style.left = (p.x / 480 * 100) + '%';
+  grab.style.top = (p.y / 300 * 100) + '%';
+  var rv = Math.round(current);
+  numEl.textContent = rv + '%';
+  valEl.textContent = String(rv);
+  grab.setAttribute('aria-valuenow', String(rv));
+  grab.setAttribute('aria-valuetext', 'Level ' + rv + '%');
+}
+
+function announce() {
+  live.textContent = 'Level ' + Math.round(current) + '% recomputed';
+}
+
+function setValue(v, isManual) {
+  value = Math.max(0, Math.min(100, v));
+  if (isManual) { manual = true; root.classList.remove('is-demo'); }
+}
+
+function angleFromPointer(clientX, clientY) {
+  if (!zoneRect) zoneRect = zone.getBoundingClientRect();
+  var cx = zoneRect.left + zoneRect.width * (CX / 480);
+  var cy = zoneRect.top + zoneRect.height * (CY / 300);
+  var deg = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
+  while (deg < START) deg += 360;
+  while (deg > START + 360) deg -= 360;
+  if (deg > END) deg = (deg - END < START + 360 - deg) ? END : START;
+  return deg;
+}
+
+function fromPointer(clientX, clientY) {
+  var deg = angleFromPointer(clientX, clientY);
+  var v = (deg - START) / SWEEP * 100;
+  setValue(v, true);
+}
+
+function onDown(e) {
+  zoneRect = zone.getBoundingClientRect();
+  if (grab.setPointerCapture) { try { grab.setPointerCapture(e.pointerId); } catch (err) {} }
+  fromPointer(e.clientX, e.clientY);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+function onMove(e) {
+  fromPointer(e.clientX, e.clientY);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+function onUp() { announce(); }
+
+function onZoneDown(e) {
+  zoneRect = zone.getBoundingClientRect();
+  fromPointer(e.clientX, e.clientY);
+  if (reduced()) { current = value; paint(); announce(); }
+}
+
+function onKey(e) {
+  var map = { ArrowLeft: -STEP, ArrowDown: -STEP, ArrowRight: STEP, ArrowUp: STEP };
+  if (e.key === 'Home') { setValue(0, true); e.preventDefault(); }
+  else if (e.key === 'End') { setValue(100, true); e.preventDefault(); }
+  else if (map[e.key] !== undefined) { setValue(value + map[e.key], true); e.preventDefault(); }
+  else { return; }
+  if (reduced()) { current = value; paint(); announce(); }
+}
+
+function onResize() {
+  zoneRect = zone.getBoundingClientRect();
+  if (reduced()) paint();
+}
+
+function autoStep(dt) {
+  autoT += dt;
+  var omega = 2 * Math.PI / AUTO_PERIOD;
+  value = 50 + 48 * Math.sin(autoT * omega);
+}
+
+function frame(ts) {
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  if (!manual) autoStep(dt);
+  current += (value - current) * LERP_RATE;
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+
+grab.addEventListener('pointerdown', onDown);
+grab.addEventListener('pointermove', onMove);
+grab.addEventListener('pointerup', onUp);
+grab.addEventListener('keydown', onKey);
+zone.addEventListener('pointerdown', onZoneDown);
+window.addEventListener('resize', onResize);
+
+if (reduced()) {
+  root.classList.add('is-still');
+  current = value;
+  paint();
+} else {
+  paint();
+  rafId = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

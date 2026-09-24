@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터 브러시 스포너 — 폴링 샌드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint"><span>Material pours onto every spot the cursor (or the auto brush) passes</span></p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Pointer Brush cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">6</b>cells brush radius</span>
+    <span class="cd__meta cd__meta--dim">canvas · fillRect · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 포인터 브러시(06). 재료 코드 0 빈칸 1 모래 2 물 8 씨앗 11 돌.
+// pointermove 로 커서 좌표 주변 반경 BRUSH_R 칸의 빈칸에 POUR_P 확률로 선택 재료를 충전한다.
+// 커서가 없을 때(자동 렌더·측정)는 리사주 곡선 경로로 붓이 스스로 움직이며 재료를 순환한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var BRUSH_R = 6;     // 브러시 반경(칸) — 3 은 가는 펜선, 12 는 넓은 폭 붓
+  var POUR_P  = 0.5;   // 반경 안 빈칸의 충전 확률 — 붓질의 농도
+  // ────────────────────────────────────────────────────
+
+  var EMPTY=0, SAND=1, WATER=2, SEED=8, STONE=11;
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 붓길로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A66);
+
+  // 색은 CSS 커스텀 프로퍼티(--sand-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_NIGHT = tokRGB('--sand-night');
+  var C_GLOW  = tokRGB('--sand-glow');
+  var C_SAND  = tokRGB('--sand-grain');
+  var C_GOLD  = tokRGB('--sand-gold');
+  var C_WATER = tokRGB('--sand-water');
+  var C_MIST  = tokRGB('--sand-mist');
+  var C_STONE = tokRGB('--sand-stone');
+  var C_LILAC = [185, 160, 255]; // 브러시 링 — 잔광과 구분되는 라일락(토큰 $subject-lilac 값)
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, cols = 0, rows = 0, CELL = 4;
+  var grid = null, wdir = null;
+  var raf = 0, t0 = -1;
+  var tick = 0;
+
+  // 붓 상태 — 커서가 있으면 커서 좌표, 없으면 리사주 자동 경로
+  var brush = { x: 0, y: 0, gx: 0, gy: 0, hasPointer: false };
+  // 재료 순환 — 모래 40틱 → 물 40틱 → 씨앗 40틱
+  var CYCLE = 40;
+  var MATS = [SAND, WATER, SEED];
+
+  function idx(x, y) { return y * cols + x; }
+
+  // ── 장면 — 바닥 돌 지형(완만한 언덕 + 우측 낮은 곳) ──
+  function build() {
+    grid = new Uint8Array(cols * rows);
+    wdir = new Uint8Array(cols * rows);
+    for (var x = 0; x < cols; x++) {
+      var hgt = rows * (0.82
+        + 0.07 * Math.sin(x / cols * Math.PI * 1.7 + 0.4)
+        - 0.10 * Math.sin(x / cols * Math.PI * 0.9));
+      hgt = Math.round(Math.max(rows * 0.62, Math.min(rows * 0.92, hgt)));
+      for (var y = hgt; y < rows; y++) grid[idx(x, y)] = STONE;
+    }
+  }
+
+  // ── 붓 — 반경 안 빈칸에 확률 충전 ──
+  function pour(gx, gy, mat) {
+    var r2 = BRUSH_R * BRUSH_R;
+    for (var dy = -BRUSH_R; dy <= BRUSH_R; dy++) {
+      for (var dx = -BRUSH_R; dx <= BRUSH_R; dx++) {
+        if (dx * dx + dy * dy > r2) continue;
+        var x = gx + dx, y = gy + dy;
+        if (x < 0 || x >= cols || y < 0 || y >= rows) continue;
+        var i = idx(x, y);
+        if (grid[i] === EMPTY && rand() < POUR_P) grid[i] = mat;
+      }
+    }
+  }
+
+  // 리사주 곡선 — 서로 다른 주파수의 sin/cos 로 붓이 화면을 끊임없이 가로지른다
+  function lissajous(t) {
+    var u = t * 1.6;
+    return {
+      x: W * (0.5 + 0.44 * Math.sin(u * 1.7 + 1.2)),
+      y: H * (0.45 + 0.36 * Math.sin(u * 2.6))
+    };
+  }
+
+  function update(t) {
+    tick++;
+    // 붓 위치 갱신 — 커서가 없으면 자동 리사주. 붓이 물 위를 지나갈 때만 재료를 뿌린다
+    if (!brush.hasPointer) {
+      var p = lissajous(t);
+      brush.x = p.x; brush.y = p.y;
+      brush.gx = Math.floor(brush.x / CELL);
+      brush.gy = Math.floor(brush.y / CELL);
+    }
+    pour(brush.gx, brush.gy, MATS[Math.floor(tick / CYCLE) % 3]);
+
+    var x, y, i;
+    var moved = new Uint8Array(cols * rows);
+    for (y = rows - 1; y >= 0; y--) {
+      var ltr = (tick & 1) === 0;
+      for (var s = 0; s < cols; s++) {
+        x = ltr ? s : cols - 1 - s;
+        i = idx(x, y);
+        if (moved[i]) continue;
+        var m = grid[i];
+        if (m === SAND) {
+          // 모래 — 아래, 막히면 대각(02 규칙)
+          if (y < rows - 1 && grid[idx(x, y + 1)] === EMPTY) {
+            grid[idx(x, y + 1)] = SAND; grid[i] = EMPTY; moved[idx(x, y + 1)] = 1;
+          } else {
+            var dirs = rand() < 0.5 ? [-1, 1] : [1, -1];
+            for (var d = 0; d < 2; d++) {
+              var nx = x + dirs[d];
+              if (nx < 0 || nx >= cols || y >= rows - 1) continue;
+              if (grid[idx(nx, y + 1)] === EMPTY) {
+                grid[idx(nx, y + 1)] = SAND; grid[i] = EMPTY; moved[idx(nx, y + 1)] = 1;
+                break;
+              }
+            }
+          }
+        } else if (m === WATER) {
+          // 물 — 아래 → 대각 → 좌우(방향 교차)
+          var below = y < rows - 1 ? grid[idx(x, y + 1)] : STONE;
+          if (below === EMPTY) {
+            grid[idx(x, y + 1)] = WATER; grid[i] = EMPTY; moved[idx(x, y + 1)] = 1;
+          } else {
+            var dir = wdir[i] || (tick & 1 ? 1 : -1);
+            var dl = (x > 0 && y < rows - 1) ? grid[idx(x - 1, y + 1)] : STONE;
+            var dr = (x < cols - 1 && y < rows - 1) ? grid[idx(x + 1, y + 1)] : STONE;
+            var cand = dir > 0 ? [[1, dr], [-1, dl]] : [[-1, dl], [1, dr]];
+            var done = false;
+            for (var c = 0; c < 2 && !done; c++) {
+              if (cand[c][1] === EMPTY) {
+                var cx = x + cand[c][0];
+                grid[idx(cx, y + 1)] = WATER; wdir[idx(cx, y + 1)] = cand[c][0];
+                grid[i] = EMPTY; wdir[i] = 0; moved[idx(cx, y + 1)] = 1;
+                done = true;
+              }
+            }
+            if (!done) {
+              var sx = x + dir;
+              if (sx >= 0 && sx < cols && grid[idx(sx, y)] === EMPTY) {
+                grid[idx(sx, y)] = WATER; wdir[idx(sx, y)] = dir;
+                grid[i] = EMPTY; wdir[i] = 0; moved[idx(sx, y)] = 1;
+              } else if (rand() < 0.02) {
+                grid[i] = EMPTY; // 갇힌 물 증발 — 화면이 포화되지 않게
+              }
+            }
+          }
+        }
+        // 씨앗은 정지 — 붓자국이 그대로 남는다
+      }
+    }
+  }
+
+  // ── 렌더 — fillRect. 칸 = CELL px ──
+  function draw(t) {
+    ctx.fillStyle = 'rgb(' + C_NIGHT.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 잔광(안개) — 중심이 sin/cos 로 천천히 도는 radial gradient, 알파 낮게
+    var gx = W * (0.5 + 0.30 * Math.sin(t * 0.9 + 2.0));
+    var gy = H * (0.5 + 0.26 * Math.cos(t * 0.7));
+    var gr = Math.max(W, H) * 0.55;
+    var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+    g.addColorStop(0, 'rgba(' + C_GLOW.join(',') + ',0.06)');
+    g.addColorStop(1, 'rgba(' + C_GLOW.join(',') + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // 격자 — 재료별 fillRect. 모래는 매 프레임 위상이 도는 grain/gold 교대로 알갱이가 반짝인다
+    var ph = Math.floor(t * 30) % 2;
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var m = grid[idx(x, y)];
+        if (m === EMPTY) continue;
+        if (m === SAND) ctx.fillStyle = (((x + y) & 1) === ph) ? 'rgb(' + C_SAND.join(',') + ')' : 'rgb(' + C_GOLD.join(',') + ')';
+        else if (m === WATER) ctx.fillStyle = 'rgb(' + C_WATER.join(',') + ')';
+        else if (m === SEED) ctx.fillStyle = 'rgb(' + C_MIST.join(',') + ')';
+        else if (m === STONE) ctx.fillStyle = 'rgb(' + C_STONE.join(',') + ')';
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+
+    // 붓 링 — 반경을 옅은 라일락 고리로 보여 붓의 크기를 알린다
+    var pr = BRUSH_R * CELL;
+    ctx.beginPath();
+    ctx.arc(brush.x, brush.y, pr, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(' + C_LILAC.join(',') + ',0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    cols = Math.max(8, Math.floor(W / CELL));
+    rows = Math.max(8, Math.floor(H / CELL));
+    build();
+    tick = 0;
+    var p = lissajous(0);
+    brush.x = p.x; brush.y = p.y;
+    brush.gx = Math.floor(brush.x / CELL);
+    brush.gy = Math.floor(brush.y / CELL);
+  }
+
+  // pointermove — field 좌표 → 격자 좌표 변환해 붓 위치 갱신. 커서가 있으면 자동 붓은 쉰다
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    brush.x = e.clientX - r.left;
+    brush.y = e.clientY - r.top;
+    brush.gx = Math.max(0, Math.min(cols - 1, Math.floor(brush.x / CELL)));
+    brush.gy = Math.max(0, Math.min(rows - 1, Math.floor(brush.y / CELL)));
+    brush.hasPointer = true;
+  });
+  field.addEventListener('pointerleave', function () {
+    brush.hasPointer = false;
+  });
+
+  function stillFrame() {
+    // reduce — 자동 붓 몇 보 + 낙하 몇 틱만 돌리고 한 장
+    for (var k = 0; k < 50; k++) update(k / 60);
+    draw(0.8);
+  }
+
+  var STEP = 1000 / 60, acc = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    acc = acc + (now - (frame.prev || now));
+    frame.prev = now;
+    while (acc >= STEP) {
+      update(t);
+      acc -= STEP;
+    }
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  nOut.textContent = String(BRUSH_R);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>눌린 깊이만큼 스프링으로 튕겨 돌아오는 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pj is-demo" id="pj">
+  <p class="pj__hint"><span>누르고 있던 시간이 눌림 깊이가 되어, 놓으면 그 깊이만큼 스프링 감쇠가 달라집니다</span></p>
+  <div class="pj__scene" id="scene">
+    <button class="pj__btn" id="btn" type="button" aria-label="제출하기 — 누른 깊이만큼 스프링으로 튕겨 돌아오는 버튼">
+      <span class="pj__label">제출하기</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('pj');
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var PERIOD = 2.4;              // 합성 시연 한 주기(초)
+  var STIFFNESS = 0.28;
+  var DAMP_BASE = 0.60;          // 감쇠 하한 — 얕게 누르면 빨리 정착
+  var DAMP_DEPTH_RANGE = 0.32;   // 눌림 깊이가 더할수록 감쇠가 늘어 더 크게 튄다
+  var PRESS_DEPTH_CAP = 480;     // 이 시간(ms) 이상 누르면 깊이 1
+  var MAX_DEG = 6;
+  var LERP = 0.16;
+
+  var targetNX = 0, targetNY = 0, curNX = 0, curNY = 0;
+  var hasPointer = false;
+  var pressedReal = false;
+  var wasHeld = false;
+  var pressStartNow = 0;
+  var damping = DAMP_BASE;
+  var aimZ = 0, curZ = 0, velZ = 0;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function syntheticTarget(t) { return [Math.sin(t * 0.7 + 1.1), Math.sin(t * 0.5)]; }
+
+  // 눌리는 지속시간이 다른 합성 사이클을 반복해 눌림 깊이 차이를 보여준다(고정 시드)
+  function syntheticHold(t) {
+    var cycle = Math.floor(t / PERIOD);
+    var phase = t - cycle * PERIOD;
+    var holdFrac = 0.14 + 0.18 * (0.5 + 0.5 * Math.sin(cycle * 1.7));
+    return phase < PERIOD * holdFrac;
+  }
+
+  function render(nx, ny, z) {
+    var rotY = nx * MAX_DEG;
+    var rotX = -ny * MAX_DEG;
+    btn.style.transform = 'rotateX(' + rotX.toFixed(2) + 'deg) rotateY(' + rotY.toFixed(2) + 'deg) translateZ(' + z.toFixed(2) + 'px)';
+    var shadowScale = clamp(1 + z / 60, 0.35, 1.25);
+    btn.style.boxShadow = '0 ' + (14 * shadowScale).toFixed(1) + 'px ' + (24 * shadowScale).toFixed(1) + 'px rgba(23,20,26,.30)';
+  }
+
+  var t0 = null;
+  function loop(now) {
+    if (t0 === null) t0 = now;
+    var t = (now - t0) / 1000;
+    var heldSynthetic = false;
+    if (!hasPointer && !reduce) {
+      var s = syntheticTarget(t);
+      targetNX = s[0]; targetNY = s[1];
+      heldSynthetic = syntheticHold(t);
+    }
+    var held = pressedReal || heldSynthetic;
+    if (held && !wasHeld) { pressStartNow = now; }
+    if (!held && wasHeld) {
+      var heldMs = now - pressStartNow;
+      var depth = clamp(heldMs / PRESS_DEPTH_CAP, 0, 1);
+      damping = DAMP_BASE + depth * DAMP_DEPTH_RANGE;
+    }
+    wasHeld = held;
+    aimZ = held ? -14 : 0;
+
+    curNX += (targetNX - curNX) * LERP;
+    curNY += (targetNY - curNY) * LERP;
+    velZ = (velZ + (aimZ - curZ) * STIFFNESS) * damping;
+    curZ += velZ;
+    render(curNX, curNY, curZ);
+    requestAnimationFrame(loop);
+  }
+
+  function pointFromEvent(e) {
+    var r = scene.getBoundingClientRect();
+    var nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    var ny = ((e.clientY - r.top) / r.height) * 2 - 1;
+    return [clamp(nx, -1, 1), clamp(ny, -1, 1)];
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var p = pointFromEvent(e);
+    targetNX = p[0]; targetNY = p[1];
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetNX = 0; targetNY = 0;
+    pressedReal = false;
+  });
+  btn.addEventListener('pointerdown', function () {
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    pressedReal = true;
+    if (reduce) { render(targetNX, targetNY, -14); }
+  });
+  btn.addEventListener('pointerup', function () {
+    pressedReal = false;
+    if (reduce) { render(targetNX, targetNY, 0); }
+  });
+  btn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+  });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      root.classList.remove('is-demo');
+      hasPointer = true;
+      pressedReal = true;
+      if (reduce) { render(targetNX, targetNY, -14); }
+    }
+  });
+  btn.addEventListener('keyup', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      pressedReal = false;
+      if (reduce) { render(targetNX, targetNY, 0); }
+    }
+  });
+
+  if (reduce) {
+    render(0.3, 0.2, -14);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

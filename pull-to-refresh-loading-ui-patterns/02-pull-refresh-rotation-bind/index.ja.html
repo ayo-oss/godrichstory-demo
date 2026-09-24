@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回転連動 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prrb is-demo" id="prrb">
+  <div class="prrb__phone" id="prrbPhone">
+    <div class="prrb__zone">
+      <span class="prrb__ring"></span>
+      <span class="prrb__knob" id="prrbKnob"></span>
+    </div>
+    <div class="prrb__list" id="prrbList">
+      <div class="prrb__row"></div>
+      <div class="prrb__row"></div>
+      <div class="prrb__row"></div>
+    </div>
+  </div>
+  <span class="prrb__hint" id="prrbHint">引っぱって更新</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prrbPhone');
+  var knob = document.getElementById('prrbKnob');
+  var list = document.getElementById('prrbList');
+  var hint = document.getElementById('prrbHint');
+  var root = document.getElementById('prrb');
+
+  // 계산 겹: 당긴 거리(raw)를 기준 거리(REF)로 나눈 비율(ratio)만큼 knob 을 궤도(SWEEP도)로 돌린다.
+  // ratio 가 1 이 되면 거리 연동을 놓고 각속도(SPIN_SPEED)로 계속 도는 로딩 상태로 넘어간다.
+  var REF = 120, SWEEP = 270, RADIUS = 18, SPIN_SPEED = 0.62; // deg / ms
+
+  function place(angleDeg, pullPx) {
+    var rad = (angleDeg - 90) * Math.PI / 180;
+    var x = Math.cos(rad) * RADIUS, y = Math.sin(rad) * RADIUS;
+    knob.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px)';
+    list.style.transform = 'translateY(' + pullPx.toFixed(1) + 'px)';
+  }
+
+  var state = 'idle'; // idle -> dragging -> spinning -> idle
+  var raw = 0, ratio = 0, spinAngle = 0, spinStart = 0, spinRaf = null;
+
+  function fromRatio() { return ratio * SWEEP; }
+
+  function spinFrame(ts) {
+    if (!spinStart) { spinStart = ts; }
+    var el = ts - spinStart;
+    spinAngle = (el * SPIN_SPEED) % 360;
+    place(spinAngle, 24);
+    if (el < 900) {
+      spinRaf = requestAnimationFrame(spinFrame);
+    } else {
+      state = 'idle'; ratio = 0; raw = 0; spinStart = 0;
+      hint.textContent = '引っぱって更新';
+      place(0, 0);
+    }
+  }
+
+  function startSpin() {
+    state = 'spinning';
+    hint.textContent = '読み込み中';
+    spinStart = 0;
+    spinRaf = requestAnimationFrame(spinFrame);
+  }
+
+  function apply(r) {
+    raw = r;
+    ratio = Math.max(0, Math.min(1, raw / REF));
+    place(fromRatio(), ratio * 24);
+    hint.textContent = ratio > 0.05 ? ('回転 ' + Math.round(fromRatio()) + '度 · 割合 ' + Math.round(ratio * 100) + '%') : '引っぱって更新';
+  }
+
+  var dragging = false, startY = 0, startRaw = 0;
+  function onDown(y) {
+    if (state === 'spinning') { return; }
+    dragging = true; state = 'dragging'; startY = y; startRaw = raw;
+  }
+  function onMove(y) {
+    if (!dragging) { return; }
+    apply(Math.max(0, Math.min(REF * 1.3, startRaw + (y - startY))));
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (ratio >= 1) { startSpin(); } else { state = 'idle'; apply(0); }
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  place(0, 0);
+
+  // 자동 루프: raw 를 단계적으로 REF 까지 올려 같은 apply()·startSpin() 경로를 탄다.
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (state === 'spinning') { return; }
+    autoRaw += 30;
+    if (autoRaw >= REF) { apply(REF); startSpin(); autoRaw = 0; return; }
+    apply(autoRaw);
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } if (spinRaf) { cancelAnimationFrame(spinRaf); } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 170); }
+})();
+</script>
+</body>
+</html>

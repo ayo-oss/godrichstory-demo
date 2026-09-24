@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>물 흐름 — 셀 오토마타 모래 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>Water spreads left and right when blocked below, while sand piles on top of it</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Sand and Water Flow cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">1</b>cells water spread 1</span>
+    <span class="cd__meta cd__meta--dim">canvas · ImageData putImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 물 흐름(03). 모래는 02 규칙(낙하+대각), 물은 액체 규칙 —
+// 아래 → 대각 → 좌우(매 프레임 방향 교대, 한 번에 SPREAD칸).
+// 바닥에 울퉁불퉁한 고정 돌 지형 2~3단을 깔아 모래는 쌓이고 물은 낮은 곳으로 흘러 고인다.
+// 렌더는 ImageData 버퍼 → putImageData.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var SPREAD = 1;      // 물 좌우 퍼짐 칸수/프레임 — 1 기본, 2~3 은 빠른 유체
+  var SAND_P = 0.42;   // 모래 스포너 칸별 매 틱 생성 확률
+  var WATER_P = 0.40;  // 물 스포너 칸별 매 틱 생성 확률
+  var ZONE_W = 22;     // 스포너 폭(칸)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A03);
+
+  // 색은 CSS 커스텀 프로퍼티(--sand-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_NIGHT = tokRGB('--sand-night');
+  var C_GLOW  = tokRGB('--sand-glow');
+  var C_GRAIN = tokRGB('--sand-grain');
+  var C_GOLD  = tokRGB('--sand-gold');
+  var C_WATER = tokRGB('--sand-water');
+  var C_ICE   = tokRGB('--sand-ice');
+  var C_STONE = tokRGB('--sand-stone');
+
+  var EMPTY = 0, SAND = 1, WATER = 2, STONE = 3;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var W = 0, H = 0, cols = 0, rows = 0;
+  var grid = null, shade = null;
+  var sandX = 0, waterX = 0;
+  var flowDir = 1;   // 물 좌우 방향 — 매 틱 교대
+  var raf = 0, t0 = -1, acc = 0;
+  var STEP = 1 / 60;
+  var img = null, buf = null;
+
+  function idx(x, y) { return y * cols + x; }
+
+  // 울퉁불퉁한 고정 돌 지형 2~3단 — 시드로 결정(매번 같은 지형)
+  function terrain() {
+    var i, x, y;
+    // 1단 — 왼쪽 낮은 언덕
+    var h1 = Math.round(rows * 0.22);
+    for (x = 0; x < Math.round(cols * 0.30); x++) {
+      var rise = Math.round((1 - x / (cols * 0.30)) * h1 * 0.6);
+      for (y = 0; y <= rise; y++) grid[idx(x, rows - 1 - y)] = STONE;
+    }
+    // 2단 — 중앙 능선(가장 높음)
+    var h2 = Math.round(rows * 0.34);
+    var cx0 = Math.round(cols * 0.44), cx1 = Math.round(cols * 0.62);
+    for (x = cx0; x < cx1; x++) {
+      var k = 1 - Math.abs((x - (cx0 + cx1) / 2) / ((cx1 - cx0) / 2));
+      var rise2 = Math.round(k * h2);
+      for (y = 0; y <= rise2; y++) grid[idx(x, rows - 1 - y)] = STONE;
+    }
+    // 3단 — 오른쪽 낮은 언덕
+    var h3 = Math.round(rows * 0.26);
+    for (x = Math.round(cols * 0.76); x < cols; x++) {
+      var k3 = (x - cols * 0.76) / (cols * 0.24);
+      var rise3 = Math.round(k3 * h3 * 0.7);
+      for (y = 0; y <= rise3; y++) grid[idx(x, rows - 1 - y)] = STONE;
+    }
+    // 바닥 한 줄
+    for (x = 0; x < cols; x++) grid[idx(x, rows - 1)] = STONE;
+    i = 0;
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    cols = Math.max(1, Math.floor(W / CELL));
+    rows = Math.max(1, Math.floor(H / CELL));
+    grid = new Uint8Array(cols * rows);
+    shade = new Uint8Array(cols * rows);
+    sandX = Math.max(0, Math.round(cols * 0.16));
+    waterX = Math.max(0, Math.round(cols * 0.84 - ZONE_W));
+    terrain();
+    img = ctx.createImageData(Math.round(W), Math.round(H));
+    buf = img.data;
+  }
+
+  function spawnStep() {
+    var x, i;
+    for (var k = 0; k < ZONE_W; k++) {
+      x = sandX + k;
+      if (x >= 0 && x < cols && rand() < SAND_P) {
+        i = idx(x, 0);
+        if (grid[i] === EMPTY) { grid[i] = SAND; shade[i] = rand() < 0.5 ? 0 : 1; }
+      }
+      x = waterX + k;
+      if (x >= 0 && x < cols && rand() < WATER_P) {
+        i = idx(x, 0);
+        if (grid[i] === EMPTY) grid[i] = WATER;
+      }
+    }
+  }
+
+  function swap(a, b) {
+    var g = grid[a]; grid[a] = grid[b]; grid[b] = g;
+    var s = shade[a]; shade[a] = shade[b]; shade[b] = s;
+  }
+
+  function update() {
+    flowDir = -flowDir;   // 물 좌우 방향 매 틱 교대
+    var x, y, i, j, nx;
+    for (y = rows - 2; y >= 0; y--) {
+      for (x = 0; x < cols; x++) {
+        i = idx(x, y);
+        var c = grid[i];
+        if (c !== SAND && c !== WATER) continue;
+        // 아래로 — 물은 모래·돌 위로 못 감. 모래가 물 위로 가라앉음(밀도)
+        var bi = idx(x, y + 1);
+        if (grid[bi] === EMPTY || (c === SAND && grid[bi] === WATER)) {
+          swap(i, bi);
+          continue;
+        }
+        if (c === SAND) {
+          // 대각선 — 좌하 → 우하 순서
+          var dir = rand() < 0.5 ? -1 : 1;
+          var ok1 = false, ok2 = false;
+          nx = x + dir;
+          if (nx >= 0 && nx < cols) {
+            var d1 = idx(nx, y + 1), d1s = idx(nx, y);
+            var t1 = grid[d1] === EMPTY || grid[d1] === WATER;
+            if (t1 && (grid[d1s] === EMPTY || grid[d1s] === WATER)) ok1 = true;
+          }
+          if (!ok1) {
+            nx = x - dir;
+            if (nx >= 0 && nx < cols) {
+              var d2 = idx(nx, y + 1), d2s = idx(nx, y);
+              var t2 = grid[d2] === EMPTY || grid[d2] === WATER;
+              if (t2 && (grid[d2s] === EMPTY || grid[d2s] === WATER)) ok2 = true;
+            }
+          }
+          if (ok1 || ok2) {
+            var dx = ok1 ? dir : -dir;
+            swap(i, idx(x + dx, y + 1));
+          }
+        } else {
+          // 물 — 대각선
+          var wdir = flowDir;
+          var wok1 = false, wok2 = false;
+          nx = x + wdir;
+          if (nx >= 0 && nx < cols && grid[idx(nx, y + 1)] === EMPTY && grid[idx(nx, y)] === EMPTY) wok1 = true;
+          if (!wok1) {
+            nx = x - wdir;
+            if (nx >= 0 && nx < cols && grid[idx(nx, y + 1)] === EMPTY && grid[idx(nx, y)] === EMPTY) wok2 = true;
+          }
+          if (wok1 || wok2) {
+            swap(i, idx(x + (wok1 ? wdir : -wdir), y + 1));
+            continue;
+          }
+          // 물 — 좌우 퍼짐(한 번에 SPREAD칸)
+          var moved = false;
+          for (var s = 1; s <= SPREAD; s++) {
+            nx = x + flowDir * s;
+            if (nx < 0 || nx >= cols) break;
+            var ti = idx(nx, y);
+            if (grid[ti] === EMPTY) {
+              // 통로 검사
+              var clear = true;
+              for (var q = 1; q <= s; q++) {
+                if (grid[idx(x + flowDir * q, y)] !== EMPTY) { clear = false; break; }
+              }
+              if (clear) { swap(i, ti); moved = true; break; }
+            } else break;
+          }
+          if (!moved) {
+            for (var s2 = 1; s2 <= SPREAD; s2++) {
+              nx = x - flowDir * s2;
+              if (nx < 0 || nx >= cols) break;
+              var ti2 = idx(nx, y);
+              if (grid[ti2] === EMPTY) {
+                var clear2 = true;
+                for (var q2 = 1; q2 <= s2; q2++) {
+                  if (grid[idx(x - flowDir * q2, y)] !== EMPTY) { clear2 = false; break; }
+                }
+                if (clear2) { swap(i, ti2); moved = true; break; }
+              } else break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function draw(t) {
+    // 느린 잔광 중심 — ImageData 위에 겹칠 수 없어 먼저 격자로 굽는다
+    var gx = 0.5 + 0.36 * Math.sin(t * 0.17);
+    var gy = 0.5 + 0.30 * Math.cos(t * 0.13);
+    var gr = Math.max(W, H) * 0.7;
+    var r2 = gr * gr;
+    var px, py, x, y, i, o;
+    var Wp = Math.round(W), Hp = Math.round(H);
+    for (py = 0; py < Hp; py++) {
+      for (px = 0; px < Wp; px++) {
+        o = (py * Wp + px) * 4;
+        // 밤 배경
+        buf[o] = C_NIGHT[0]; buf[o + 1] = C_NIGHT[1]; buf[o + 2] = C_NIGHT[2]; buf[o + 3] = 255;
+        // 잔광(안개) — radial gradient 근사, 알파 0.06 내외
+        var dxg = px - gx * Wp, dyg = py - gy * Hp;
+        var d2 = (dxg * dxg + dyg * dyg) / r2;
+        if (d2 < 1) {
+          var a = 0.07 * (1 - d2);
+          buf[o] += (C_GLOW[0] - C_NIGHT[0]) * a;
+          buf[o + 1] += (C_GLOW[1] - C_NIGHT[1]) * a;
+          buf[o + 2] += (C_GLOW[2] - C_NIGHT[2]) * a;
+        }
+      }
+    }
+    // 격자 렌더 — CELL 4px 블록
+    var c0, c1, c2;
+    for (y = 0; y < rows; y++) {
+      for (x = 0; x < cols; x++) {
+        i = idx(x, y);
+        var cell = grid[i];
+        if (cell === EMPTY) continue;
+        if (cell === SAND) { c0 = shade[i] ? C_GOLD : C_GRAIN; }
+        else if (cell === WATER) { c0 = C_WATER; }
+        else { c0 = C_STONE; }
+        var bx = x * CELL, by = y * CELL;
+        var bw = Math.min(CELL, Wp - bx), bh = Math.min(CELL, Hp - by);
+        for (var yy = 0; yy < bh; yy++) {
+          var rowo = ((by + yy) * Wp + bx) * 4;
+          for (var xx = 0; xx < bw; xx++) {
+            var oo = rowo + xx * 4;
+            buf[oo] = c0[0]; buf[oo + 1] = c0[1]; buf[oo + 2] = c0[2];
+          }
+        }
+      }
+    }
+    // 물 표면 하이라이트 — 물 셀 바로 위가 빈 칸이면 ice 톤 한 줄
+    for (y = 1; y < rows; y++) {
+      for (x = 0; x < cols; x++) {
+        i = idx(x, y);
+        if (grid[i] === WATER && grid[idx(x, y - 1)] === EMPTY) {
+          var hx = x * CELL, hy = y * CELL;
+          var hw = Math.min(1, Wp - hx);
+          if (hw > 0 && hy < Hp) {
+            var ho = (hy * Wp + hx) * 4;
+            buf[ho] = C_ICE[0]; buf[ho + 1] = C_ICE[1]; buf[ho + 2] = C_ICE[2];
+          }
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function stillFrame() {
+    for (var k = 0; k < 40; k++) { spawnStep(); update(); }
+    draw(0.6);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    acc += dt;
+    while (acc >= STEP) { spawnStep(); update(); acc -= STEP; }
+    draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  nOut.textContent = String(SPREAD);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

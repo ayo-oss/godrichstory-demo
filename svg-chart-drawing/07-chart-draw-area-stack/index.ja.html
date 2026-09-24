@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아래에서 채워지는 누적 영역 그래프 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ca is-demo" id="ca">
+  <div class="ca__card">
+    <div class="ca__head">
+      <p class="ca__title">端末別占有率の推移</p>
+      <span class="ca__chip">8か月 · 合計100</span>
+    </div>
+    <div class="ca__plot">
+      <svg class="ca__svg" id="chart" viewBox="0 0 440 190" role="img" aria-label="デスクトップ・モバイル・タブレットの占有率積み上げ面グラフ。モバイルは34%から48%へ増え、デスクトップは52%から35%へ減る">
+        <!-- 가로 격자 3단 — y 눈금(25/50/75)과 같은 간격 -->
+        <g class="ca__grid">
+          <line x1="34" y1="44.5" x2="432" y2="44.5"></line>
+          <line x1="34" y1="79" x2="432" y2="79"></line>
+          <line x1="34" y1="113.5" x2="432" y2="113.5"></line>
+        </g>
+        <g class="ca__ticks">
+          <text x="28" y="14">100</text>
+          <text x="28" y="48.5">75</text>
+          <text x="28" y="83">50</text>
+          <text x="28" y="117.5">25</text>
+        </g>
+        <!-- 밑변 軸 -->
+        <line class="ca__axis" x1="34" y1="148" x2="432" y2="148"></line>
+        <g class="ca__labels">
+          <text x="34" y="170">3月</text>
+          <text x="90.7" y="170">4月</text>
+          <text x="147.4" y="170">5月</text>
+          <text x="204.1" y="170">6月</text>
+          <text x="260.9" y="170">7月</text>
+          <text x="317.6" y="170">8月</text>
+          <text x="374.3" y="170">9月</text>
+          <text x="431" y="170">10月</text>
+        </g>
+        <!-- 레이어 3장 — 위부터 タブレット·モバイル·デスクトップ 순으로 그린다. d 는 JS 가 누적 경계로 채운다 -->
+        <path class="ca__layer ca__layer--3" id="ly3" d=""></path>
+        <path class="ca__layer ca__layer--2" id="ly2" d=""></path>
+        <path class="ca__layer ca__layer--1" id="ly1" d=""></path>
+        <!-- 호버 가이드선 — 포인터가 가리키는 달. x 는 JS -->
+        <line class="ca__guide" id="guide" x1="0" y1="10" x2="0" y2="148"></line>
+        <!-- 直接 라벨 — 레이어 이름이 각 영역 안에 산다. y 는 JS -->
+        <text class="ca__lab ca__lab--1" id="lab1" x="261" text-anchor="middle">デスクトップ</text>
+        <text class="ca__lab ca__lab--2" id="lab2" x="261" text-anchor="middle">モバイル</text>
+        <text class="ca__lab ca__lab--3" id="lab3" x="261" text-anchor="middle">タブレット</text>
+      </svg>
+      <!-- 툴팁 — 달과 세 계열 값. plot 안 위쪽에 절대 배치. 계열은 한 줄에 하나씩 쌓아
+           폭을 좁게 유지한다 (한 줄에 셋을 늘어놓으면 320px 에서 카드 밖으로 나간다) -->
+      <div class="ca__tip" id="tip" aria-hidden="true">
+        <span class="ca__tipMon" id="tipMon">9月</span>
+        <span class="ca__tipRow"><i class="ca__sw ca__sw--1"></i><span class="ca__tipName">デスクトップ</span><b id="tv1">37</b></span>
+        <span class="ca__tipRow"><i class="ca__sw ca__sw--2"></i><span class="ca__tipName">モバイル</span><b id="tv2">46</b></span>
+        <span class="ca__tipRow"><i class="ca__sw ca__sw--3"></i><span class="ca__tipName">タブレット</span><b id="tv3">17</b></span>
+      </div>
+      <!-- 스크린리더용 데이터 표 — 화면에 안 보인다 -->
+      <table class="ca__sr">
+        <caption>端末別占有率の推移</caption>
+        <thead><tr><th>月別</th><th>デスクトップ</th><th>モバイル</th><th>タブレット</th></tr></thead>
+        <tbody id="srBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+var MON = ['3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月'];
+var DESK = [52, 50, 47, 45, 42, 40, 37, 35];   // 세 계열을 더하면 매월 100
+var MOB = [34, 36, 38, 40, 42, 44, 46, 48];
+var TAB = [14, 14, 15, 15, 16, 16, 17, 17];
+var PAD_L = 34, PAD_R = 432, TOP = 10, BASE = 148;   // viewBox 좌표
+var ca = document.getElementById('ca');
+var svg = document.getElementById('chart');
+var tip = document.getElementById('tip');
+var tipMon = document.getElementById('tipMon');
+var tv1 = document.getElementById('tv1');
+var tv2 = document.getElementById('tv2');
+var tv3 = document.getElementById('tv3');
+var guide = document.getElementById('guide');
+
+// 스케일 함수 — 月 인덱스와 점유율(0-100)을 viewBox 좌표로 바꾼다
+function xAt(i) { return PAD_L + (PAD_R - PAD_L) * i / (MON.length - 1); }
+function yAt(v) { return BASE - (BASE - TOP) * v / 100; }
+
+// 누적 경계선 — 바닥(0), デスクトップ 위, モバイル 위, 천장(100). 아래부터 쌓는 순서 그대로다
+var B = [
+  MON.map(function () { return 0; }),
+  DESK.slice(),
+  DESK.map(function (v, i) { return v + MOB[i]; }),
+  MON.map(function () { return 100; })
+];
+// k번째 레이어 path — 위 경계를 좌에서 우로 걷고 아래 경계를 거꾸로 돌아와 면적을 닫는다
+function layerPath(k) {
+  var d = '';
+  for (var i = 0; i < MON.length; i++) d += (i ? ' L' : 'M') + xAt(i).toFixed(1) + ',' + yAt(B[k + 1][i]).toFixed(1);
+  for (var j = MON.length - 1; j >= 0; j--) d += ' L' + xAt(j).toFixed(1) + ',' + yAt(B[k][j]).toFixed(1);
+  return d + ' Z';
+}
+document.getElementById('ly1').setAttribute('d', layerPath(0));   // デスクトップ: 바닥부터
+document.getElementById('ly2').setAttribute('d', layerPath(1));   // モバイル: デスクトップ 위
+document.getElementById('ly3').setAttribute('d', layerPath(2));   // タブレット: モバイル 위
+
+// 直接 라벨 — 6월과 7月 사이(가운데)의 각 밴드 한가운데에 둔다
+document.getElementById('lab1').setAttribute('y', yAt(B[1][3] / 2).toFixed(1));
+document.getElementById('lab2').setAttribute('y', yAt(B[1][3] + MOB[3] / 2).toFixed(1));
+document.getElementById('lab3').setAttribute('y', yAt(B[2][3] + TAB[3] / 2).toFixed(1));
+
+// 스크린리더 표 채우기
+var srBody = document.getElementById('srBody');
+MON.forEach(function (m, i) {
+  var tr = document.createElement('tr');
+  var th = document.createElement('th'); th.setAttribute('scope', 'row'); th.textContent = m;
+  tr.appendChild(th);
+  [DESK[i], MOB[i], TAB[i]].forEach(function (v) {
+    var td = document.createElement('td'); td.textContent = v + '%'; tr.appendChild(td);
+  });
+  srBody.appendChild(tr);
+});
+
+// 툴팁과 가이드선 — 달을 받아 값을 채우고 x 위치를 잡는다. 툴팁은 양 끝에서 카드 밖으로 나가지 않게 17-83% 로 Clamp
+function placeTip(i) {
+  tipMon.textContent = MON[i];
+  tv1.textContent = DESK[i]; tv2.textContent = MOB[i]; tv3.textContent = TAB[i];
+  var gx = xAt(i);
+  guide.setAttribute('x1', gx.toFixed(1)); guide.setAttribute('x2', gx.toFixed(1));
+  var pct = Math.min(83, Math.max(17, gx / 440 * 100));
+  tip.style.left = pct.toFixed(2) + '%';
+}
+placeTip(6);   // 9月 — 모바일이 데스크톱을 앞선 달
+
+// 포인터의 x 위치에서 가장 가까운 달을 찾는다
+svg.addEventListener('pointermove', function (e) {
+  if (ca.classList.contains('is-demo')) { ca.classList.remove('is-demo'); }
+  var r = svg.getBoundingClientRect();
+  var vx = (e.clientX - r.left) / r.width * 440;
+  var i = Math.round((vx - PAD_L) / ((PAD_R - PAD_L) / (MON.length - 1)));
+  i = Math.max(0, Math.min(MON.length - 1, i));
+  placeTip(i);
+  tip.classList.add('is-on');
+  guide.classList.add('is-on');
+});
+svg.addEventListener('pointerleave', function () {
+  tip.classList.remove('is-on');
+  guide.classList.remove('is-on');
+});
+</script>
+</body>
+</html>

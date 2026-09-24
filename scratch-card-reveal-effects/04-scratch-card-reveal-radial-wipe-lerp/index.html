@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>누른 지점에서 목표 반지름까지 lerp 로 가속하며 원형으로 은박이 벗겨진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">스크래치 카드</p>
+    <div class="scv__zone" id="zone">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">할인 쿠폰</p>
+        <p class="scv__prizeSub">누른 지점에서 원이 점점 커져요</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+    </div>
+    <button type="button" class="scv__reveal" id="revealBtn">한 번에 보기</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 누른 지점을 중심으로 반지름을 목표값까지 lerp(선형보간)로 매 프레임 가속 추적한다.
+  // 실제 드래그 없이 누르고 있기만 해도 반지름이 스스로 자라나 원형으로 은박이 사라진다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var FW = foil.width, FH = foil.height;
+  var WIPE_TARGET_R = Math.ceil(Math.sqrt(FW * FW + FH * FH) / 2); // 카드 대각선 절반 — 어느 지점을 눌러도 끝까지 덮는다
+  var WIPE_LERP_RATE = 1.5; // 확장 과정이 눈에 오래 보이도록 가속을 늦춘다
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424041);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, FW, FH);
+    var grad = ctx.createLinearGradient(0, 0, FW, FH);
+    grad.addColorStop(0, '#dfe3ea');
+    grad.addColorStop(.5, '#f4f6f9');
+    grad.addColorStop(1, '#c9ced8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.strokeStyle = 'rgba(23,20,26,.14)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 18; i += 1) {
+      var x = foilRand() * FW, y = foilRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 20 - 10), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  var press = null; // {x,y,r}
+  function wipe() {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(press.x, press.y, press.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function clearedRatio() {
+    var data = ctx.getImageData(0, 0, FW, FH).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  var opened = false;
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = '할인 쿠폰이 열렸어요';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  paintFoil();
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var holding = false;
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    holding = true;
+    var p = pos(e);
+    press = { x: p.x, y: p.y, r: 4 };
+    wipe();
+    if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!holding || opened) return;
+    var p = pos(e);
+    press.x = p.x; press.y = p.y;
+  });
+  window.addEventListener('pointerup', function () { holding = false; });
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+
+  // 카드 끝까지 원형 확장 → 다시 덮임 → 다른 지점에서 재확장을 한 루프 안에서 반복한다.
+  var demoRand = seedRand(424042);
+  var DEMO_POINTS = [
+    { x: FW * (0.30 + demoRand() * 0.08), y: FH * (0.36 + demoRand() * 0.08) },
+    { x: FW * (0.66 + demoRand() * 0.08), y: FH * (0.58 + demoRand() * 0.08) },
+    { x: FW * (0.42 + demoRand() * 0.08), y: FH * (0.30 + demoRand() * 0.08) }
+  ];
+  var DEMO_STARTS = [220, 950, 1680];
+  var DEMO_LOOP_MS = 3200;
+  var demoCycle = -1;
+  var demoPress = null;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+    demoCycle = -1;
+    demoPress = null;
+  }
+  function runDemo(tMod, dtS) {
+    var next = demoCycle + 1;
+    if (next < DEMO_STARTS.length && tMod >= DEMO_STARTS[next]) {
+      demoCycle = next;
+      var p = DEMO_POINTS[demoCycle];
+      demoPress = { x: p.x, y: p.y, r: 4 };
+      opened = false;
+      root.classList.remove('is-open');
+      paintFoil(); // 이전 사이클에서 열렸던 은박을 다시 덮는다
+    }
+    if (demoPress && !opened) {
+      demoPress.r += (WIPE_TARGET_R - demoPress.r) * Math.min(1, WIPE_LERP_RATE * dtS);
+      press = demoPress;
+      wipe();
+      if (clearedRatio() > .82) openCard();
+    }
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    var dtS = dt / 1000;
+    lastTs = ts;
+    if (holding && !opened && press) {
+      press.r += (WIPE_TARGET_R - press.r) * Math.min(1, WIPE_LERP_RATE * dtS);
+      wipe();
+      if (clearedRatio() > .82) openCard();
+    }
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod, dtS);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

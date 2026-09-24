@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>점수 숫자가 한 자리씩 굴러 올라가는 카운터 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbd is-demo" id="lbd">
+  <ul class="lbd__list" id="lbdList" role="list"></ul>
+  <p class="lbd__sr" id="lbdSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_DIGIT_ROLL_STAGGER_MS = 30;
+  var LEADERBOARD_DIGIT_ROLL_MS = 380;
+  var LEADERBOARD_DIGIT_H = 22;
+  var LEADERBOARD_DIGIT_TICK_MS = 300;
+  var LEADERBOARD_DIGIT_ROLL_HIGHLIGHT = "91,140,248";
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbd");
+  var list = document.getElementById("lbdList");
+  var sr = document.getElementById("lbdSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "AXIS_4", score: 780 },
+    { id: "p2", name: "MIRA_Q", score: 742 },
+    { id: "p3", name: "TROVE1", score: 705 },
+    { id: "p4", name: "HALO_9", score: 668 },
+    { id: "p5", name: "SABLE2", score: 631 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function buildReel(container) {
+    var digits = [];
+    for (var d = 0; d <= 9; d++) {
+      var s = document.createElement("span");
+      s.textContent = String(d);
+      container.appendChild(s);
+      digits.push(s);
+    }
+    return digits;
+  }
+
+  // 계산 겹: rollTo() 가 점수 숫자를 3자리로 나눠, 왼쪽부터 자릿수 순번(i) x
+  // LEADERBOARD_DIGIT_ROLL_STAGGER_MS 를 그 자릿수 reel 의 transitionDelay 로 걸어
+  // 한꺼번에 목표 값으로 바꾼다 — 값을 늘리면 자리마다 굴러가는 시간차가 그만큼 커진다.
+  // 실제로 값이 바뀐 자릿수 칸에는 굴러가는 진행 구간과 같은 길이의 배경 하이라이트를
+  // 얹어(is-rolling), 숫자가 도는 셀이 눈에 띄게 밝아졌다 가라앉게 한다.
+  function rollTo(row, score) {
+    var str = String(score);
+    while (str.length < 3) str = "0" + str;
+    var changed = false;
+    for (var i = 0; i < 3; i++) {
+      var digit = parseInt(str[i], 10);
+      var delay = reduce ? 0 : i * LEADERBOARD_DIGIT_ROLL_STAGGER_MS;
+      var dur = reduce ? 0 : LEADERBOARD_DIGIT_ROLL_MS;
+      var reel = row.reels[i];
+      var box = row.digitBoxes[i];
+      reel.style.transitionDelay = delay + "ms";
+      reel.style.transitionDuration = dur + "ms";
+      reel.style.transform = "translateY(-" + (digit * LEADERBOARD_DIGIT_H) + "px)";
+      if (!reduce && row.prevDigits[i] !== digit) {
+        changed = true;
+        box.style.setProperty("--roll-delay", delay + "ms");
+        box.style.setProperty("--roll-ms", dur + "ms");
+        box.classList.remove("is-rolling");
+        void box.offsetWidth;
+        box.classList.add("is-rolling");
+        window.setTimeout(function (b) { return function () { b.classList.remove("is-rolling"); }; }(box), delay + dur + 60);
+      }
+      row.prevDigits[i] = digit;
+    }
+    // 계산 겹: 자릿수 하나라도 바뀌면 그 진행 구간(자릿수 3개가 전부 굴러 멈추는
+    // 시점까지) 만큼 행 전체 배경에도 옅은 톤을 얹어, 작은 자릿수 칸을 넘어 행 폭
+    // 전체로 진행률을 전파한다.
+    if (!reduce && changed) {
+      var span = 2 * LEADERBOARD_DIGIT_ROLL_STAGGER_MS + LEADERBOARD_DIGIT_ROLL_MS + 60;
+      row.li.style.setProperty("--row-glow-ms", span + "ms");
+      row.li.classList.remove("is-hot");
+      void row.li.offsetWidth;
+      row.li.classList.add("is-hot");
+      window.setTimeout(function (li) { return function () { li.classList.remove("is-hot"); }; }(row.li), span);
+    }
+  }
+
+  function bump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    p.score = Math.min(999, p.score + 30 + Math.floor(rand() * 70));
+    rollTo(nodes[id], p.score);
+    sr.textContent = p.name + " 점수 " + p.score + "점";
+  }
+
+  // 한 틱에 서로 다른 참가자 여러 명의 점수를 동시에 올려, 여러 행의 여러 자릿수가
+  // 한꺼번에 돌아가게 한다.
+  function bumpMany() {
+    var pool = players.slice();
+    var picks = [];
+    for (var n = 0; n < 5 && pool.length; n++) {
+      var i = Math.floor(rand() * pool.length);
+      picks.push(pool.splice(i, 1)[0]);
+    }
+    picks.forEach(function (p) {
+      p.score = Math.min(999, p.score + 55 + Math.floor(rand() * 120));
+      rollTo(nodes[p.id], p.score);
+    });
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbd__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var name = document.createElement("span");
+    name.className = "lbd__name";
+    name.textContent = p.name;
+
+    var scoreWrap = document.createElement("span");
+    scoreWrap.className = "lbd__score";
+    var reels = [];
+    var digitBoxes = [];
+    for (var i = 0; i < 3; i++) {
+      var digitBox = document.createElement("span");
+      digitBox.className = "lbd__digit";
+      var reel = document.createElement("span");
+      reel.className = "lbd__reel";
+      buildReel(reel);
+      digitBox.appendChild(reel);
+      scoreWrap.appendChild(digitBox);
+      reels.push(reel);
+      digitBoxes.push(digitBox);
+    }
+
+    li.appendChild(name);
+    li.appendChild(scoreWrap);
+
+    var initStr = String(p.score);
+    while (initStr.length < 3) initStr = "0" + initStr;
+    nodes[p.id] = {
+      li: li, reels: reels, digitBoxes: digitBoxes,
+      prevDigits: [parseInt(initStr[0], 10), parseInt(initStr[1], 10), parseInt(initStr[2], 10)]
+    };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+
+    list.appendChild(li);
+  });
+
+  players.forEach(function (p) { rollTo(nodes[p.id], p.score); });
+  // 최초 배치는 전이 없이 바로 자리 잡는다
+  Object.keys(nodes).forEach(function (id) {
+    nodes[id].reels.forEach(function (r) { r.style.transitionDuration = "0ms"; });
+  });
+  window.setTimeout(function () {
+    Object.keys(nodes).forEach(function (id) {
+      nodes[id].reels.forEach(function (r) { r.style.transitionDuration = ""; });
+    });
+  }, 30);
+
+  if (!reduce) {
+    (function loop() {
+      if (root.classList.contains("is-demo")) {
+        bumpMany();
+      }
+      window.setTimeout(loop, LEADERBOARD_DIGIT_TICK_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

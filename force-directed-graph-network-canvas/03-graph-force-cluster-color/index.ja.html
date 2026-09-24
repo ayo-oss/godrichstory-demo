@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>クラスタ色分け — 네트워크 그래프 캔버스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gc is-demo" id="gcRoot" role="img" aria-label="色で分かれた3つの集団が力で集まるネットワーク図" tabindex="0">
+  <canvas class="gc__cv" id="gcCv"></canvas>
+  <p class="gc__hint">
+    <span class="gc__title">クラスタ色分け</span>
+    <span class="gc__desc">同じ色同士は強く引き合い、違う色同士は強く反発します</span>
+  </p>
+  <div class="gc__bar">
+    <span class="gc__meta">ノード30個 · 3クラスタ · rAF</span>
+    <span class="gc__meta gc__meta--dim">arc · fillRect · Math.hypot</span>
+  </div>
+</div>
+</main>
+<script>
+// クラスタ色分け(03) — 엣지는 없다. 대신 같은 그룹 노드는 그룹 무게중심 쪽으로
+// 약하게 끌리고, 다른 그룹끼리는 척력이 더 세다. 이 비대칭 힘만으로 색깔별
+// 덩어리가 화면 위에서 스스로 갈라진다 — 매 프레임 중심을 다시 구해 계속 움직인다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 30;
+  var GROUPS = 3;
+  var INTRA_REPEL = 0.5;   // 같은 그룹 척력 배율(작을수록 잘 뭉친다)
+  var INTER_REPEL = 1.9;   // 다른 그룹 척력 배율(클수록 잘 갈라진다)
+  // ────────────────────────
+  var REPEL = 640;
+  var CENTROID_K = 0.05;   // 그룹 무게중심으로 끌리는 힘
+  var CENTER_K = 0.0006;
+  var DAMP = 0.955;
+  var JITTER = 46;
+  var NR = 4.6;
+  var OMEGA = 0.75;   // 전체를 천천히 돌려 색 덩어리가 화면을 넓게 훑게 한다
+
+  var root = document.getElementById('gcRoot');
+  var cvEl = document.getElementById('gcCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_PANEL = tokRGB('--gc-panel');
+  var C_G = [tokRGB('--gc-g1'), tokRGB('--gc-g2'), tokRGB('--gc-g3')];
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x327003);
+
+  var px, py, vx, vy, grp;
+
+  function buildGraph() {
+    px = new Float32Array(N); py = new Float32Array(N);
+    vx = new Float32Array(N); vy = new Float32Array(N);
+    grp = new Int8Array(N);
+    for (var i = 0; i < N; i++) {
+      px[i] = rand() * W; py[i] = rand() * H;
+      grp[i] = i % GROUPS;
+    }
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildGraph();
+  }
+
+  function step(dt) {
+    var fx = new Float32Array(N), fy = new Float32Array(N);
+    for (var i = 0; i < N; i++) {
+      for (var j = i + 1; j < N; j++) {
+        var dx = px[j] - px[i], dy = py[j] - py[i];
+        var d = Math.hypot(dx, dy) || 0.001;
+        var d2 = d * d; if (d2 < 4) d2 = 4;
+        var mult = grp[i] === grp[j] ? INTRA_REPEL : INTER_REPEL;
+        var f = (REPEL * mult) / d2;
+        var ux = dx / d, uy = dy / d;
+        fx[i] -= ux * f; fy[i] -= uy * f;
+        fx[j] += ux * f; fy[j] += uy * f;
+      }
+    }
+    // 그룹 무게중심 — 매 프레임 다시 구해 그 쪽으로 약하게 당긴다
+    var cxg = new Float32Array(GROUPS), cyg = new Float32Array(GROUPS), cnt = new Float32Array(GROUPS);
+    for (var n = 0; n < N; n++) { cxg[grp[n]] += px[n]; cyg[grp[n]] += py[n]; cnt[grp[n]]++; }
+    for (var g = 0; g < GROUPS; g++) { if (cnt[g] > 0) { cxg[g] /= cnt[g]; cyg[g] /= cnt[g]; } }
+
+    var cx = W / 2, cy = H / 2;
+    for (var m = 0; m < N; m++) {
+      fx[m] += (cxg[grp[m]] - px[m]) * CENTROID_K;
+      fy[m] += (cyg[grp[m]] - py[m]) * CENTROID_K;
+      fx[m] += (cx - px[m]) * CENTER_K;
+      fy[m] += (cy - py[m]) * CENTER_K;
+      fx[m] += (rand() - 0.5) * JITTER;
+      fy[m] += (rand() - 0.5) * JITTER;
+      vx[m] = (vx[m] + fx[m] * dt) * DAMP;
+      vy[m] = (vy[m] + fy[m] * dt) * DAMP;
+      px[m] += vx[m] * dt; py[m] += vy[m] * dt;
+    }
+  }
+
+  function rotateAll(dtheta) {
+    var cx = W / 2, cy = H / 2, cs = Math.cos(dtheta), sn = Math.sin(dtheta);
+    for (var i = 0; i < N; i++) {
+      var rx = px[i] - cx, ry = py[i] - cy;
+      px[i] = cx + rx * cs - ry * sn;
+      py[i] = cy + rx * sn + ry * cs;
+    }
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + C_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+    for (var i = 0; i < N; i++) {
+      var c = C_G[grp[i]];
+      var pulse = 0.5 + 0.5 * Math.sin(t * 1.8 + i * 0.9);
+      ctx.fillStyle = 'rgba(' + c.join(',') + ',' + (0.16 + 0.18 * pulse).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(px[i], py[i], NR + 5 + pulse * 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgb(' + c.join(',') + ')';
+      ctx.beginPath(); ctx.arc(px[i], py[i], NR, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1, last = -1;
+  function frame(now) {
+    if (t0 < 0) { t0 = now; last = now; }
+    var dt = Math.min((now - last) / 1000, 0.05); last = now;
+    var t = (now - t0) / 1000;
+    step(dt);
+    rotateAll(OMEGA * dt);
+    draw(t);
+    requestAnimationFrame(frame);
+  }
+  function settle() {
+    for (var s = 0; s < 260; s++) step(1 / 60);
+    draw(0);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) settle();
+  });
+
+  fit();
+  if (reduce) {
+    settle();
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

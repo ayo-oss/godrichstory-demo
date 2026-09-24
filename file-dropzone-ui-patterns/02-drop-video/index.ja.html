@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>動画をドロップ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd" id="vd">
+  <p class="vd__hint" id="vdHint">video/ のみ通過 — メタデータを先に読み込み、再生時間・解像度・ビットレートを計算します</p>
+  <div class="vd__zone" id="vdZone" role="button" tabindex="0" aria-describedby="vdHint" aria-label="動画ドロップゾーン">
+    <input type="file" id="vdInput" accept="video/*" class="vd__file" aria-label="ファイルを選択">
+    <svg class="vd__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M200 72v112a8 8 0 0 1-8 8H32a8 8 0 0 1-8-8V72a8 8 0 0 1 8-8h160a8 8 0 0 1 8 8" opacity=".2"/><path d="M251.77 73a8 8 0 0 0-8.21.39L208 97.05V72a16 16 0 0 0-16-16H32a16 16 0 0 0-16 16v112a16 16 0 0 0 16 16h160a16 16 0 0 0 16-16v-25l35.56 23.71A8 8 0 0 0 248 184a8 8 0 0 0 8-8V80a8 8 0 0 0-4.23-7M192 184H32V72h160zm48-22.95l-32-21.33v-23.44L240 95Z"/></g></svg>
+  </div>
+  <div class="vd__panel" id="vdPanel" aria-live="polite">
+    <div class="vd__head">
+      <b class="vd__name" id="vdName">lecture-week3.mp4</b>
+      <span class="vd__chip" id="vdChip">video/mp4</span>
+    </div>
+    <dl class="vd__stats">
+      <div class="vd__stat"><dt>長さ</dt><dd id="vdDur">128.4秒</dd></div>
+      <div class="vd__stat"><dt>解像度</dt><dd id="vdRes">1920×1080</dd></div>
+      <div class="vd__stat"><dt>ビットレート</dt><dd id="vdBr">2.8 Mbps</dd></div>
+      <div class="vd__stat"><dt>サイズ</dt><dd id="vdSize">44.9 MB</dd></div>
+    </dl>
+    <div class="vd__scan" aria-hidden="true"><span class="vd__scanbar" id="vdScanbar"></span></div>
+    <p class="vd__calc" id="vdCalc">44.9 MB × 8 ÷ 128.4秒 = 2.8 Mbps</p>
+  </div>
+</div>
+</main>
+<script>
+// 動画をドロップ(02) — video/ 접두사로 통과한 파일을 객체 URL 로 video 요소에 걸고 loadedmetadata 이벤트에서
+// duration(秒)·videoWidth·videoHeight 를 읽어, 재생 전에 長さ·해상도를 숫자로 계산해 보여준다.
+// ビットレート = 파일크기(비트) ÷ 長さ(秒) — 이 나눗셈이 이 데모의 '계산 한 겹'이다.
+// 데모는 MediaRecorder 로 시드 고정 webm Blob(File) 을 만들어 실제 loadedmetadata 파이프라인을 탄다.
+(function () {
+  var zone = document.getElementById('vdZone');
+  var input = document.getElementById('vdInput');
+  var panel = document.getElementById('vdPanel');
+  var nameEl = document.getElementById('vdName');
+  var chipEl = document.getElementById('vdChip');
+  var durEl = document.getElementById('vdDur');
+  var resEl = document.getElementById('vdRes');
+  var brEl = document.getElementById('vdBr');
+  var sizeEl = document.getElementById('vdSize');
+  var calcEl = document.getElementById('vdCalc');
+  var scanbar = document.getElementById('vdScanbar');
+  if (!zone || !input || !panel || !nameEl || !chipEl || !durEl || !resEl || !brEl || !sizeEl || !calcEl || !scanbar) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 시나리오: 가상 파일 3개 (이름·종류·長さ·解像度·바이트) — loadedmetadata 계산 결과가 파일마다 다르다
+  var FILES = [
+    { name: 'lecture-week3.mp4', type: 'video/mp4', dur: 128.4, w: 1920, h: 1080, bytes: 469762048 * 0.0957 },
+    { name: 'shorts-intro.webm', type: 'video/webm', dur: 27.9, w: 1080, h: 1920, bytes: 10485760 * 0.582 },
+    { name: 'demo-4k-clip.mp4', type: 'video/mp4', dur: 64.2, w: 3840, h: 2160, bytes: 1073741824 * 0.0423 }
+  ];
+
+  // 사람 단위 환산 — 1024(2의 10제곱) 나눗세(08 과 같은 규칙)
+  function human(bytes) {
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0, v = bytes;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (Math.floor(v * 10) / 10) + ' ' + units[i];
+  }
+
+  function paint(name, type, dur, w, h, size) {
+    var mbps = (size * 8) / dur / 1000000;      // ビットレート = 비트 ÷ 秒
+    nameEl.textContent = name;
+    chipEl.textContent = type;
+    durEl.textContent = dur.toFixed(1) + '秒';
+    resEl.textContent = w + '×' + h;
+    brEl.textContent = mbps.toFixed(1) + ' Mbps';
+    sizeEl.textContent = human(size);
+    calcEl.textContent = human(size) + ' × 8 ÷ ' + dur.toFixed(1) + '秒 =  ' + mbps.toFixed(1) + ' Mbps';
+    panel.classList.add('is-in');
+    scanbar.classList.remove('is-run');
+    void scanbar.offsetWidth;   // 재시작
+    scanbar.classList.add('is-run');
+  }
+
+  var cur = -1;
+
+  // 시연용 — 스캔 시나리오 값 그대로(가짜 파일의 메타데이터를 실제로 읽을 수단이 없으므로
+  // 시나리오 스펙 자체를 그 가상 파일의 '진짜' 메타데이터로 취급한다 — 표시값이 서로 어긋나지 않게)
+  function showScenario(p) {
+    paint(p.name, p.type, p.dur, p.w, p.h, p.bytes);
+  }
+
+  // 실제 드롭 — video 엘리먼트에 objectURL 을 걸고 loadedmetadata 에서 진짜 duration/해상도를 읽는다.
+  // File.size 는 항상 실제 값. 진짜 파일이므로 셋이 서로 어긋날 일이 없다.
+  function showReal(f) {
+    var u = URL.createObjectURL(f);
+    var probe = document.createElement('video');
+    probe.muted = true;
+    probe.onloadedmetadata = function () {
+      paint(f.name, f.type, probe.duration, probe.videoWidth, probe.videoHeight, f.size);
+      URL.revokeObjectURL(u);
+    };
+    probe.onerror = function () { URL.revokeObjectURL(u); };
+    probe.src = u;
+  }
+
+
+  // 실제 드롭 경로 — File.type 접두사 검사 후 실제 메타데이터 경로(showReal)
+  zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault(); zone.classList.remove('is-over');
+    var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    // File.type 접두사만 먼저 보고(싸다), 통과하면 메타데이터까지 읽는다(비싸다)
+    if (file && file.type && file.type.startsWith('video/')) showReal(file);
+  });
+  input.addEventListener('change', function () {
+    var file = input.files && input.files[0];
+    if (file && file.type && file.type.startsWith('video/')) showReal(file);
+    input.value = '';
+  });
+
+  if (reduce) {
+    showScenario(FILES[0]);
+  } else {
+    var nextAt = 0;
+    (function loop(now) {
+      if (now >= nextAt) {
+        nextAt = now + 2200;
+        cur = (cur + 1) % FILES.length;
+        showScenario(FILES[cur]);
+      }
+      requestAnimationFrame(loop);
+    })(0);
+  }
+})();
+</script>
+</body>
+</html>

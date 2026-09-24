@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reduced-motion comparison toggle — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cbr is-demo" id="cbr">
+  <div class="cbr__panel">
+    <p class="cbr__label">Normal</p>
+    <label class="cbr__row">
+      <input type="checkbox" class="cbr__input" id="cbrNormalInput">
+      <span class="cbr__box" id="cbrNormalBox" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="14" height="14"><path id="cbrNormalPath" class="cbr__path" d="M4 10.5l3.5 3.5L16 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+      <span class="cbr__text">Receive newsletter</span>
+    </label>
+  </div>
+  <div class="cbr__panel">
+    <p class="cbr__label">Reduced</p>
+    <label class="cbr__row">
+      <input type="checkbox" class="cbr__input" id="cbrReducedInput">
+      <span class="cbr__box cbr__box--instant" id="cbrReducedBox" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="14" height="14"><path class="cbr__check" d="M4 10.5l3.5 3.5L16 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+      <span class="cbr__text">Receive newsletter</span>
+    </label>
+  </div>
+</div>
+<script>
+(function () {
+  var DURATION_MS = 460; // 계산 겹 상수: Normal 판에서 체크 선이 그려지는 데 걸리는 실제 시간(ms)
+  var CYCLE_MS = 900; // 자동 루프가 두 판을 함께 켜고 끄는 간격
+  var systemReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('cbr');
+  var normalInput = document.getElementById('cbrNormalInput');
+  var normalBox = document.getElementById('cbrNormalBox');
+  var normalPath = document.getElementById('cbrNormalPath');
+  var reducedInput = document.getElementById('cbrReducedInput');
+  var reducedBox = document.getElementById('cbrReducedBox');
+
+  var isDemo = true;
+  var LEN = normalPath.getTotalLength();
+  normalPath.style.strokeDasharray = String(LEN);
+  normalPath.style.strokeDashoffset = String(LEN);
+
+  var drawing = false, drawStart = 0, drawFrom = LEN, drawTo = LEN;
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function currentOffset(ts) {
+    if (!drawing) return drawTo;
+    var t = Math.min(1, (ts - drawStart) / DURATION_MS);
+    return drawFrom + (drawTo - drawFrom) * easeOutCubic(t);
+  }
+
+  function setState(next, ts) {
+    // Normal 판: DURATION_MS 동안 draw-on 을 실측 길이 기준으로 보간(matchMedia 가 false 일 때의 실제 경로)
+    normalInput.checked = next;
+    normalBox.classList.toggle('cbr__box--on', next);
+    drawFrom = currentOffset(ts);
+    drawTo = next ? 0 : LEN;
+    drawStart = ts;
+    drawing = true;
+
+    // Reduced 판: matchMedia 결과와 같은 논리 분기로, 중간 프레임 없이 즉시 목표 상태로 점프
+    reducedInput.checked = next;
+    reducedBox.classList.toggle('cbr__box--on', next);
+  }
+
+  normalInput.addEventListener('change', function () { human(); setState(normalInput.checked, performance.now()); });
+  reducedInput.addEventListener('change', function () {
+    human();
+    reducedBox.classList.toggle('cbr__box--on', reducedInput.checked);
+    normalInput.checked = reducedInput.checked;
+    normalBox.classList.toggle('cbr__box--on', reducedInput.checked);
+    normalPath.style.strokeDashoffset = reducedInput.checked ? '0' : String(LEN);
+    drawTo = reducedInput.checked ? 0 : LEN;
+    drawing = false;
+  });
+
+  var cycleStart = 0;
+  var lastState = false;
+
+  function loop(ts) {
+    if (!cycleStart) cycleStart = ts;
+
+    if (isDemo && !systemReduce) {
+      var step = Math.floor((ts - cycleStart) / CYCLE_MS) % 2 === 1;
+      if (step !== lastState) { lastState = step; setState(step, ts); }
+    }
+
+    if (drawing) {
+      var off = currentOffset(ts);
+      normalPath.style.strokeDashoffset = String(off);
+      if (Math.abs(off - drawTo) < 0.05) drawing = false;
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // Normal 판의 draw-on 계산(DURATION_MS)은 matchMedia 값과 무관하게 항상 그대로 수행한다 —
+  // 실제 OS/브라우저가 reduce 라면 위 자동 루프 자체가 멈춰(강제 모션 없음) 데모가 클릭을
+  // 기다리고, 클릭 시에는 여전히 두 판의 차이(그리기 vs 즉시 점프)가 그대로 보인다.
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

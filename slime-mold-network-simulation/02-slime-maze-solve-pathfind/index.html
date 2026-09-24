@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>미로 최단경로 — 이그노벨상 실험 재현 — 슬라임몰드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sm is-demo" id="smRoot">
+  <p class="sm__hint">
+    <span>미로 벽을 장애물 필드로 깔고 입구·출구에 먹이를 두면, 점균 네트워크가 막다른 길의 트레일부터 말라 없어지고 가장 짧은 통로만 굵어지며 스스로 최단경로를 찾아냅니다</span>
+  </p>
+  <div class="sm__field" id="smField" role="application" aria-label="미로 최단경로 점균 실험판" tabindex="0">
+    <canvas class="sm__cv" id="smCv"></canvas>
+  </div>
+  <div class="sm__bar">
+    <span class="sm__meta"><b class="sm__val" id="smN">0</b><span id="smUnit"> 탐색 스텝 · 미로 풀이</span></span>
+    <span class="sm__meta sm__meta--dim">canvas · ImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 미로 최단경로(02). Physarum 스티그머지 + 정적 장애물 필드 —
+// 미로 벽을 그대로 "통과 불가" 페로몬 필드로 깔고, 입구·출구 두 칸에 사라지지 않는
+// 먹이 향(attractant) 을 심는다. 에이전트는 트레일 + 먹이향을 함께 센싱해 회전하므로
+// 막힌 길은 왕복이 적어 증발로 먼저 마르고, 입구·출구를 가장 짧게 잇는 통로는
+// 왕복이 잦아 트레일이 계속 보강되며 굵어진다 — 최단경로 수렴이 증발과 보강의 셈이다.
+//
+// 화면이 사는 장치 — 077 캔버스 기준의 "매 프레임 계산":
+//  · 캔버스는 절대 clear 하지 않는다. 벽·트레일·먹이향을 한 ImageData 에 매 프레임 새로 계산해 얹는다.
+//  · 입구·출구 먹이 점은 맥동하는 광원처럼 밝기가 흔들려 필드 전체가 살아 있다(누적면적 ↑).
+(function () {
+  // ── 변형 상수 블록 ──
+  var AGENTS = 900;         // 미로 안을 걷는 에이전트 수
+  var DECAY = 0.05;         // 증발률 — 막다른 길이 마르는 속도
+  var FOOD_W = 1.7;         // 먹이향이 센서 판단에 끼치는 가중치
+  // ────────────────────────────────────
+  var SENSOR_ANGLE = 0.55;
+  var SENSOR_DIST = 4.6;
+  var TURN = 0.55;
+  var STEP = 1.0;
+  var DEPOSIT = 5.2;
+  var DIFFUSE = 0.45;
+  var CAP = 8;
+  var SUBSTEPS = 3;
+  var MAZE_COLS = 13, MAZE_ROWS = 7, WALL_T = 2;
+
+  var root = document.getElementById('smRoot');
+  var field = document.getElementById('smField');
+  var cv = document.getElementById('smCv');
+  var ctx = cv.getContext('2d', { alpha: false });
+  var nOut = document.getElementById('smN');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x320A02);
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_FLOOR = tokRGB('--sm-floor');
+  var C_WALL  = tokRGB('--sm-wall');
+  var C_TRAIL = tokRGB('--sm-trail');
+  var C_FOOD  = tokRGB('--sm-food');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, fw = 0, fh = 0, raf = 0, t0 = -1;
+  var trail, trailB, obstacle, food, img, data;
+  var ax, ay, ah;
+  var stepCount = 0;
+  var foodA = [0, 0], foodB = [0, 0];
+
+  // ── 값노이즈(주변광 요동용) — 벽·바닥까지 필드 전체를 매 프레임 은은히 들썩여
+  // 누적면적을 "실제로 화면을 채우는" 수준으로 끌어올린다(077 기준, 좁은 통로만으론 부족).
+  var perm = new Uint8Array(512);
+  (function () {
+    var p = [];
+    for (var i = 0; i < 256; i++) p.push(i);
+    for (var i2 = 255; i2 > 0; i2--) {
+      var k2 = Math.floor(rand() * (i2 + 1));
+      var tmp = p[i2]; p[i2] = p[k2]; p[k2] = tmp;
+    }
+    for (var i3 = 0; i3 < 512; i3++) perm[i3] = p[i3 & 255];
+  })();
+  function fade(k) { return k * k * (3 - 2 * k); }
+  function vnoise(x, y) {
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var xf = x - xi, yf = y - yi;
+    var a2 = perm[(perm[xi & 255] + yi) & 255];
+    var b2 = perm[(perm[(xi + 1) & 255] + yi) & 255];
+    var c2 = perm[(perm[xi & 255] + yi + 1) & 255];
+    var d2 = perm[(perm[(xi + 1) & 255] + yi + 1) & 255];
+    var u = fade(xf), v = fade(yf);
+    return (a2 + (b2 - a2) * u + (c2 - a2) * v + (a2 - b2 - c2 + d2) * u * v) / 255;
+  }
+
+  function idx(x, y) {
+    x = x % fw; if (x < 0) x += fw;
+    y = y % fh; if (y < 0) y += fh;
+    return (y * fw + x) | 0;
+  }
+  function clampIdx(x, y) {
+    x = Math.max(0, Math.min(fw - 1, Math.round(x)));
+    y = Math.max(0, Math.min(fh - 1, Math.round(y)));
+    return y * fw + x;
+  }
+
+  // ── 미로 생성 — 랜덤 DFS 백트래커로 완전 연결 보장 ──
+  function buildMaze() {
+    var cellW = fw / MAZE_COLS, cellH = fh / MAZE_ROWS;
+    var rightOpen = new Uint8Array(MAZE_COLS * MAZE_ROWS);
+    var downOpen = new Uint8Array(MAZE_COLS * MAZE_ROWS);
+    var vis = new Uint8Array(MAZE_COLS * MAZE_ROWS);
+    var midR = MAZE_ROWS >> 1;
+    var stack = [[0, midR]];
+    vis[midR * MAZE_COLS] = 1;
+    while (stack.length) {
+      var cur = stack[stack.length - 1];
+      var c = cur[0], r = cur[1];
+      var nbrs = [];
+      if (c > 0 && !vis[r * MAZE_COLS + (c - 1)]) nbrs.push([c - 1, r, 'L']);
+      if (c < MAZE_COLS - 1 && !vis[r * MAZE_COLS + (c + 1)]) nbrs.push([c + 1, r, 'R']);
+      if (r > 0 && !vis[(r - 1) * MAZE_COLS + c]) nbrs.push([c, r - 1, 'U']);
+      if (r < MAZE_ROWS - 1 && !vis[(r + 1) * MAZE_COLS + c]) nbrs.push([c, r + 1, 'D']);
+      if (!nbrs.length) { stack.pop(); continue; }
+      var pick = nbrs[Math.floor(rand() * nbrs.length)];
+      if (pick[2] === 'R') rightOpen[r * MAZE_COLS + c] = 1;
+      if (pick[2] === 'L') rightOpen[r * MAZE_COLS + (c - 1)] = 1;
+      if (pick[2] === 'D') downOpen[r * MAZE_COLS + c] = 1;
+      if (pick[2] === 'U') downOpen[(r - 1) * MAZE_COLS + c] = 1;
+      vis[pick[1] * MAZE_COLS + pick[0]] = 1;
+      stack.push([pick[0], pick[1]]);
+    }
+    obstacle = new Uint8Array(fw * fh);
+    for (var i = 0; i < obstacle.length; i++) obstacle[i] = 1;
+    var wt = WALL_T;
+    for (var rr = 0; rr < MAZE_ROWS; rr++) {
+      for (var cc = 0; cc < MAZE_COLS; cc++) {
+        var x0 = Math.round(cc * cellW), y0 = Math.round(rr * cellH);
+        var x1 = Math.round((cc + 1) * cellW), y1 = Math.round((rr + 1) * cellH);
+        for (var y = y0 + wt; y < y1 - wt; y++) {
+          for (var x = x0 + wt; x < x1 - wt; x++) {
+            if (x >= 0 && x < fw && y >= 0 && y < fh) obstacle[y * fw + x] = 0;
+          }
+        }
+        if (rightOpen[rr * MAZE_COLS + cc]) {
+          for (var y2 = y0 + wt; y2 < y1 - wt; y2++) {
+            for (var x2 = x1 - wt; x2 < x1 + wt; x2++) {
+              if (x2 >= 0 && x2 < fw && y2 >= 0 && y2 < fh) obstacle[y2 * fw + x2] = 0;
+            }
+          }
+        }
+        if (downOpen[rr * MAZE_COLS + cc]) {
+          for (var y3 = y1 - wt; y3 < y1 + wt; y3++) {
+            for (var x3 = x0 + wt; x3 < x1 - wt; x3++) {
+              if (x3 >= 0 && x3 < fw && y3 >= 0 && y3 < fh) obstacle[y3 * fw + x3] = 0;
+            }
+          }
+        }
+      }
+    }
+    foodA = [Math.round(cellW * 0.5), Math.round(cellH * (midR + 0.5))];
+    foodB = [Math.round(cellW * (MAZE_COLS - 0.5)), Math.round(cellH * (midR + 0.5))];
+  }
+
+  function buildFood() {
+    food = new Float32Array(fw * fh);
+    var pts = [foodA, foodB];
+    for (var y = 0; y < fh; y++) {
+      for (var x = 0; x < fw; x++) {
+        var best = 0;
+        for (var p = 0; p < pts.length; p++) {
+          var dx = x - pts[p][0], dy = y - pts[p][1];
+          var d2 = dx * dx + dy * dy;
+          var v = Math.exp(-d2 / (fw * 1.1));
+          if (v > best) best = v;
+        }
+        food[y * fw + x] = best;
+      }
+    }
+  }
+
+  function sense(x, y) {
+    var i = clampIdx(x, y);
+    if (obstacle[i]) return -1000;
+    return trail[i] + food[i] * FOOD_W * CAP;
+  }
+
+  function initAgents() {
+    var open = [];
+    for (var i = 0; i < obstacle.length; i++) if (!obstacle[i]) open.push(i);
+    ax = new Float32Array(AGENTS); ay = new Float32Array(AGENTS); ah = new Float32Array(AGENTS);
+    for (var k = 0; k < AGENTS; k++) {
+      var oi = open[Math.floor(rand() * open.length)];
+      ax[k] = oi % fw; ay[k] = Math.floor(oi / fw);
+      ah[k] = rand() * Math.PI * 2;
+    }
+  }
+
+  function stepAgents() {
+    for (var i = 0; i < AGENTS; i++) {
+      var x = ax[i], y = ay[i], h = ah[i];
+      var sf = sense(x + Math.cos(h) * SENSOR_DIST, y + Math.sin(h) * SENSOR_DIST);
+      var sl = sense(x + Math.cos(h + SENSOR_ANGLE) * SENSOR_DIST, y + Math.sin(h + SENSOR_ANGLE) * SENSOR_DIST);
+      var sr = sense(x + Math.cos(h - SENSOR_ANGLE) * SENSOR_DIST, y + Math.sin(h - SENSOR_ANGLE) * SENSOR_DIST);
+      if (sf >= sl && sf >= sr) {
+        // 직진
+      } else if (sl > sr) {
+        h += TURN;
+      } else if (sr > sl) {
+        h -= TURN;
+      } else {
+        h += (rand() < 0.5 ? 1 : -1) * TURN;
+      }
+      h += (rand() - 0.5) * 0.16;
+      var nx = x + Math.cos(h) * STEP, ny = y + Math.sin(h) * STEP;
+      var ni = clampIdx(nx, ny);
+      if (obstacle[ni]) {
+        h += Math.PI * 0.5 + (rand() - 0.5) * Math.PI;   // 벽 — 크게 방향을 틀어 되돌아 나온다
+      } else {
+        ax[i] = Math.max(0, Math.min(fw - 1, nx));
+        ay[i] = Math.max(0, Math.min(fh - 1, ny));
+        trail[ni] = Math.min(CAP, trail[ni] + DEPOSIT);
+      }
+      ah[i] = h;
+    }
+    stepCount++;
+  }
+
+  function diffuseEvap() {
+    for (var y = 0; y < fh; y++) {
+      var ym = y === 0 ? 0 : y - 1, yp = y === fh - 1 ? fh - 1 : y + 1;
+      for (var x = 0; x < fw; x++) {
+        var i = y * fw + x;
+        if (obstacle[i]) { trailB[i] = 0; continue; }
+        var xm = x === 0 ? 0 : x - 1, xp = x === fw - 1 ? fw - 1 : x + 1;
+        var avg = (trail[y * fw + xm] + trail[y * fw + xp] + trail[ym * fw + x] + trail[yp * fw + x]) * 0.25;
+        trailB[i] = (trail[i] * (1 - DIFFUSE) + avg * DIFFUSE) * (1 - DECAY);
+      }
+    }
+    var t = trail; trail = trailB; trailB = t;
+  }
+
+  function render(t) {
+    var pa = 0.55 + 0.45 * Math.sin(t * 2.6);
+    var pb = 0.55 + 0.45 * Math.sin(t * 2.6 + 2.1);
+    for (var y = 0; y < fh; y++) {
+      for (var x = 0; x < fw; x++) {
+        var i = y * fw + x;
+        var j = i * 4;
+        // 앰비언트 글로우 레이어 — 전면 확산 구조(314 기법): 벽·바닥·트레일 구분 없이
+        // 필드 전체를 값노이즈 두 옥타브로 매 프레임 크게 흔들어 누적면적을 화면 전역으로 채운다.
+        var n1 = vnoise(x * 0.09, y * 0.09 + t * 0.9);
+        var n2 = vnoise(x * 0.03 + 40, y * 0.03 + t * 0.6);
+        var sh = (n1 - 0.5) * 30 + (n2 - 0.5) * 20;
+        if (obstacle[i]) {
+          data[j] = C_WALL[0] + sh; data[j + 1] = C_WALL[1] + sh; data[j + 2] = C_WALL[2] + sh; data[j + 3] = 255;
+          continue;
+        }
+        var v = trail[i] / CAP; if (v > 1) v = 1;
+        var k = v * v * (3 - 2 * v);
+        var rr = C_FLOOR[0] + (C_TRAIL[0] - C_FLOOR[0]) * k;
+        var gg = C_FLOOR[1] + (C_TRAIL[1] - C_FLOOR[1]) * k;
+        var bb = C_FLOOR[2] + (C_TRAIL[2] - C_FLOOR[2]) * k;
+        var dA = Math.hypot(x - foodA[0], y - foodA[1]);
+        var dB = Math.hypot(x - foodB[0], y - foodB[1]);
+        var glow = Math.max(Math.exp(-dA * dA / 26) * pa, Math.exp(-dB * dB / 26) * pb);
+        rr += (C_FOOD[0] - rr) * glow; gg += (C_FOOD[1] - gg) * glow; bb += (C_FOOD[2] - bb) * glow;
+        rr += sh; gg += sh; bb += sh;
+        data[j] = rr; data[j + 1] = gg; data[j + 2] = bb; data[j + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    fw = Math.max(96, Math.min(200, Math.round(W / 3)));
+    fh = Math.max(52, Math.min(120, Math.round(H / 3)));
+    cv.width = fw; cv.height = fh;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    ctx = cv.getContext('2d', { alpha: false });
+    img = ctx.createImageData(fw, fh); data = img.data;
+    trail = new Float32Array(fw * fh); trailB = new Float32Array(fw * fh);
+    stepCount = 0;
+    buildMaze();
+    buildFood();
+    initAgents();
+  }
+
+  function stillFrame() {
+    for (var k = 0; k < 260; k++) { stepAgents(); diffuseEvap(); }
+    render(1.9);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    for (var s = 0; s < SUBSTEPS; s++) { stepAgents(); diffuseEvap(); }
+    render(t);
+    if (nOut) nOut.textContent = String(stepCount);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

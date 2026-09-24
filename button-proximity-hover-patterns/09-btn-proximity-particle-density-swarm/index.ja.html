@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>距離値の分だけ粒子が集まるボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pd is-demo" id="pd">
+  <p class="pd__badge" id="pdBadge">粒子値 0/6</p>
+  <div class="pd__scene" id="pdScene">
+    <div class="pd__wrap" id="pdWrap">
+      <canvas class="pd__canvas" id="pdCanvas" width="280" height="150" aria-hidden="true"></canvas>
+      <button class="pd__btn" id="pdBtn" type="button">登録する</button>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // PROX_PARTICLE_MAX_COUNT — 변형 3: 6 → 14 로 늘리면 입자가 촘촘히 모여 붐비듯 화려해진다.
+  var PROX_PARTICLE_MAX_COUNT = 6;
+  var PROX_RADIUS_PX = 170;
+  var LERP = 0.16;
+  var RADIUS_FAR_PX = 92;
+  var RADIUS_NEAR_PX = 46;
+
+  var root = document.getElementById('pd');
+  var scene = document.getElementById('pdScene');
+  var wrap = document.getElementById('pdWrap');
+  var btn = document.getElementById('pdBtn');
+  var canvas = document.getElementById('pdCanvas');
+  var badge = document.getElementById('pdBadge');
+  var ctx = canvas.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // 캔버스 표시 크기 = 스테이지가 실제로 내준 크기(getBoundingClientRect) — 고정 px 캡을 두지 않는다.
+  var radiusScale = 1;
+  function resizeCanvas() {
+    var r = wrap.getBoundingClientRect();
+    var w = Math.max(1, Math.round(r.width));
+    var h = Math.max(1, Math.round(r.height));
+    if (canvas.width !== w) { canvas.width = w; }
+    if (canvas.height !== h) { canvas.height = h; }
+    radiusScale = Math.min(w / 280, h / 150);
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  // 입자마다 글자별 노이즈 오프셋과 같은 계열 — 각도·주기에 고정 지터를 심어 기계적으로 안 보이게 한다
+  var particles = [];
+  for (var i = 0; i < PROX_PARTICLE_MAX_COUNT; i += 1) {
+    particles.push({
+      baseAngle: (i / PROX_PARTICLE_MAX_COUNT) * Math.PI * 2,
+      noise: ((i * 137) % 23) / 23 - 0.5,
+      phase: (i * 71) % 100 / 100 * Math.PI * 2,
+      size: 2.4 + ((i * 53) % 7) / 7 * 1.6
+    });
+  }
+
+  var targetP = 0;
+  var curP = 0;
+  var hasPointer = false;
+  var TRAIL_STEPS = 7;
+  var trailHistory = [];
+
+  function distanceToButton(x, y) {
+    var r = btn.getBoundingClientRect();
+    var cx = r.left + r.width / 2;
+    var cy = r.top + r.height / 2;
+    return Math.hypot(x - cx, y - cy);
+  }
+
+  function draw(p, t) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2;
+    var count = p * PROX_PARTICLE_MAX_COUNT;
+    var radius = (RADIUS_FAR_PX + (RADIUS_NEAR_PX - RADIUS_FAR_PX) * p) * radiusScale;
+    var positions = [];
+    particles.forEach(function (pt, i) {
+      var visible = clamp(count - i, 0, 1);
+      if (visible <= 0) { return; }
+      var ang = pt.baseAngle + t * 0.5 + pt.noise * Math.sin(t * 1.3 + pt.phase) * 0.6;
+      var rad = radius + pt.noise * 10 * radiusScale * Math.sin(t * 0.9 + pt.phase);
+      var x = cx + Math.cos(ang) * rad;
+      var y = cy + Math.sin(ang) * rad * 0.72;
+      positions.push({ x: x, y: y, size: pt.size * radiusScale * 1.3, alpha: (0.4 + p * 0.6) * visible });
+    });
+    // 계산 레이어: 최근 몇 프레임의 입자 위치를 옅은 잔상으로 같이 그려 궤적이 남게 한다(전체 캔버스를 덮지 않는다).
+    trailHistory.push(positions);
+    if (trailHistory.length > TRAIL_STEPS) { trailHistory.shift(); }
+    trailHistory.forEach(function (frame, hi) {
+      var age = trailHistory.length - hi;
+      var fade = 1 - age / (TRAIL_STEPS + 1);
+      frame.forEach(function (pos) {
+        ctx.globalAlpha = pos.alpha * fade;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, pos.size * (0.8 + fade * 0.9), 0, Math.PI * 2);
+        ctx.fillStyle = '#0a4fe8';
+        ctx.fill();
+      });
+    });
+    positions.forEach(function (pos) {
+      ctx.globalAlpha = pos.alpha;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, pos.size, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff7e6';
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    // 계산 레이어: 같은 진행률(p)을 입자 뒤 글로우 크기·불투명도에도 전파한다 — 배경과 겹치지 않는 색.
+    wrap.style.setProperty('--sw-p', p.toFixed(3));
+    badge.textContent = '粒子値 ' + Math.round(count) + '/' + PROX_PARTICLE_MAX_COUNT;
+  }
+
+  function syntheticOffset(t) {
+    var ang = t * 1.5;
+    var rad = 110 * (1 + Math.cos(t * Math.PI));
+    return [Math.cos(ang) * rad, Math.sin(ang) * rad];
+  }
+
+  var startTime = null;
+  function loop(now) {
+    if (startTime === null) { startTime = now; }
+    var t = (now - startTime) / 1000;
+    if (!hasPointer && !reduce) {
+      var off = syntheticOffset(t);
+      var d = Math.hypot(off[0], off[1]);
+      targetP = clamp(1 - d / PROX_RADIUS_PX, 0, 1);
+    }
+    curP += (targetP - curP) * LERP;
+    draw(curP, t);
+    requestAnimationFrame(loop);
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var d = distanceToButton(e.clientX, e.clientY);
+    targetP = clamp(1 - d / PROX_RADIUS_PX, 0, 1);
+    if (reduce) { curP = targetP; draw(curP, 0); }
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+    targetP = 0;
+    if (reduce) { curP = 0; draw(0, 0); }
+  });
+  btn.addEventListener('focus', function () {
+    hasPointer = true;
+    targetP = 1;
+    if (reduce) { curP = 1; draw(1, 0); }
+  });
+  btn.addEventListener('blur', function () {
+    hasPointer = false;
+    targetP = 0;
+    if (reduce) { curP = 0; draw(0, 0); }
+  });
+
+  if (reduce) {
+    draw(0, 0);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

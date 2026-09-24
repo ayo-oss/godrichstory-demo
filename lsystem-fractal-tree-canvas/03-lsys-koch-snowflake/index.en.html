@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Koch snowflake — L-system fractal tree, 9 pieces — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>Repeat the one-line rewrite F → F+F--F+F and each triangle side folds finer, lengthening the snowflake coastline — perimeter grows while the inner area barely changes, revealing the fractal dimension</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="Koch snowflake lab" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">rule F→F+F--F+F · angle 60° · gen <b id="lsGen">0</b></span>
+    <span class="ls__meta ls__meta--dim">canvas · string rewriting · strokeStyle</span>
+  </div>
+</div>
+</main>
+<script>
+// 코흐 눈송이(03) — 정삼각형(F--F--F)의 각 변을 F+F--F+F 로 되풀이해 다시 쓰면
+// 가운데를 들어올린 산 모양이 매번 새로 끼어들어 해안선이 무한히 길어진다(둘레 → ∞, 넓이 → 유한).
+// 움직임 = gen 크로스페이드 성장(0→4) + 완성 뒤 둘레를 도는 빛 한 점(strokeStyle 순환).
+(function () {
+  // ── 변형 상수 블록 ──
+  var ANGLE  = 60;
+  var MAXGEN = 4;
+  var CYCLE  = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var genEl = document.getElementById('lsGen');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_LINE = tokRGB('--ls-bark2');
+  var C_GLOW = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  var RULE = { 'F': 'F+F--F+F' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  // 거북 해석 — 문자열을 점 목록(닫힌 다각형)으로 적분
+  function turtlePoly(str, step) {
+    var x = 0, y = 0, a = 0;
+    var pts = [{ x: x, y: y }];
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        x += Math.cos(a) * step;
+        y += Math.sin(a) * step;
+        pts.push({ x: x, y: y });
+      } else if (ch === '+') {
+        a -= ANGLE * Math.PI / 180;
+      } else if (ch === '-') {
+        a += ANGLE * Math.PI / 180;
+      }
+    }
+    return pts;
+  }
+
+  var AXIOM = 'F--F--F';
+  var POLY = [];   // 세대별 정규화 점 목록(0~1 정사각 프레임)
+  (function precompute() {
+    var strs = [];
+    for (var g = 0; g <= MAXGEN; g++) strs.push(expand(AXIOM, g));
+    // gen 0 은 변 길이 1로, 세대가 늘수록 변 개수가 3*4^g — step 을 3^g 에 반비례시켜 전체 크기를 맞춘다
+    var raw = [];
+    for (var g2 = 0; g2 <= MAXGEN; g2++) {
+      var step = 1 / Math.pow(3, g2) * (g2 === 0 ? 1 : 1);
+      raw.push(turtlePoly(strs[g2], step));
+    }
+    // 최종 gen 기준 bbox 로 전체를 정규화(모든 세대가 같은 프레임 안에 겹치도록)
+    var last = raw[MAXGEN];
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < last.length; i++) {
+      minX = Math.min(minX, last[i].x); maxX = Math.max(maxX, last[i].x);
+      minY = Math.min(minY, last[i].y); maxY = Math.max(maxY, last[i].y);
+    }
+    var span = Math.max(maxX - minX, maxY - minY) || 1;
+    for (var g3 = 0; g3 <= MAXGEN; g3++) {
+      var norm = [];
+      for (var j = 0; j < raw[g3].length; j++) {
+        norm.push({ x: (raw[g3][j].x - minX) / span, y: (raw[g3][j].y - minY) / span });
+      }
+      POLY.push(norm);
+    }
+  })();
+
+  function rgb(c, a) {
+    return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')';
+  }
+
+  function drawPoly(ctx, pts, ox, oy, sc, col, alpha, lw, fillAlpha) {
+    if (!pts.length) return;
+    ctx.beginPath();
+    ctx.moveTo(ox + pts[0].x * sc, oy + pts[0].y * sc);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(ox + pts[i].x * sc, oy + pts[i].y * sc);
+    ctx.closePath();
+    if (fillAlpha > 0) {
+      ctx.fillStyle = rgb(col, fillAlpha);
+      ctx.fill();
+    }
+    ctx.strokeStyle = rgb(col, alpha);
+    ctx.lineWidth = lw;
+    ctx.stroke();
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = Math.min(W, H) * 0.78;
+    var ox = (W - sc) / 2, oy = (H - sc) / 2 + H * 0.03;
+
+    // 0~0.68 : gen 크로스페이드 성장. 0.68~1.0 : 완성 눈송이 + 도는 빛
+    var grPhase = Math.min(loop / 0.68, 1);
+    var genF = grPhase * MAXGEN;
+    var gA = Math.min(MAXGEN, Math.floor(genF));
+    var gB = Math.min(MAXGEN, gA + 1);
+    var f = genF - gA;
+
+    // 안쪽 반투명 채움 — 윤곽선만으로는 면적이 작아 보인다. 채움 알파를 계속 미세 진동시켜
+    // 완성 뒤(정지 구간)에도 픽셀이 계속 갱신되게 한다(피사체를 키운다 원칙).
+    var fillA = 0.16 + 0.06 * Math.sin(loop * Math.PI * 5);
+    drawPoly(ctx, POLY[gA], ox, oy, sc, C_LINE, 1, 1.4, fillA);
+    if (f > 0 && gB !== gA) drawPoly(ctx, POLY[gB], ox, oy, sc, C_GLOW, f, 1.2, 0);
+
+    if (genEl) genEl.textContent = String(gA);
+
+    if (loop >= 0.68) {
+      // 둘레를 도는 빛 — 최종 gen 점 목록을 따라 위치를 진행시킨다(strokeStyle 색 순환)
+      var t = (loop - 0.68) / 0.32;
+      var pts = POLY[MAXGEN];
+      var idxF = t * (pts.length - 1);
+      var i0 = Math.floor(idxF) % (pts.length - 1);
+      var lf = idxF - Math.floor(idxF);
+      var p0 = pts[i0], p1 = pts[i0 + 1] || pts[0];
+      var lx = ox + (p0.x + (p1.x - p0.x) * lf) * sc;
+      var ly = oy + (p0.y + (p1.y - p0.y) * lf) * sc;
+      var hue = 0.5 + 0.5 * Math.sin(loop * Math.PI * 4);
+      var glowCol = [C_GLOW[0] + (255 - C_GLOW[0]) * hue * 0.4, C_GLOW[1], C_GLOW[2] + (255 - C_GLOW[2]) * 0.2];
+      ctx.fillStyle = rgb(glowCol, 0.9);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = rgb(glowCol, 0.35);
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(lx, ly, 5.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.85 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.85);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

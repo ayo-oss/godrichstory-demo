@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>複数の指がそれぞれのpointerIdで同時に別々の場所をこすり取る — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">スクラッチカード</p>
+    <div class="scv__zone" id="zone">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">交換クーポン</p>
+        <p class="scv__prizeSub">複数の指で同時にこすってみてください</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+    </div>
+    <button type="button" class="scv__reveal" id="revealBtn">一気に見る</button>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: pointerdown 마다 e.pointerId 를 키로 하는 Map 에 마지막 좌표를 저장해
+  // 여러 포인터(멀티터치)가 서로를 덮어쓰지 않고 각자의 경로를 동시에 긁게 한다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var FW = foil.width, FH = foil.height;
+  var SCRATCH_BRUSH_R = 14;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var foilRand = seedRand(424051);
+
+  function paintFoil() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, FW, FH);
+    var grad = ctx.createLinearGradient(0, 0, FW, FH);
+    grad.addColorStop(0, '#5b6cff');
+    grad.addColorStop(.5, '#8f9bff');
+    grad.addColorStop(1, '#3c46c9');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.strokeStyle = 'rgba(23,20,26,.16)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 18; i += 1) {
+      var x = foilRand() * FW, y = foilRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (foilRand() * 20 - 10), y + (foilRand() * 8 - 4));
+      ctx.stroke();
+    }
+  }
+
+  function scratchAt(x, y) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  function scratchLine(x0, y0, x1, y1) {
+    var dx = x1 - x0, dy = y1 - y0;
+    var dist = Math.max(1, Math.hypot(dx, dy));
+    var steps = Math.max(1, Math.ceil(dist / 6));
+    for (var i = 0; i <= steps; i += 1) {
+      scratchAt(x0 + dx * (i / steps), y0 + dy * (i / steps));
+    }
+  }
+
+  function clearedRatio() {
+    var data = ctx.getImageData(0, 0, FW, FH).data;
+    var clear = 0, total = data.length / 4;
+    for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+    return clear / total;
+  }
+
+  var opened = false;
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = '交換クーポンが開きました';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  paintFoil();
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var pointers = new Map(); // pointerId -> {x,y}
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    var p = pos(e);
+    pointers.set(e.pointerId, p);
+    scratchAt(p.x, p.y);
+    if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (opened || !pointers.has(e.pointerId)) return;
+    var prev = pointers.get(e.pointerId);
+    var p = pos(e);
+    scratchLine(prev.x, prev.y, p.x, p.y);
+    pointers.set(e.pointerId, p);
+    if (clearedRatio() > .82) openCard();
+  });
+  function release(e) { pointers.delete(e.pointerId); }
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+
+  // 데모 경로 두 개를 서로 다른 pointerId(9001·9002)로 흉내내 동시 긁기를 재현한다
+  var demoRand = seedRand(424052);
+  function buildPath(baseX, baseY, count) {
+    var pts = [];
+    for (var i = 0; i < count; i += 1) {
+      pts.push({
+        t: 240 + i * 96,
+        x: baseX + (i % 4) * (FW * 0.12) + (demoRand() - .5) * 6,
+        y: baseY + Math.floor(i / 4) * (FH * 0.2) + (demoRand() - .5) * 6
+      });
+    }
+    return pts;
+  }
+  var pathA = buildPath(FW * 0.1, FH * 0.14, 12);
+  var pathB = buildPath(FW * 0.52, FH * 0.5, 12);
+  var DEMO_LOOP_MS = 4000;
+  var stepA = 0, stepB = 0;
+  var lastA = null, lastB = null;
+
+  function resetDemo() {
+    opened = false;
+    root.classList.remove('is-open');
+    paintFoil();
+    stepA = 0; stepB = 0; lastA = null; lastB = null;
+  }
+  function advance(path, stepRef, lastRef, tMod) {
+    var step = stepRef.v, last = lastRef.v;
+    while (step < path.length && path[step].t <= tMod) {
+      var p = path[step];
+      if (last) scratchLine(last.x, last.y, p.x, p.y); else scratchAt(p.x, p.y);
+      last = p;
+      step += 1;
+    }
+    stepRef.v = step; lastRef.v = last;
+  }
+  function runDemo(tMod) {
+    var sa = { v: stepA }, la = { v: lastA };
+    var sb = { v: stepB }, lb = { v: lastB };
+    advance(pathA, sa, la, tMod);
+    advance(pathB, sb, lb, tMod);
+    stepA = sa.v; lastA = la.v;
+    stepB = sb.v; lastB = lb.v;
+    if (clearedRatio() > .82) openCard();
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>二本指で選択オブジェクトだけ拡大・回転 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="frame" id="frame">
+    <div class="subjectShape" id="subject"></div>
+    <div class="finger finger--a" id="fingerA" tabindex="0" role="slider" aria-label="1本目の指のポイント" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
+    <div class="finger finger--b" id="fingerB" tabindex="0" role="slider" aria-label="2本目の指のポイント" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
+  </div>
+  <div class="readout" id="readout" aria-hidden="true"><span id="rp">100</span>% · <span id="rr">0</span>°</div>
+</div>
+</main>
+<script>
+(function () {
+  var MIN_SCALE = 0.55;
+  var MAX_SCALE = 1.9;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var frame = document.getElementById('frame');
+  var subject = document.getElementById('subject');
+  var fingerA = document.getElementById('fingerA');
+  var fingerB = document.getElementById('fingerB');
+  var rp = document.getElementById('rp');
+  var rr = document.getElementById('rr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 이 데모는 선택된 오브젝트 하나에만 적용된다 — 247 의 gesture-pinch-zoom-pan(화면 전체를
+  // 확대·이동하는 손짓)과 달리 여기서는 무대·배경은 그대로고 subjectShape 만 scale·rotate 된다.
+  var posA = { x: 0.24, y: 0.5 };
+  var posB = { x: 0.76, y: 0.5 };
+  var baseDist = null;
+  var baseAngle = null;
+  var dragging = null;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  function placeFinger(el, pos) {
+    var r = frame.getBoundingClientRect();
+    el.style.left = (pos.x * r.width) + 'px';
+    el.style.top = (pos.y * r.height) + 'px';
+  }
+
+  // 두 포인터 거리/각 → scale·rotate. 실제 두 손가락 대신 포인터 이벤트 2개(finger A·B)를
+  // 각각 시뮬레이트해 그 사이 거리비·각도차를 subjectShape 에 그대로 반영한다.
+  function computeFromFingers() {
+    var r = frame.getBoundingClientRect();
+    var ax = posA.x * r.width, ay = posA.y * r.height;
+    var bx = posB.x * r.width, by = posB.y * r.height;
+    var d = Math.hypot(bx - ax, by - ay);
+    var a = Math.atan2(by - ay, bx - ax) * 180 / Math.PI;
+    if (baseDist === null) { baseDist = d; baseAngle = a; }
+    var scale = clamp(d / baseDist, MIN_SCALE, MAX_SCALE);
+    var rotate = a - baseAngle;
+    subject.style.transform = 'translate(-50%,-50%) rotate(' + rotate.toFixed(1) + 'deg) scale(' + scale.toFixed(3) + ')';
+    rp.textContent = Math.round(scale * 100);
+    rr.textContent = Math.round(rotate);
+    placeFinger(fingerA, posA);
+    placeFinger(fingerB, posB);
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  function bindFinger(el, posRef) {
+    el.addEventListener('pointerdown', function (e) {
+      human();
+      dragging = posRef;
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', function (e) {
+      if (dragging !== posRef) return;
+      var r = frame.getBoundingClientRect();
+      posRef.x = clamp((e.clientX - r.left) / r.width, 0.05, 0.95);
+      posRef.y = clamp((e.clientY - r.top) / r.height, 0.05, 0.95);
+      computeFromFingers();
+    });
+    function end(e) {
+      if (dragging !== posRef) return;
+      dragging = null;
+      try { el.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('keydown', function (e) {
+      var step = 0.04;
+      if (e.key === 'ArrowLeft') { human(); posRef.x = clamp(posRef.x - step, 0.05, 0.95); computeFromFingers(); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { human(); posRef.x = clamp(posRef.x + step, 0.05, 0.95); computeFromFingers(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { human(); posRef.y = clamp(posRef.y - step, 0.05, 0.95); computeFromFingers(); e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { human(); posRef.y = clamp(posRef.y + step, 0.05, 0.95); computeFromFingers(); e.preventDefault(); }
+    });
+  }
+
+  bindFinger(fingerA, posA);
+  bindFinger(fingerB, posB);
+  computeFromFingers();
+
+  // reduce: 실사용 경로 적용 — 두 finger 의 pointer·keydown 은 위에서 즉시 반영한다.
+  // 아래 자동 루프(시연 게이트만)는 두 finger 를 동시에 벌리고 비틀며 reduce 에서는 돌지 않는다.
+  function loopStep() {
+    if (!scene.classList.contains('is-demo') || reduce) return;
+    var t = (performance.now() % LOOP_MS) / LOOP_MS;
+    var spread = 0.16 + Math.sin(t * Math.PI * 2) * 0.14;
+    var twist = Math.sin(t * Math.PI * 2) * 0.12;
+    posA.x = clamp(0.5 - spread - twist, 0.05, 0.95);
+    posA.y = clamp(0.5 - twist * 0.6, 0.05, 0.95);
+    posB.x = clamp(0.5 + spread - twist, 0.05, 0.95);
+    posB.y = clamp(0.5 + twist * 0.6, 0.05, 0.95);
+    computeFromFingers();
+    requestAnimationFrame(loopStep);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loopStep);
+  }
+})();
+</script>
+</body>
+</html>

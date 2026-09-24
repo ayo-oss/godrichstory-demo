@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>織り模様 — 스트링아트 실 감기 기하 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sh is-demo" id="shRoot" role="application" aria-label="織り実験盤" tabindex="0">
+  <canvas class="sh__cv" id="shCv"></canvas>
+  <p class="sh__hint">
+    <span class="sh__title">織り模様</span>
+    <span class="sh__desc">2方向の糸を位相をずらして交差させると、モアレが文様タイルに落ち着きます</span>
+  </p>
+  <div class="sh__bar">
+    <span class="sh__meta">糸2方向 · 位相差0.5 · 周期2秒</span>
+    <span class="sh__meta sh__meta--dim">globalAlpha · sin</span>
+  </div>
+</div>
+</main>
+<script>
+// 스트링아트 織り模様(08) — 두 실 방향이 위상차를 두고 교차하며 짜는 직조 계산.
+// 세로 경사(warp)와 가로 위사(weft)를 각각 실 격자로 놓고, 위상차 PHASE 만큼
+// 어긋나게 흘려 보낸다. globalAlpha 로 두 방향을 반투명하게 겹치면 교차점이
+// 밝아지며 모아레 문양 타일이 정착된다 — 베틀의 경위사 교차를 축소한 판.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NW    = 26;    // 경사(세로 실) 올 수
+  var NF    = 18;    // 위사(가로 실) 올 수
+  var PHASE = 0.5;   // 두 방향 위상차(주기 비율) — 0.25 로 줄이면 문양이 촘촘해진다(변형 3)
+  var BASE  = 0.5;   // 실 기본 globalAlpha — 0.25 로 내리면 더 성긴 레이스가 된다(변형 3)
+  var CYCLE = 2.0;   // 직조 주기(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('shRoot');
+  var cvEl = document.getElementById('shCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var COL_THRD  = tokRGB('--sh-thread');
+  var COL_CROSS = tokRGB('--sh-cross');
+  var COL_PIN   = tokRGB('--sh-pin');
+  var COL_PANEL = tokRGB('--sh-panel');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var pad = 0;
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    pad = Math.min(W, H) * 0.06;
+  }
+
+  // 실 한 올 — 사인 곡선으로 출렁이는 직선(경사·위사 공통)
+  function thread(x0, y0, x1, y1, wob, t) {
+    var K = 14;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    for (var k = 1; k <= K; k++) {
+      var u = k / K;
+      var x = x0 + (x1 - x0) * u, y = y0 + (y1 - y0) * u;
+      // 진행 방향의 법선으로 wobble — 실의 장력 출렁임
+      var dx = x1 - x0, dy = y1 - y0;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var nx = -dy / len, ny = dx / len;
+      var off = Math.sin(u * Math.PI * 2 + t * 2) * wob;
+      ctx.lineTo(x + nx * off, y + ny * off);
+    }
+    ctx.stroke();
+  }
+
+  function draw(progress, t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + COL_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    var iw = W - 2 * pad, ih = H - 2 * pad;
+    var doneW = Math.floor(progress * NW);
+    var i, u, recency, alpha;
+
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = 'rgba(' + COL_THRD.join(',') + ',0.3)';
+
+    // 경사(세로) — 위상 0. 왼→오른 순서로 감는다
+    for (i = 0; i < doneW; i++) {
+      u = i / (NW - 1);
+      recency = Math.max(0, 1 - (progress - u));
+      alpha = BASE * (0.72 + 0.5 * Math.pow(recency, 1.2));
+      ctx.globalAlpha = Math.min(0.95, alpha);
+      ctx.strokeStyle = 'rgb(' + COL_THRD.join(',') + ')';
+      ctx.lineWidth = 2.6 + recency * 1.8;
+      thread(pad + iw * u, pad, pad + iw * u, H - pad, 3.5, t);
+    }
+
+    // 위사(가로) — 위상차 PHASE 만큼 늦게 흐른다
+    var pF = Math.max(0, progress - PHASE) / (1 - PHASE);
+    var doneF2 = Math.floor(pF * NF);
+    for (i = 0; i < doneF2; i++) {
+      u = i / (NF - 1);
+      recency = Math.max(0, 1 - (pF - u));
+      alpha = BASE * (0.72 + 0.5 * Math.pow(recency, 1.2));
+      ctx.globalAlpha = Math.min(0.95, alpha);
+      ctx.strokeStyle = 'rgb(' + COL_CROSS.join(',') + ')';
+      ctx.lineWidth = 2.6 + recency * 1.8;
+      thread(pad, pad + ih * u, W - pad, pad + ih * u, 3.5, t + PHASE * 6);
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+
+    // 핀 — 네 변에 박힌 직조 핀. 감긴 핀은 밝게
+    var k;
+    for (k = 0; k < NW; k++) {
+      u = k / (NW - 1);
+      var done = k < doneW;
+      ctx.fillStyle = done ? 'rgb(' + COL_PIN.join(',') + ')' : 'rgba(' + COL_PIN.join(',') + ',0.35)';
+      var r0 = done ? 1.8 : 1;
+      ctx.beginPath(); ctx.arc(pad + iw * u, pad, r0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pad + iw * u, H - pad, r0, 0, Math.PI * 2); ctx.fill();
+    }
+    for (k = 0; k < NF; k++) {
+      u = k / (NF - 1);
+      var done2 = k < doneF2;
+      ctx.fillStyle = done2 ? 'rgb(' + COL_PIN.join(',') + ')' : 'rgba(' + COL_PIN.join(',') + ',0.35)';
+      var r2 = done2 ? 1.8 : 1;
+      ctx.beginPath(); ctx.arc(pad, pad + ih * u, r2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(W - pad, pad + ih * u, r2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = ((now - t0) / 1000) % CYCLE;
+    // 0→0.8 감기 · 0.8→1 유지 — 유지 구간에도 실 출렁임(wobble)이 계속 움직인다
+    var progress = Math.min(1, t / CYCLE / 0.8);
+    draw(progress, t);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(1, 0);
+  });
+  fit();
+  if (reduce) {
+    draw(1, 0);   // reduce — 다 짜진 직조 타일 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

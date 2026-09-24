@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구르며 부딪히는 도형 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rb" id="rb">
+  <p class="rb__hint">
+    <svg class="rb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>Throw a shape — velocities swap along the collision normal and the off-center hit makes it roll away</span>
+  </p>
+  <div class="rb__field" id="field" role="application" aria-label="Rigid body collision board" tabindex="0">
+    <canvas class="rb__cv" id="cv"></canvas>
+    <b class="rb__badge" aria-hidden="true"><span class="rb__badgeNum" id="hitVal">0</span><span class="rb__badgeUnit">collisions</span></b>
+  </div>
+  <div class="rb__bar">
+    <label class="rb__dial">restitution
+      <input type="range" id="e" min="30" max="85" step="5" value="60" aria-label="restitution coefficient (%)">
+    </label>
+    <button class="rb__reset" id="reset" type="button">Reset</button>
+  </div>
+</div>
+</main>
+<script>
+// 구르며 부딪히는 도형 — 강체 충돌의 핵심 두 가지를 베어낸 미니 물리엔진.
+//   ① 충격량: 충돌 법선 방향 상대속도에 반발계수 e 를 곱해 운동량 보존(j = -(1+e)·vRel·n / (1/m1 + 1/m2))
+//     으로 두 몸체에 나눠 준다. Verlet 에서는 "이전 위치를 충격량만큼 되돌리는 것"이 곧 속도 변화다.
+//   ② 토크: 충돌 접점이 중심에서 벗어난 팔(r × n)만큼 각속도를 얻는다 — 구르며 튕기는 이유.
+// OBB(회전하는 사각형)와 원의 충돌은 원심을 사각 로컬 좌표로 옮겨 최근접점을 찍는 클램프 근사로 푼다.
+var root = document.getElementById('rb');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var eIn = document.getElementById('e');
+var hitVal = document.getElementById('hitVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var CIRC = css.getPropertyValue('--circ').trim();
+var BOXF = css.getPropertyValue('--boxf').trim();
+var RING = css.getPropertyValue('--ring').trim();
+var W = 0, H = 0, dpr = 1;
+var t0 = performance.now();
+
+var GRAV = 1400;              // 중력(px/s^2)
+var DAMP = 0.9985;            // 속도 보존률(공기 저항 아주 작게 — 굴러다녀야 한다)
+var WALL_E = 0.72;            // 벽·바닥 restitution(도형끼리 반발과 별개)
+var FRICTION = 0.985;         // 바닥 접점 접선 감쇠(미끄러짐)
+var LOOP = 2;                 // 자동 시연 한 바퀴(초)
+
+// 몸체: {kind:'c'|'b', x, y, px, py, r(반지름 또는 절반변), a(회전각), pa(이전 각), m(질량), im(역질량), col}
+var bodies = [];
+var hits = 0;
+var hold = -1;                // 잡고 있는 몸체 번호
+var holdX = 0, holdY = 0, holdPX = 0, holdPY = 0;   // 잡은 위치와 직전 위치(던지기 속도용)
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  bodies = []; hits = 0; hitVal.textContent = '0'; hold = -1;
+  var colIn = H * 0.34, gap = W / 6;
+  // 원 3 + 사각 2 + 원 1 — 질량은 반지름 세제곱 비례(면적 밀도 같은 셈)
+  var spec = [
+    { k: 'c', r: 17, fx: 0.5,  fy: 0.20, c: CIRC },
+    { k: 'c', r: 13, fx: 0.30, fy: 0.46, c: CIRC },
+    { k: 'c', r: 21, fx: 0.72, fy: 0.40, c: CIRC },
+    { k: 'b', r: 15, fx: 0.42, fy: 0.62, c: BOXF, sq: 0.78 },
+    { k: 'b', r: 18, fx: 0.62, fy: 0.30, c: BOXF, sq: 1.25 },
+    { k: 'c', r: 11, fx: 0.86, fy: 0.66, c: CIRC }
+  ];
+  for (var i = 0; i < spec.length; i++) {
+    var s = spec[i];
+    var m = s.k === 'c' ? s.r * s.r * s.r : s.r * s.r * s.r * (s.sq || 1) * 0.9;
+    var x = W * s.fx, y = H - colIn * (1 - s.fy) * 0.9;
+    bodies.push({
+      kind: s.k, x: x, y: y, px: x, py: y,
+      r: s.r, hw: s.r, hh: s.r * (s.sq || 1),
+      a: s.k === 'b' ? (i * 0.9 - 1.2) : 0, pa: s.k === 'b' ? (i * 0.9 - 1.2) : 0,
+      m: m, im: 1 / m, col: s.c
+    });
+  }
+}
+
+// 몸체 반지름(충돌 판정용 대략 크기)
+function rad(b) { return b.kind === 'c' ? b.r : Math.max(b.hw, b.hh); }
+
+// 원-원 충돌 → {nx, ny, pen, cx, cy}
+function hitCC(a, b) {
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var d = Math.hypot(dx, dy);
+  var rr = a.r + b.r;
+  if (d >= rr || d === 0) return null;
+  return { nx: dx / d, ny: dy / d, pen: rr - d, cx: a.x + dx / d * a.r, cy: a.y + dy / d * a.r };
+}
+// 점이 회전사각(OBB) 안/가장자리에서 사각 중심 기준 로컬 좌표로 변환
+function toLocal(b, px2, py2) {
+  var c = Math.cos(b.a), s = Math.sin(b.a);   // 월드→로컬은 역회전
+  var dx = px2 - b.x, dy = py2 - b.y;
+  return { x: dx * c + dy * s, y: -dx * s + dy * c };
+}
+// 원-OBB 충돌 — 원심을 로컬로 옮겨 클램프한 최근접점으로 판정
+function hitCB(c, b) {
+  var l = toLocal(b, c.x, c.y);
+  var qx = Math.max(-b.hw, Math.min(b.hw, l.x));
+  var qy = Math.max(-b.hh, Math.min(b.hh, l.y));
+  var dx = l.x - qx, dy = l.y - qy;
+  var d = Math.hypot(dx, dy);
+  if (d >= c.r) return null;
+  var nx, ny, pen;
+  if (d > 0.0001) { nx = dx / d; ny = dy / d; pen = c.r - d; }
+  else {
+    // 원심이 사각 안 — 가장 얕은 축으로 밀어낸다
+    var ox = b.hw - Math.abs(l.x), oy = b.hh - Math.abs(l.y);
+    if (ox < oy) { nx = l.x >= 0 ? 1 : -1; ny = 0; pen = ox + c.r; }
+    else { nx = 0; ny = l.y >= 0 ? 1 : -1; pen = oy + c.r; }
+  }
+  var co = Math.cos(b.a), si = Math.sin(b.a);   // 로컬 법선 → 월드로 회전
+  var wnx = nx * co - ny * si, wny = nx * si + ny * co;
+  return { nx: wnx, ny: wny, pen: pen, cx: qx, cy: qy };
+}
+function collide(a, b) {
+  if (a.kind === 'c' && b.kind === 'c') return hitCC(a, b);
+  if (a.kind === 'c' && b.kind === 'b') { var h = hitCB(a, b); if (h) { h.nx = -h.nx; h.ny = -h.ny; } return h; }
+  if (a.kind === 'b' && b.kind === 'c') return hitCB(b, a);
+  // 사각-사각은 원 근사(반지름 = 평균 반변)로만 밀어낸다 — 6개 몸체 미니엔진의 절충
+  var ra = (a.hw + a.hh) * 0.5, rb2 = (b.hw + b.hh) * 0.5;
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var d = Math.hypot(dx, dy);
+  if (d >= (ra + rb2) * 0.9 || d === 0) return null;
+  return { nx: dx / d, ny: dy / d, pen: (ra + rb2) * 0.9 - d, cx: 0, cy: 0 };
+}
+
+// 충격량 적용 — Verlet 은 이전 위치를 되돌리는 것으로 속도를 바꾼다
+function impulse(a, b, n, cx2, cy2, e) {
+  var avx = a.x - a.px, avy = a.y - a.py;
+  var bvx = b.x - b.px, bvy = b.y - b.py;
+  var vRel = (avx - bvx) * n.x + (avy - bvy) * n.y;
+  if (vRel > 0) return false;                 // 이미 떨어지는 중
+  var j = -(1 + e) * vRel / (a.im + b.im);
+  var jx = n.x * j, jy = n.y * j;
+  a.px -= jx * a.im; a.py -= jy * a.im;       // 정방향 충격량 = 속도 증가
+  b.px += jx * b.im; b.py += jy * b.im;
+  // 토크 — 접점 팔이 중심에서 벗어났으면 각속도로 돌린다(사각만 받는다)
+  if (a.kind === 'b') {
+    var la = toLocal(a, cx2, cy2);
+    a.pa -= (la.x * n.y - la.y * n.x) * j * a.im * 0.00013;
+  }
+  if (b.kind === 'b') {
+    var lb = toLocal(b, cx2, cy2);
+    b.pa += (lb.x * n.y - lb.y * n.x) * j * b.im * 0.00013;
+  }
+  return true;
+}
+
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var e = Number(eIn.value) / 100;
+  var i, j2, bd;
+
+  // (1) 관성 + 중력 + 회전 감쇠
+  for (i = 0; i < bodies.length; i++) {
+    bd = bodies[i];
+    if (i === hold) continue;
+    var vx = bd.x - bd.px;
+    var vy = bd.y - bd.py + GRAV * dt * dt;
+    bd.px = bd.x; bd.py = bd.y;
+    bd.x += vx * DAMP;
+    bd.y += vy * DAMP;
+    var na = bd.a + (bd.a - bd.pa) * 0.995;
+    bd.pa = bd.a; bd.a = na;
+  }
+  if (hold >= 0) {
+    var hb = bodies[hold];
+    hb.px = holdPX; hb.py = holdPY;   // 직전 손 위치 → 이전 위치. 놓으면 이 차이가 던지기 속도
+    hb.x = holdX; hb.y = holdY;
+    hb.pa += (hb.a - hb.pa) * 0.8;
+  }
+
+  // (2) 짝 충돌 — 위치 보정(침투 밀어내기) + 충격량
+  for (i = 0; i < bodies.length; i++) {
+    for (j2 = i + 1; j2 < bodies.length; j2++) {
+      var A = bodies[i], B = bodies[j2];
+      if (i === hold && j2 === hold) continue;
+      var h = collide(A, B);
+      if (!h) continue;
+      var cxW, cyW;
+      if (A.kind === 'b' && B.kind === 'b') { cxW = (A.x + B.x) * 0.5; cyW = (A.y + B.y) * 0.5; }
+      else if (A.kind === 'b') {
+        var co = Math.cos(A.a), si = Math.sin(A.a);
+        cxW = A.x + h.cx * co - h.cy * si; cyW = A.y + h.cx * si + h.cy * co;
+      } else if (B.kind === 'b') {
+        var co2 = Math.cos(B.a), si2 = Math.sin(B.a);
+        cxW = B.x + h.cx * co2 - h.cy * si2; cyW = B.y + h.cx * si2 + h.cy * co2;
+      } else { cxW = h.cx; cyW = h.cy; }
+      // 침투 보정 — 질량 역수 비율로 나눠 밀어낸다(잡은 몸체는 움직이지 않는다)
+      var tot = (i === hold ? 0 : A.im) + (j2 === hold ? 0 : B.im);
+      if (tot > 0) {
+        var cor = Math.min(h.pen, 6) / tot * 0.55;
+        if (i !== hold) { A.x -= h.nx * cor * A.im; A.y -= h.ny * cor * A.im; }
+        if (j2 !== hold) { B.x += h.nx * cor * B.im; B.y += h.ny * cor * B.im; }
+      }
+      if (impulse(A, B, h, cxW, cyW, e)) { hits++; hitVal.textContent = hits; }
+    }
+  }
+
+  // (3) 벽·바닥 — 반사 + 바닥 접점 토크(구르기)
+  for (i = 0; i < bodies.length; i++) {
+    bd = bodies[i];
+    if (i === hold) continue;
+    var rr = rad(bd);
+    if (bd.x < rr) { bd.x = rr; bd.px = bd.x + (bd.x - bd.px) * WALL_E; bd.pa += (bd.py - bd.y) * 0.02; }
+    if (bd.x > W - rr) { bd.x = W - rr; bd.px = bd.x + (bd.x - bd.px) * WALL_E; bd.pa -= (bd.py - bd.y) * 0.02; }
+    if (bd.y > H - rr) {
+      var vy = bd.y - bd.py;
+      bd.y = H - rr;
+      bd.py = bd.y + vy * WALL_E;                       // restitution
+      var vx = bd.x - bd.px;
+      bd.px = bd.x - vx * FRICTION;                     // 마찰
+      bd.pa -= vx * 0.02 / bd.r;                        // 구르기 토크(접선 속도 → 회전)
+    }
+    if (bd.y < rr) { bd.y = rr; bd.py = bd.y + (bd.y - bd.py) * WALL_E; }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (var i = 0; i < bodies.length; i++) {
+    var b = bodies[i];
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.a);
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = RING;
+    if (b.kind === 'c') {
+      ctx.fillStyle = b.col;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      // 회전이 보이는 표시 — 바깥 점 하나
+      ctx.fillStyle = RING;
+      ctx.beginPath();
+      ctx.arc(b.r * 0.55, 0, Math.max(2.5, b.r * 0.16), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = b.col;
+      ctx.beginPath();
+      ctx.roundRect(-b.hw, -b.hh, b.hw * 2, b.hh * 2, 4);
+      ctx.fill();
+      ctx.stroke();
+      // 비대칭 마킹 — 어디가 위인지(회전) 알려준다
+      ctx.fillStyle = RING;
+      ctx.beginPath();
+      ctx.arc(b.hw * 0.45, -b.hh * 0.45, Math.max(2.5, b.hw * 0.14), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  if (hold >= 0) {
+    ctx.strokeStyle = RING;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.arc(bodies[hold].x, bodies[hold].y, rad(bodies[hold]) + 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+// 사람이 안 만졌을 때 도는 자동 시연 — 결정적 가상 "던지기".
+// 한 주기마다 도형 하나를 사인파 경로로 끌어 올려 놓는다. Math.random 금지.
+var manual = false;
+var demoPhase = 0;
+function demoThrow(dtSec) {
+  demoPhase += dtSec / LOOP;
+  var idx = Math.floor(demoPhase) % bodies.length;
+  var frac = demoPhase - Math.floor(demoPhase);
+  var b = bodies[idx];
+  if (!b) return;
+  var ph = demoPhase * Math.PI * 2;
+  if (frac < 0.62) {
+    // 잡는 구간 — 목표(들어 올리는 경로)를 따라간다. 이전 프레임 손 위치가 곧 이전 위치
+    var tx = W * 0.5 + Math.sin(ph) * W * 0.28;
+    var ty = H * 0.30 + Math.sin(ph * 2) * H * 0.08;
+    hold = bodies.indexOf(b);
+    holdPX = holdX; holdPY = holdY;
+    holdX = tx; holdY = ty;
+  } else if (hold >= 0) {
+    // 놓기 — 마지막 두 프레임 이동을 살짝 증폭해 던지기 속도로 만든다
+    holdPX = holdX - (holdX - holdPX) * 1.6;
+    holdPY = holdY - (holdY - holdPY) * 1.6;
+    hold = -1;
+  }
+}
+
+function frame(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  if (!manual) demoThrow(dt);
+  step(now);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// 조작 — 도형을 집어 던진다. 놓는 순간의 이동 속도가 그대로 던지기 속도
+function pick(x, y) {
+  var best = -1, bd2 = 30;
+  for (var i = 0; i < bodies.length; i++) {
+    var b = bodies[i];
+    var d = Math.hypot(b.x - x, b.y - y);
+    if (d < rad(b) + 12 && d < bd2 + rad(b)) { bd2 = d; best = i; }
+  }
+  return best;
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var x = e.clientX - r.left, y = e.clientY - r.top;
+  var idx = pick(x, y);
+  if (idx < 0) return;
+  manual = true;
+  hold = idx;
+  var b = bodies[idx];
+  holdX = b.x; holdY = b.y; holdPX = b.x; holdPY = b.y;
+  field.setPointerCapture(e.pointerId);
+  if (reduce.matches) { draw(); }
+});
+field.addEventListener('pointermove', function (e) {
+  if (hold < 0) return;
+  var r = field.getBoundingClientRect();
+  holdPX = holdX; holdPY = holdY;
+  holdX = Math.max(6, Math.min(W - 6, e.clientX - r.left));
+  holdY = Math.max(6, Math.min(H - 6, e.clientY - r.top));
+});
+window.addEventListener('pointerup', function () { hold = -1; });
+document.getElementById('reset').addEventListener('click', function () {
+  manual = false; demoPhase = 0; build();
+});
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

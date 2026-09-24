@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>줄이 넘치면 「+N」으로 접는 칩 입력 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ov is-demo" id="ov">
+  <div class="ov__viewport" id="ovViewport">
+    <div class="ov__row" id="ovRow" role="list" aria-label="태그 목록, 좁아지면 접힘">
+      <span class="ov__chip" role="listitem">기획</span>
+      <span class="ov__chip" role="listitem">디자인</span>
+      <span class="ov__chip" role="listitem">개발</span>
+      <span class="ov__chip" role="listitem">QA</span>
+      <span class="ov__chip" role="listitem">마케팅</span>
+      <span class="ov__chip" role="listitem">영업</span>
+      <span class="ov__badge" id="ovBadge" role="listitem">+0</span>
+    </div>
+  </div>
+  <p class="ov__meta">폭 <b id="ovWidth">0</b>px · 접힌 태그 <b id="ovHidden">0</b>개</p>
+  <p class="ov__sr" role="status" aria-live="polite" id="ovLive"></p>
+</div>
+<script>
+(function () {
+  var BADGE_RESERVE = 34; // 계산 겹 상수: 배지 자리 예약폭(px) — 실측 렌더폭 기준 어림
+  var GAP = 8;
+  var WIDE_MS = 900, NARROW_MS = 900, PAUSE_MS = 500;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('ov');
+  var viewport = document.getElementById('ovViewport');
+  var row = document.getElementById('ovRow');
+  var badge = document.getElementById('ovBadge');
+  var widthEl = document.getElementById('ovWidth');
+  var hiddenEl = document.getElementById('ovHidden');
+  var live = document.getElementById('ovLive');
+
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  // 계산 겹: 뷰포트 폭을 칩들의 누적 너비합과 계속 비교해, 다음 칩(+배지 자리)이 넘치는 지점부터 감춘다.
+  function relayout() {
+    var chips = Array.prototype.slice.call(row.querySelectorAll('.ov__chip'));
+    var containerWidth = viewport.getBoundingClientRect().width;
+    var sum = 0, shown = 0;
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].style.display = '';
+    }
+    for (i = 0; i < chips.length; i++) {
+      var w = chips[i].getBoundingClientRect().width;
+      var addGap = shown > 0 ? GAP : 0;
+      var withThis = sum + addGap + w;
+      var remaining = chips.length - (i + 1);
+      var reserve = remaining > 0 ? GAP + BADGE_RESERVE : 0;
+      if (withThis + reserve <= containerWidth) { sum = withThis; shown++; }
+      else { break; }
+    }
+    for (var j = shown; j < chips.length; j++) { chips[j].style.display = 'none'; }
+    var hidden = chips.length - shown;
+    if (hidden > 0) {
+      badge.textContent = '+' + hidden;
+      badge.classList.add('ov__badge--show');
+    } else {
+      badge.classList.remove('ov__badge--show');
+    }
+    widthEl.textContent = Math.round(containerWidth);
+    hiddenEl.textContent = hidden;
+    live.textContent = hidden > 0 ? hidden + '개 태그 접힘' : '전체 표시';
+  }
+
+  var ro = window.ResizeObserver ? new ResizeObserver(function () { relayout(); }) : null;
+  if (ro) ro.observe(viewport);
+
+  var timer = 0, rafId = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function pollDuring(ms, cb) {
+    var t0 = null;
+    function step(ts) {
+      if (!root.classList.contains('is-demo')) return;
+      if (t0 === null) t0 = ts;
+      relayout();
+      if (ts - t0 < ms) { rafId = requestAnimationFrame(step); } else { relayout(); cb(); }
+    }
+    rafId = requestAnimationFrame(step);
+  }
+
+  function loop() {
+    if (!root.classList.contains('is-demo')) return;
+    viewport.classList.add('ov__viewport--narrow');
+    pollDuring(NARROW_MS, function () {
+      schedule(function () {
+        if (!root.classList.contains('is-demo')) return;
+        viewport.classList.remove('ov__viewport--narrow');
+        pollDuring(WIDE_MS, function () { schedule(loop, PAUSE_MS); });
+      }, PAUSE_MS);
+    });
+  }
+
+  viewport.addEventListener('click', function () { human(); viewport.classList.toggle('ov__viewport--narrow'); relayout(); });
+  window.addEventListener('resize', relayout);
+
+  relayout();
+  if (!reduce) {
+    schedule(loop, 300);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

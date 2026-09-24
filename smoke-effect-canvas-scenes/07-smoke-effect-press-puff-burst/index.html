@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>버튼이 눌린 순간 입자 뭉치 하나가 생겨 짧은 시간 안에 사방으로 퍼지다가 빠르게 옅어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">버튼이 눌린 순간 입자 뭉치 하나가 생겨 짧은 시간 안에 사방으로 퍼지다가 빠르게 옅어진다</p>
+  <button class="smk__btn" id="smkBtn" type="button">연기 뿜기</button>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 누르는 순간 원점 한 곳에서 SMOKE_BURST_COUNT 개 입자를 방사형으로 한 번에
+  // 만들어 서로 다른 각도·속도로 사방에 흩뿌리고, 수명을 짧게 잡아(SMOKE_BURST_LIFE_MS)
+  // 빠르게 옅어지게 한다. 자동 시연은 루프마다 두 번 같은 burst() 함수를 그대로 호출한다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var btn = document.getElementById('smkBtn');
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_BURST_COUNT = 34;
+  var SMOKE_BURST_SPEED_PX_S = 60;
+  var SMOKE_BURST_LIFE_MS = 620;
+  var ORIGIN_X = CALC_W * 0.5, ORIGIN_Y = CALC_H * 0.56;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var pRand = seedRand(423071);
+  var particles = [];
+
+  function burst(bornMs) {
+    for (var i = 0; i < SMOKE_BURST_COUNT; i += 1) {
+      var ang = pRand() * Math.PI * 2;
+      var speed = SMOKE_BURST_SPEED_PX_S * (0.4 + pRand() * 0.9);
+      particles.push({
+        x: ORIGIN_X, y: ORIGIN_Y,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        born: bornMs
+      });
+    }
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      p.x += p.vx * dtS;
+      p.y += p.vy * dtS;
+      p.vy -= 8 * dtS;
+      if (nowMs - p.born < SMOKE_BURST_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / SMOKE_BURST_LIFE_MS));
+      var r = 4 + f * 15;
+      var alpha = (1 - f) * 0.55;
+      if (alpha <= 0.01) continue;
+      var dx = p.x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(28,24,20,' + alpha + ')');
+      g.addColorStop(1, 'rgba(28,24,20,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  btn.addEventListener('pointerdown', function () {
+    burst(elapsed);
+    if (reduce) drawSmoke(elapsed);
+  });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      burst(elapsed);
+      if (reduce) drawSmoke(elapsed);
+    }
+  });
+
+  var PUFF_LOOP_MS = 2000;
+  var PUFF_TIME_1 = 260;
+  var PUFF_TIME_2 = 1300;
+  var lastCycle = -1;
+  var triggered1 = false, triggered2 = false;
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      if (root.classList.contains('is-demo')) {
+        var cycle = Math.floor(elapsed / PUFF_LOOP_MS);
+        var phase = elapsed % PUFF_LOOP_MS;
+        if (cycle !== lastCycle) { lastCycle = cycle; triggered1 = false; triggered2 = false; }
+        if (!triggered1 && phase >= PUFF_TIME_1) { triggered1 = true; burst(elapsed); }
+        if (!triggered2 && phase >= PUFF_TIME_2) { triggered2 = true; burst(elapsed); }
+      }
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

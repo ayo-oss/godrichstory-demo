@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disabled button ripple block — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="drb is-demo" id="drb" role="group" aria-label="Batch actions"></div>
+<script>
+(function () {
+  var ITEMS = [
+    { label: 'Delete', disabled: true },
+    { label: 'Approve', disabled: false },
+    { label: 'Unlock', disabled: true },
+    { label: 'Export', disabled: false }
+  ];
+  var CYCLE_MS = 650; // 데모 자동 시도 간격
+  var HALT_RATIO = 0.5; // 계산 겹 상수: 리플이 최대 반경의 이 비율까지만 번지고 멈춘다
+  var SHAKE_MS = 420;
+  var SHAKE_FREQ = 26; // rad/s 대역 — 데모용 가정값
+  var SHAKE_DECAY = 6.5;
+  var SHAKE_AMPLITUDE = 6; // px, 데모용 가정값
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('drb');
+  var isDemo = true;
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  var cells = ITEMS.map(function (item) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'drb__btn';
+    btn.textContent = item.label;
+    if (item.disabled) btn.setAttribute('aria-disabled', 'true');
+
+    var ripple = document.createElement('span');
+    ripple.className = 'drb__ripple';
+    btn.appendChild(ripple);
+
+    root.appendChild(btn);
+    return { btn: btn, ripple: ripple, disabled: item.disabled, raf: 0 };
+  });
+
+  // 계산 겹 1: 리플이 버튼 대각선의 절반(HALT_RATIO)까지만 실측 확산되다 멈춘다(막힘의 시각화).
+  // 계산 겹 2: 흔들림은 캔버스 키프레임이 아니라 rAF 로 sin(진동) × exp(감쇠) 를 매 프레임 적분한다.
+  function attempt(cell) {
+    if (!cell.disabled) return;
+    var r = cell.btn.getBoundingClientRect();
+    var maxR = Math.hypot(r.width, r.height) / 2;
+    var haltR = maxR * HALT_RATIO;
+
+    if (reduce) {
+      cell.ripple.style.transform = 'translate(-50%,-50%) scale(' + (haltR / 4) + ')';
+      cell.ripple.style.opacity = '0.001';
+      cell.btn.style.transform = 'translate(0,0)';
+      return;
+    }
+
+    if (cell.raf) cancelAnimationFrame(cell.raf);
+    var t0 = 0;
+    var dur = Math.max(260, SHAKE_MS);
+    function step(ts) {
+      if (!t0) t0 = ts;
+      var t = (ts - t0) / 1000;
+      var tt = Math.min(1, (ts - t0) / dur);
+
+      // 리플: 0 → haltR 까지 감속 확산 후 멈춤(그 이상 안 커짐), 페이드는 확산과 별도로 진행
+      var spread = haltR * (1 - Math.pow(1 - Math.min(1, tt * 1.6), 2));
+      cell.ripple.style.transform = 'translate(-50%,-50%) scale(' + Math.max(0.001, spread / 4) + ')';
+      cell.ripple.style.opacity = String(Math.max(0, 1 - tt));
+
+      // 흔들림: 감쇠 진동자 — 캔버스 키프레임이 아니라 매 프레임 계산
+      var shakeT = Math.min(t, SHAKE_MS / 1000);
+      var dx = SHAKE_AMPLITUDE * Math.sin(SHAKE_FREQ * shakeT) * Math.exp(-SHAKE_DECAY * shakeT);
+      cell.btn.style.transform = 'translate(' + dx.toFixed(2) + 'px,0)';
+
+      if (tt < 1) cell.raf = requestAnimationFrame(step);
+      else { cell.raf = 0; cell.btn.style.transform = 'translate(0,0)'; }
+    }
+    cell.raf = requestAnimationFrame(step);
+  }
+
+  cells.forEach(function (cell) {
+    cell.btn.addEventListener('pointerdown', function () { human(); attempt(cell); });
+  });
+
+  var idx = 0, start = 0;
+  var disabledIdx = cells.map(function (c, i) { return c.disabled ? i : -1; }).filter(function (i) { return i >= 0; });
+  function loop(ts) {
+    if (!start) start = ts;
+    if (isDemo && !reduce) {
+      var slot = Math.floor((ts - start) / CYCLE_MS) % disabledIdx.length;
+      if (slot !== idx) { idx = slot; attempt(cells[disabledIdx[idx]]); }
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

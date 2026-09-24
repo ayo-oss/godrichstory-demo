@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D 노이즈 함수로 은박 표면을 계산해 카드마다 반사 무늬가 다르게 그려진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <div class="scv__card">
+    <p class="scv__label">스크래치 카드</p>
+    <div class="scv__zone" id="zone">
+      <div class="scv__prize">
+        <p class="scv__prizeTitle">선물 쿠폰</p>
+        <p class="scv__prizeSub">새 카드마다 다른 은박 무늬</p>
+      </div>
+      <canvas class="scv__foil" id="foil" width="280" height="150" aria-hidden="true"></canvas>
+    </div>
+    <div class="scv__btnRow">
+      <button type="button" class="scv__reveal" id="revealBtn">한 번에 보기</button>
+      <button type="button" class="scv__redo" id="redoBtn">새 카드 만들기</button>
+    </div>
+    <p class="scv__live" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 2D 값 노이즈 함수(valueNoise2D)로 은박 표면의 밝기를 픽셀마다 계산해 금속 질감을
+  // 만든다. buildNoiseFoil(seed) 는 seed 하나로 결정된 무늬 하나를 만들고, "새 카드 만들기" 는
+  // seed 를 바꿔 다른 무늬를 다시 계산한다 — 이미지 파일이 아니라 그때그때 계산으로 그린다.
+  var root = document.getElementById('scv');
+  var zone = document.getElementById('zone');
+  var foil = document.getElementById('foil');
+  var ctx = foil.getContext('2d');
+  var revealBtn = document.getElementById('revealBtn');
+  var redoBtn = document.getElementById('redoBtn');
+  var live = document.getElementById('live');
+
+  var FOIL_NOISE_DIM = 22;
+  var SCRATCH_BRUSH_R = 15;
+  var FW = foil.width, FH = foil.height;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+
+  function buildNoiseTable(seed) {
+    var rand = seedRand(seed);
+    var table = new Float32Array(FOIL_NOISE_DIM * FOIL_NOISE_DIM);
+    for (var i = 0; i < table.length; i += 1) table[i] = rand();
+    return table;
+  }
+  function noiseAt(table, xi, yi) {
+    var wx = ((xi % FOIL_NOISE_DIM) + FOIL_NOISE_DIM) % FOIL_NOISE_DIM;
+    var wy = ((yi % FOIL_NOISE_DIM) + FOIL_NOISE_DIM) % FOIL_NOISE_DIM;
+    return table[wy * FOIL_NOISE_DIM + wx];
+  }
+  function valueNoise2D(table, x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(table, x0, y0), v10 = noiseAt(table, x0 + 1, y0);
+    var v01 = noiseAt(table, x0, y0 + 1), v11 = noiseAt(table, x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx, b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  function buildNoiseFoil(seed) {
+    var table = buildNoiseTable(seed);
+    var crackRand = seedRand(seed + 1);
+    var img = ctx.createImageData(FW, FH);
+    var d = img.data;
+    var scaleX = FOIL_NOISE_DIM / FW, scaleY = FOIL_NOISE_DIM / FH;
+    for (var y = 0; y < FH; y += 1) {
+      for (var x = 0; x < FW; x += 1) {
+        var n = valueNoise2D(table, x * scaleX * 2.4, y * scaleY * 2.4);
+        var lightness = 176 + n * 62;
+        var idx = (y * FW + x) * 4;
+        d[idx] = lightness * 0.98;
+        d[idx + 1] = lightness;
+        d[idx + 2] = lightness * 1.03;
+        d[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    ctx.strokeStyle = 'rgba(23,20,26,.14)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 16; i += 1) {
+      var sx = crackRand() * FW, sy = crackRand() * FH;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + (crackRand() * 26 - 13), sy + (crackRand() * 10 - 5));
+      ctx.stroke();
+    }
+    return img;
+  }
+
+  var seed = 424021;
+  var baseCache = null, baseSeed = null;
+  function getBase() {
+    if (baseSeed !== seed) { baseCache = buildNoiseFoil(seed); baseSeed = seed; }
+    return baseCache;
+  }
+
+  function renderIdle(sheenT) {
+    ctx.putImageData(getBase(), 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var sheenX = FW * sheenT;
+    var g = ctx.createLinearGradient(sheenX - 34, 0, sheenX + 34, FH);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(.5, 'rgba(255,255,255,.55)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, FW, FH);
+    ctx.restore();
+  }
+
+  function scratchAt(x, y) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  var opened = false, scratchStarted = false;
+
+  function openCard() {
+    if (opened) return;
+    opened = true;
+    scratchStarted = true;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, FW, FH);
+    root.classList.add('is-open');
+    live.textContent = '선물 쿠폰이 열렸어요';
+  }
+
+  function newCard() {
+    seed += 1;
+    opened = false;
+    scratchStarted = false;
+    root.classList.remove('is-open');
+    renderIdle(0);
+    live.textContent = '새 은박 무늬를 계산했어요';
+  }
+
+  function pos(e) {
+    var r = foil.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dragging = false;
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (opened) return;
+    root.classList.remove('is-demo');
+    scratchStarted = true;
+    dragging = true;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+    if (foil.setPointerCapture) foil.setPointerCapture(e.pointerId);
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (!dragging || opened) return;
+    var p = pos(e);
+    scratchAt(p.x, p.y);
+  });
+  window.addEventListener('pointerup', function () { dragging = false; });
+
+  revealBtn.addEventListener('click', function () { root.classList.remove('is-demo'); openCard(); });
+  redoBtn.addEventListener('click', function () { root.classList.remove('is-demo'); newCard(); });
+
+  // 격자 미리보기 — 반짝임(is idle) 뒤 긁기 스케줄 실행 후 새 무늬로 넘어가는 순환
+  var demoRand = seedRand(424022);
+  var demoPath = [];
+  (function buildDemoPath() {
+    for (var i = 0; i < 18; i += 1) {
+      demoPath.push({
+        t: 1400 + i * 90,
+        x: (FW * 0.15) + (i % 6) * (FW * 0.15) + (demoRand() - .5) * 8,
+        y: (FH * 0.28) + Math.floor(i / 6) * (FH * 0.24) + (demoRand() - .5) * 8
+      });
+    }
+  })();
+  var DEMO_LOOP_MS = 4400;
+  var demoStep = 0;
+
+  function runDemo(tMod) {
+    if (tMod < 1400) {
+      renderIdle((Math.sin(tMod * 0.0028) + 1) / 2);
+      return;
+    }
+    if (!scratchStarted) scratchStarted = true;
+    while (demoStep < demoPath.length && demoPath[demoStep].t <= tMod) {
+      var p = demoPath[demoStep];
+      scratchAt(p.x, p.y);
+      demoStep += 1;
+    }
+  }
+  function resetDemo() {
+    seed += 1;
+    opened = false;
+    scratchStarted = false;
+    root.classList.remove('is-open');
+    demoStep = 0;
+  }
+
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0;
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) resetDemo();
+      runDemo(tMod);
+    }
+    requestAnimationFrame(tick);
+  }
+  renderIdle(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

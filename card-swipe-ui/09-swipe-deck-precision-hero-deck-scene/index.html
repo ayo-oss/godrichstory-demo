@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>회전 렙·스프링·원근 스택을 한 장면에 모은 완성형 카드 덱 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <p class="hs__caption">회전 렙·스프링·원근 스택을 한 장면에 모은 완성형 카드 덱</p>
+  <div class="hs__scene" id="hsScene">
+    <div class="hs__peek" id="hsPeek3" aria-hidden="true"></div>
+    <div class="hs__peek" id="hsPeek2" aria-hidden="true"></div>
+    <div class="hs__peek" id="hsPeek1" aria-hidden="true"></div>
+    <div class="hs__card" id="hsCard" tabindex="0" role="group" aria-roledescription="스와이프 카드">
+      <p class="hs__label" id="hsLabel">주말 카페</p>
+    </div>
+    <button class="hs__btn hs__btn--nope" id="hsNope" type="button" aria-label="싫어요">✕</button>
+    <button class="hs__btn hs__btn--like" id="hsLike" type="button" aria-label="좋아요">♥</button>
+  </div>
+  <p class="hs__status" id="hsStatus" aria-live="polite">대기 중</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 01+03+04 를 한 장면에 모은다: 회전은 목표값을 향해 매 프레임 HERO_ROTATE_LERP_RATE 로
+  // 지연 보간(01), 약하게 놓으면 스프링(강성·감쇠) 적분으로 되돌아오고(03),
+  // 뒤 카드들은 HERO_STACK_PERSPECTIVE_SCALE 원근 투영으로 겹쳐 쌓인다(04).
+  var HERO_ROTATE_LERP_RATE = 0.22;
+  var ROTATE_TARGET_RATIO = 0.09;
+  var ROTATE_MAX_DEG = 22;
+  var HERO_STACK_PERSPECTIVE_SCALE = 0.11;
+  var FOCAL = 240;
+  var STACK_SIZE = 3;
+  var SPRING_FLING_VELOCITY_MIN = 0.42;
+  var SPRING_STIFFNESS = 130;
+  var SPRING_DAMPING = 13;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("hs");
+  var card = document.getElementById("hsCard");
+  var label = document.getElementById("hsLabel");
+  var status = document.getElementById("hsStatus");
+  var btnLike = document.getElementById("hsLike");
+  var btnNope = document.getElementById("hsNope");
+  var peeks = [
+    document.getElementById("hsPeek1"),
+    document.getElementById("hsPeek2"),
+    document.getElementById("hsPeek3")
+  ];
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function layoutStack() {
+    for (var i = 1; i <= STACK_SIZE; i++) {
+      var depth = i * HERO_STACK_PERSPECTIVE_SCALE * FOCAL;
+      var s = FOCAL / (FOCAL + depth);
+      var ty = -(1 - s) * 58;
+      var el = peeks[i - 1];
+      el.style.transform = "translateY(" + ty.toFixed(2) + "%) scale(" + s.toFixed(3) + ")";
+      el.style.opacity = (1 - i * 0.24).toFixed(2);
+      el.style.zIndex = String(STACK_SIZE - i);
+    }
+  }
+  layoutStack();
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["주말 카페", "홈트 기록", "독서 목록", "여행 메모", "아침 루틴", "저녁 산책"];
+  var rand = seedRand(115);
+  var idx = Math.floor(rand() * CARDS.length);
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vxRaw = 0;
+  var pos = 0, vel = 0, rot = 0, phase = "idle", exitDir = 1;
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  function render() {
+    var targetRot = clamp(pos * ROTATE_TARGET_RATIO, -ROTATE_MAX_DEG, ROTATE_MAX_DEG);
+    rot += (targetRot - rot) * HERO_ROTATE_LERP_RATE;
+    card.style.transform = "translateX(" + pos.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
+  }
+
+  function nextCard() {
+    idx += 1; setCard();
+    pos = 0; vel = 0; rot = 0; phase = "idle";
+    render();
+    status.textContent = "대기 중";
+  }
+
+  function judge(velocityPxMs, dir) {
+    root.classList.remove("is-demo");
+    var flung = Math.abs(velocityPxMs) >= SPRING_FLING_VELOCITY_MIN;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "좋아요 처리됨" : "싫어요 처리됨"; nextCard(); }
+      else { pos = 0; vel = 0; rot = 0; render(); status.textContent = "스프링으로 되돌아옴"; phase = "idle"; }
+      return;
+    }
+    if (flung) {
+      phase = "exit"; exitDir = dir;
+      status.textContent = dir > 0 ? "좋아요 처리됨" : "싫어요 처리됨";
+    } else {
+      phase = "spring";
+      vel = velocityPxMs * 1000;
+      status.textContent = "스프링으로 되돌아옴";
+    }
+  }
+
+  function startDrag(clientX) {
+    root.classList.remove("is-demo");
+    dragging = true; phase = "idle";
+    startX = clientX; lastX = clientX; lastT = performance.now(); vxRaw = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vxRaw = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    pos = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vxRaw, pos >= 0 ? 1 : -1);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function keyVerdict(dir, weak) {
+    root.classList.remove("is-demo");
+    pos = dir * (weak ? 30 : 70); render();
+    judge(dir * (weak ? 0.08 : SPRING_FLING_VELOCITY_MIN + 0.4), dir);
+  }
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { e.preventDefault(); keyVerdict(1, false); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); keyVerdict(-1, false); }
+  });
+  btnLike.addEventListener("click", function () { keyVerdict(1, false); });
+  btnNope.addEventListener("click", function () { keyVerdict(-1, false); });
+
+  function integrate(dt) {
+    var accel = SPRING_STIFFNESS * (0 - pos) - SPRING_DAMPING * vel;
+    vel += accel * dt;
+    pos += vel * dt;
+    if (Math.abs(pos) < 0.4 && Math.abs(vel) < 4) { pos = 0; vel = 0; phase = "idle"; }
+  }
+
+  function step(dt) {
+    var dtS = Math.min(dt / 1000, 0.032);
+    if (phase === "exit") {
+      pos += exitDir * Math.max(Math.abs(vel) / 1000, SPRING_FLING_VELOCITY_MIN * 1.3) * dt;
+      render();
+      if (Math.abs(pos) > EXIT_PX) nextCard();
+    } else if (phase === "spring") {
+      integrate(dtS);
+      render();
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 pointer 없이 pos·judge() 를 같은 경로로 호출한다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.4 && t < 0.65 && synthPhase === "wait") synthPhase = "pull";
+    if (synthPhase === "pull") {
+      var p = clamp((t - 0.4) / 0.25, 0, 1);
+      pos = p * 65; render();
+      if (t >= 0.65) { synthPhase = "afterPull"; judge(0.08, 1); }
+    }
+    if (t > 1.3 && t < 1.55 && synthPhase === "afterPull") synthPhase = "throw";
+    if (synthPhase === "throw") {
+      var q = clamp((t - 1.3) / 0.25, 0, 1);
+      pos = -q * 140; render();
+      if (t >= 1.55) { synthPhase = "done"; judge(-(SPRING_FLING_VELOCITY_MIN + 0.4), -1); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

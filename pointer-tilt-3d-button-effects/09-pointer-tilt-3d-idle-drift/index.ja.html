@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>放っておいても正弦波で漂うボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="id is-demo" id="idw">
+  <p class="id__hint"><span>周波数の異なる2つの正弦波を足し合わせ、手を離してもボタンがゆっくり自ら漂います</span></p>
+  <div class="id__scene" id="scene">
+    <span class="id__floor" id="floor" aria-hidden="true"></span>
+    <button class="id__btn" id="btn" type="button" aria-label="無料で始める — 放っておいても漂うボタン">
+      <span class="id__glow" id="glow" aria-hidden="true"></span>
+      <span class="id__label">無料で始める</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('idw');
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var floor = document.getElementById('floor');
+  var glow = document.getElementById('glow');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var MAX_DEG = 8;   // 불변
+  var LERP = 0.12;
+  var targetNX = 0, targetNY = 0, curNX = 0, curNY = 0;
+  var hasPointer = false;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // 유휴 드리프트 — 주파수·위상이 다른 사인파 둘을 더한 합성 곡선(고정 시드). 포인터가 있으면 좌표로 덮인다
+  // 진폭 상수를 키워 자동 시연에서도 가장자리(±1, MAX_DEG 전체)까지 실제로 닿게 한다
+  function idleDrift(t) {
+    var x = 0.85 * Math.sin(t * 0.55) + 0.55 * Math.sin(t * 1.31 + 0.8);
+    var y = 0.76 * Math.sin(t * 0.41 + 1.3) + 0.48 * Math.sin(t * 0.97 + 2.4);
+    return [clamp(x, -1, 1), clamp(y, -1, 1)];
+  }
+
+  function render(nx, ny) {
+    var rotY = nx * MAX_DEG;
+    var rotX = -ny * MAX_DEG;
+    var mag = Math.min(1, Math.sqrt(nx * nx + ny * ny));
+    var lift = 1 - mag * 0.4;
+    btn.style.transform = 'translateY(' + ((1 - lift) * -6).toFixed(2) + 'px) rotateX(' + rotX.toFixed(2) + 'deg) rotateY(' + rotY.toFixed(2) + 'deg)';
+    var blur = 16 + Math.abs(nx) * 10 + Math.abs(ny) * 10;
+    btn.style.boxShadow = '0 ' + (10 * lift).toFixed(1) + 'px ' + blur.toFixed(1) + 'px rgba(8,6,12,.34)';
+    // 바닥 그림자 — 기운 반대쪽으로 떨어져 나가며 면적을 만든다
+    floor.style.transform = 'translate(' + (nx * 38).toFixed(1) + 'px, ' + (ny * 16).toFixed(1) + 'px) scale(' + (1 + mag * 0.32).toFixed(2) + ')';
+    floor.style.opacity = (0.16 + mag * 0.55).toFixed(2);
+    // 하이라이트 — 기운 반대쪽(들린 쪽)에서 밝아져 그림자와 짝으로 움직인다
+    var gx = (50 - nx * 32).toFixed(0);
+    var gy = (50 - ny * 32).toFixed(0);
+    glow.style.background = 'radial-gradient(circle at ' + gx + '% ' + gy + '%, rgba(255,255,255,' + (0.16 + mag * 0.42).toFixed(2) + '), rgba(255,255,255,0) 62%)';
+  }
+
+  var t0 = null;
+  function loop(now) {
+    if (t0 === null) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!hasPointer && !reduce) {
+      var d = idleDrift(t);
+      targetNX = d[0]; targetNY = d[1];
+    }
+    curNX += (targetNX - curNX) * LERP;
+    curNY += (targetNY - curNY) * LERP;
+    render(curNX, curNY);
+    requestAnimationFrame(loop);
+  }
+
+  function pointFromEvent(e) {
+    var r = scene.getBoundingClientRect();
+    var nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    var ny = ((e.clientY - r.top) / r.height) * 2 - 1;
+    return [clamp(nx, -1, 1), clamp(ny, -1, 1)];
+  }
+
+  scene.addEventListener('pointermove', function (e) {
+    hasPointer = true;
+    root.classList.remove('is-demo');
+    var p = pointFromEvent(e);
+    targetNX = p[0]; targetNY = p[1];
+  });
+  scene.addEventListener('pointerleave', function () {
+    hasPointer = false;
+  });
+  btn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    targetNX = 0; targetNY = -0.9;
+    if (reduce) { render(targetNX, targetNY); }
+    setTimeout(function () { hasPointer = false; }, 260);
+  });
+  btn.addEventListener('keydown', function (e) {
+    var step = 0.22;
+    var moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    var m = moves[e.key];
+    if (!m) return;
+    e.preventDefault();
+    root.classList.remove('is-demo');
+    hasPointer = true;
+    targetNX = clamp(targetNX + m[0], -1, 1);
+    targetNY = clamp(targetNY + m[1], -1, 1);
+    if (reduce) { render(targetNX, targetNY); }
+  });
+
+  if (reduce) {
+    render(0.2, -0.2);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

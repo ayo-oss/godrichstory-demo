@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>昼と夜が分かれる地球儀 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gn" id="gn">
+  <p class="gn__hint">
+    <svg class="gn__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 40a88 88 0 1 0 88 88a88.1 88.1 0 0 0-88-88" opacity=".2"/><path d="M120 40V16a8 8 0 0 1 16 0v24a8 8 0 0 1-16 0m112 88a8 8 0 0 1-8 8h-24a8 8 0 0 1 0-16h24a8 8 0 0 1 8 8M69.66 186.34a8 8 0 0 1 0 11.32l-16.97 17a8 8 0 0 1-11.32-11.32l17-17a8 8 0 0 1 11.29 0M56 128a8 8 0 0 0-8-8H24a8 8 0 0 0 0 16h24a8 8 0 0 0 8-8m13.66-58.34a8 8 0 0 0 11.32 0a8 8 0 0 0 0-11.32l-17-17a8 8 0 0 0-11.32 11.32Zm128 0l17-17a8 8 0 0 0-11.32-11.32l-17 17a8 8 0 0 0 11.32 11.32M128 200a8 8 0 0 0-8 8v24a8 8 0 0 0 16 0v-24a8 8 0 0 0-8-8m58.34-13.66a8 8 0 0 0-11.32 11.32l17 17a8 8 0 0 0 11.32-11.32Z" fill-rule="evenodd"/></g></svg>
+    <span>太陽方向と表面法線の内積で明るさをピクセルごとに計算します</span>
+  </p>
+  <div class="gn__field" id="field" role="img" aria-label="昼夜境界の地球儀">
+    <canvas class="gn__cv" id="cv"></canvas>
+  </div>
+</div>
+</main>
+<script>
+// 昼夜境界の地球儀 — 구 표면의 픽셀마다 법선(x,y,z)/R 을 구하고 태양 방향 벡터와 내적해 밝기를 얻는다
+// (dot product shading). CSS 트윈이 아니라 매 프레임 ImageData 를 채워 넣는 픽셀 단위 계산이다(077 계열).
+// 태양 방향은 시간에 따라 지구본을 도는 것처럼 천천히 회전 — 경계선이 자연스레 이동한다.
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var TAU = Math.PI * 2;
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var buf = null;             // ImageData 캐시 — 매 프레임 재할당하지 않는다
+var last = 0, raf = 0;
+var sunAngle = 0.6;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  // CSS(width:100%·height:100%) 로 화면 크기를 잡고 백킹스토어만 물리 픽셀로 —
+  // 인라인 width 를 심으면 좁은 화면에서 잔값이 남아 판이 그대로 벌어진다(320px 넘침).
+  W = Math.round(r.width * dpr);
+  H = Math.round(r.height * dpr);
+  cv.width = W; cv.height = H;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  buf = ctx.createImageData(W, H);
+}
+
+function hexToRgb(hex) {
+  var h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
+  var n = parseInt(h, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function draw() {
+  var cx = W / 2, cy = H / 2;
+  var R = Math.min(W, H) * 0.47;
+  var Rsq = R * R;
+
+  var cs = getComputedStyle(document.getElementById('gn'));
+  var night = hexToRgb(cs.getPropertyValue('--gn-night').trim());
+  var day = hexToRgb(cs.getPropertyValue('--gn-day').trim());
+  var termGlow = hexToRgb(cs.getPropertyValue('--gn-terminator').trim());
+
+  // 태양 벡터 — 살짝 기울어진(자전축 경사 느낌) 채로 xz 평면을 천천히 돈다
+  var tilt = 0.22;
+  var sx = Math.cos(sunAngle), sz = Math.sin(sunAngle);
+  var sun = { x: sx, y: tilt, z: sz };
+  var sl = Math.sqrt(sun.x * sun.x + sun.y * sun.y + sun.z * sun.z);
+  sun.x /= sl; sun.y /= sl; sun.z /= sl;
+
+  var data = buf.data;
+  var minX = Math.max(0, Math.floor(cx - R - 1));
+  var maxX = Math.min(W, Math.ceil(cx + R + 1));
+  var minY = Math.max(0, Math.floor(cy - R - 1));
+  var maxY = Math.min(H, Math.ceil(cy + R + 1));
+
+  // 먼저 전체를 투명(알파 0)으로 밀어 둔다 — 원 밖은 무대 배경이 그대로 비친다
+  data.fill(0);
+
+  for (var y = minY; y < maxY; y++) {
+    var dy = y - cy;
+    var rowBase = y * W;
+    for (var x = minX; x < maxX; x++) {
+      var dx = x - cx;
+      var d2 = dx * dx + dy * dy;
+      if (d2 > Rsq) continue;
+      var nx = dx / R, ny = -dy / R;
+      var nzsq = 1 - nx * nx - ny * ny;
+      if (nzsq < 0) continue;
+      var nz = Math.sqrt(nzsq);
+      var ndotl = nx * sun.x + ny * sun.y + nz * sun.z;   // 법선·태양 내적
+      var lit = Math.max(0, ndotl);
+      var t = Math.min(1, lit * 2.2);                     // 경계 부근을 넓혀 그라디언트로
+      var idx = (rowBase + x) * 4;
+      data[idx] = night[0] + (day[0] - night[0]) * t;
+      data[idx + 1] = night[1] + (day[1] - night[1]) * t;
+      data[idx + 2] = night[2] + (day[2] - night[2]) * t;
+      // 터미네이터 근접(내적이 0 근방)일 때 옅은 노을색 한 겹을 얹는다
+      var edge = 1 - Math.min(1, Math.abs(ndotl) * 6);
+      if (edge > 0) {
+        data[idx] = data[idx] + (termGlow[0] - data[idx]) * edge * 0.55;
+        data[idx + 1] = data[idx + 1] + (termGlow[1] - data[idx + 1]) * edge * 0.55;
+        data[idx + 2] = data[idx + 2] + (termGlow[2] - data[idx + 2]) * edge * 0.55;
+      }
+      data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(buf, 0, 0);
+}
+
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  sunAngle += dt * 0.55;
+  draw();
+  raf = requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', function () { fit(); draw(); });
+
+fit();
+if (reduce) {
+  draw();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

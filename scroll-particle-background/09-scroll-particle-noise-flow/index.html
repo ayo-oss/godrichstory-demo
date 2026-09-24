@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>노이즈 흐름장 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>스크롤 속도가 흐름장의 빠르기를, 위치가 물결의 위상을 바꿉니다</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="입자 노이즈 흐름 스크롤 영역">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">0%</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(8675309);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#ff9ebb';
+
+  // 계산 겹: 자체 구현 2D 값-노이즈 흐름장(value-noise flow field) — 라이브러리 없이 순열 표를
+  // 직접 만들어(makeLcg 로 섞음) 격자 꼭짓점 해시값을 스무스스텝으로 보간한다. 그 값을 각도로 써서
+  // 입자마다 흐르는 방향을 정하므로 입자가 "따라 흐르는" 모습이 나온다.
+  var PERM_SIZE = 256;
+  var perm = (function () {
+    var p = [];
+    for (var i = 0; i < PERM_SIZE; i++) p.push(i);
+    for (var j = PERM_SIZE - 1; j > 0; j--) {
+      var k = Math.floor(rng() * (j + 1));
+      var t = p[j]; p[j] = p[k]; p[k] = t;
+    }
+    return p.concat(p);
+  })();
+  function hash2(ix, iy) {
+    var a = perm[(ix & 255)];
+    return perm[(a + iy) & 255] / 255;
+  }
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function valueNoise(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var fx = smooth(x - x0), fy = smooth(y - y0);
+    var v00 = hash2(x0, y0), v10 = hash2(x0 + 1, y0);
+    var v01 = hash2(x0, y0 + 1), v11 = hash2(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * fx;
+    var b = v01 + (v11 - v01) * fx;
+    return a + (b - a) * fy;
+  }
+
+  var NOISE_SCALE = 0.045;  // 공간 주파수 — 낮을수록 큰 소용돌이 결
+  var TIME_GAIN = 0.00014;  // 시간에 따라 장이 흘러가는 속도
+  var SCROLL_WARP = 3.4;    // 스크롤 위치가 노이즈 좌표를 미는 양 (위상 이동)
+  var BASE_SPEED = 34;      // 기본 흐름 속력 (px/s)
+  var FLOW_SPEED = 0.6;     // 흐름 속력 배수 (변형 대상 상수)
+  var COUNT = 60;
+
+  var W = 0, H = 0, dpr = 1;
+  var dots = [];
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (dots.length === 0) initDots();
+  }
+
+  function initDots() {
+    dots = [];
+    for (var i = 0; i < COUNT; i++) {
+      dots.push({ x: rng() * W, y: rng() * H, r: 1.2 + rng() * 1.9 });
+    }
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, idleMs = 0, lastTop = 0, lastT = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.3;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; idleMs = 0; } else { idleMs += dt; }
+    lastTop = top; lastT = now;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function fieldAngle(x, y, now) {
+    var nx = x * NOISE_SCALE + now * TIME_GAIN + scrollPos * SCROLL_WARP;
+    var ny = y * NOISE_SCALE;
+    return valueNoise(nx, ny) * Math.PI * 4;
+  }
+
+  function step(now, dtSec) {
+    var speedGain = 1 + Math.min(2.2, Math.abs(scrollVel) / 180);
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      var ang = fieldAngle(d.x, d.y, now);
+      var speed = BASE_SPEED * FLOW_SPEED * speedGain;
+      d.x += Math.cos(ang) * speed * dtSec;
+      d.y += Math.sin(ang) * speed * dtSec;
+      if (d.x < 0) d.x += W; else if (d.x > W) d.x -= W;
+      if (d.y < 0) d.y += H; else if (d.y > H) d.y -= H;
+    }
+  }
+
+  function paint() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      ctx.globalAlpha = 0.78;
+      ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateVal() { val.textContent = Math.round(scrollPos * 100) + '%'; }
+
+  function paintStatic() {
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      var ang = fieldAngle(d.x, d.y, 0);
+      d.x += Math.cos(ang) * 6;
+      d.y += Math.sin(ang) * 6;
+      if (d.x < 0) d.x += W; else if (d.x > W) d.x -= W;
+      if (d.y < 0) d.y += H; else if (d.y > H) d.y -= H;
+    }
+    paint();
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(now, dtSec);
+    paint();
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = triangle(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

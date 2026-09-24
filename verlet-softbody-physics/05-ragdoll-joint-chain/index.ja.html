@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>래그돌 관절 인형 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rd" id="rd">
+  <p class="rd__hint">
+    <svg class="rd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>どの関節でも引っ張ると長さ制約が連鎖で解け、人形全体が折れてたれます</span>
+  </p>
+  <div class="rd__field" id="field" role="application" aria-label="ラグドール関節実験盤" tabindex="0">
+    <canvas class="rd__cv" id="cv"></canvas>
+    <b class="rd__badge" aria-hidden="true"><span class="rd__badgeNum" id="stVal">0</span><span class="rd__badgeUnit">伸びた制約</span></b>
+  </div>
+  <div class="rd__bar">
+    <label class="rd__dial">関節の剛性
+      <input type="range" id="st" min="2" max="10" step="1" value="6" aria-label="制約反復数">
+    </label>
+    <button class="rd__reset" id="reset" type="button">最初から</button>
+  </div>
+</div>
+</main>
+<script>
+// 래그돌 관절 인형 — 관절 사슬의 길이 제약 물리.
+// 머리-목-가슴-골반-허벅지-정강이(좌우)·어깨-상박-하박(좌우) 점들을 제약(거리·각도)으로 엮는다.
+//   ① 거리 제약: 두 관절 사이를 해부학 길이로 못 박는다(반복해 풀수록 팽팽).
+//   ② 각도 제한: 부모 세그먼트 방향 대비 자식이 꺾일 수 있는 각(무릎·팔꿈치는 한 방향으로만 접힘)을
+//      넘으면 자식을 경계 각으로 되돌린다 — 이것이 인형을 "인체답게" 만든다.
+// 속도 변수 없음 — 위치 기반 Verlet 적분 next = pos + (pos - prev) * damp + accel * dt^2.
+var root = document.getElementById('rd');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var stIn = document.getElementById('st');
+var stVal = document.getElementById('stVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var INK = css.getPropertyValue('--ink').trim();
+var SKIN = css.getPropertyValue('--skin').trim();
+var LIMB = css.getPropertyValue('--limb').trim();
+var GRIP = css.getPropertyValue('--grip').trim();
+var W = 0, H = 0, dpr = 1;
+var t0 = performance.now();
+
+var GRAV = 1500;              // 중력(px/s^2)
+var DAMP = 0.99;              // 속도 보존률(관절 마찰 — 인형이 무한히 흔들리지 않게)
+var LOOP = 3;                 // 자동 시연 한 바퀴(초)
+
+var pts = [];                 // 관절: {x, y, px, py}
+var links = [];               // 거리 제약: {a, b, len, min(최소 길이 — 접힘 허용)}
+var limits = [];              // 각도 제한: {a(부모), b(관절), c(자식), min, max(부모 방향 기준 라디안)}
+var dragging = -1;
+var dragX = 0, dragY = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  pts = []; links = []; limits = [];
+  // 좌표는 판 크기에 맞춘 비율 — 관절 이름은 해부학 순서
+  var S = Math.min(W, H) / 208;          // 축척(208px 기준 설계)
+  function P(x, y) { pts.push({ x: W * 0.5 + x * S, y: 34 + y * S, px: W * 0.5 + x * S, py: 34 + y * S }); return pts.length - 1; }
+  var head  = P(0, 0);
+  var neck  = P(0, 16);
+  var chest = P(0, 30);
+  var pelv  = P(0, 54);
+  var hipL  = P(-3, 57),  kneeL = P(-4, 78),  footL = P(-5, 100);
+  var hipR  = P(3, 57),   kneeR = P(4, 78),   footR = P(5, 100);
+  var shL   = P(-10, 33), elbL  = P(-16, 48), handL = P(-18, 66);
+  var shR   = P(10, 33),  elbR  = P(16, 48),  handR = P(18, 66);
+  function L(a, b, shrink) {
+    var len = Math.hypot(pts[a].x - pts[b].x, pts[a].y - pts[b].y);
+    links.push({ a: a, b: b, len: len, min: len * (shrink || 1) });
+  }
+  L(head, neck, 0.9); L(neck, chest, 0.95); L(chest, pelv, 0.97);
+  L(pelv, hipL); L(hipL, kneeL, 0.55); L(kneeL, footL, 0.55);
+  L(pelv, hipR); L(hipR, kneeR, 0.55); L(kneeR, footR, 0.55);
+  L(chest, shL); L(shL, elbL, 0.6); L(elbL, handL, 0.6);
+  L(chest, shR); L(shR, elbR, 0.6); L(elbR, handR, 0.6);
+  // 보강 — 어깨 좌우·골반 좌우를 묶어 몸통이 좌우로 찢어지지 않게
+  L(shL, shR, 0.9); L(hipL, hipR, 0.9); L(shL, pelv, 0.9); L(shR, pelv, 0.9);
+  // 각도 제한 {a: 부모 방향 기준점, b: 관절, c: 자식, min, max}
+  // 무릎은 뒤로만(사람 무릎), 팔꿈치는 앞으로만, 목·허리는 ±0.9 라디안
+  limits = [
+    { a: chest, b: neck, c: head, min: -0.9, max: 0.9 },
+    { a: neck, b: chest, c: pelv, min: -0.35, max: 0.35 },
+    { a: hipL, b: kneeL, c: footL, min: 0.1, max: 2.4 },
+    { a: hipR, b: kneeR, c: footR, min: 0.1, max: 2.4 },
+    { a: pelv, b: hipL, c: kneeL, min: -2.2, max: 0.3 },
+    { a: pelv, b: hipR, c: kneeR, min: -0.3, max: 2.2 },
+    { a: shL, b: elbL, c: handL, min: -2.3, max: 0.1 },
+    { a: shR, b: elbR, c: handR, min: -0.1, max: 2.3 }
+  ];
+  dragging = -1;
+}
+
+// 거리 제약 한 번 — 목표 구간 [min, len] 안으로 못 박는다. min < len 이면 접힘이 허용된다
+function solveLink(lk, strength) {
+  var a = pts[lk.a], b = pts[lk.b];
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+  var target = d;
+  if (d > lk.len) target = lk.len;
+  else if (d < lk.min) target = lk.min;
+  else return;                               // 구간 안 — 그대로
+  var off = (d - target) / d * 0.5 * strength;
+  var ox = dx * off, oy = dy * off;
+  var aFree = lk.a !== dragging, bFree = lk.b !== dragging;
+  if (aFree && bFree) { a.x += ox; a.y += oy; b.x -= ox; b.y -= oy; }
+  else if (aFree) { a.x += ox * 2; a.y += oy * 2; }
+  else if (bFree) { b.x -= ox * 2; b.y -= oy * 2; }
+}
+
+// 각도 제한 — 부모 세그먼트(b→a) 방향 대비 자식(b→c) 각도를 [min, max]로 되돌린다
+function solveLimit(lm) {
+  if (lm.b === dragging) return;
+  var a = pts[lm.a], b = pts[lm.b], c = pts[lm.c];
+  var pbx = a.x - b.x, pby = a.y - b.y;      // 부모 방향
+  var pl = Math.hypot(pbx, pby) || 0.0001;
+  var cbx = c.x - b.x, cby = c.y - b.y;      // 자식 방향
+  var cl = Math.hypot(cbx, cby) || 0.0001;
+  var base = Math.atan2(pby, pbx);
+  var ang = Math.atan2(cby, cbx) - base;
+  // -π..π 로 정규화
+  while (ang > Math.PI) ang -= Math.PI * 2;
+  while (ang < -Math.PI) ang += Math.PI * 2;
+  var clamped = Math.max(lm.min, Math.min(lm.max, ang));
+  if (clamped === ang) return;
+  var target = base + clamped;
+  // 자식을 관절(b) 주위로 회전 — b 도 아주 조금 반대로 돌려 부드럽게
+  var co = Math.cos(target), si = Math.sin(target);
+  var nx = b.x + co * cl, ny = b.y + si * cl;
+  var mx = (nx - c.x) * 0.6, my = (ny - c.y) * 0.6;
+  c.x += mx; c.y += my;
+  b.x -= mx * 0.12; b.y -= my * 0.12;
+}
+
+var stretched = 0;
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var iters = Number(stIn.value);
+
+  // (1) 관성 + 중력
+  for (var i = 0; i < pts.length; i++) {
+    if (i === dragging) continue;
+    var p = pts[i];
+    var vx = (p.x - p.px) * DAMP;
+    var vy = (p.y - p.py) * DAMP;
+    p.px = p.x; p.py = p.y;
+    p.x += vx;
+    p.y += vy + GRAV * dt * dt;
+  }
+  // (2) 制約反復 — 거리 → 각도 순서로 iters 번. 반복이 곧 관절 강성이다
+  for (var k = 0; k < iters; k++) {
+    for (var l = 0; l < links.length; l++) solveLink(links[l], 1);
+    for (var m = 0; m < limits.length; m++) solveLimit(limits[m]);
+    // 바닥·벽 — 관절이 판 밖으로 못 나간다
+    for (var v = 0; v < pts.length; v++) {
+      var q = pts[v];
+      if (q.y > H - 4) { q.y = H - 4; q.py = q.y + (q.y - q.py) * 0.3; }
+      if (q.x < 4) { q.x = 4; }
+      if (q.x > W - 4) { q.x = W - 4; }
+    }
+  }
+  if (dragging >= 0) {
+    pts[dragging].x = dragX; pts[dragging].y = dragY;
+  }
+  // 배지 — 목표보다 伸びた制約 수
+  stretched = 0;
+  for (var s = 0; s < links.length; s++) {
+    var lk = links[s];
+    var d = Math.hypot(pts[lk.b].x - pts[lk.a].x, pts[lk.b].y - pts[lk.a].y);
+    if (d > lk.len + 0.75) stretched++;
+  }
+}
+
+function seg(a, b, w, col) {
+  ctx.strokeStyle = col;
+  ctx.lineWidth = w;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(pts[a].x, pts[a].y);
+  ctx.lineTo(pts[b].x, pts[b].y);
+  ctx.stroke();
+}function draw() {
+  ctx.clearRect(0, 0, W, H);
+  var S = Math.min(W, H) / 208;
+  // 관절 번호: 0머리 1목 2가슴 3골반 4~6왼다리 7~9오른다리 10~12왼팔 13~15오른팔
+  // 다리(뒤) → 몸통 → 팔(앞) → 머리 순서로 겹친다
+  seg(4, 5, 7 * S * 0.9, LIMB); seg(5, 6, 6 * S * 0.9, LIMB);      // 왼다리
+  seg(7, 8, 7 * S * 0.9, LIMB); seg(8, 9, 6 * S * 0.9, LIMB);      // 오른다리
+  seg(1, 2, 10 * S, INK); seg(2, 3, 11 * S, INK);                   // 목+몸통
+  seg(10, 11, 5.5 * S, LIMB); seg(11, 12, 4.5 * S, LIMB);           // 왼팔
+  seg(13, 14, 5.5 * S, LIMB); seg(14, 15, 4.5 * S, LIMB);           // 오른팔
+  // 어깨끈·골반끈 — 몸통과 팔다리를 잇는 결
+  seg(10, 13, 4 * S, INK);
+  seg(4, 7, 4 * S, INK);
+  // 머리 — 목 위 동그라미
+  ctx.fillStyle = SKIN;
+  ctx.beginPath();
+  ctx.arc(pts[0].x, pts[0].y - 7 * S, 9.5 * S, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = INK;
+  ctx.stroke();
+  // 관절 점 — 잡을 곳을 알려준다
+  for (var m2 = 1; m2 < pts.length; m2++) {
+    if (m2 === 2) continue;          // 가슴은 몸통에 파묻힌다
+    ctx.fillStyle = GRIP;
+    ctx.beginPath();
+    ctx.arc(pts[m2].x, pts[m2].y, 2.6 * S + 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 잡은 관절 표시
+  if (dragging >= 0) {
+    ctx.strokeStyle = GRIP;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(pts[dragging].x, pts[dragging].y, 8, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+// 사람이 안 만졌을 때 도는 자동 시연 — 가상 손이 머리를 8자로 끌고 다닌다.
+// Math.random 금지 — 사인파 경로. 놓는 순간이 있어 인형이 중력으로 늘어졌다 붙잡힌다.
+var manual = false;
+function demoTarget(now) {
+  var ph = (now / 1000) / LOOP * Math.PI * 2;
+  return {
+    x: W * 0.5 + Math.sin(ph) * W * 0.3,
+    y: 40 + Math.abs(Math.sin(ph * 2)) * H * 0.24,
+    hold: Math.sin(ph * 2) > -0.55        // 대부분 잡고 있고 잠깐 놓는다
+  };
+}
+var frameN = 0;
+function frame(now) {
+  if (!manual) {
+    var t = demoTarget(now);
+    if (t.hold) { dragging = 0; dragX = t.x; dragY = t.y; }
+    else dragging = -1;
+  }
+  step(now);
+  draw();
+  frameN++;
+  if (frameN % 12 === 0) stVal.textContent = stretched;
+  requestAnimationFrame(frame);
+}
+
+// 조작 — 아무 관절을 잡아 끈다
+function pick(x, y) {
+  var best = -1, bd = 20;
+  for (var i = 0; i < pts.length; i++) {
+    var d = Math.hypot(pts[i].x - x, pts[i].y - y);
+    if (d < bd) { bd = d; best = i; }
+  }
+  if (best < 0) {
+    // 머리 원 안쪽도 머리로 잡는다
+    var S = Math.min(W, H) / 208;
+    if (Math.hypot(pts[0].x - x, pts[0].y - 7 * S - y) < 11 * S) best = 0;
+  }
+  return best;
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var x = e.clientX - r.left, y = e.clientY - r.top;
+  dragging = pick(x, y);
+  if (dragging < 0) return;
+  manual = true;
+  dragX = x; dragY = y;
+  field.setPointerCapture(e.pointerId);
+  if (reduce.matches) {
+    // 줄인 모드 — 잡은 관절만 즉시 옮기고 제약이 한 번에 따라오게 한다
+    for (var k = 0; k < 12; k++) {
+      for (var l = 0; l < links.length; l++) solveLink(links[l], 1);
+      for (var m = 0; m < limits.length; m++) solveLimit(limits[m]);
+    }
+    draw();
+  }
+});
+field.addEventListener('pointermove', function (e) {
+  if (dragging < 0) return;
+  var r = field.getBoundingClientRect();
+  dragX = Math.max(4, Math.min(W - 4, e.clientX - r.left));
+  dragY = Math.max(4, Math.min(H - 4, e.clientY - r.top));
+  if (reduce.matches) {
+    pts[dragging].x = dragX; pts[dragging].y = dragY;
+    pts[dragging].px = dragX; pts[dragging].py = dragY;
+  }
+});
+window.addEventListener('pointerup', function () { dragging = -1; });
+document.getElementById('reset').addEventListener('click', function () {
+  manual = false; build(); stVal.textContent = 0;
+});
+stIn.addEventListener('input', function () { stVal.textContent = stretched; });
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

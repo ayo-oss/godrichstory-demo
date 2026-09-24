@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Thermal-Imaging Tone That Turns a Brightness-Order Value Into Color — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">A Thermal-Imaging Tone That Turns a Brightness-Order Value Into Color</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawPhotoBase(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#8fc7ff');
+    sky.addColorStop(1, '#fff2d6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.72, sunY = h * 0.3, sunR = h * 0.22;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.3);
+    glow.addColorStop(0, 'rgba(255,247,230,.9)');
+    glow.addColorStop(1, 'rgba(255,247,230,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#ffe27a';
+    pctx.fill();
+    var hillColors = ['#6ec8ff', '#2b9d74', '#17141a'];
+    for (var i = 0; i < 3; i += 1) {
+      var baseY = h * (0.5 + i * 0.15);
+      pctx.beginPath();
+      pctx.moveTo(0, h);
+      var step = Math.max(2, w / 24);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.06 + i * 2.4 + seed * 0.0003) * h * 0.05 + Math.sin(x * 0.17 + i) * h * 0.02;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h);
+      pctx.closePath();
+      pctx.fillStyle = hillColors[i];
+      pctx.fill();
+    }
+    for (var k = 0; k < 60; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.55, r = rand() * 1.4 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.12 + rand() * 0.22) + ')';
+      pctx.fill();
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var THERMAL_SHIFT = 0;
+  var THERMAL_STOPS = [[10, 20, 90], [10, 90, 200], [40, 200, 120], [240, 210, 40], [230, 50, 20]];
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawPhotoBase(octx, CALC_W, CALC_H, 414061);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function thermalColor(v) {
+    var t = Math.max(0, Math.min(1, v)) * (THERMAL_STOPS.length - 1);
+    var i0 = Math.floor(t), i1 = Math.min(THERMAL_STOPS.length - 1, i0 + 1);
+    var f = t - i0;
+    var a = THERMAL_STOPS[i0], b = THERMAL_STOPS[i1];
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  }
+
+  function renderFrame(elapsed) {
+    var wave = Math.sin(elapsed * Math.PI * 4 / LOOP_MS);
+    var shift = THERMAL_SHIFT + wave * 0.28;
+    var idx = 0;
+    for (var i = 0; i < CALC_W * CALC_H; i += 1) {
+      var lum = (0.299 * baseBuf[idx] + 0.587 * baseBuf[idx + 1] + 0.114 * baseBuf[idx + 2]) / 255;
+      var c = thermalColor(lum + shift);
+      outBuf[idx] = c[0]; outBuf[idx + 1] = c[1]; outBuf[idx + 2] = c[2]; outBuf[idx + 3] = 255;
+      idx += 4;
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderFrame(elapsed);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

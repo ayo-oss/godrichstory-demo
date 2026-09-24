@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아치 교량 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ab is-demo" id="abRoot">
+  <p class="ab__hint">
+    <svg class="ab__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path opacity=".2" d="M20 180h216v20H20z"/><path d="M226 168h-14a86 86 0 0 0-168 0H30a8 8 0 0 0 0 16h196a8 8 0 0 0 0-16Zm-98-70a70.08 70.08 0 0 1 69.4 62H58.6A70.08 70.08 0 0 1 128 98Z"/></g></svg>
+    <span>The arch curves upward along a sine wave — the pointer orbits the view left and right, and up and down changes the angle</span>
+  </p>
+  <div class="ab__field" id="abField" role="application" aria-label="Arch bridge perspective board" tabindex="0">
+    <canvas class="ab__cv" id="abCv"></canvas>
+  </div>
+  <div class="ab__bar">
+    <label class="ab__dial">arch height
+      <input type="range" id="abHeight" min="60" max="160" step="10" value="110" aria-label="arch height">
+      <b class="ab__val" id="abHeightVal">110px</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 아치 교량 — 아치 단면 높이를 sin(t·π) 로 계산해(t는 0~1) 돌 블록 22개를 앞·뒤 립 두 겹으로
+// lineTo 사각형으로 채운다. 상판·난간·기둥도 같은 좌표계에 얹어 z 내림차순(화가 알고리즘)으로
+// 정렬해 그린다. 카메라는 포인터로 yaw·pitch 를 직접 회전시켜 돈다. 라이브러리·WebGL 없음.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var SEG = 22;              // 아치 블록 개수
+  var SPAN = 200;            // 아치 경간(스팬)
+  var ARCH_HALF_D = 15;      // 아치 앞·뒤 립 사이 반깊이
+  var DECK_HALF_Z = 19;      // 상판 반너비(z)
+  var DECK_MARGIN = 34;      // 상판이 아치보다 더 뻗는 접근로 길이
+  var PLANK_N = 16;          // 상판 널빤지 개수
+  var POST_N = 9;            // 난간 기둥 개수
+  var RAIL_H = 22;           // 난간 높이
+  var CART_MS = 2600;        // 건너가는 카트의 왕복 주기
+  var LOOP_MS = 2700;        // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('abRoot');
+  var field = document.getElementById('abField');
+  var cv = document.getElementById('abCv');
+  var ctx = cv.getContext('2d');
+  var heightIn = document.getElementById('abHeight');
+  var heightOut = document.getElementById('abHeightVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var STONE = [tok('--ab-pink'), tok('--ab-mint'), tok('--ab-lilac'), tok('--ab-sky')];   // 돌 블록 순환
+  var CREAM = tok('--ab-cream');
+  var DECKC = tok('--ab-deck');
+  var RAIL = tok('--ab-rail');
+  var WATER = tok('--ab-water');
+  var INK = tok('--ab-ink');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var FOCAL = 300, BACK = 90;
+  var yaw = 0.55, pitch = 0.16;
+  var px01 = 0.5, py01 = 0.5;         // 포인터 위치 비율(0~1) — 자동재생 중엔 가상 경로가 채운다
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 카메라 — yaw(y축) 뒤 pitch(x축). 둘 다 포인터로 직접 회전한다
+  function camRot(p) {
+    var ca = Math.cos(yaw), sa = Math.sin(yaw);
+    var x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca;
+    var cb = Math.cos(pitch), sb = Math.sin(pitch);
+    return { x: x1, y: p.y * cb - z1 * sb, z: p.y * sb + z1 * cb };
+  }
+
+  function project(p) { var s = FOCAL / (FOCAL + p.z + BACK); return { sx: W * 0.5 + p.x * s, sy: H * 0.62 - p.y * s, s: s }; }
+
+  // 아치 단면 — t(0~1) 를 사인 곡선으로 높이로 바꾼다. 경간 양끝에서 0, 정점에서 height
+  function archY(t, height) { return Math.sin(t * Math.PI) * height; }
+  function archX(t) { return (t - 0.5) * SPAN; }
+
+  function step(dt) {
+    yaw += (0.045 + (px01 - 0.5) * 0.75) * dt;
+    var aim = 0.16 + (py01 - 0.5) * 0.46;
+    pitch += (aim - pitch) * 0.08;
+  }
+
+  function quad(A, B, C, D, fill) {
+    ctx.beginPath();
+    ctx.moveTo(A.sx, A.sy);
+    ctx.lineTo(B.sx, B.sy);
+    ctx.lineTo(C.sx, C.sy);
+    ctx.lineTo(D.sx, D.sy);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    var height = Number(heightIn.value);
+    var deckY = height + 14;
+    var scale = Math.min(W / 480, H / 300);
+
+    // 강물 — 배경 평면. 가로줄 몇 겹을 sin 물결로 흔들며 lineTo 로 잇는다(늘 가장 뒤에 그린다)
+    var WATER_HALF_Z = ARCH_HALF_D * 3.4;
+    for (var row = 0; row < 4; row++) {
+      var wz = -WATER_HALF_Z + row * (WATER_HALF_Z * 2 / 3);
+      ctx.beginPath();
+      var first = true;
+      for (var wx = -SPAN * 0.9; wx <= SPAN * 0.9; wx += 14) {
+        var wy = -10 - 3 * Math.sin(wx * 0.05 + now / 700 + row);
+        var pw = project(camRot({ x: wx * scale, y: wy * scale, z: wz * scale }));
+        if (first) { ctx.moveTo(pw.sx, pw.sy); first = false; } else { ctx.lineTo(pw.sx, pw.sy); }
+      }
+      ctx.strokeStyle = WATER;
+      ctx.lineWidth = 1.4;
+      ctx.globalAlpha = 0.5 - row * 0.08;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // ── 그릴 아이템을 모아 z 내림차순(먼 것 먼저) — 화가 알고리즘 ──
+    var items = [];
+
+    // 아치 블록 — 앞 립 z=+d, 뒤 립 z=-d 인 사각 블록을 lineTo 사각형으로 채운다
+    for (var i = 0; i < SEG; i++) {
+      (function (idx) {
+        var t0v = idx / SEG, t1v = (idx + 1) / SEG;
+        var y0 = archY(t0v, height), y1 = archY(t1v, height);
+        var x0 = archX(t0v), x1 = archX(t1v);
+        var w0 = camRot({ x: x0 * scale, y: y0 * scale, z: ARCH_HALF_D * scale });
+        var w1 = camRot({ x: x0 * scale, y: y0 * scale, z: -ARCH_HALF_D * scale });
+        var w2 = camRot({ x: x1 * scale, y: y1 * scale, z: -ARCH_HALF_D * scale });
+        var w3 = camRot({ x: x1 * scale, y: y1 * scale, z: ARCH_HALF_D * scale });
+        var zAvg = (w0.z + w1.z + w2.z + w3.z) / 4;
+        items.push({ z: zAvg, fn: function () {
+          quad(project(w0), project(w1), project(w2), project(w3), STONE[idx % STONE.length]);
+        }});
+      })(i);
+    }
+
+    // 교각(스팬드럴 기둥) — 아치 중앙부에서 상판까지 다섯 곳
+    [0.30, 0.42, 0.5, 0.58, 0.70].forEach(function (t) {
+      var y = archY(t, height);
+      var x = archX(t);
+      var wTop = camRot({ x: x * scale, y: deckY * scale, z: 0 });
+      var wBot = camRot({ x: x * scale, y: y * scale, z: 0 });
+      items.push({ z: (wTop.z + wBot.z) / 2, fn: function () {
+        var a = project(wTop), b = project(wBot);
+        ctx.strokeStyle = RAIL;
+        ctx.lineWidth = Math.max(1.4, 4 * a.s);
+        ctx.beginPath();
+        ctx.moveTo(a.sx, a.sy);
+        ctx.lineTo(b.sx, b.sy);
+        ctx.stroke();
+      }});
+    });
+
+    // 상판 — 널빤지 PLANK_N 개. z 는 거의 같아 순서 영향이 적지만 같은 방식으로 정렬한다
+    for (var p2 = 0; p2 < PLANK_N; p2++) {
+      (function (idx) {
+        var fx0 = -SPAN / 2 - DECK_MARGIN + (SPAN + DECK_MARGIN * 2) * (idx / PLANK_N);
+        var fx1 = -SPAN / 2 - DECK_MARGIN + (SPAN + DECK_MARGIN * 2) * ((idx + 1) / PLANK_N);
+        var w0 = camRot({ x: fx0 * scale, y: deckY * scale, z: -DECK_HALF_Z * scale });
+        var w1 = camRot({ x: fx1 * scale, y: deckY * scale, z: -DECK_HALF_Z * scale });
+        var w2 = camRot({ x: fx1 * scale, y: deckY * scale, z: DECK_HALF_Z * scale });
+        var w3 = camRot({ x: fx0 * scale, y: deckY * scale, z: DECK_HALF_Z * scale });
+        var zAvg = (w0.z + w1.z + w2.z + w3.z) / 4;
+        items.push({ z: zAvg + 1, fn: function () {
+          quad(project(w0), project(w1), project(w2), project(w3), idx % 2 ? DECKC : CREAM);
+        }});
+      })(p2);
+    }
+
+    // 난간 — 좌우 두 줄. 기둥을 세우고(lineTo) 꼭대기를 한 줄로 잇는다
+    [-1, 1].forEach(function (side) {
+      var z = side * DECK_HALF_Z;
+      var wRef = camRot({ x: 0, y: deckY * scale, z: z * scale });
+      items.push({ z: wRef.z - 0.5, fn: function () {
+        var tops = [];
+        for (var pIdx = 0; pIdx <= POST_N; pIdx++) {
+          var fx = -SPAN / 2 - DECK_MARGIN + (SPAN + DECK_MARGIN * 2) * (pIdx / POST_N);
+          var base = project(camRot({ x: fx * scale, y: deckY * scale, z: z * scale }));
+          var top = project(camRot({ x: fx * scale, y: (deckY + RAIL_H) * scale, z: z * scale }));
+          tops.push(top);
+          ctx.strokeStyle = RAIL;
+          ctx.lineWidth = Math.max(1, 2.4 * base.s);
+          ctx.beginPath();
+          ctx.moveTo(base.sx, base.sy);
+          ctx.lineTo(top.sx, top.sy);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.moveTo(tops[0].sx, tops[0].sy);
+        for (var k = 1; k < tops.length; k++) ctx.lineTo(tops[k].sx, tops[k].sy);
+        ctx.lineWidth = Math.max(1.4, 3 * tops[0].s);
+        ctx.stroke();
+      }});
+    });
+
+    // 건너가는 카트 — 삼각파로 왕복(t2). 상판 위에 얹혀 다닌다
+    var ph2 = (now % CART_MS) / CART_MS;
+    var t2 = Math.abs(ph2 * 2 - 1);                 // 0→1→0 삼각파
+    var cx = -SPAN * 0.36 + SPAN * 0.72 * t2;
+    var wc = camRot({ x: cx * scale, y: (deckY + 5) * scale, z: 0 });
+    items.push({ z: wc.z - 1, fn: function () {
+      var pr = project(wc);
+      var rr = 6 * pr.s;
+      ctx.beginPath();
+      ctx.arc(pr.sx, pr.sy, rr, 0, TAU);
+      ctx.fillStyle = CREAM;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(pr.sx - rr * 0.3, pr.sy - rr * 0.3, rr * 0.32, 0, TAU);
+      ctx.fillStyle = STONE[0];
+      ctx.fill();
+    }});
+
+    items.sort(function (a, b) { return b.z - a.z; });
+    for (var q = 0; q < items.length; q++) items[q].fn();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. 표 영역을 벗어난 자연스러운 경로
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setHeight(v) { heightOut.textContent = v + 'px'; if (reduce) draw(t0 < 0 ? 0 : last); }
+
+  heightIn.addEventListener('input', function () { setHeight(heightIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0); draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0); draw(last); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 다리가 놓인 한 장만 남는다(빈 화면이 아니다)
+    px01 = 0.58; py01 = 0.4;
+    step(0);
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

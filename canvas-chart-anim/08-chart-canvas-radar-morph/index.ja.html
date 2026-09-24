@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>레이더 차트 모핑 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rm" id="rm">
+  <p class="rm__hint">
+    <svg class="rm__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a104 104 0 0 0-90.08 155.86l12.47 37.39a8 8 0 0 0 10.12 10.12l37.39-12.47A104 104 0 1 0 128 24m0 136a32 32 0 1 1 32-32a32 32 0 0 1-32 32" opacity=".2"/><path d="M176 128a48 48 0 1 1-48-48a48 48 0 0 1 48 48"/></g></svg>
+    <span>6軸の多角形が頂点ごとに異なる速度でモーフィングします — <code>lerp</code>·<code>globalAlpha</code>·<code>頂点の時間差</code></span>
+  </p>
+  <div class="rm__field" id="field" role="application" aria-label="レーダーチャート モーフィングの実験台" tabindex="0">
+    <canvas class="rm__cv" id="cv" role="img" aria-label="6軸の能力レーダーチャート — Aチームの多角形が頂点ごとに思い思いの速度でBチームへ変わり、2つの半透明の面が重なる"></canvas>
+  </div>
+  <div class="rm__bar">
+    <button class="rm__btn" id="replay" type="button">
+      <svg class="rm__bico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 128a88 88 0 1 1-88-88a88 88 0 0 1 88 88" opacity=".2"/><path d="M224 128a96 96 0 0 1-94.71 96H128a95.38 95.38 0 0 1-65.9-26.2a8 8 0 0 1 11-11.63a80 80 0 1 0-1.67-114.78a3 3 0 0 1-.26.25L44.59 96H72a8 8 0 0 1 0 16H24a8 8 0 0 1-8-8V56a8 8 0 0 1 16 0v29.8L60.25 60A96 96 0 0 1 224 128"/></g></svg>
+      <span>再描画</span>
+    </button>
+    <table class="sr-only">
+      <caption>6軸の能力スコア（100点満点） — AチームとBチーム</caption>
+      <thead><tr><th scope="col">軸</th><th scope="col">Aチーム</th><th scope="col">Bチーム</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">速度</th><td>72</td><td>58</td></tr>
+        <tr><th scope="row">正確度</th><td>64</td><td>82</td></tr>
+        <tr><th scope="row">安定性</th><td>80</td><td>90</td></tr>
+        <tr><th scope="row">探索</th><td>52</td><td>74</td></tr>
+        <tr><th scope="row">協働</th><td>76</td><td>60</td></tr>
+        <tr><th scope="row">持続</th><td>58</td><td>78</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</main>
+<script>
+// 레이더 차트 모핑 — 6軸 다각형이 팀 A 값에서 팀 B 값으로 정점마다 서로 다른 속도로 바뀐다.
+// 정점별 속도차는 시작 시각(offset)과 持続 배율(rate) 두 개로 만든다 — 같은 시각에 출발해도
+// 배율이 다르면 도착이 어긋나고, 다각형이 찌그러졌다가 제 모양으로 펴지는 모핑의 핵이 그 어긋남이다.
+// 두 팀 면은 반투명 fill(알파 0.25)로 겹친다 — source-over 겹침으로 교차 영역이 자연히 진해진다.
+// 2초 루프: 0~0.08 軸 라벨 등장, 0.08~0.62 A→B 모핑, 0.62~0.75 범례 칩 강조, 0.75~0.90 복귀.
+var root = document.getElementById('rm');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var replayBtn = document.getElementById('replay');
+
+var css = getComputedStyle(root);
+var C_A = css.getPropertyValue('--chart-1').trim();
+var C_B = css.getPropertyValue('--chart-3').trim();
+var C_INK = css.getPropertyValue('--ink').trim();
+var C_MUTE = css.getPropertyValue('--mute').trim();
+var C_GRID = css.getPropertyValue('--grid').trim();
+var C_PAPER = css.getPropertyValue('--paper').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+// 고정 시드 — 여섯 軸 역량 점수 두 세트(백점 만점)
+var AXES = ['速度', '正確度', '安定性', '探索', '協働', '持続'];
+var A_VAL = [88, 82, 92, 78, 90, 84];
+var B_VAL = [34, 26, 40, 22, 30, 28];
+// 정점별 모핑 速度 — 시작 시차(offset)와 持続 배율(rate). 여섯 정점이 제각각 어긋난다
+var VTX = [
+  { off: 0.00, rate: 1.25 },
+  { off: 0.04, rate: 0.80 },
+  { off: 0.02, rate: 1.10 },
+  { off: 0.06, rate: 0.70 },
+  { off: 0.01, rate: 1.35 },
+  { off: 0.05, rate: 0.90 }
+];
+var LOOP = 2;        // 한 사이클 2초
+var MORPH0 = 0.08;   // 모핑 시작 — 그 전까지 軸 라벨이 뜬다
+var MORPH1 = 0.62;   // 모핑 끝 — 이 뒤 범례 칩이 강조된다
+var BACK1 = 0.90;    // 복귀 완료 — 루프 끝(90%) 안에서 A 로 되돌아간다
+var N = AXES.length;
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var t0 = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 감속 이징 — 정점이 목표에 미끄러지듯 닿는다
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+// 軸 i 방향의 단위 벡터 — 12시부터 시계 방향
+function angleAt(i) { return -Math.PI / 2 + (Math.PI * 2 * i) / N; }
+
+// 정점 i 의 모핑 진행(0..1). p 는 루프 전체 진행, span 은 이 구간의 전체 길이(정규화).
+// VTX[i].off 만큼 늦게 출발하고 VTX[i].rate 배로 빨리/느리게 끝난다 — 정점마다 어긋난다.
+function vertexP(i, p, span, start) {
+  var local = (p - start - VTX[i].off) / (span / VTX[i].rate);
+  return Math.max(0, Math.min(1, local));
+}
+
+// 반경 — 値(0..100)을 최대 반경에 얹는다
+function rAt(v) { return R * Math.max(0.08, v / 100); }
+var R = 0;
+
+// 다각형 경로 — 값열을 정점 좌표로 잇는다
+function polyPath(vals) {
+  ctx.beginPath();
+  for (var i = 0; i < N; i++) {
+    var a = angleAt(i);
+    var x = CX + Math.cos(a) * rAt(vals[i]);
+    var y = CY + Math.sin(a) * rAt(vals[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+var CX = 0, CY = 0;
+
+// 한 팀 층 — 그릴 값열과 계열색. 면(알파 0.25) + 테두리 + 정점 점
+function drawLayer(vals, color, alpha) {
+  polyPath(vals);
+  ctx.globalAlpha = 0.32 * alpha;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+  for (var i = 0; i < N; i++) {
+    var a = angleAt(i);
+    ctx.beginPath();
+    ctx.arc(CX + Math.cos(a) * rAt(vals[i]), CY + Math.sin(a) * rAt(vals[i]), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function draw(p) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C_PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  // 중심·반경 — 필드 안쪽. 왼쪽에 범례 침을 둘 자리를 남긴다
+  var legendW = 76;
+  CX = (W - legendW) / 2 + 6;
+  CY = H / 2 + 6;
+  R = Math.min(W - legendW - 24, H - 44) / 2;
+
+  var axisP = Math.min(1, p / 0.08);   // 軸 라벨 등장(첫 8%)
+
+  // 거미줄 그리드 — 25/50/75/100 농도 고리 + 軸 살
+  ctx.lineWidth = 1;
+  for (var ring = 25; ring <= 100; ring += 25) {
+    polyGrid(ring);
+    ctx.strokeStyle = C_GRID;
+    ctx.stroke();
+  }
+  for (var i = 0; i < N; i++) {
+    var a = angleAt(i);
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    ctx.lineTo(CX + Math.cos(a) * R, CY + Math.sin(a) * R);
+    ctx.strokeStyle = C_GRID;
+    ctx.stroke();
+  }
+
+  // 軸 라벨 — 농도 고리가 뜬 뒤 반경 밖에 붙는다
+  ctx.font = '700 10px ' + FONT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (var l = 0; l < N; l++) {
+    var la = angleAt(l);
+    ctx.fillStyle = C_MUTE;
+    ctx.globalAlpha = axisP;
+    ctx.fillText(AXES[l], CX + Math.cos(la) * (R + 14), CY + Math.sin(la) * (R + 12));
+    ctx.globalAlpha = 1;
+  }
+
+  // 모핑 값열 — A 팀은 고정, B 팀은 정점별 진행으로 A→B 사이를 간다
+  var morphing = A_VAL.slice();
+  var back = Math.max(0, (p - 0.75) / (BACK1 - 0.75));   // 0.75~0.90 복귀
+  for (var m = 0; m < N; m++) {
+    var fwd = easeOutCubic(vertexP(m, p, MORPH1 - MORPH0, MORPH0));
+    var v = A_VAL[m] + (B_VAL[m] - A_VAL[m]) * fwd;
+    // 복귀 — B 에 도달한 뒤 다시 A 로. 복귀도 정점 배율을 그대로 쓴다
+    var bk = easeOutCubic(Math.max(0, (back - VTX[m].off * 0.5) * VTX[m].rate));
+    morphing[m] = v + (A_VAL[m] - v) * Math.min(1, bk);
+  }
+
+  // 두 층 — Aチーム(고정, 뒤) 과 모핑 층(앞). 반투명 면이 겹쳐 교차 영역이 진해진다
+  drawLayer(A_VAL, C_A, axisP);
+  drawLayer(morphing, C_B, Math.min(1, axisP * 1.2));
+
+  // 범례 칩 — 오른쪽 세로. 모핑이 끝난 뒤(0.62~0.75) 강조로 커진다
+  var hi = Math.max(0, Math.min(1, (p - MORPH1) / 0.13));
+  drawChip(C_A, 'Aチーム', H / 2 - 26, axisP * 0.9, hi * 0.6);
+  drawChip(C_B, 'Bチーム', H / 2 + 10, Math.min(1, axisP * 1.2), 0.6 + hi * 0.4);
+
+  // 平均 라벨 — 모핑 층의 현재 平均. 모핑이 끝나면 뜬다
+  if (p > MORPH1) {
+    var sum = 0;
+    for (var s = 0; s < N; s++) sum += morphing[s];
+    ctx.font = '700 11px ' + FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = C_INK;
+    ctx.fillText('平均 ' + Math.round(sum / N), CX - R, CY - R - 8);
+  }
+}
+
+// 농도 고리 경로 — 値 ring(0..100) 반경의 육각형
+function polyGrid(ring) {
+  ctx.beginPath();
+  for (var i = 0; i < N; i++) {
+    var a = angleAt(i);
+    var r = R * ring / 100;
+    var x = CX + Math.cos(a) * r;
+    var y = CY + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+// 범례 칩 — 오른쪽 세로 배치. 색점 + 팀명. 강조(hi)로 색점이 커진다
+function drawChip(color, label, y, alpha, hi) {
+  var x = W - 68;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.arc(x, y + 8, 4 + hi * 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.font = '700 11px ' + FONT;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = C_INK;
+  ctx.fillText(label, x + 12, y + 8);
+  ctx.globalAlpha = 1;
+}
+
+function frame(now) {
+  if (!t0) t0 = now;
+  var p = ((now - t0) / 1000 % LOOP) / LOOP;      // 0..1, 2초 루프
+  draw(p);
+  raf = requestAnimationFrame(frame);
+}
+
+replayBtn.addEventListener('click', function () { t0 = 0; });
+window.addEventListener('resize', function () { fit(); if (reduce) draw(1); });
+
+fit();
+if (reduce) {
+  // reduce — 루프 없이 완성 상태(두 다각형이 겹친 Bチーム 도달 장면) 한 장만 그린다
+  draw(0.75);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

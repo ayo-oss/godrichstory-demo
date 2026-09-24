@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아이콘 모양이 단계마다 변형되는 난이도 선택 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ims is-demo" id="ims">
+  <svg class="ims__icon" viewBox="0 0 80 80" width="64" height="64" aria-hidden="true">
+    <path id="imsPath" class="ims__shape"></path>
+  </svg>
+  <div class="ims__row" id="imsRow" role="radiogroup" aria-label="난이도">
+    <button type="button" class="ims__dot" role="radio" aria-checked="false" aria-label="쉬움" data-i="0" tabindex="0"></button>
+    <button type="button" class="ims__dot" role="radio" aria-checked="false" aria-label="보통" data-i="1" tabindex="-1"></button>
+    <button type="button" class="ims__dot" role="radio" aria-checked="true" aria-label="어려움" data-i="2" tabindex="-1"></button>
+    <button type="button" class="ims__dot" role="radio" aria-checked="false" aria-label="매우 어려움" data-i="3" tabindex="-1"></button>
+    <button type="button" class="ims__dot" role="radio" aria-checked="false" aria-label="최고" data-i="4" tabindex="-1"></button>
+  </div>
+  <p class="ims__label" id="imsLabel">어려움</p>
+</div>
+</main>
+<script>
+(function () {
+  var LEVELS = ['쉬움', '보통', '어려움', '매우 어려움', '최고'];
+  var SIDES = [3, 4, 5, 6, 7];
+  var POINTS = 7, CX = 40, CY = 40, R = 30, MORPH_MS = 420;
+  var root = document.getElementById('ims');
+  var path = document.getElementById('imsPath');
+  var row = document.getElementById('imsRow');
+  var dots = Array.prototype.slice.call(row.querySelectorAll('.ims__dot'));
+  var label = document.getElementById('imsLabel');
+  var tier = 2;
+  var raf = 0, t0 = 0, fromR = [], toR = [];
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 정다각형의 변 수(sides)와 각도(theta)로 그 방향의 반지름을 구하는 기하 공식.
+  // theta 가 한 변의 중심에서 멀어질수록(꼭짓점에 가까울수록) 반지름이 길어진다
+  function polygonRadius(theta, sides) {
+    var seg = (2 * Math.PI) / sides;
+    var a = ((theta % seg) + seg) % seg - seg / 2;
+    return R * Math.cos(seg / 2) / Math.cos(a);
+  }
+  function angleAt(i) { return (i / POINTS) * Math.PI * 2 - Math.PI / 2; }
+  function radiiFor(sides) {
+    var out = [];
+    for (var i = 0; i < POINTS; i++) out.push(polygonRadius(angleAt(i), sides));
+    return out;
+  }
+  function buildPath(radii) {
+    var d = '';
+    for (var i = 0; i < POINTS; i++) {
+      var a = angleAt(i);
+      var x = CX + radii[i] * Math.cos(a);
+      var y = CY + radii[i] * Math.sin(a);
+      d += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2) + ' ';
+    }
+    return d + 'Z';
+  }
+  var currentR = radiiFor(SIDES[tier]);
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function morphTo(sides) {
+    cancelAnimationFrame(raf);
+    var target = radiiFor(sides);
+    if (reduce) { currentR = target; path.setAttribute('d', buildPath(currentR)); return; }
+    fromR = currentR.slice(); toR = target; t0 = performance.now();
+    function step(now) {
+      var t = Math.min(1, (now - t0) / MORPH_MS);
+      var e = 1 - Math.pow(1 - t, 3);
+      currentR = fromR.map(function (r, i) { return lerp(r, toR[i], e); });
+      path.setAttribute('d', buildPath(currentR));
+      if (t < 1) raf = requestAnimationFrame(step);
+    }
+    raf = requestAnimationFrame(step);
+  }
+  function human() { root.classList.remove('is-demo'); clearInterval(timer); }
+  function select(i) {
+    tier = i;
+    dots.forEach(function (d, idx) {
+      d.setAttribute('aria-checked', idx === i ? 'true' : 'false');
+      d.setAttribute('tabindex', idx === i ? '0' : '-1');
+    });
+    label.textContent = LEVELS[i];
+    morphTo(SIDES[i]);
+  }
+  dots.forEach(function (d, i) {
+    d.addEventListener('click', function () { human(); select(i); });
+    d.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); human(); select(Math.min(LEVELS.length - 1, tier + 1)); dots[tier].focus({ preventScroll: true }); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); human(); select(Math.max(0, tier - 1)); dots[tier].focus({ preventScroll: true }); }
+    });
+  });
+
+  var sequence = [4, 0, 3, 1, 2];
+  var si = 0;
+  function tick() { select(sequence[si % sequence.length]); si++; }
+  var timer = reduce ? null : setInterval(tick, 900);
+  path.setAttribute('d', buildPath(currentR));
+}());
+</script>
+</body>
+</html>

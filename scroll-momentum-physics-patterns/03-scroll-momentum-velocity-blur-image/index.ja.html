@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクロール速度ブラー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vbi is-demo" id="vbi">
+  <div class="vbi__viewport" id="vbiViewport" role="application" aria-label="速度ブラーギャラリー">
+    <div class="vbi__track" id="vbiTrack">
+      <div class="vbi__card vbi__card--a"></div>
+      <div class="vbi__card vbi__card--b"></div>
+      <div class="vbi__card vbi__card--c"></div>
+      <div class="vbi__card vbi__card--a"></div>
+    </div>
+  </div>
+  <p class="vbi__hint">横に速くスクロールするほどぼやけ、止まると再び鮮明になります</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vbi');
+  var viewport = document.getElementById('vbiViewport');
+  var track = document.getElementById('vbiTrack');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 매 프레임의 이동 값 변화율(velocity)을 재서 흐림 목표 값(targetBlur = |velocity| *
+  // VELOCITY_TO_BLUR, MAX_BLUR 상한)을 만들고, 실제 표시 흐림(blur)은 BLUR_SMOOTH 비율로 그 목표를
+  // 뒤따른다 — 속도가 줄면 흐림도 뒤따라 0 으로 잦아든다. 코스팅 자체는 COAST_FRICTION 으로 감쇠.
+  var VELOCITY_TO_BLUR = 0.55;
+  var MAX_BLUR = 9;
+  var BLUR_SMOOTH = 0.25;
+  var COAST_FRICTION = 0.92;
+  var MIN_VELOCITY = 0.05;
+
+  var pos = 0, vel = 0, blur = 0, maxScroll = 0, raf = null;
+
+  function measure() { maxScroll = Math.max(0, track.scrollWidth - viewport.clientWidth); }
+  function clamp(v) { return Math.max(-maxScroll, Math.min(0, v)); }
+  function paint() {
+    track.style.transform = 'translateX(' + pos.toFixed(1) + 'px)';
+    track.style.filter = blur > 0.05 ? 'blur(' + blur.toFixed(2) + 'px)' : 'none';
+  }
+  function stopLoop() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } }
+  function loopTick() {
+    vel *= COAST_FRICTION;
+    pos = clamp(pos + vel);
+    if (pos === 0 || pos === -maxScroll) { vel = 0; }
+    var target = Math.min(MAX_BLUR, Math.abs(vel) * VELOCITY_TO_BLUR);
+    blur += (target - blur) * BLUR_SMOOTH;
+    paint();
+    if (Math.abs(vel) < MIN_VELOCITY && blur < 0.05) { blur = 0; paint(); raf = null; return; }
+    raf = requestAnimationFrame(loopTick);
+  }
+  function startLoop(v) {
+    vel = v;
+    if (reduce) { pos = clamp(pos + vel * 6); vel = 0; blur = 0; paint(); return; }
+    stopLoop();
+    raf = requestAnimationFrame(loopTick);
+  }
+
+  function wireReal() {
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay();
+      stopLoop();
+      var d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      pos = clamp(pos - d * 0.6);
+      paint();
+      startLoop(-d * 0.6);
+    }, { passive: false });
+
+    var dragging = false, startX = 0, startPos = 0, lastX = 0, lastT = 0, dragVel = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay(); stopLoop();
+      dragging = true; startX = lastX = e.clientX; startPos = pos; lastT = performance.now(); dragVel = 0;
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      var t = performance.now();
+      var dt = Math.max(1, t - lastT);
+      dragVel = (e.clientX - lastX) / dt * 16.6;
+      pos = clamp(startPos + (e.clientX - startX));
+      var target = Math.min(MAX_BLUR, Math.abs(dragVel) * VELOCITY_TO_BLUR);
+      blur += (target - blur) * BLUR_SMOOTH;
+      paint();
+      lastX = e.clientX; lastT = t;
+    });
+    viewport.addEventListener('pointerup', function () {
+      if (!dragging) { return; }
+      dragging = false;
+      startLoop(dragVel);
+    });
+  }
+  wireReal();
+  measure();
+  window.addEventListener('resize', measure);
+
+  // 자동 루프: 번갈아 방향을 바꿔 세게 튕겨 속도→흐림 매핑을 반복 재현한다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    measure();
+    if (maxScroll <= 0) { return; }
+    phase += 1;
+    var dir = (phase % 2 === 0) ? -1 : 1;
+    pos = clamp(dir > 0 ? 0 : -maxScroll);
+    paint();
+    startLoop(dir * -13);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 1500); autoTick(); }
+})();
+</script>
+</body>
+</html>

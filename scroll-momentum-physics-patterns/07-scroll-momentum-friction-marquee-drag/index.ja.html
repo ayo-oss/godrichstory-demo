@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>摩擦復帰マーキードラッグ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fmd is-demo" id="fmd">
+  <div class="fmd__viewport" id="fmdViewport" role="application" aria-label="マーキードラッグ実験パネル" tabindex="0">
+    <div class="fmd__track" id="fmdTrack">
+      <span class="fmd__chip fmd__chip--a">01</span>
+      <span class="fmd__chip fmd__chip--b">02</span>
+      <span class="fmd__chip fmd__chip--c">03</span>
+      <span class="fmd__chip fmd__chip--a">04</span>
+      <span class="fmd__chip fmd__chip--b">05</span>
+      <span class="fmd__chip fmd__chip--c">06</span>
+      <span class="fmd__chip fmd__chip--a">01</span>
+      <span class="fmd__chip fmd__chip--b">02</span>
+      <span class="fmd__chip fmd__chip--c">03</span>
+      <span class="fmd__chip fmd__chip--a">04</span>
+      <span class="fmd__chip fmd__chip--b">05</span>
+      <span class="fmd__chip fmd__chip--c">06</span>
+    </div>
+  </div>
+  <p class="fmd__hint">ドラッグまたはホイールを回すと速度が変わり、摩擦で基準速度に戻ります</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('fmd');
+  var viewport = document.getElementById('fmdViewport');
+  var track = document.getElementById('fmdTrack');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 평소엔 BASE_SPEED 로 계속 흐르다가, 드래그·휠로 속도(vel)가 그 값에서 벗어나면
+  // 매 프레임 FRICTION_PULL 만큼만 BASE_SPEED 쪽으로 되돌아온다 — 순간 정지가 아니라 서서히 복귀.
+  var CHIP_W = 56, GAP = 10, SET_COUNT = 6;
+  var WRAP = SET_COUNT * (CHIP_W + GAP);
+  var BASE_SPEED = -0.9;
+  var FRICTION_PULL = 0.06;
+  var pos = 0, vel = BASE_SPEED;
+  var inputActive = false;
+  var raf = null;
+
+  function clampWrap(v) { var m = v % WRAP; if (m > 0) { m -= WRAP; } return m; }
+  function paint() { track.style.transform = 'translateX(' + pos.toFixed(1) + 'px)'; }
+  function loopTick() {
+    if (reduce) { raf = null; return; }
+    if (!inputActive) { vel += (BASE_SPEED - vel) * FRICTION_PULL; }
+    pos = clampWrap(pos + vel);
+    paint();
+    raf = requestAnimationFrame(loopTick);
+  }
+  function ensureLoop() { if (raf === null && !reduce) { raf = requestAnimationFrame(loopTick); } }
+  ensureLoop();
+  paint();
+
+  function wireReal() {
+    var dragging = false, lastX = 0, lastT = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay();
+      dragging = true; inputActive = true; lastX = e.clientX; lastT = performance.now();
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      var t = performance.now();
+      var dt = Math.max(1, t - lastT);
+      var dx = e.clientX - lastX;
+      vel = dx / dt * 16.6;
+      pos = clampWrap(pos + dx);
+      paint();
+      lastX = e.clientX; lastT = t;
+    });
+    viewport.addEventListener('pointerup', function () {
+      if (!dragging) { return; }
+      dragging = false; inputActive = false;
+      ensureLoop();
+    });
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay();
+      inputActive = true;
+      vel += -e.deltaY * 0.4 - e.deltaX * 0.4;
+      ensureLoop();
+      clearTimeout(viewport._wt);
+      viewport._wt = setTimeout(function () { inputActive = false; }, 80);
+    }, { passive: false });
+  }
+  wireReal();
+
+  // 자동 루프: 주기적으로 강하게 튕겨 마찰이 기준 속도로 되돌리는 과정을 반복 재현한다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    phase += 1;
+    var dir = (phase % 2 === 0) ? 1 : -1;
+    inputActive = true;
+    vel = dir * 7 + BASE_SPEED;
+    ensureLoop();
+    setTimeout(function () { inputActive = false; }, 140);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 1500); autoTick(); }
+})();
+</script>
+</body>
+</html>

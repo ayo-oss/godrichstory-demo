@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loader an Erosion-thickness Value Eats into a Noise Ring — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld" id="ld">
+  <p class="ld__hint">
+    <svg class="ld__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 56v56a8 8 0 0 1-16 0V91.3l-25.6 25.7A80 80 0 1 1 174 60a8 8 0 1 1-9 13.2A64 64 0 1 0 179.7 128H216a8 8 0 0 1 0 16h-56a8 8 0 0 1-8-8V80a8 8 0 0 1 16 0v20.7L192.7 76A80.1 80.1 0 0 0 64 128a8 8 0 0 1-16 0a96 96 0 0 1 163.6-68.3L224 71.3V56a8 8 0 0 1 8 8" opacity=".2"/><path d="M224 48a8 8 0 0 0-8 8v15.3l-11.7-11.6a96 96 0 1 0 27.6 51.6a8 8 0 0 0-15.8 2.5a80 80 0 1 1-23-43l-25.7 25.7A8 8 0 0 0 173 112h56a8 8 0 0 0 8-8V56a8 8 0 0 0-13-8"/></g></svg>
+    <span>Click or press the space bar to pause or restart</span>
+  </p>
+  <div class="ld__field" id="field" role="application" aria-label="Noise ring erosion test panel" tabindex="0">
+    <canvas class="ld__cv" id="cv"></canvas>
+    <b class="ld__badge" aria-hidden="true"><span class="ld__badgeNum" id="pct">0%</span><span class="ld__badgeUnit">Erode</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 노이즈 링 로더 — 두 옥타브 값-노이즈(LCG 격자점 보간)를 각도에 따라 흐르게 하고, 그 값에
+// 진행률을 곱한 만큼 링의 바깥 경계를 안쪽으로 갉아먹는다. Erode 두께가 곧 진행률이다.
+var root = document.getElementById('ld');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var pctEl = document.getElementById('pct');
+
+var css = getComputedStyle(root);
+var PAPER = css.getPropertyValue('--paper').trim();
+var RING = css.getPropertyValue('--ring').trim();
+var RING_EDGE = css.getPropertyValue('--ring-edge').trim();
+var INNER = css.getPropertyValue('--inner').trim();
+
+function makeRng(seed) {
+  var s = seed >>> 0;
+  return function () {
+    s = (1103515245 * s + 12345) >>> 0;
+    return (s >>> 8) / 16777216;
+  };
+}
+
+var LATTICE_N = 24;
+var rng = makeRng(20260926);
+var lattice = [];
+for (var i = 0; i < LATTICE_N; i++) lattice.push(rng());
+
+function smooth(f) { return f * f * (3 - 2 * f); }
+function valueNoise(x) {
+  var xi = ((x % LATTICE_N) + LATTICE_N) % LATTICE_N;
+  var i0 = Math.floor(xi);
+  var i1 = (i0 + 1) % LATTICE_N;
+  var f = smooth(xi - i0);
+  return lattice[i0] * (1 - f) + lattice[i1] * f;
+}
+function fieldNoise(theta, sec) {
+  var x1 = (theta / (Math.PI * 2)) * LATTICE_N + sec * 1.6;
+  var x2 = (theta / (Math.PI * 2)) * LATTICE_N * 2.3 + 40 - sec * 2.4;
+  return valueNoise(x1) * 0.68 + valueNoise(x2) * 0.32;
+}
+
+var LOOP = 2.6;
+var SAMPLES = 96;
+var W = 0, H = 0, dpr = 1, cxp = 0, cyp = 0, outerR = 0, innerR = 0, maxErode = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cxp = W * 0.5; cyp = H * 0.5;
+  outerR = Math.min(W, H) * 0.42;
+  innerR = outerR * 0.52;
+  maxErode = outerR - innerR;
+}
+
+function draw(sec) {
+  var t = sec % LOOP;
+  var p = t / LOOP;
+
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.beginPath();
+  for (var i = 0; i <= SAMPLES; i++) {
+    var theta = (i / SAMPLES) * Math.PI * 2;
+    var n = fieldNoise(theta, sec);
+    var r = outerR - p * maxErode * n;
+    var x = cxp + Math.cos(theta) * r;
+    var y = cyp + Math.sin(theta) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.moveTo(cxp + innerR, cyp);
+  ctx.arc(cxp, cyp, innerR, 0, Math.PI * 2, true);
+  ctx.fillStyle = RING;
+  ctx.fill('evenodd');
+
+  ctx.beginPath();
+  for (var j = 0; j <= SAMPLES; j++) {
+    var th = (j / SAMPLES) * Math.PI * 2;
+    var nn = fieldNoise(th, sec);
+    var rr = outerR - p * maxErode * nn;
+    var xx = cxp + Math.cos(th) * rr;
+    var yy = cyp + Math.sin(th) * rr;
+    if (j === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = RING_EDGE;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = INNER;
+  ctx.beginPath();
+  ctx.arc(cxp, cyp, innerR * 0.86, 0, Math.PI * 2);
+  ctx.fill();
+
+  pctEl.textContent = Math.round(p * 100) + '%';
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var paused = false;
+var t0 = 0;
+var raf = 0;
+
+function togglePause() {
+  paused = !paused;
+  root.classList.toggle('is-paused', paused);
+}
+function restart() {
+  t0 = performance.now();
+  draw(0);
+}
+
+field.addEventListener('click', function () { togglePause(); });
+field.addEventListener('keydown', function (e) {
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePause(); }
+  else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+});
+window.addEventListener('resize', function () {
+  fit();
+  if (paused || reduce) draw(((performance.now() - t0) / 1000));
+});
+
+function frame(now) {
+  if (!paused) draw((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+t0 = performance.now();
+fit();
+if (reduce) {
+  root.classList.add('is-still');
+  draw(LOOP * 0.62);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

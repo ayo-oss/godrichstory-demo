@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headline Transition Where Decode-Progress Value Locks In From the Left — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ds is-demo" id="ds">
+  <p class="ds__hint"><span>Click or press Enter and the decode-progress value rises as characters lock in one by one from the left</span></p>
+  <div class="ds__panel" id="panel" tabindex="0" role="button" aria-label="Replay headline transition where decode-progress value locks in from the left">
+    <canvas class="ds__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('ds');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BG1 = tok('--scene-bg1', '#1c2f66');
+  var BG2 = tok('--scene-bg2', '#17141a');
+  var TEXT_COLOR = tok('--scene-text', '#fff7e6');
+  var GHOST_COLOR = tok('--scene-ghost', '#8ea0d8');
+  var BAR_COLOR = tok('--scene-bar', '#8be6c4');
+
+  var TEXT = 'Login successful';
+  var POOL = 'ABCDEFGHIJKLMNOP#@$%&01239'.split('');
+
+  var W = 0, H = 0, dpr = 1, iw = 0, ih = 0;
+
+  var SEED = 1133;
+  var DECODE_SPEED = 1.7;
+  var BLOCK = 6; // 스캔라인/블록 노이즈 격자 폭(px) — SEED 로 흔든다
+  var chars = TEXT.split('');
+  var charX = [];
+  var fontSize = 20;
+  var baselineY = 0;
+
+  function hash01(n) {
+    n = (n ^ 61) ^ (n >>> 16);
+    n = (n + (n << 3)) | 0;
+    n = n ^ (n >>> 4);
+    n = Math.imul(n, 0x27d4eb2d);
+    n = n ^ (n >>> 15);
+    return (n >>> 0) / 4294967295;
+  }
+
+  function PRECOMPUTE() {
+    fontSize = Math.max(18, Math.min(38, iw / 8));
+    ctx.font = '700 ' + fontSize + 'px ui-monospace, monospace';
+    var widths = chars.map(function (c) { return ctx.measureText(c).width; });
+    var total = widths.reduce(function (a, b) { return a + b; }, 0);
+    var maxW = iw * 0.94;
+    if (total > maxW && total > 0) {
+      fontSize = Math.max(14, fontSize * (maxW / total));
+      ctx.font = '700 ' + fontSize + 'px ui-monospace, monospace';
+      widths = chars.map(function (c) { return ctx.measureText(c).width; });
+      total = widths.reduce(function (a, b) { return a + b; }, 0);
+    }
+    var startX = (iw - total) / 2;
+    charX = [];
+    var x = startX;
+    for (var i = 0; i < chars.length; i++) { charX.push(x); x += widths[i]; }
+    baselineY = ih / 2 + fontSize * 0.32;
+  }
+
+  var frameCounter = 0;
+  var phase = 0;
+
+  // 해독 중인 글자 뒤로 깔리는 스캔라인/블록 노이즈 — 진행률만큼 폭이 줄며 면적을 만든다
+  function drawNoiseBand(p) {
+    if (p <= 0.02) return;
+    var bandTop = baselineY - fontSize * 1.15;
+    var bandH = fontSize * 1.9;
+    var rows = Math.max(1, Math.ceil(bandH / BLOCK));
+    var cols = Math.max(1, Math.ceil(iw / BLOCK));
+    for (var r = 0; r < rows; r++) {
+      var by = bandTop + r * BLOCK;
+      for (var c = 0; c < cols; c++) {
+        var bx = c * BLOCK;
+        var s = (Math.imul(c + 1, 668265263) ^ Math.imul(r + 1, 2246822519) ^ Math.imul(frameCounter, 3266489917) ^ SEED) >>> 0;
+        var v = hash01(s);
+        if (v < 0.34) {
+          ctx.fillStyle = v < 0.14 ? BAR_COLOR : GHOST_COLOR;
+          ctx.globalAlpha = (0.55 + v) * p * 0.85;
+          ctx.fillRect(bx, by, BLOCK - 1, BLOCK - 1);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function RENDER(p) {
+    frameCounter = (frameCounter + 1) >>> 0;
+    phase += 0.3;
+    var decodeFrac = 1 - p;
+    var n = chars.length;
+
+    var g = ctx.createLinearGradient(0, 0, 0, ih);
+    g.addColorStop(0, BG1); g.addColorStop(1, BG2);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, iw, ih);
+
+    drawNoiseBand(p);
+
+    var boundaryX = charX[0];
+    ctx.font = '700 ' + fontSize + 'px ui-monospace, monospace';
+    ctx.textBaseline = 'alphabetic';
+
+    for (var i = 0; i < n; i++) {
+      var resolved = decodeFrac * DECODE_SPEED * n >= (i + 1);
+      var ch = chars[i];
+      var drawCh = ch;
+      var jy = 0;
+      if (!resolved && ch !== ' ') {
+        var seed = (Math.imul(i + 1, 2654435761) ^ Math.imul(frameCounter, 2246822519) ^ SEED) >>> 0;
+        var hIdx = Math.floor(hash01(seed) * POOL.length);
+        drawCh = POOL[hIdx];
+        jy = Math.round((hash01(seed ^ 0x9e3779b9) - 0.5) * 5 * p);
+        ctx.fillStyle = GHOST_COLOR;
+        boundaryX = charX[i];
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.fillText(drawCh, charX[i], baselineY + jy);
+    }
+
+    if (p > 0.02) {
+      var pulse = 0.35 + 0.25 * Math.sin(phase);
+      ctx.fillStyle = BAR_COLOR;
+      ctx.globalAlpha = pulse * p;
+      ctx.fillRect(boundaryX - 2, ih * 0.22, 3, ih * 0.56);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    iw = W; ih = H;
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+  var PLAY_MS = 900;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

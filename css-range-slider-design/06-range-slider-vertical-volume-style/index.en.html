@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vertical volume bar — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vv" id="vv">
+  <p class="vv__hint">Rotating a horizontal slider -90° turns its coordinate system with it, so the same fill formula pours from bottom to top</p>
+  <div class="vv__row" role="img" aria-label="Scene of a vertical volume slider filling from bottom to top">
+    <span class="vv__label" aria-hidden="true">VOL</span>
+    <div class="vv__col">
+      <div class="vv__wrap" id="vvWrap">
+        <input class="vv__range" id="vvRange" type="range" min="0" max="100" step="1" value="60" aria-label="Volume">
+      </div>
+      <span class="vv__icon" id="vvIcon"></span>
+    </div>
+  </div>
+  <p class="vv__meta"><b class="vv__tag" id="vvPct">60%</b><span class="vv__unit">Fill = var(--pct), unchanged</span></p>
+</div>
+</main>
+<script>
+// 세로 볼륨바(06, 아이디어형) — 가로 input 을 -90도 회전시켜 세로로 세운다. 네이티브
+// 썸은 로컬 0%(값이 작은 쪽)에서 시작하고, 회전 뒤 로컬 0%는 화면 아래쪽에 온다.
+// 채움도 썸과 같은 지점(로컬 0% = 화면 아래)에서 var(--pct)% 까지 칠해야 "아래에서
+// 위로" 차오른다 — 트랙 배경을 (100%-var(--pct)) 로 뒤집으면 채움이 항상 화면
+// 맨 위 조각으로 떨어져 썸과 분리된다(렌더 확인 후 style.scss 에서 수정, 뒤집지 않음).
+(function () {
+  var root = document.getElementById('vv');
+  var wrap = document.getElementById('vvWrap');
+  var range = document.getElementById('vvRange');
+  var pctEl = document.getElementById('vvPct');
+  var iconEl = document.getElementById('vvIcon');
+  if (!root || !wrap || !range || !pctEl || !iconEl) return;
+
+  var ICONS = {
+    none: '<svg viewBox="0 0 256 256" width="20" height="20"><g fill="currentColor"><path d="M80 88v80H32a8 8 0 0 1-8-8V96a8 8 0 0 1 8-8Z" opacity=".35"/><path d="M155.51 24.81a8 8 0 0 0-8.42.88L77.25 80H32a16 16 0 0 0-16 16v64a16 16 0 0 0 16 16h45.25l69.84 54.31A8 8 0 0 0 160 224V32a8 8 0 0 0-4.49-7.19M32 96h40v64H32Zm112 111.64l-56-43.55V91.91l56-43.55Z"/></g></svg>',
+    low: '<svg viewBox="0 0 256 256" width="20" height="20"><g fill="currentColor"><path d="M80 88v80H32a8 8 0 0 1-8-8V96a8 8 0 0 1 8-8Z" opacity=".35"/><path d="M155.51 24.81a8 8 0 0 0-8.42.88L77.25 80H32a16 16 0 0 0-16 16v64a16 16 0 0 0 16 16h45.25l69.84 54.31A8 8 0 0 0 160 224V32a8 8 0 0 0-4.49-7.19M32 96h40v64H32Zm112 111.64l-56-43.55V91.91l56-43.55ZM208 128a39.93 39.93 0 0 1-10 26.46a8 8 0 0 1-12-10.58a24 24 0 0 0 0-31.72a8 8 0 1 1 12-10.58A40 40 0 0 1 208 128"/></g></svg>',
+    high: '<svg viewBox="0 0 256 256" width="20" height="20"><g fill="currentColor"><path d="M80 88v80H32a8 8 0 0 1-8-8V96a8 8 0 0 1 8-8Z" opacity=".35"/><path d="M155.51 24.81a8 8 0 0 0-8.42.88L77.25 80H32a16 16 0 0 0-16 16v64a16 16 0 0 0 16 16h45.25l69.84 54.31A8 8 0 0 0 160 224V32a8 8 0 0 0-4.49-7.19M32 96h40v64H32Zm112 111.64l-56-43.55V91.91l56-43.55Zm54-106.08a40 40 0 0 1 0 52.88a8 8 0 0 1-12-10.58a24 24 0 0 0 0-31.72a8 8 0 0 1 12-10.58M248 128a79.9 79.9 0 0 1-20.37 53.34a8 8 0 0 1-11.92-10.67a64 64 0 0 0 0-85.33a8 8 0 1 1 11.92-10.67A79.83 79.83 0 0 1 248 128"/></g></svg>'
+  };
+
+  var MIN = 0, MAX = 100;
+  var TAU = 0.13;
+
+  function iconFor(v) {
+    if (v <= 1) return 'none';
+    if (v < 40) return 'low';
+    return 'high';
+  }
+
+  var lastIcon = '';
+  function paint(v) {
+    var pct = (v - MIN) / (MAX - MIN) * 100;
+    wrap.style.setProperty('--pct', pct.toFixed(2));
+    pctEl.textContent = Math.round(pct) + '%';
+    range.setAttribute('aria-valuenow', String(Math.round(v)));
+    var key = iconFor(v);
+    if (key !== lastIcon) { iconEl.innerHTML = ICONS[key]; lastIcon = key; }
+  }
+
+  var current = 60;
+  paint(current);
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var playing = true;
+  function stop() { playing = false; }
+  range.addEventListener('pointerdown', stop);
+  range.addEventListener('keydown', stop);
+  range.addEventListener('input', function () { current = Number(range.value); paint(current); });
+
+  var targets = [60, 2, 88, 30, 100, 60];
+  var seg = 0, segFrom = current;
+  var SEG_MS = 400;
+  var segStart = performance.now();
+
+  if (reduce) {
+    current = targets[0];
+    range.value = String(current);
+    paint(current);
+  } else {
+    (function step(now) {
+      if (playing) {
+        var elapsed = now - segStart;
+        if (elapsed >= SEG_MS) {
+          seg = (seg + 1) % targets.length;
+          segStart = now; elapsed = 0; segFrom = current;
+        }
+        var target = targets[seg];
+        var t = elapsed / 1000;
+        var k = 1 - Math.exp(-t / TAU);
+        current = segFrom + (target - segFrom) * k;
+        range.value = String(Math.round(current));
+        paint(current);
+      }
+      requestAnimationFrame(step);
+    })(segStart);
+  }
+})();
+</script>
+</body>
+</html>

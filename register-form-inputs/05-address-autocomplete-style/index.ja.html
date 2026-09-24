@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주소 자동완성 스타일 입력창 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="addr is-demo" id="wrap">
+    <label class="addr__label" for="addr-input">配送先住所</label>
+    <div class="addr__field">
+      <input class="addr__input" id="addr-input" type="text" role="combobox"
+             aria-expanded="false" aria-controls="addr-listbox" aria-autocomplete="list"
+             aria-haspopup="listbox" aria-describedby="addr-hint" autocomplete="off"
+             placeholder="住所を入力してください">
+      <ul class="addr__listbox" id="addr-listbox" role="listbox" aria-label="住所候補" hidden></ul>
+    </div>
+    <p class="addr__hint" id="addr-hint">矢印キーで選び · Enterで入力</p>
+  </div>
+</main>
+<script>
+(function () {
+  var ADDRESSES = [
+    'ソウル江南区テヘラン路14',
+    'ソウル麻浦区ワールドカップ路3',
+    '釜山海雲台区センタム路99',
+    '大邱寿城区東大邱路7',
+    '仁川延寿区コンベンシア大路5'
+  ];
+
+  var wrap = document.getElementById('wrap');
+  var input = document.getElementById('addr-input');
+  var listbox = document.getElementById('addr-listbox');
+
+  var matches = [];
+  var active = -1;      // -1 = 강조 없음 (입력한 글자 그대로)
+  var open = false;
+  var hideTimer = null;
+
+  function render(list) {
+    listbox.innerHTML = '';
+    list.forEach(function (text, i) {
+      var li = document.createElement('li');
+      li.className = 'addr__option';
+      li.id = 'addr-opt-' + i;
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', 'false');
+      li.textContent = text;
+      li.addEventListener('click', function () { selectOption(i, true); });
+      li.addEventListener('pointerenter', function () { setActive(i); });
+      listbox.appendChild(li);
+    });
+  }
+
+  function setActive(i) {
+    active = i;
+    var opts = listbox.querySelectorAll('.addr__option');
+    opts.forEach(function (o, idx) {
+      var on = idx === i;
+      o.classList.toggle('addr__option--active', on);
+      o.setAttribute('aria-selected', String(on));
+    });
+    if (i > -1 && opts[i]) input.setAttribute('aria-activedescendant', opts[i].id);
+    else input.removeAttribute('aria-activedescendant');
+  }
+
+  function openList() {
+    if (open) return;
+    open = true;
+    clearTimeout(hideTimer);
+    listbox.hidden = false;
+    void listbox.offsetWidth;
+    listbox.classList.add('is-open');
+    input.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeList() {
+    if (!open) return;
+    open = false;
+    listbox.classList.remove('is-open');
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    hideTimer = setTimeout(function () { if (!open) listbox.hidden = true; }, 220);
+  }
+
+  function selectOption(i, focusInput) {
+    var text = matches[i];
+    if (text === undefined) return;
+    input.value = text;
+    closeList();
+    setActive(-1);
+    matches = [];
+    if (focusInput) input.focus({ preventScroll: true });
+  }
+
+  function filterAndRender(query) {
+    matches = query ? ADDRESSES.filter(function (a) { return a.indexOf(query) > -1; }) : [];
+    if (query && matches.length) {
+      render(matches);
+      setActive(-1);
+      openList();
+    } else {
+      closeList();
+    }
+  }
+
+  input.addEventListener('input', function () { filterAndRender(input.value.trim()); });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!open && matches.length) { openList(); setActive(0); return; }
+      if (open && matches.length) setActive(Math.min(active + 1, matches.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (open) { if (active <= 0) setActive(-1); else setActive(active - 1); }
+    } else if (e.key === 'Enter') {
+      if (open && active > -1) { e.preventDefault(); selectOption(active, true); }
+    } else if (e.key === 'Escape') {
+      if (open) { e.preventDefault(); closeList(); setActive(-1); }
+    }
+  });
+
+  document.addEventListener('pointerdown', function (e) {
+    if (open && !wrap.contains(e.target)) closeList();
+  });
+
+  // ── 실사용자가 손대면 데모를 영구 정지 ──
+  wrap.addEventListener('pointerdown', stopDemo, true);
+  wrap.addEventListener('keydown', stopDemo, true);
+
+  function stopDemo() {
+    if (!wrap.classList.contains('is-demo')) return;
+    wrap.classList.remove('is-demo');
+    clearTimeout(demoTimer);
+  }
+
+  // ── 자동 데모 루프: input 이벤트를 실제로 디스패치해 진짜 필터·선택 경로를 돈다 ──
+  var demoTimer = null;
+  var QUERIES = ['ソウル江南', '釜山海雲台'];
+  var qIdx = 0;
+
+  function dispatchInput() {
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function typewrite(str, i, cb) {
+    if (!wrap.classList.contains('is-demo')) return;
+    if (i <= str.length) {
+      input.value = str.slice(0, i);
+      dispatchInput();
+      demoTimer = setTimeout(function () { typewrite(str, i + 1, cb); }, 110);
+    } else {
+      demoTimer = setTimeout(cb, 500);
+    }
+  }
+
+  function demoStep() {
+    if (!wrap.classList.contains('is-demo')) return;
+    var query = QUERIES[qIdx % QUERIES.length];
+    qIdx++;
+    typewrite(query, 1, function () {
+      if (!wrap.classList.contains('is-demo')) return;
+      if (matches.length) {
+        setActive(0);
+        demoTimer = setTimeout(function () {
+          if (!wrap.classList.contains('is-demo')) return;
+          selectOption(0, false);
+          demoTimer = setTimeout(function () {
+            if (!wrap.classList.contains('is-demo')) return;
+            input.value = '';
+            dispatchInput();
+            demoTimer = setTimeout(demoStep, 400);
+          }, 900);
+        }, 450);
+      } else {
+        demoTimer = setTimeout(demoStep, 400);
+      }
+    });
+  }
+
+  demoTimer = setTimeout(demoStep, 500);
+})();
+</script>
+</body>
+</html>

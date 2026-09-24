@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>テキストの値が格子状に散らばるQR風キャンバス — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tq is-demo" id="tq">
+  <label class="tq__cap" for="tqText">テキストの値</label>
+  <input class="tq__input" id="tqText" type="text" maxlength="18" value="hello world" aria-label="テキストの値を入力するとハッシュで計算したQR風の格子をキャンバスに描きます" aria-describedby="tqReadout">
+  <canvas class="tq__canvas" id="tqCanvas" width="120" height="120" aria-hidden="true"></canvas>
+  <p class="tq__readout" id="tqReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('tq');
+  var input = document.getElementById('tqText');
+  var canvas = document.getElementById('tqCanvas');
+  var ctx = canvas.getContext('2d');
+  var readout = document.getElementById('tqReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  // 계산 한 겹 — テキスト-> 결정적 해시 -> 격자 값(흑백), QR 인코딩이 아니라 QR풍 패턴이다
+  function hashStr(s) {
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function cellOn(hash, i) {
+    var x = (hash ^ Math.imul(i + 1, 2654435761)) >>> 0;
+    x = (x ^ (x >>> 15)) >>> 0;
+    return (x & 1) === 1;
+  }
+  var GRID_MAX = 12; // 변형 07: 키우면 글자 수가 많을 때 격자 칸 수(=캔버스를 채우는 칸 크기)가 더 커진다
+  function computeGrid(text) {
+    var hash = hashStr(text);
+    var gridSize = Math.min(GRID_MAX, Math.max(4, 4 + Math.floor(text.length / 3)));
+    var total = gridSize * gridSize;
+    var finderSize = Math.min(3, gridSize - 1);
+    var cells = new Array(total);
+    for (var r = 0; r < gridSize; r++) {
+      for (var c = 0; c < gridSize; c++) {
+        var i = r * gridSize + c;
+        var inFinder = (r < finderSize && c < finderSize) ||
+          (r < finderSize && c >= gridSize - finderSize) ||
+          (r >= gridSize - finderSize && c < finderSize);
+        cells[i] = inFinder ? true : cellOn(hash, i);
+      }
+    }
+    return { gridSize: gridSize, cells: cells, total: total };
+  }
+
+  var SENT_PREFIX = 'テキスト', SENT_MID1 = '文字は', SENT_MID2 = '×', SENT_SUFFIX = '格子の値として計算されます';
+
+  var grid = computeGrid(input.value);
+  var revealTarget = grid.total;
+  var revealStartNow = performance.now();
+  var CELLS_PER_SEC = 90;
+
+  function recompute(text) {
+    grid = computeGrid(text);
+    revealTarget = grid.total;
+    revealStartNow = performance.now();
+    readout.textContent = SENT_PREFIX + text.length + SENT_MID1 + grid.gridSize + SENT_MID2 + grid.gridSize + SENT_SUFFIX;
+    if (reduce) { draw(grid.total); }
+  }
+
+  function draw(revealedCount) {
+    var size = canvas.width;
+    var cell = size / grid.gridSize;
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = '#fff7e6';
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#17141a';
+    for (var i = 0; i < grid.total && i < revealedCount; i++) {
+      if (!grid.cells[i]) continue;
+      var r = Math.floor(i / grid.gridSize);
+      var c = i % grid.gridSize;
+      ctx.fillRect(c * cell, r * cell, Math.ceil(cell), Math.ceil(cell));
+    }
+  }
+
+  function onInput() { human(); recompute(input.value); }
+  input.addEventListener('input', onInput);
+  input.addEventListener('change', onInput);
+
+  var DEMO_VALUES = ['hello world', 'abcdef123456', 'sample-input-07', 'pattern-grid-x9', 'hash-seed-42', 'demo-text-string'];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_VALUES.length);
+      if (idx !== lastIdx) {
+        lastIdx = idx;
+        input.value = DEMO_VALUES[idx];
+        recompute(DEMO_VALUES[idx]);
+      }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    if (!reduce) {
+      var elapsedSec = Math.max(0, (now - revealStartNow) / 1000);
+      var revealedCount = Math.min(grid.total, Math.floor(elapsedSec * CELLS_PER_SEC));
+      draw(revealedCount);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  readout.textContent = SENT_PREFIX + input.value.length + SENT_MID1 + grid.gridSize + SENT_MID2 + grid.gridSize + SENT_SUFFIX;
+  if (reduce) { draw(grid.total); }
+
+  if (!reduce) {
+    requestAnimationFrame(driveTick);
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>대역폭 판정으로 바뀌는 화질 배지 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="qualityCard is-demo" id="qualityCard">
+  <div class="badge" id="badge">
+    <span class="warnIcon" id="warnIcon" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256">
+        <g fill="currentColor">
+          <path d="M215.46 216H40.54c-12.62 0-20.54-13.21-14.41-23.91l87.46-151.87c6.3-11 22.52-11 28.82 0l87.46 151.87c6.13 10.7-1.79 23.91-14.41 23.91" opacity=".2"/>
+          <path d="M236.8 188.09L149.35 36.22a24.76 24.76 0 0 0-42.7 0L19.2 188.09a23.51 23.51 0 0 0 0 23.72A24.35 24.35 0 0 0 40.55 224h174.9a24.35 24.35 0 0 0 21.33-12.19a23.51 23.51 0 0 0 .02-23.72m-13.87 15.71a8.5 8.5 0 0 1-7.48 4.2H40.55a8.5 8.5 0 0 1-7.48-4.2a7.59 7.59 0 0 1 0-7.72l87.45-151.87a8.75 8.75 0 0 1 15 0l87.45 151.87a7.59 7.59 0 0 1-.04 7.72M120 144v-40a8 8 0 0 1 16 0v40a8 8 0 0 1-16 0m20 36a12 12 0 1 1-12-12a12 12 0 0 1 12 12"/>
+        </g>
+      </svg>
+    </span>
+    <span class="badgeText" id="badgeText">고화질</span>
+  </div>
+  <p class="readout" id="readout" aria-live="polite">대역폭 약 6.0Mbps</p>
+  <button class="forceBtn" id="forceBtn" type="button" aria-pressed="false">지금 고화질로 전환</button>
+</div>
+<script>
+(function () {
+  var QUALITY_BADGE_HOLD_MS = 1200; // 훅 — 변형이 1200→3000 으로 바꾸는 값
+  var LOOP_MS = 6000;
+  var TICK_MS = 100;
+  var HIGH_MBPS = 6;
+  var LOW_MBPS = 2.5;
+
+  var card = document.getElementById('qualityCard');
+  var badge = document.getElementById('badge');
+  var badgeText = document.getElementById('badgeText');
+  var warnIcon = document.getElementById('warnIcon');
+  var readout = document.getElementById('readout');
+  var forceBtn = document.getElementById('forceBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var LEVELS = { high: '고화질', mid: '중간 화질', low: '저화질' };
+  // 판정 배지의 바탕색을 만드는 3점 그라디언트 정지색(고→중→저)
+  var STOP_HIGH = [110, 200, 255];
+  var STOP_MID = [255, 158, 187];
+  var STOP_LOW = [194, 54, 26];
+
+  function bandwidth(ms) {
+    var w = 4.2 + 3.6 * Math.sin(ms / 380) + 1.3 * Math.sin(ms / 133);
+    return Math.max(0.4, w);
+  }
+
+  function judge(mbps) {
+    if (mbps >= HIGH_MBPS) return 'high';
+    if (mbps <= LOW_MBPS) return 'low';
+    return 'mid';
+  }
+
+  function mix(a, b, t) { return Math.round(a + (b - a) * t); }
+
+  // 원시 대역폭 값을 0~1 로 정규화해 바탕색을 매 틱 연속으로 섞는다(실시간 신호) —
+  // 화면 문구(고/중/저)는 아래 tick() 의 판정+홀드 결과를 따로 쓴다(순간 튐 없는 결정)
+  function liveColor(mbps) {
+    var t = Math.max(0, Math.min(1, (mbps - LOW_MBPS) / (HIGH_MBPS - LOW_MBPS)));
+    var stops = t > 0.5 ? [STOP_MID, STOP_HIGH, (t - 0.5) * 2] : [STOP_LOW, STOP_MID, t * 2];
+    var from = stops[0], to = stops[1], localT = stops[2];
+    return 'rgb(' + mix(from[0], to[0], localT) + ',' + mix(from[1], to[1], localT) + ',' + mix(from[2], to[2], localT) + ')';
+  }
+
+  var displayLevel = 'high';
+  var pendingLevel = 'high';
+  var pendingSinceMs = 0;
+  var forced = null;
+
+  function paint(level, mbps) {
+    badgeText.textContent = LEVELS[level];
+    badge.setAttribute('data-level', level);
+    badge.style.backgroundColor = liveColor(mbps);
+    warnIcon.hidden = level !== 'low';
+    readout.textContent = '대역폭 약 ' + mbps.toFixed(1) + 'Mbps';
+  }
+
+  // 대역폭이 임계값을 넘었다고 즉시 바꾸지 않고, QUALITY_BADGE_HOLD_MS 만큼 그 판정이
+  // 계속 유지될 때만 라벨·아이콘을 바꾼다 — 순간 튐으로 배지 글자가 깜빡이는 것을 막는 판정 계산.
+  // (바탕색은 위 liveColor() 로 매 틱 계속 움직여 실시간 신호 자체는 감추지 않는다)
+  function tick(ms) {
+    var mbps = bandwidth(ms);
+    if (forced !== null) { paint(forced, mbps); return; }
+    var target = judge(mbps);
+    if (target !== displayLevel) {
+      if (target === pendingLevel) {
+        if (ms - pendingSinceMs >= QUALITY_BADGE_HOLD_MS) {
+          displayLevel = target;
+        }
+      } else {
+        pendingLevel = target;
+        pendingSinceMs = ms;
+      }
+    } else {
+      pendingLevel = displayLevel;
+    }
+    paint(displayLevel, mbps);
+  }
+
+  var timer = null;
+  var start = 0;
+  function loop() { tick(performance.now() - start); }
+
+  function human() {
+    if (card.classList.contains('is-demo')) {
+      card.classList.remove('is-demo');
+      window.clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  forceBtn.addEventListener('click', function () {
+    human();
+    if (forced === null) {
+      forced = 'high';
+      forceBtn.setAttribute('aria-pressed', 'true');
+      forceBtn.textContent = '자동 판정으로 되돌리기';
+    } else {
+      forced = null;
+      forceBtn.setAttribute('aria-pressed', 'false');
+      forceBtn.textContent = '지금 고화질로 전환';
+    }
+  });
+
+  if (!reduce) {
+    start = performance.now();
+    tick(0);
+    timer = window.setInterval(loop, TICK_MS);
+  } else {
+    // reduce: 실사용 경로 적용 — 판정 갱신을 멈추고 한 등급을 고정해 보여준다
+    paint('mid', 4.0);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

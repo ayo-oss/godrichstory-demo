@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ボタンの背景が進捗分だけ満ちるミニプログレス表示 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <button class="btn" id="btn" type="button">
+    <span class="btnFill" id="fill" aria-hidden="true"></span>
+    <span class="btnText" id="text">Upload file</span>
+  </button>
+  <span class="visuallyHidden" id="status" role="status" aria-live="polite"></span>
+</div>
+</main>
+<script>
+(function () {
+  var FILL_MS = 1100;
+  var HOLD_AT_FULL_MS = 500;
+  var SUCCESS_HOLD_MS = 350;
+  var GAP_MS = 450;
+  var START_DELAY_MS = 200;
+
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var fill = document.getElementById('fill');
+  var text = document.getElementById('text');
+  var status = document.getElementById('status');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gen = 0;
+  var timers = [];
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); });
+      timers = [];
+    }
+  }
+
+  function easeOutCubic(p) { return 1 - Math.pow(1 - p, 3); }
+
+  // 계산 겹: 채움 막대는 scaleX 로만 늘어난다(transform-origin: left — 시작 변에서 자란다는
+  // 예외적 origin, 채움 막대이므로 허용). 진행률 p 는 easeOutCubic 으로 매 프레임 계산해
+  // 같은 값을 style.transform 과 라벨의 퍼센트 숫자 둘 다에 쓴다.
+  function drive(myGen, onDone) {
+    var start = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (start === null) start = now;
+      var raw = Math.min(1, (now - start) / FILL_MS);
+      var p = easeOutCubic(raw);
+      fill.style.transform = 'scaleX(' + p.toFixed(4) + ')';
+      text.textContent = 'Uploading ' + Math.round(p * 100) + '%';
+      if (raw < 1) requestAnimationFrame(step); else onDone();
+    }
+    requestAnimationFrame(step);
+  }
+
+  function fadeOutFill(myGen, ms, onDone) {
+    var start = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (start === null) start = now;
+      var p = Math.min(1, (now - start) / ms);
+      fill.style.opacity = String(1 - p);
+      if (p < 1) requestAnimationFrame(step); else onDone();
+    }
+    requestAnimationFrame(step);
+  }
+
+  function runAnimated() {
+    gen++;
+    var myGen = gen;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    status.textContent = 'アップロード中';
+    fill.style.opacity = '1';
+    fill.style.transform = 'scaleX(0)';
+    drive(myGen, function () {
+      timers.push(setTimeout(function () {
+        text.textContent = 'Uploaded';
+        status.textContent = 'アップロード完了';
+        fadeOutFill(myGen, 260, function () {
+          timers.push(setTimeout(function () {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+            text.textContent = 'Upload file';
+            fill.style.transform = 'scaleX(0)';
+          }, SUCCESS_HOLD_MS));
+        });
+      }, HOLD_AT_FULL_MS));
+    });
+  }
+
+  function runReduced() {
+    gen++;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    status.textContent = 'アップロード中';
+    fill.style.opacity = '1';
+    fill.style.transform = 'scaleX(1)';
+    text.textContent = 'Uploading 100%';
+    timers.push(setTimeout(function () {
+      text.textContent = 'Uploaded';
+      status.textContent = 'アップロード完了';
+      fill.style.opacity = '0';
+      timers.push(setTimeout(function () {
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        text.textContent = 'Upload file';
+        fill.style.transform = 'scaleX(0)';
+      }, SUCCESS_HOLD_MS));
+    }, HOLD_AT_FULL_MS));
+  }
+
+  btn.addEventListener('click', function () {
+    if (btn.disabled) return;
+    human();
+    if (reduce) runReduced(); else runAnimated();
+  });
+
+  // reduce: 실사용 경로 적용 — runReduced() 는 채움 트윈 없이 즉시 꽉 찬 상태로 바꾼다.
+  // 아래 자동 루프는 시연 게이트만 — reduce 에서는 돌지 않는다.
+  function cycle() {
+    if (!scene.classList.contains('is-demo')) return;
+    runAnimated();
+    timers.push(setTimeout(function () {
+      timers.push(setTimeout(cycle, GAP_MS));
+    }, FILL_MS + HOLD_AT_FULL_MS + 260 + SUCCESS_HOLD_MS));
+  }
+
+  if (!reduce) {
+    timers.push(setTimeout(cycle, START_DELAY_MS));
+  }
+})();
+</script>
+</body>
+</html>

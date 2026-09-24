@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>세로 드래그 관성 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="nspdi is-demo" id="nspdi">
+  <div class="nspdi__panel">
+    <span class="nspdi__label">체감 온도</span>
+    <div class="nspdi__body">
+      <div class="nspdi__track">
+        <span class="nspdi__handle" id="nspdiHandle"></span>
+      </div>
+      <span class="nspdi__value" id="nspdiValue">20<small>°C</small></span>
+    </div>
+    <span class="nspdi__hint">위아래로 끌면 놓은 뒤에도 관성으로 이어집니다</span>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('nspdi');
+  var handle = document.getElementById('nspdiHandle');
+  var valueEl = document.getElementById('nspdiValue');
+
+  var MIN = -10, MAX = 40, STEP_PX = 20, MAX_OFFSET = 34;
+  var value = 20;
+  var dragging = false;
+  var startY = 0, startValue = 0, lastY = 0, lastT = 0, vel = 0;
+  var inertiaRaf = null;
+
+  function render() { valueEl.innerHTML = value + '<small>°C</small>'; }
+  function setHandle(px) {
+    var c = Math.max(-MAX_OFFSET, Math.min(MAX_OFFSET, px));
+    handle.style.transform = 'translateY(' + c.toFixed(1) + 'px)';
+  }
+
+  function beginDrag(y) {
+    if (inertiaRaf) { cancelAnimationFrame(inertiaRaf); inertiaRaf = null; }
+    dragging = true;
+    startY = y; startValue = value; lastY = y; lastT = performance.now(); vel = 0;
+    handle.classList.add('nspdi__handle--active');
+  }
+  function moveDrag(y) {
+    var now = performance.now();
+    var dtMove = Math.max(1, now - lastT);
+    vel = (y - lastY) / dtMove;
+    lastY = y; lastT = now;
+    var dy = y - startY;
+    value = Math.max(MIN, Math.min(MAX, startValue - Math.round(dy / STEP_PX)));
+    render();
+    setHandle(dy);
+  }
+
+  // 계산 겹: 놓는 순간의 속도(px/ms)에 지수 마찰(FRICTION)을 매 프레임 곱해 감쇠시키고,
+  // 감쇠 중 이동한 가상 거리(virtual)를 20px 단위로 값에 계속 반영한다 — 손을 놓아도 몇 단계 더 이어진다.
+  var FRICTION = 6.2;
+  function endDrag() {
+    dragging = false;
+    handle.classList.remove('nspdi__handle--active');
+    var baseValue = value;
+    var virtual = 0;
+    var v = vel;
+    var last = performance.now();
+    function frame(now) {
+      var dt = now - last; last = now;
+      v *= Math.exp(-FRICTION * dt / 1000);
+      virtual += v * dt;
+      value = Math.max(MIN, Math.min(MAX, baseValue - Math.round(virtual / STEP_PX)));
+      render();
+      setHandle(virtual);
+      if (Math.abs(v) > 0.02) {
+        inertiaRaf = requestAnimationFrame(frame);
+      } else {
+        setHandle(0);
+        inertiaRaf = null;
+      }
+    }
+    inertiaRaf = requestAnimationFrame(frame);
+  }
+
+  handle.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo'); stopAutoplay();
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    beginDrag(e.clientY);
+  });
+  handle.addEventListener('pointermove', function (e) { if (dragging) { moveDrag(e.clientY); } });
+  ['pointerup', 'pointercancel'].forEach(function (ev) {
+    handle.addEventListener(ev, function () { if (dragging) { endDrag(); } });
+  });
+
+  var autoplayTimer = null;
+  function autoplayFling(vpx) {
+    vel = vpx;
+    value = 20;
+    render();
+    endDrag();
+  }
+  function stopAutoplay() { if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; } }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayFling(-0.85);
+    autoplayTimer = setInterval(function () {
+      autoplayFling(Math.random() > 0.5 ? -0.85 : 0.85);
+    }, 1900);
+  }
+  render();
+})();
+</script>
+</body>
+</html>

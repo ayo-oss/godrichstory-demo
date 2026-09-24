@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grid Reflow — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gr">
+  <p class="gr__hint">Coordinates are divided by track width and row height into integer column/row indices, clamped at the edges.</p>
+  <div class="gr__board" id="grBoard">
+    <div class="gr__cell"><span class="gr__dot gr__dot--a"></span><span class="gr__lbl">sky</span></div>
+    <div class="gr__cell"><span class="gr__dot gr__dot--b"></span><span class="gr__lbl">sea</span></div>
+    <div class="gr__cell"><span class="gr__dot gr__dot--c"></span><span class="gr__lbl">forest</span></div>
+    <div class="gr__cell"><span class="gr__dot gr__dot--d"></span><span class="gr__lbl">desert</span></div>
+    <div class="gr__cell"><span class="gr__dot gr__dot--e"></span><span class="gr__lbl">snowfield</span></div>
+    <div class="gr__cell"><span class="gr__dot gr__dot--f"></span><span class="gr__lbl">volcano</span></div>
+  </div>
+  <p class="gr__meta"><b class="gr__state" id="grState">col 0 · row 0</b><span class="gr__unit">→ idx 0</span></p>
+</div>
+</main>
+<script>
+// 그리드 재배치(03) — 그리드 rect 와 열 수(3)로 포인터 x·y 를 트랙 폭·행 높이로 나눈 몫을
+// 열·행 인덱스로 삼고(cellAt), 0..cols-1 · 0..rows-1 로 클램프한 뒤 row*cols+col 로
+// 1차원 인덱스를 펴서 순서 배열을 스플라이스한다(applyMove). 이동한 칸들은 FLIP 과 같은
+// 전후 좌표차 역산으로 transform 을 되돌렸다가 푼다. 자동 시연은 고정 시나리오 3회전.
+(function () {
+  var board = document.getElementById('grBoard');
+  var stateEl = document.getElementById('grState');
+  if (!board || !stateEl) return;
+
+  var COLS = 3;
+  var order = [0, 1, 2, 3, 4, 5];   // 1차원 순서 배열 — 스플라이스 대상
+  var CELLS = Array.prototype.slice.call(board.children);
+
+  // 좌표 → 클램프된 col·row 몫
+  function cellAt(x, y) {
+    var r = board.getBoundingClientRect();
+    var col = Math.floor((x - r.left) / (r.width / COLS));
+    var row = Math.floor((y - r.top) / (r.height / Math.ceil(CELLS.length / COLS)));
+    col = Math.max(0, Math.min(COLS - 1, col));
+    row = Math.max(0, Math.min(Math.ceil(CELLS.length / COLS) - 1, row));
+    return { col: col, row: row, idx: row * COLS + col };
+  }
+
+  // 1차원 인덱스 두 개로 스플라이스 + FLIP 되돌림
+  function applyMove(from, to) {
+    if (from === to || to < 0 || to >= order.length) return;
+    var first = CELLS.map(function (c) {
+      var r = c.getBoundingClientRect();
+      return { x: r.left, y: r.top };
+    });
+    order.splice(to, 0, order.splice(from, 1)[0]);
+    order.forEach(function (ci) { board.appendChild(CELLS[ci]); });
+    CELLS.forEach(function (c) {
+      var r = c.getBoundingClientRect();
+      var me = first[CELLS.indexOf(c)];
+      var dx = me.x - r.left, dy = me.y - r.top;
+      if (dx !== 0 || dy !== 0) {
+        c.style.transition = 'none';
+        c.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        requestAnimationFrame(function () {
+          c.style.transition = 'transform 240ms cubic-bezier(.2,.8,.2,1)';
+          c.style.transform = 'translate(0,0)';
+        });
+      }
+    });
+  }
+
+  // 포인터 상태 라벨 — 몫 계산을 그대로 보여준다
+  function labelAt(x, y) {
+    var c = cellAt(x, y);
+    stateEl.textContent = 'col ' + c.col + ' · row ' + c.row;
+  }
+
+  // 사람 조작 — 칸 클릭: 첫 칸과 자리 교환(같은 역산 경로)
+  board.addEventListener('click', function (e) {
+    stop();
+    var cell = e.target.closest('.gr__cell');
+    if (!cell) return;
+    var r = board.getBoundingClientRect();
+    var cr = cell.getBoundingClientRect();
+    labelAt(cr.left + cr.width / 2 - r.left + r.left, cr.top + cr.height / 2);
+    var target = cellAt(cr.left + cr.width / 2, cr.top + cr.height / 2);
+    var cur = CELLS.indexOf(cell);
+    applyMove(cur, target.idx);
+  });
+
+  // 자동 시연 — 보드 좌표를 실측해 몫 계산으로 이동하는 시나리오
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 우하단·좌상단을 번갈아 가리켜 매 회 실제로 자리가 바뀌게 한다(같은 칸 반복 시 from===to 무동작 방지)
+  var swapToggle = 0;
+  function scenario() {
+    var r = board.getBoundingClientRect();
+    var x2, y2;
+    if (swapToggle === 0) {
+      x2 = r.left + r.width * 0.9; y2 = r.top + r.height * 0.8; // 우하단
+    } else {
+      x2 = r.left + r.width * 0.1; y2 = r.top + r.height * 0.2; // 좌상단
+    }
+    swapToggle = 1 - swapToggle;
+    var t2 = cellAt(x2, y2);
+    labelAt(x2, y2);
+    var moving = order[0];
+    applyMove(order.indexOf(moving), t2.idx);
+  }
+
+  if (reduce) {
+    scenario();
+  } else {
+    var last = 0;
+    var DELAY = 460;
+    (function tick(now) {
+      if (playing && now - last >= DELAY) { last = now; scenario(); }
+      requestAnimationFrame(tick);
+    })(performance.now());
+  }
+})();
+</script>
+</body>
+</html>

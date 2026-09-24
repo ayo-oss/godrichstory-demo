@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>테슬라 아크 — 두 전극의 지속 방전 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M134 12a10 10 0 0 1 10 10v66a12 12 0 1 1-24 0V22a10 10 0 0 1 10-10h4zM62 96a10 10 0 0 1 10 10v52a12 12 0 1 1-24 0v-52a10 10 0 0 1 10-10h4zm132 0a10 10 0 0 1 10 10v52a12 12 0 1 1-24 0v-52a10 10 0 0 1 10-10h4zM128 108a14 14 0 0 1 8 25v27h-12v-27a14 14 0 0 1 4-25zM78 168a8 8 0 0 1 0 16H54a8 8 0 0 1 0-16h24zm50 0a8 8 0 0 1 0 16h-24a8 8 0 0 1 0-16h24zm50 0a8 8 0 0 1 0 16h-24a8 8 0 0 1 0-16h24zM128 200a8 8 0 0 1 0 16h-6v-16h6zm-6 0v16h-6a8 8 0 0 1 0-16h6z" opacity=".95"/><circle cx="128" cy="18" r="18" fill="currentColor" opacity=".25"/></svg>
+    <span>2つの電極間の中点変位経路を毎フレーム新しいシードで計算し直します — 両端は固定のまま経路だけが絶えず揺れ続ける持続放電です</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="テスラアーク放電 実験パネル" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">電圧 <b class="cd__val" id="cdVolt"></b>kV・枝 <b class="cd__val" id="cdFork"></b></span>
+    <span class="cd__meta cd__meta--dim">キャンバス・lineTo・globalCompositeOperation</span>
+  </div>
+</div>
+</main>
+<script>
+// 테슬라 아크(05). 좌우 고정 전극(구 스탠드) 사이의 아크를 매 프레임 새 난수로 중점변위 재계산해 그린다.
+// 밝기 겹침은 lighter 컴포짓(가산혼합)으로, 떨림 세기는 시간 반주기로 붙였다 뗐다 한다.
+// 곁가지는 아크 경로의 무작위 지점에서 위쪽으로 짧게 갈라진다(매 프레임 새 지점 — 아크가 살아 있는 인상).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var VOLT   = 240;    // 표시 電圧(kV) — 변형 "電圧" 축(240 → 480)
+  var JITTER = 9;      // 변위 깊이 — 클수록 경로가 잘게 떨린다(9 → 12)
+  var FORK_N = 3;      // 곁가지 수 — 변형 "방전 가지" 축(3 → 6)
+  // ────────────────────────────────────────────────────
+
+  // 잔광 拡散(04 와 같은 기법) — 아크가 지나간 자리의 밝기 버퍼 lum 을 매 프레임
+  // 이웃 4픽셀 平均 쪽으로 섞고(SWARM) 냉각(DIE_OUT)해 식힌다. 전극 사이 무대에
+  // 방전의 잔상이 번지다 사라진다 — 라인 두께를 키우지 않고도 화면에 남는 빛의 면적이 커진다.
+  var SWARM  = 0.50;   // 拡散 계수
+  var DIE_OUT = 0.985; // 냉각 계수 — 잔상이 한 동안 남아 누적면적을 채운다
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  document.getElementById('cdVolt').textContent = String(VOLT);
+  document.getElementById('cdFork').textContent = String(FORK_N);
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 떨림으로 시작한다
+  var SEED = 0x3160505;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--bolt-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--bolt-ink');
+  var C_CORE = tokRGB('--bolt-core');
+  var C_HALO = tokRGB('--bolt-halo');
+  var C_MINT = tokRGB('--bolt-mint');
+  var C_PINK = tokRGB('--bolt-pink');
+  var C_MIST = tokRGB('--bolt-mist');
+  function rgb(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  var W = 0, H = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1, prev = 0;
+  var STILL_T = 1.6;   // reduce 에서 그리는 시각 — 방전이 붙은 한 장
+
+  // 중점변위 — 선분을 depth 번 반분하며 중점을 법선 방향으로 무작위 오프셋
+  function genBolt(ax, ay, bx, by, mag, depth) {
+    var pts = [{ x: ax, y: ay }, { x: bx, y: by }];
+    var dx = bx - ax, dy = by - ay;
+    var len = Math.hypot(dx, dy) || 1;
+    var nx = -dy / len, ny = dx / len;
+    var off = mag;
+    for (var d = 0; d < depth; d++) {
+      var next = [pts[0]];
+      for (var i = 0; i < pts.length - 1; i++) {
+        var p = pts[i], q = pts[i + 1];
+        var r = (rand() * 2 - 1) * off;
+        next.push({ x: (p.x + q.x) * 0.5 + nx * r, y: (p.y + q.y) * 0.5 + ny * r }, q);
+      }
+      pts = next;
+      off *= 0.55;
+    }
+    return pts;
+  }
+
+  // ── 전극 위치(핏에서 계산) ──
+  var elL = { x: 0, y: 0 }, elR = { x: 0, y: 0 };
+
+  // ── 잔광 버퍼(04 拡散 기법) — fit 에서 크기를 잡는다 ──
+  var glow = null, glow2 = null, glowCv = null, glowCtx = null, glowImg = null;
+  var HALO_LUT = new Uint8ClampedArray(256);
+  (function () {   // 밝기 t → 불투명도. 라일락 헤일로 색으로 뿌린다
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255;
+      HALO_LUT[i] = Math.round(255 * Math.pow(t, 0.78) * 0.5);
+    }
+  })();
+
+  function glowFit() {
+    glow = new Float32Array(W * H);
+    glow2 = new Float32Array(W * H);
+    glowCv = document.createElement('canvas');
+    glowCv.width = W; glowCv.height = H;
+    glowCtx = glowCv.getContext('2d');
+    glowImg = glowCtx.createImageData(W, H);
+    var d = glowImg.data;
+    for (var i = 3; i < d.length; i += 4) d[i] = 255;
+  }
+
+  // 아크 경로를 밝기 버퍼에 도장 — 코어는 1.2, 둘레는 거리 비례 감쇠(04 stampPoint 와 동일 규격)
+  function glowStamp(px, py, radius) {
+    var cx = Math.round(px), cy = Math.round(py);
+    for (var yy = cy - radius; yy <= cy + radius; yy++) {
+      if (yy < 0 || yy >= H) continue;
+      for (var xx = cx - radius; xx <= cx + radius; xx++) {
+        if (xx < 0 || xx >= W) continue;
+        var dxx = xx - cx, dyy = yy - cy;
+        var d = Math.sqrt(dxx * dxx + dyy * dyy);
+        if (d > radius) continue;
+        var v = d <= 1 ? 1.2 : (1 - d / radius) * 0.6;
+        var idx = yy * W + xx;
+        if (v > glow[idx]) glow[idx] = v;
+      }
+    }
+  }
+
+  function glowStampPath(pts, radius) {
+    for (var i = 0; i < pts.length - 1; i++) {
+      var p = pts[i], q = pts[i + 1];
+      var seg = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / 2));
+      for (var s = 0; s < seg; s++) {
+        var f = s / seg;
+        glowStamp(p.x + (q.x - p.x) * f, p.y + (q.y - p.y) * f, radius);
+      }
+    }
+  }
+
+  // 拡散 — 이웃 4픽셀 平均 쪽으로 섞고 냉각. 이중 버퍼 교체
+  function glowDiffuse() {
+    for (var y = 0; y < H; y++) {
+      var row = y * W;
+      var up = (y > 0 ? y - 1 : y) * W;
+      var dn = (y < H - 1 ? y + 1 : y) * W;
+      for (var x = 0; x < W; x++) {
+        var i = row + x;
+        var l = glow[i];
+        var av = (glow[row + (x > 0 ? x - 1 : x)] + glow[row + (x < W - 1 ? x + 1 : x)] +
+                  glow[up + x] + glow[dn + x]) * 0.25;
+        glow2[i] = (l + SWARM * (av - l)) * DIE_OUT;
+      }
+    }
+    var tmp = glow; glow = glow2; glow2 = tmp;
+  }
+
+  // 버퍼 → 라일락 헤일로 반투명 레이어. draw 초반에 lighter 로 깔면 아크·전극이 그 위에 산다
+  function glowCompose() {
+    var d = glowImg.data, n = W * H;
+    for (var i = 0; i < n; i++) {
+      var v = glow[i];
+      var li = v >= 1 ? 255 : (v <= 0 ? 0 : (v * 255) | 0);
+      var a = HALO_LUT[li];
+      var j = i << 2;
+      d[j] = C_HALO[0]; d[j + 1] = C_HALO[1]; d[j + 2] = C_HALO[2]; d[j + 3] = a;
+    }
+    glowCtx.putImageData(glowImg, 0, 0);
+  }
+
+  // 아크 한 겹 그리기 — 두께·알파가 다른 같은 경로 3번 겹치기(헤일로·몸통·코어)
+  function strokePath(pts, width, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+  }
+
+  function draw(tSec) {
+    // 무대 — 어스름 잉크. 아크 세기(throb)에 맞춰 무대 전체가 호흡처럼 밝아졌다 어두워진다
+    // (전면 라이팅 — 배경 픽셀 자체가 변해 누적면적으로 직결. 방전의 방 안 밝기 변화)
+    var throb0 = 0.62 + 0.38 * Math.abs(Math.sin(tSec * 2.1));
+    var roomA = 0.04 + 0.42 * throb0;   // 잉크 위에 깔리는 라일락 라이팅의 알파 — 방전 세기를 무대가 그대로 받는다
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+    var room = ctx.createRadialGradient((elL.x + elR.x) / 2, H * 0.42, 0, (elL.x + elR.x) / 2, H * 0.42, W * 0.62);
+    room.addColorStop(0, rgb(C_HALO, roomA * 0.9));
+    room.addColorStop(1, rgb(C_HALO, 0));
+    ctx.fillStyle = room;
+    ctx.fillRect(0, 0, W, H);
+
+    // 떨림 세기 — 시간 반주기 진동. 아크가 붙었다 약해지는 호흡. 진폭을 넓혀 화면을 더 크게 쓸게 한다
+    var throb = throb0;
+    var mag = H * 0.38 * throb;
+
+    var main = genBolt(elL.x, elL.y, elR.x, elR.y, mag, JITTER);
+
+    // 잔광 拡散 버퍼 — 이번 프레임 아크를 도장한 뒤 번지게 하고 무대 위에 깐다(반경 확대로 광륜을 키운다)
+    glowStampPath(main, 14);
+    glowDiffuse();
+    glowCompose();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(glowCv, 0, 0);
+
+    // 가산혼합 — 아크의 겹친 빛
+    ctx.globalCompositeOperation = 'lighter';
+    strokePath(main, 10, rgb(C_HALO, 0.17 * throb + 0.06));
+    strokePath(main, 3.2, rgb(C_HALO, 0.5));
+    strokePath(main, 1.4, rgb(C_CORE, 0.95));
+
+    // 곁가지 — 경로의 무작위 지점에서 위쪽으로 짧게 갈라진다. 매 프레임 새 지점·새 경로
+    for (var k = 0; k < FORK_N; k++) {
+      var t = 0.2 + rand() * 0.6;
+      var idx = Math.min(main.length - 2, Math.floor(t * (main.length - 1)));
+      var p = main[idx];
+      var bl = H * (0.18 + rand() * 0.22);
+      var side = rand() < 0.5 ? -1 : 1;
+      var br = genBolt(p.x, p.y, p.x + side * W * 0.07, p.y - bl, bl * 0.42, 4);
+      glowStampPath(br, 9);   // 곁가지도 잔광에 남긴다
+      var fc = k % 2 === 0 ? C_MINT : C_PINK;
+      strokePath(br, 3.0, rgb(fc, 0.2));
+      strokePath(br, 1.0, rgb(fc, 0.6));
+    }
+
+    // 전극 — 구(전구) + 스탠드. source-over 로 되돌려 또렷하게
+    ctx.globalCompositeOperation = 'source-over';
+    drawElectrode(elL, tSec);
+    drawElectrode(elR, tSec);
+  }
+
+  // 전극 한 쪽 — 받침대·봉·구(구체 하이라이트 포함). 구는 아크 쪽을 향해 뜨겁게 밝는다
+  function drawElectrode(e, tSec) {
+    var r = Math.max(5, H * 0.055);
+    var baseY = H - 6;
+    // 받침 — 어두운 슬레이트
+    ctx.fillStyle = rgb(C_INK[0] + 26, C_INK[1] + 26, C_INK[2] + 34, 1);
+    roundRect(e.x - r * 1.7, baseY - 3, r * 3.4, 5, 2);
+    // 봉
+    ctx.strokeStyle = rgb(C_MIST, 0.4);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(e.x, baseY - 3);
+    ctx.lineTo(e.x, e.y + r);
+    ctx.stroke();
+    // 구 — 코어 채움 + 라일락 테두리 + 반대편 하이라이트 점
+    var glow = 0.55 + 0.45 * Math.abs(Math.sin(tSec * 2.1 + 1.2));
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = rgb(C_HALO, 0.3 * glow);
+    ctx.beginPath(); ctx.arc(e.x, e.y, r * 1.9, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = rgb(C_CORE, 0.9);
+    ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = rgb(C_HALO, 0.85);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath(); ctx.arc(e.x - r * 0.35, e.y - r * 0.35, r * 0.2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.fill();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+    prngState = SEED >>> 0;
+    glowFit();
+    // 전극 — 좌우 안쪽으로 살짝 들어간 구 스탠드, 수직 중앙보다 약간 위
+    var m = Math.max(34, W * 0.14);
+    elL.x = m; elL.y = H * 0.42;
+    elR.x = W - m; elR.y = H * 0.42;
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    prev = now;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T); });
+
+  fit();
+  if (reduce) {
+    draw(STILL_T);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

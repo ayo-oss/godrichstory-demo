@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スワイプして消す通知リスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="sw is-demo" id="sw">
+    <ul class="sw__list" id="swList" role="list"></ul>
+    <p class="sw__sr" id="swSr" aria-live="polite"></p>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var SWIPE_DISMISS_RATIO = 0.32;   // 카드 폭 대비 이 비율 이상 밀면 손을 떼도 지워진다
+  var SWIPE_VELOCITY_PX_MS = 0.6;   // 이 속도(px/ms) 이상으로 빠르게 밀면 거리가 짧아도 지워진다
+
+  var NAMES = [
+    "決済が承認されました", "新しいコメントが付きました", "会議まであと10分です",
+    "アップロードが完了しました", "招待状が届きました"
+  ];
+
+  var root = document.getElementById("sw");
+  var list = document.getElementById("swList");
+  var sr = document.getElementById("swSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  var XIC =
+    '<svg class="sw__xic" viewBox="0 0 256 256" aria-hidden="true" focusable="false">' +
+    '<g fill="currentColor"><path opacity=".2" d="M216 56v144a16 16 0 0 1-16 16H56a16 16 0 0 1-16-16V56a16 16 0 0 1 16-16h144a16 16 0 0 1 16 16"/>' +
+    '<path d="M205.66 194.34a8 8 0 0 1-11.32 11.32L128 139.31l-66.34 66.35a8 8 0 0 1-11.32-11.32L116.69 128L50.34 61.66a8 8 0 0 1 11.32-11.32L128 116.69l66.34-66.35a8 8 0 0 1 11.32 11.32L139.31 128Z"/></g></svg>';
+
+  function dismiss(li, name) {
+    var h = li.getBoundingClientRect().height;
+    li.style.height = h + "px";
+    li.classList.add("sw__item--out");
+    requestAnimationFrame(function () {
+      li.style.height = "0px";
+      li.style.marginBottom = "0px";
+    });
+    window.setTimeout(function () {
+      if (li.parentNode) li.parentNode.removeChild(li);
+      sr.textContent = name + " 通知を削除しました";
+    }, reduce ? 0 : 260);
+  }
+
+  function makeRow(name) {
+    var li = document.createElement("li");
+    li.className = "sw__item";
+    li.setAttribute("role", "listitem");
+
+    var reveal = document.createElement("div");
+    reveal.className = "sw__reveal";
+    reveal.innerHTML = XIC;
+
+    var row = document.createElement("div");
+    row.className = "sw__row";
+    row.textContent = name;
+
+    var delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "sw__del";
+    delBtn.setAttribute("aria-label", name + " 通知を削除");
+    delBtn.innerHTML = XIC;
+    delBtn.addEventListener("click", function () {
+      human();
+      dismiss(li, name);
+    });
+    row.appendChild(delBtn);
+
+    li.appendChild(reveal);
+    li.appendChild(row);
+
+    // 계산 겹: pointerdown 시각·좌표를 기록해두고 pointermove 로 실제 이동 거리(dx)를,
+    // pointerup 시점에는 총 이동 시간으로 나눈 속도(px/ms)를 계산한다. 거리 비율(threshold)
+    // 이나 속도 중 하나만 넘어도 지워진다 — 톡 치듯 빠르게 밀면 짧게 밀어도 지워지는 이유.
+    var dragging = false, startX = 0, startT = 0, dx = 0, width = 0;
+
+    row.addEventListener("pointerdown", function (e) {
+      human();
+      dragging = true;
+      startX = e.clientX;
+      startT = e.timeStamp;
+      dx = 0;
+      width = li.getBoundingClientRect().width;
+      row.style.transition = "none";
+      row.setPointerCapture(e.pointerId);
+    });
+
+    row.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      dx = Math.min(0, e.clientX - startX);
+      row.style.transform = "translateX(" + dx + "px)";
+      var p = Math.min(1, Math.abs(dx) / width);
+      reveal.style.opacity = String(p);
+    });
+
+    function endDrag(e) {
+      if (!dragging) return;
+      dragging = false;
+      row.style.transition = "";
+      var dt = Math.max(1, e.timeStamp - startT);
+      var velocity = Math.abs(dx) / dt;
+      var ratio = Math.abs(dx) / width;
+      if (ratio > SWIPE_DISMISS_RATIO || velocity > SWIPE_VELOCITY_PX_MS) {
+        row.style.transform = "translateX(-100%)";
+        reveal.style.opacity = "1";
+        dismiss(li, name);
+      } else {
+        row.style.transform = "translateX(0px)";
+        reveal.style.opacity = "0";
+      }
+    }
+    row.addEventListener("pointerup", endDrag);
+    row.addEventListener("pointercancel", endDrag);
+
+    return li;
+  }
+
+  NAMES.forEach(function (name) { list.appendChild(makeRow(name)); });
+
+  if (reduce) {
+    var last = list.querySelector(".sw__item:last-child");
+    if (last) dismiss(last, NAMES[NAMES.length - 1]);
+  } else {
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      var first = list.querySelector(".sw__item");
+      if (!first) {
+        NAMES.forEach(function (name) { list.appendChild(makeRow(name)); });
+        window.setTimeout(loop, 900);
+        return;
+      }
+      synthetic = true;
+      var row = first.querySelector(".sw__row");
+      var width = first.getBoundingClientRect().width;
+      row.style.transform = "translateX(" + (-width * 0.55) + "px)";
+      first.querySelector(".sw__reveal").style.opacity = "1";
+      window.setTimeout(function () {
+        dismiss(first, first.textContent.replace(/通知を削除$/, "").trim());
+        synthetic = false;
+      }, 380);
+      window.setTimeout(loop, 1100);
+    }
+    window.setTimeout(loop, 600);
+  }
+})();
+</script>
+</body>
+</html>

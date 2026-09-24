@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page transition with row movement — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tps">
+  <div class="tps__viewport is-demo" id="tpsViewport"></div>
+  <div class="tps__nav">
+    <button class="tps__btn" id="tpsPrev" type="button" aria-label="Previous page">‹</button>
+    <span class="tps__page" id="tpsPageLabel">1 / 3</span>
+    <button class="tps__btn" id="tpsNext" type="button" aria-label="Next page">›</button>
+  </div>
+</div>
+<script>
+(function () {
+  var root = document.querySelector('.tps');
+  var viewport = document.getElementById('tpsViewport');
+  var pageLabel = document.getElementById('tpsPageLabel');
+
+  // 상수: 컨테이너 폭(px) · 행 높이(px) · stagger 간격(ms) · 보간 속도 · 자동 전환 간격
+  var W = 240;
+  var ROW_H = 30;
+  var STAGGER_MS = 60;
+  var LERP = 0.28;
+  var AUTO_PAGE_MS = 1600;
+
+  var pages = [
+    [['Apple', 120], ['Banana', 80], ['Grape', 45], ['Cherry', 12]],
+    [['Pear', 33], ['Plum', 21], ['Watermelon', 5], ['Korean melon', 18]],
+    [['Kiwi', 60], ['Mango', 40], ['Strawberry', 90], ['Blueberry', 27]]
+  ];
+
+  var pageIndex = 0;
+  var live = []; // 현재 화면에 존재하는 모든 행 {el, x, targetX, delayUntil}
+  var transitioning = false;
+
+  function makeRow(item) {
+    var el = document.createElement('div');
+    el.className = 'tps__row';
+    el.innerHTML = '<span class="tps__cell">' + item[0] + '</span><span class="tps__cell tps__cell--num">' + item[1] + '</span>';
+    viewport.appendChild(el);
+    return el;
+  }
+
+  function renderInitial() {
+    pages[pageIndex].forEach(function (item) {
+      var el = makeRow(item);
+      live.push({ el: el, x: 0, targetX: 0, delayUntil: 0, role: 'stay' });
+    });
+    layoutStay();
+    pageLabel.textContent = (pageIndex + 1) + ' / ' + pages.length;
+  }
+
+  function layoutStay() {
+    var i = 0;
+    live.forEach(function (r) {
+      r.el.style.top = (i * ROW_H) + 'px';
+      i++;
+    });
+  }
+
+  // 계산 겹: 페이지 값이 바뀌면 방향 값(dir)에 따라 나가는 행·들어오는 행에 행 순서 × STAGGER_MS 만큼
+  // 시작 시각을 다르게 걸어(stagger) 목표 x 로 보간한다
+  function goTo(newIndex) {
+    if (transitioning || newIndex < 0 || newIndex >= pages.length || newIndex === pageIndex) return;
+    transitioning = true;
+    var dir = newIndex > pageIndex ? 1 : -1;
+    var now = performance.now();
+    var outgoing = live.slice();
+    outgoing.forEach(function (r, i) {
+      r.role = 'out';
+      r.targetX = -dir * W;
+      r.delayUntil = now + i * STAGGER_MS;
+    });
+    var incoming = pages[newIndex].map(function (item, i) {
+      var el = makeRow(item);
+      el.style.top = (i * ROW_H) + 'px';
+      el.style.transform = 'translateX(' + (dir * W) + 'px)';
+      return { el: el, x: dir * W, targetX: 0, delayUntil: now + i * STAGGER_MS, role: 'in' };
+    });
+    live = outgoing.concat(incoming);
+    pageIndex = newIndex;
+    pageLabel.textContent = (pageIndex + 1) + ' / ' + pages.length;
+
+    setTimeout(function () {
+      outgoing.forEach(function (r) { r.el.remove(); });
+      live = live.filter(function (r) { return r.role !== 'out'; });
+      live.forEach(function (r) { r.role = 'stay'; });
+      transitioning = false;
+    }, 900);
+  }
+
+  function tick() {
+    var now = performance.now();
+    live.forEach(function (r) {
+      if (now < r.delayUntil) return;
+      r.x += (r.targetX - r.x) * LERP;
+      r.el.style.transform = 'translateX(' + r.x.toFixed(1) + 'px)';
+      r.el.style.opacity = String(Math.max(0, 1 - Math.abs(r.x) / W));
+    });
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  renderInitial();
+  viewport.style.height = (4 * ROW_H) + 'px';
+
+  document.getElementById('tpsPrev').addEventListener('click', function () {
+    viewport.classList.remove('is-demo');
+    goTo(pageIndex - 1);
+  });
+  document.getElementById('tpsNext').addEventListener('click', function () {
+    viewport.classList.remove('is-demo');
+    goTo(pageIndex + 1);
+  });
+
+  // 자동 루프: 페이지 값을 순환하며 다음으로 넘긴다
+  function autoStep() {
+    if (viewport.classList.contains('is-demo')) {
+      goTo((pageIndex + 1) % pages.length);
+    }
+    setTimeout(autoStep, AUTO_PAGE_MS);
+  }
+  setTimeout(autoStep, AUTO_PAGE_MS);
+})();
+</script>
+</main>
+</body>
+</html>

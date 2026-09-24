@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위상차 비교 패널 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pd" id="pd">
+  <p class="pd__hint">
+    <svg class="pd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M32 192V64a8 8 0 0 1 16 0v128a8 8 0 0 1-16 0Z" opacity=".45"/><path d="M64 96v64a8 8 0 0 1-16 0V96a8 8 0 0 1 16 0Z" opacity=".45"/><path d="M208 192V64a8 8 0 0 1 16 0v128a8 8 0 0 1-16 0Z" opacity=".45"/><path d="M240 96v64a8 8 0 0 1-16 0V96a8 8 0 0 1 16 0Z" opacity=".45"/><ellipse cx="128" cy="128" rx="52" ry="36" fill="none" stroke="currentColor" stroke-width="10"/></g></svg>
+    <span>位相差を動かすと直線が楕円になり、円になります</span>
+  </p>
+  <div class="pd__field" id="field" role="application" aria-label="位相差比較の実験盤">
+    <canvas class="pd__cv" id="cv"></canvas>
+    <b class="pd__badge" aria-hidden="true"><span class="pd__badgeNum">0.00</span><span class="pd__badgeUnit">π rad</span></b>
+  </div>
+  <p class="pd__ctrl">
+    <label class="pd__ctrlLabel" for="phase">位相 δ</label>
+    <input class="pd__slider" id="phase" type="range" min="0" max="100" value="0" step="0.5" aria-label="位相差の調整">
+  </p>
+</div>
+</main>
+<script>
+// 위상차 비교 패널 — 같은 주파수의 두 사인파를 X·Y 에 걸되 위상차 δ 만 다르게 하면
+// 리사주 도형이 δ=0 직선 → δ=π/2 원 → δ=π 반직선으로 바뀐다.
+// requestAnimationFrame 마다 input[type=range] 슬라이더 값을 읽어 Math.sin 위상에 반영한다.
+// 슬라이더를 만지지 않을 때는 자동 루프가 δ 를 0→2π 로 천천히 왕복한다(미리보기·측정용).
+var root = document.getElementById('pd');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var slider = document.getElementById('phase');
+
+var css = getComputedStyle(root);
+var TRACE = css.getPropertyValue('--trace').trim();
+var XW = css.getPropertyValue('--x-wave').trim();
+var YW = css.getPropertyValue('--y-wave').trim();
+var RAIL = css.getPropertyValue('--rail').trim();
+
+var LOOP = 2;                 // 자동 루프가 δ 를 0→2π 왕복하는 시간(초)
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var manual = false;           // 사람이 슬라이더를 잡고 있으면 자동 루프를 멈춘다
+var numEl = document.querySelector('.pd__badgeNum');
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 화면을 세 팔로 나눈다 — 왼쪽 X 파형·오른쪽 Y 파형·가운데 리사주 도형
+function draw(delta, sec) {
+  ctx.clearRect(0, 0, W, H);
+
+  var mid = H * 0.5;
+  var cxr = W * 0.5, R = Math.min(W * 0.28, H * 0.36);
+  var xw0 = W * 0.04, xw1 = W * 0.30;      // X 파형 영역
+  var yw0 = W * 0.70, yw1 = W * 0.96;      // Y 파형 영역
+  var t = sec;
+
+  // 레일
+  ctx.strokeStyle = RAIL;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(xw0, mid + 0.5); ctx.lineTo(xw1, mid + 0.5);
+  ctx.moveTo(yw0, mid + 0.5); ctx.lineTo(yw1, mid + 0.5);
+  ctx.moveTo(cxr - R - 8, mid + 0.5); ctx.lineTo(cxr + R + 8, mid + 0.5);
+  ctx.moveTo(cxr, mid - R - 8); ctx.lineTo(cxr, mid + R + 8);
+  ctx.stroke();
+
+  // X 파형 — sin(ωt)
+  ctx.strokeStyle = XW;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var x = 0; x <= xw1 - xw0; x += 2) {
+    var ph = t * Math.PI * 2 + x / (xw1 - xw0) * Math.PI * 2;
+    var y = mid - Math.sin(ph) * R * 0.8;
+    if (x === 0) ctx.moveTo(xw0 + x, y); else ctx.lineTo(xw0 + x, y);
+  }
+  ctx.stroke();
+
+  // Y 파형 — sin(ωt + δ)
+  ctx.strokeStyle = YW;
+  ctx.beginPath();
+  for (var x2 = 0; x2 <= yw1 - yw0; x2 += 2) {
+    var ph2 = t * Math.PI * 2 + x2 / (yw1 - yw0) * Math.PI * 2 + delta;
+    var y2 = mid - Math.sin(ph2) * R * 0.8;
+    if (x2 === 0) ctx.moveTo(yw0 + x2, y2); else ctx.lineTo(yw0 + x2, y2);
+  }
+  ctx.stroke();
+
+  // 리사주 도형 — X=sin(ωt), Y=sin(ωt+δ). δ 가 0 이면 대각선 직선, π/2 면 원, π 면 반대 대각선
+  ctx.strokeStyle = TRACE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  var N = 120;
+  for (var i = 0; i <= N; i++) {
+    var th = i / N * Math.PI * 2;
+    var px = cxr + Math.sin(th) * R;
+    var py = mid - Math.sin(th + delta) * R;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // 진행 점 — 두 파형의 지금 값을 잇는 밝은 점
+  var hx = cxr + Math.sin(t * Math.PI * 2) * R;
+  var hy = mid - Math.sin(t * Math.PI * 2 + delta) * R;
+  ctx.fillStyle = TRACE;
+  ctx.beginPath(); ctx.arc(hx, hy, 4.5, 0, Math.PI * 2); ctx.fill();
+
+  if (numEl) {
+    var v = (delta / Math.PI).toFixed(2);
+    if (numEl.textContent !== v) numEl.textContent = v;
+  }
+}
+
+function frame(now) {
+  var sec = now / 1000;
+  var delta;
+  if (manual) {
+    delta = slider.value / 100 * Math.PI * 2;
+  } else {
+    // 자동 왕복 — 0→2π 를 갔다가 되돌아온다(루프가 이어진다)
+    var u = (sec % LOOP) / LOOP;
+    delta = (u < 0.5 ? u * 2 : (1 - u) * 2) * Math.PI * 2;
+    if (slider) slider.value = String(Math.round(delta / (Math.PI * 2) * 100));
+  }
+  draw(delta, sec);
+  raf = requestAnimationFrame(frame);
+}
+
+if (slider) {
+  slider.addEventListener('input', function () { manual = true; });
+  slider.addEventListener('pointerdown', function () { manual = true; });
+  slider.addEventListener('keydown', function () { manual = true; });
+}
+
+fit();
+window.addEventListener('resize', function () { fit(); if (reduce) draw(Math.PI / 2, 0.2); });
+if (reduce) {
+  // reduce — 루프 없이 δ=π/2 (원) 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  draw(Math.PI / 2, 0.2);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

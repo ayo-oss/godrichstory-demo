@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>目盛りマグネットスナップ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="nspts is-demo" id="nspts">
+  <div class="nspts__panel">
+    <span class="nspts__label">画面の明るさ</span>
+    <span class="nspts__value" id="nsptsValue">5</span>
+    <div class="nspts__track" id="nsptsTrack">
+      <span class="nspts__tick" data-i="0"></span>
+      <span class="nspts__tick" data-i="1"></span>
+      <span class="nspts__tick" data-i="2"></span>
+      <span class="nspts__tick" data-i="3"></span>
+      <span class="nspts__tick" data-i="4"></span>
+      <span class="nspts__tick" data-i="5"></span>
+      <span class="nspts__tick" data-i="6"></span>
+      <span class="nspts__tick" data-i="7"></span>
+      <span class="nspts__tick" data-i="8"></span>
+      <span class="nspts__tick" data-i="9"></span>
+      <span class="nspts__tick" data-i="10"></span>
+      <span class="nspts__handle" id="nsptsHandle"></span>
+    </div>
+    <span class="nspts__hint">ドラッグして離すと、近い目盛りに磁石のように吸着します</span>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('nspts');
+  var track = document.getElementById('nsptsTrack');
+  var handle = document.getElementById('nsptsHandle');
+  var valueEl = document.getElementById('nsptsValue');
+  var ticks = Array.prototype.slice.call(track.querySelectorAll('.nspts__tick'));
+
+  var TICK_COUNT = 11, TRACK_W = 200, GAP = TRACK_W / (TICK_COUNT - 1);
+  var currentX = 5 * GAP;
+  var dragging = false, startClientX = 0, startX = 0, settleRaf = null;
+
+  function xToIndex(x) { return Math.max(0, Math.min(10, Math.round(x / GAP))); }
+  function nearestTickX(x) { return xToIndex(x) * GAP; }
+
+  function paint(x) {
+    handle.style.transform = 'translate(-50%, -50%) translateX(' + x.toFixed(1) + 'px)';
+    for (var i = 0; i < ticks.length; i++) {
+      var tx = i * GAP;
+      var d = Math.abs(x - tx);
+      var proximity = Math.max(0, 1 - d / GAP);
+      ticks[i].style.transform = 'translate(-50%, -50%) scale(' + (1 + proximity * 0.9).toFixed(2) + ')';
+      ticks[i].style.opacity = (0.35 + proximity * 0.65).toFixed(2);
+    }
+    valueEl.textContent = String(xToIndex(x));
+  }
+
+  // 계산 겹: 놓는 순간의 위치(x0)에서 가장 가까운 눈금(target)까지 매 프레임 스프링 힘
+  // (거리 * 강성 - 속도 * 감쇠)을 계산해 자석처럼 서서히 빨려 들어가게 만든다.
+  var STIFF = 0.28, DAMP = 0.62;
+  function springSettle(x0, target) {
+    if (settleRaf) { cancelAnimationFrame(settleRaf); }
+    var x = x0, v = 0;
+    function frame() {
+      var force = (target - x) * STIFF;
+      v = (v + force) * DAMP;
+      x += v;
+      paint(x);
+      if (Math.abs(target - x) > 0.3 || Math.abs(v) > 0.2) {
+        settleRaf = requestAnimationFrame(frame);
+      } else {
+        x = target;
+        paint(x);
+        currentX = x;
+        settleRaf = null;
+      }
+    }
+    settleRaf = requestAnimationFrame(frame);
+  }
+
+  function moveTo(clientX) {
+    var raw = Math.max(0, Math.min(TRACK_W, startX + (clientX - startClientX)));
+    // 계산 겹: 가장 가까운 눈금까지 거리 비율로 자석 인력 세기(pull)를 계산해
+    // 손가락 위치와 눈금 사이를 보간한다 — 드래그 중에도 살짝 끌려간다.
+    var tx = nearestTickX(raw);
+    var dist = Math.abs(raw - tx);
+    var pull = Math.max(0, 1 - dist / (GAP * 0.9));
+    var x = raw + (tx - raw) * pull * 0.55;
+    currentX = x;
+    paint(x);
+  }
+
+  handle.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo'); stopAutoplay();
+    if (settleRaf) { cancelAnimationFrame(settleRaf); settleRaf = null; }
+    dragging = true;
+    startClientX = e.clientX;
+    startX = currentX;
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', function (e) { if (dragging) { moveTo(e.clientX); } });
+  ['pointerup', 'pointercancel'].forEach(function (ev) {
+    handle.addEventListener(ev, function () {
+      if (!dragging) { return; }
+      dragging = false;
+      springSettle(currentX, nearestTickX(currentX));
+    });
+  });
+
+  var seq = [3, 8, 1, 6, 9, 2, 5];
+  var idx = 0;
+  var autoplayTimer = null;
+  function stopAutoplay() { if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; } }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(function () {
+      springSettle(currentX, seq[idx % seq.length] * GAP);
+      idx += 1;
+    }, 850);
+  }
+  paint(currentX);
+})();
+</script>
+</body>
+</html>

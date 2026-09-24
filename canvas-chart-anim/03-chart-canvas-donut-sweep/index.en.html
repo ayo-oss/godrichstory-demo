@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>도넛 그래프 스윕 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dn" id="dn">
+  <p class="dn__hint">
+    <svg class="dn__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 0 1-96 96v-56a40 40 0 0 0 0-80V32a96 96 0 0 1 96 96" opacity=".2"/><path d="M128 24a8 8 0 0 0-8 8v56a8 8 0 0 0 8 8a32 32 0 1 1-27.72 16a8 8 0 0 0-2.93-10.93l-48.5-28A8 8 0 0 0 37.92 76A104 104 0 1 0 128 24M48.09 91.1L83 111.26A48.1 48.1 0 0 0 80 128c0 1.53.08 3 .22 4.52L41.28 143a88.16 88.16 0 0 1 6.81-51.9m-2.67 67.31l39-10.44A48.1 48.1 0 0 0 120 175.32v40.31a88.2 88.2 0 0 1-74.58-57.22M136 215.63v-40.31a48 48 0 0 0 0-94.65V40.36a88 88 0 0 1 0 175.27"/></g></svg>
+    <span>Three traffic slices join up to fill the ring — <code>arc</code>·<code>startAngle</code>·<code>endAngle</code></span>
+  </p>
+  <div class="dn__field" id="field" role="application" aria-label="Donut chart sweep test board" tabindex="0">
+    <canvas class="dn__cv" id="cv" role="img" aria-label="Traffic-source donut chart — three slices filling in clockwise"></canvas>
+  </div>
+  <div class="dn__bar">
+    <button class="dn__btn" id="replay" type="button">
+      <svg class="dn__bico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 128a88 88 0 1 1-88-88a88 88 0 0 1 88 88" opacity=".2"/><path d="M224 128a96 96 0 0 1-94.71 96H128a95.38 95.38 0 0 1-65.9-26.2a8 8 0 0 1 11-11.63a80 80 0 1 0-1.67-114.78a3 3 0 0 1-.26.25L44.59 96H72a8 8 0 0 1 0 16H24a8 8 0 0 1-8-8V56a8 8 0 0 1 16 0v29.8L60.25 60A96 96 0 0 1 224 128"/></g></svg>
+      <span>Redraw</span>
+    </button>
+    <table class="sr-only">
+      <caption>Traffic source mix (unit: visits, total 24,000)</caption>
+      <thead><tr><th scope="col">Source</th><th scope="col">Visits</th><th scope="col">Share</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Search</th><td>10,800</td><td>45%</td></tr>
+        <tr><th scope="row">Social</th><td>8,400</td><td>35%</td></tr>
+        <tr><th scope="row">Direct</th><td>4,800</td><td>20%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</main>
+<script>
+// 도넛 그래프 스윕 — 세 트래픽 유입의 점유가 링을 채운다.
+// 각 조각은 arc 로 그리되, 이어지는 조각의 시작각(startAngle)이 앞 조각의 현재 끝각(endAngle)에서 출발한다.
+// 그래서 조각 경계에서 펜이 멈추지 않고 링 전체가 한 번에 흐른다.
+// 중앙 총량은 링이 다 채워진 뒤 숫자가 뒤집히며(세로 슬라이드 교체) 나타난다.
+var root = document.getElementById('dn');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var replayBtn = document.getElementById('replay');
+
+var css = getComputedStyle(root);
+var C_1 = css.getPropertyValue('--chart-1').trim();
+var C_2 = css.getPropertyValue('--chart-2').trim();
+var C_3 = css.getPropertyValue('--chart-3').trim();
+var C_INK = css.getPropertyValue('--ink').trim();
+var C_MUTE = css.getPropertyValue('--mute').trim();
+var C_TRACK = css.getPropertyValue('--track').trim();
+var C_PAPER = css.getPropertyValue('--paper').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+// 고정 시드 데이터 — 세 유입원의 Visits Wed(합계 24,000). 난수가 아니라 코드 안 배열
+var SRC = [
+  { name: 'Search', v: 10800, c: C_1 },   // 45%
+  { name: 'Social', v: 8400,  c: C_2 },   // 35%
+  { name: 'Direct', v: 4800,  c: C_3 }    // 20%
+];
+var TOTAL = 24000;
+var TAU = Math.PI * 2;
+var START = -Math.PI / 2;    // 12h 방향에서 시작
+var GAP = 0.035;             // 조각 사이 표면 틈(라디안) — 붙어 있으면 경계가 안 읽힌다
+var LOOP = 2;                // 한 사이클 2초
+var SWEEP = 0.80;            // 전체 2초의 80% 동안 링이 채워진다
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var t0 = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// p(0..1) → 이어지는 스윕의 현재 각도. 진행률을 점유합(1.0)에 얹는다
+function sweepAngle(p) {
+  var q = Math.max(0, Math.min(1, p / SWEEP));
+  return q;   // 0..1, 1 이면 링 전체
+}
+
+function draw(p) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C_PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  // 도넛 중심·반지름 — 캔버스를 채운다(누적면적). 범례는 오른쪽 세로 줄
+  var legendW = Math.min(96, Math.max(72, W * 0.26));
+  var cx = PAD_L() + (W - PAD_L() - legendW - PAD_R()) / 2;
+  var cy = H * 0.5 + 4;
+  var R = Math.min((W - PAD_L() - legendW - PAD_R()) / 2 - 4, H / 2 - 8);
+  var ring = Math.max(16, R * 0.5);
+
+  // 링 트랙 — 다 채워질 자리를 옅게 깐다. 스윕 진행까지만 깔린다:
+  // 첫 프레임에 전체 트랙을 깔면 그 자리는 끝까지 변하지 않아 누적면적이 죽는다 —
+  // 펜이 지나가며 트랙이 열리고 조각이 따라 붙는 그림(077 품질 기준선: 화면이 살아 있어야 한다)
+  var qTrack = sweepAngle(p);
+  if (qTrack > 0.005) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, R - ring / 2, START, START + qTrack * TAU);
+    ctx.strokeStyle = C_TRACK;
+    ctx.lineWidth = ring;
+    ctx.stroke();
+  }
+
+  // 조각 — 이어지는 스윕. 진행 q 를 각 조각 점유에 분배한다:
+  // 앞 조각이 다 채워졌으면 전체 각을 확정하고, 현재 조각은 남은 진행으로 부분각을 그린다.
+  var q = qTrack;
+  var pen = START;
+  var acc = 0;
+  var cur = -1;
+  for (var i = 0; i < SRC.length; i++) {
+    var share = SRC[i].v / TOTAL;
+    var segEnd = acc + share;
+    if (q >= segEnd) {
+      // 이미 지나온 조각 — 전체 각을 그린다(양쪽에 틈 반씩)
+      var a0 = START + acc * TAU + GAP / 2;
+      var a1 = START + segEnd * TAU - GAP / 2;
+      slice(cx, cy, R, ring, a0, a1, SRC[i].c, 1);
+      pen = a1;
+      acc = segEnd;
+    } else if (q > acc) {
+      // 현재 그려지는 조각 — 시작각은 앞 조각의 끝각. 끝각은 진행에 따라 벌어진다
+      cur = i;
+      var a0c = START + acc * TAU + (i === 0 ? 0 : GAP / 2);
+      var a1c = START + q * TAU;
+      slice(cx, cy, R, ring, a0c, a1c, SRC[i].c, 1);
+      acc = segEnd;
+    } else {
+      break;
+    }
+  }
+
+  // 스윕 펜 끝 — 지나가는 지점에 작은 점. 조각이 흐른다는 감을 준다
+  if (cur >= 0 && q < 1) {
+    var penA = START + q * TAU;
+    var px = cx + Math.cos(penA) * (R - ring / 2);
+    var py = cy + Math.sin(penA) * (R - ring / 2);
+    ctx.beginPath();
+    ctx.arc(px, py, 2.6, 0, TAU);
+    ctx.fillStyle = C_PAPER;
+    ctx.fill();
+    ctx.strokeStyle = SRC[cur].c;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // 중앙 총량 — 링이 다 채워진 뒤(SWEEP 이후) 세로 슬라이드로 뒤집혀 나타난다
+  var flipP = Math.max(0, Math.min(1, (p - SWEEP) / 0.16));
+  var midY = cy + 2;
+  var label = 'Total visits';
+  var value = '24,000';
+  if (flipP > 0) {
+    // 숫자가 위에서 내려오고 "Total visits" 은 자리를 비켜 준다 — 두 줄이 교체되는 뒤집힘
+    var up = 1 - flipP;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cx - R, cy - R, R * 2, R * 2);
+    ctx.clip();
+    ctx.globalAlpha = up;
+    ctx.fillStyle = C_MUTE;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '600 10px ' + FONT;
+    ctx.fillText('Filling', cx, midY - flipP * 18);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  if (flipP > 0) {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = flipP;
+    ctx.fillStyle = C_INK;
+    ctx.font = '700 17px ' + FONT;
+    ctx.fillText(value, cx, midY + (1 - flipP) * 16);
+    ctx.fillStyle = C_MUTE;
+    ctx.font = '600 9px ' + FONT;
+    ctx.fillText(label, cx, midY - 13 + (1 - flipP) * 14);
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = C_MUTE;
+    ctx.font = '600 10px ' + FONT;
+    ctx.fillText('Filling', cx, midY);
+  }
+
+  // 범례 — 오른쪽 세로 줄. 각 항목은 조각이 시작될 때 나타난다
+  var lx = W - PAD_R() - legendW;
+  var ly = cy - 30;
+  for (var k = 0; k < SRC.length; k++) {
+    var appear = Math.max(0, Math.min(1, (p - (k * 0.26)) / 0.14));
+    if (appear <= 0) continue;
+    ctx.globalAlpha = appear;
+    var ly2 = ly + k * 26;
+    ctx.fillStyle = SRC[k].c;
+    ctx.fillRect(lx, ly2, 9, 9);
+    ctx.fillStyle = C_INK;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = '700 10px ' + FONT;
+    ctx.fillText(SRC[k].name, lx + 14, ly2 + 8);
+    ctx.fillStyle = C_MUTE;
+    ctx.font = '600 10px ' + FONT;
+    ctx.fillText(Math.round(SRC[k].v / TOTAL * 100) + '%', lx + 14, ly2 + 20);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 링 조각 한 덩이 — arc 를 stroke 로 그린다(선 두께 = 링 두께). cap 을 butt 로 둬야 각이 정확하다
+function slice(cx, cy, R, ring, a0, a1, color, alpha) {
+  if (a1 <= a0) return;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R - ring / 2, a0, a1);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = ring;
+  ctx.lineCap = 'butt';
+  ctx.globalAlpha = alpha;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// 왼쪽 패드 — 폭이 좁으면 라벨 패드를 줄인다
+function PAD_L() { return W < 220 ? 10 : 14; }
+function PAD_R() { return W < 220 ? 8 : 14; }
+
+function frame(now) {
+  if (!t0) t0 = now;
+  var p = ((now - t0) / 1000 % LOOP) / LOOP;      // 0..1, 2초 루프
+  draw(p);
+  raf = requestAnimationFrame(frame);
+}
+
+replayBtn.addEventListener('click', function () { t0 = 0; });
+window.addEventListener('resize', function () { fit(); if (reduce) draw(1); });
+
+fit();
+if (reduce) {
+  // reduce — 루프 없이 완성 상태(링이 다 채워지고 총량이 떠 있는 한 장)만 그린다
+  draw(1);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

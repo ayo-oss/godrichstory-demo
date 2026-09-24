@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>움직임을 줄이면 점 하나로 멈추는 로딩 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="togglePanel">
+    <span class="toggleLabel" id="toggleLabel">Reduce motion preview</span>
+    <button class="toggleSwitch" id="toggle" type="button" role="switch" aria-checked="false" aria-label="Reduce motion preview">
+      <span class="toggleKnob" id="knob"></span>
+    </button>
+  </div>
+  <button class="btn" id="btn" type="button">
+    <span class="btnContent">
+      <span class="btnLabel" id="label">Save</span>
+      <span class="btnSpinnerWrap" id="spinnerWrap" aria-hidden="true"><span class="btnRing" id="ring"></span></span>
+      <span class="btnDotWrap" id="dotWrap" aria-hidden="true"><span class="btnDot"></span></span>
+    </span>
+  </button>
+  <span class="visuallyHidden" id="status" role="status" aria-live="polite"></span>
+</div>
+</main>
+<script>
+(function () {
+  var FADE_MS = 180;
+  var SPIN_MS = 900;
+  var GAP_MS = 500;
+  var START_DELAY_MS = 200;
+  var TOGGLE_GAP_MS = 550;
+  var DEG_PER_MS = 360 / 650;
+
+  var scene = document.getElementById('scene');
+  var btn = document.getElementById('btn');
+  var label = document.getElementById('label');
+  var spinnerWrap = document.getElementById('spinnerWrap');
+  var ring = document.getElementById('ring');
+  var dotWrap = document.getElementById('dotWrap');
+  var status = document.getElementById('status');
+  var toggle = document.getElementById('toggle');
+  var knob = document.getElementById('knob');
+
+  // 실제 OS 설정을 진짜로 읽는다 — 기본 상태는 이 값을 따른다.
+  var mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var osReduce = mql.matches;
+  var simReduce = osReduce;
+
+  var gen = 0;
+  var timers = [];
+  var rafId = 0;
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); });
+      timers = [];
+    }
+  }
+
+  function setToggleUI() {
+    toggle.setAttribute('aria-checked', simReduce ? 'true' : 'false');
+    knob.style.transform = simReduce ? 'translateX(16px)' : 'translateX(0px)';
+  }
+
+  function applyToggle(next) {
+    simReduce = next;
+    setToggleUI();
+  }
+
+  // 시뮬 토글 — 방문자가 실제 OS 설정과 무관하게 두 상태를 미리 볼 수 있다.
+  toggle.addEventListener('click', function () {
+    human();
+    applyToggle(!simReduce);
+  });
+
+  if (osReduce) setToggleUI();
+
+  // 실사용 경로 적용 — 진짜 OS 값이 바뀌면(브라우저·OS 설정 변경) 시뮬 토글도 따라간다.
+  function onOsChange(e) {
+    osReduce = e.matches;
+    applyToggle(osReduce);
+  }
+  if (mql.addEventListener) mql.addEventListener('change', onOsChange);
+
+  function easeInOutQuad(p) { return p < .5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
+
+  function fade(el, from, to, ms, myGen, onDone) {
+    var start = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (start === null) start = now;
+      var p = Math.min(1, (now - start) / ms);
+      el.style.opacity = String(from + (to - from) * easeInOutQuad(p));
+      if (p < 1) requestAnimationFrame(step); else if (onDone) onDone();
+    }
+    requestAnimationFrame(step);
+  }
+
+  function spinLoop(myGen) {
+    var start = null;
+    function step(now) {
+      if (myGen !== gen) return;
+      if (start === null) start = now;
+      var angle = ((now - start) * DEG_PER_MS) % 360;
+      ring.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
+      rafId = requestAnimationFrame(step);
+    }
+    rafId = requestAnimationFrame(step);
+  }
+
+  function runLoad(myGen, useStaticDot, onDone) {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    status.textContent = '저장하는 중';
+    if (useStaticDot) {
+      dotWrap.style.opacity = '1';
+    } else {
+      fade(spinnerWrap, 0, 1, FADE_MS, myGen, function () { spinLoop(myGen); });
+    }
+    timers.push(setTimeout(function () {
+      cancelAnimationFrame(rafId);
+      dotWrap.style.opacity = '0';
+      spinnerWrap.style.opacity = '0';
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+      status.textContent = '저장 완료';
+      if (onDone) onDone();
+    }, SPIN_MS));
+  }
+
+  btn.addEventListener('click', function () {
+    if (btn.disabled) return;
+    human();
+    gen++;
+    runLoad(gen, simReduce);
+  });
+
+  // reduce: 시연 게이트만 — 아래 자동 루프는 reduce 여부와 무관하게 두 상태를 번갈아 보여주려고
+  // 계속 돈다(정지 표시 자체가 이 항목의 주제라 자동 루프를 완전히 끄면 데모가 항상 빈 화면이다).
+  // 실사용 경로는 위 runLoad(simReduce) 가 osReduce 시작값을 그대로 물려받아 처리한다.
+  function cycle() {
+    if (!scene.classList.contains('is-demo')) return;
+    gen++;
+    var myGen = gen;
+    var useStaticDot = simReduce;
+    runLoad(myGen, useStaticDot, function () {
+      timers.push(setTimeout(function () {
+        if (!scene.classList.contains('is-demo')) return;
+        applyToggle(!simReduce);
+        timers.push(setTimeout(cycle, TOGGLE_GAP_MS));
+      }, GAP_MS));
+    });
+  }
+
+  timers.push(setTimeout(cycle, START_DELAY_MS));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>進行値の分だけモジュールが一つずつ満ちていくQRコード — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mrg is-demo" id="mrgRoot">
+  <div class="mrg__badge" id="mrgBadge">生成進行 0%</div>
+  <button class="mrg__ctrl" id="mrgCtrl" type="button">一時停止</button>
+  <div class="mrg__canvas-wrap">
+    <canvas class="mrg__canvas" id="mrgCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // QR_MODULE_REVEAL_STAGGER_MS — 변형 1: 18 → 36 으로 늘리면 모듈이 한 칸씩 눈에 보이게 천천히 채워진다.
+  var QR_MODULE_REVEAL_STAGGER_MS = 18;
+
+  var SIZE = 17;
+  var LOOP_MS = 2000;
+  var REVEAL_MS = 220;
+
+  var canvas = document.getElementById('mrgCanvas');
+  var ctx = canvas.getContext('2d');
+  var badge = document.getElementById('mrgBadge');
+  var ctrl = document.getElementById('mrgCtrl');
+  var root = document.getElementById('mrgRoot');
+
+  function qrRand(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+  function inFinder(x, y, size) {
+    return (x < 7 && y < 7) || (x < 7 && y >= size - 7) || (x >= size - 7 && y < 7);
+  }
+  function finderDark(x, y, size) {
+    var fx = x < 7 ? x : x - (size - 7);
+    var fy = y < 7 ? y : y - (size - 7);
+    if (fx === 0 || fx === 6 || fy === 0 || fy === 6) return true;
+    if (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4) return true;
+    return false;
+  }
+  function buildModules(size, seed) {
+    var rand = qrRand(seed);
+    var grid = [];
+    for (var y = 0; y < size; y += 1) {
+      var row = [];
+      for (var x = 0; x < size; x += 1) {
+        row.push(inFinder(x, y, size) ? finderDark(x, y, size) : rand() < 0.46);
+      }
+      grid.push(row);
+    }
+    return grid;
+  }
+
+  var modules = buildModules(SIZE, 407017);
+  var darkTotal = 0;
+  modules.forEach(function (row) { row.forEach(function (v) { if (v) darkTotal += 1; }); });
+
+  // 계산 한 겹: 행(row) 값을 스태거 기준으로 삼고, 시드 난수로 모듈마다 지연을 살짝 어긋내
+  // 파도가 위에서 아래로 자연스럽게 번지도록 순서·지연 값을 구한다 (실제 인코딩 아님).
+  var jitterRand = qrRand(20260924);
+  var order = [];
+  for (var y2 = 0; y2 < SIZE; y2 += 1) {
+    for (var x2 = 0; x2 < SIZE; x2 += 1) {
+      var jitter = (jitterRand() - 0.5) * QR_MODULE_REVEAL_STAGGER_MS;
+      order.push({ x: x2, y: y2, delay: y2 * QR_MODULE_REVEAL_STAGGER_MS + jitter });
+    }
+  }
+  var maxDelay = 0;
+  order.forEach(function (o) { if (o.delay > maxDelay) maxDelay = o.delay; });
+  var SWEEP_END = maxDelay + REVEAL_MS;
+
+  function draw(elapsed) {
+    var cw = canvas.width, ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+    var cell = Math.min(cw, ch) / SIZE;
+    var ox = (cw - cell * SIZE) / 2;
+    var oy = (ch - cell * SIZE) / 2;
+    var revealedCount = 0;
+    for (var i = 0; i < order.length; i += 1) {
+      var o = order[i];
+      if (!modules[o.y][o.x]) continue;
+      var local = elapsed - o.delay;
+      var p = local <= 0 ? 0 : (local >= REVEAL_MS ? 1 : local / REVEAL_MS);
+      if (p <= 0) continue;
+      revealedCount += 1;
+      var scale = 0.4 + 0.6 * p;
+      var size = cell * 0.86 * scale;
+      var cx = ox + o.x * cell + cell / 2;
+      var cy = oy + o.y * cell + cell / 2;
+      ctx.globalAlpha = p;
+      ctx.fillStyle = 'rgb(255,247,230)';
+      ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+    var pct = Math.round((revealedCount / darkTotal) * 100);
+    badge.textContent = '生成進行 ' + pct + '%';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var elapsed = reduce ? SWEEP_END : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? '一時停止' : '再生';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      elapsed = 0;
+      playing = true;
+      ctrl.textContent = '一時停止';
+    }
+  });
+})();
+</script>
+</body>
+</html>

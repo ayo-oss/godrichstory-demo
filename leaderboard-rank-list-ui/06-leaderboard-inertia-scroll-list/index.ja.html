@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手で引っ張ると慣性で滑るランキングリスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbi is-demo" id="lbi">
+  <div class="lbi__viewport" id="lbiViewport" tabindex="0" role="list" aria-label="ランキングリスト、矢印キーでスクロール">
+    <ul class="lbi__track" id="lbiTrack"></ul>
+  </div>
+  <p class="lbi__sr" id="lbiSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_SCROLL_FRICTION = 0.92;
+  var LEADERBOARD_SCROLL_MIN_VELOCITY = 0.04;
+  var LEADERBOARD_SCROLL_ROW_H = 40;
+  var LEADERBOARD_SCROLL_STEP_PX = 40;
+  var LEADERBOARD_SCROLL_AUTO_TICK_MS = 1500;
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbi");
+  var viewport = document.getElementById("lbiViewport");
+  var track = document.getElementById("lbiTrack");
+  var sr = document.getElementById("lbiSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { name: "CEDAR6", score: 988 }, { name: "IVORY3", score: 951 },
+    { name: "PLUME9", score: 914 }, { name: "QUARTZ1", score: 877 },
+    { name: "BRISK4", score: 840 }, { name: "MOSSY7", score: 803 },
+    { name: "EMBER2", score: 766 }, { name: "SLATE8", score: 729 },
+    { name: "GROVE5", score: 692 }, { name: "TIDE_0", score: 655 },
+    { name: "FERN_9", score: 618 }, { name: "DUSK_3", score: 581 }
+  ];
+
+  var maxScroll = Math.max(0, players.length * LEADERBOARD_SCROLL_ROW_H - viewport.clientHeight);
+  var offset = 0;
+  var velocity = 0;
+  var coasting = false;
+  var dragging = false;
+  var dragStartY = 0, dragStartOffset = 0, lastY = 0, lastT = 0;
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function clamp(v) { return Math.max(0, Math.min(maxScroll, v)); }
+
+  function render() {
+    track.style.transform = "translateY(-" + offset.toFixed(1) + "px)";
+  }
+
+  function announceTop() {
+    var idx = Math.round(offset / LEADERBOARD_SCROLL_ROW_H);
+    var p = players[Math.max(0, Math.min(players.length - 1, idx))];
+    sr.textContent = p.name + " から表示中";
+  }
+
+  // 계산 겹: 놓는 순간의 속도(velocity)를 매 프레임 LEADERBOARD_SCROLL_FRICTION 만큼 감쇠시켜
+  // 목록이 미끄러지다 멎는다 — 마찰이 낮을수록 더 오래, 높을수록 더 빨리 멈춘다.
+  function coastStep() {
+    if (!coasting) return;
+    offset += velocity;
+    velocity *= LEADERBOARD_SCROLL_FRICTION;
+    if (offset < 0) { offset = 0; velocity = 0; }
+    if (offset > maxScroll) { offset = maxScroll; velocity = 0; }
+    render();
+    if (Math.abs(velocity) < LEADERBOARD_SCROLL_MIN_VELOCITY || (offset === 0 || offset === maxScroll)) {
+      coasting = false;
+      announceTop();
+      return;
+    }
+    requestAnimationFrame(coastStep);
+  }
+
+  function startCoast(v) {
+    if (reduce) {
+      offset = clamp(offset + v * 6);
+      render();
+      announceTop();
+      return;
+    }
+    velocity = v;
+    coasting = true;
+    requestAnimationFrame(coastStep);
+  }
+
+  function onPointerDown(e) {
+    human();
+    dragging = true;
+    coasting = false;
+    dragStartY = e.clientY;
+    dragStartOffset = offset;
+    lastY = e.clientY;
+    lastT = e.timeStamp;
+    viewport.setPointerCapture(e.pointerId);
+  }
+
+  function onPointerMove(e) {
+    if (!dragging) return;
+    var dy = dragStartY - e.clientY;
+    offset = clamp(dragStartOffset + dy);
+    var dt = Math.max(1, e.timeStamp - lastT);
+    velocity = (lastY - e.clientY) / dt * 16;
+    lastY = e.clientY;
+    lastT = e.timeStamp;
+    render();
+  }
+
+  function onPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    startCoast(velocity);
+  }
+
+  function onWheel(e) {
+    human();
+    e.preventDefault();
+    offset = clamp(offset + e.deltaY * 0.5);
+    render();
+    announceTop();
+  }
+
+  function onKeydown(e) {
+    if (e.key === "ArrowDown") { human(); e.preventDefault(); offset = clamp(offset + LEADERBOARD_SCROLL_STEP_PX); render(); announceTop(); }
+    else if (e.key === "ArrowUp") { human(); e.preventDefault(); offset = clamp(offset - LEADERBOARD_SCROLL_STEP_PX); render(); announceTop(); }
+    else if (e.key === "PageDown") { human(); e.preventDefault(); offset = clamp(offset + viewport.clientHeight); render(); announceTop(); }
+    else if (e.key === "PageUp") { human(); e.preventDefault(); offset = clamp(offset - viewport.clientHeight); render(); announceTop(); }
+  }
+
+  players.forEach(function (p, i) {
+    var li = document.createElement("li");
+    li.className = "lbi__row";
+    li.setAttribute("role", "listitem");
+
+    var rank = document.createElement("span");
+    rank.className = "lbi__rank";
+    rank.textContent = String(i + 1);
+    var name = document.createElement("span");
+    name.className = "lbi__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbi__score";
+    score.textContent = String(p.score);
+
+    li.appendChild(rank);
+    li.appendChild(name);
+    li.appendChild(score);
+    track.appendChild(li);
+  });
+
+  viewport.addEventListener("pointerdown", onPointerDown);
+  viewport.addEventListener("pointermove", onPointerMove);
+  viewport.addEventListener("pointerup", onPointerUp);
+  viewport.addEventListener("pointercancel", onPointerUp);
+  viewport.addEventListener("wheel", onWheel, { passive: false });
+  viewport.addEventListener("keydown", onKeydown);
+
+  render();
+
+  if (!reduce) {
+    (function loop() {
+      if (root.classList.contains("is-demo") && !dragging && !coasting) {
+        var dir = rand() > 0.5 ? 1 : -1;
+        var kick = (6 + rand() * 5) * dir;
+        startCoast(kick);
+      }
+      window.setTimeout(loop, LEADERBOARD_SCROLL_AUTO_TICK_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

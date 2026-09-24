@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Record and replay loop — record your drawing and loop it forever — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="krec" id="krec">
+  <p class="krec__hint">Recorded strokes replay the same pattern forever</p>
+  <div class="krec__row">
+    <div class="krec__field" id="field" role="application" aria-label="Record-replay lab" tabindex="0">
+      <canvas class="krec__cv" id="cv"></canvas>
+    </div>
+    <div class="krec__side">
+      <button class="krec__btn" id="rec" type="button" aria-label="Record again">Record again</button>
+      <div class="krec__bar"><div class="krec__fill" id="fill"></div></div>
+      <p class="krec__meta"><b id="loop">0</b>loops played</p>
+      <p class="krec__meta"><b id="pts">0</b>points recorded</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 녹화 재생 루프 — 붓질을 [x, y, 시각] 배열로 기록한다. 기록이 끝나면 처음부터
+// 같은 속도로 재생하되, 반사 행렬 N 갈래 무늬는 매번 다시 찍힌다(기록은 한 Wedge
+// 분량만). 재생 커서는 초록 점. 루프 카운터가 오르며 무한 반복한다.
+(function () {
+  var root = document.getElementById('krec');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var rec = document.getElementById('rec');
+  var fill = document.getElementById('fill');
+  var loop = document.getElementById('loop');
+  var pts = document.getElementById('pts');
+  if (!root || !field || !cv || !rec || !fill || !loop || !pts) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var C3 = css.getPropertyValue('--c3').trim();
+
+  var N = 8;
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+  }
+
+  // 반사 복제 스트로크 — 01 과 같은 코어
+  function mirroredSeg(x0, y0, x1, y1, col) {
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N, c = Math.cos(a), s = Math.sin(a);
+      ctx.setTransform(dpr * c, dpr * s, dpr * s, -dpr * c, cx * dpr, cy * dpr);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 시드 고정 녹화 경로 — 루프가 이어지는 나선 (끝점 = 시작점)
+  function pathAt(u) {                       // u: 0~1 루프 파라미터
+    var ang = u * 2 * Math.PI * 2 + Math.sin(u * 2 * Math.PI * 3) * 0.6;
+    var r = R * (0.16 + 0.60 * (0.5 - 0.5 * Math.cos(u * 2 * Math.PI)));
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var REC_DUR = 3.0;                 // 한 바퀴 녹화 길이(초) — 시간 표기와 일치
+  var t = 0, last = 0;
+  var phase = 0;                     // 0 녹화 · 1 재생
+  var recU = 0;                      // 녹화 진행 0~1
+  var playU = 0;                     // 재생 진행 0~1
+  var loops = 0;
+  var record = [];                   // [u, x, y] — 재생 보간용
+  var playPrev = null;
+
+  function clear() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+  }
+
+  rec.addEventListener('click', function () {
+    phase = 0; recU = 0; playU = 0; loops = 0; record = []; playPrev = null;
+    loop.textContent = '0'; pts.textContent = '0'; fill.style.width = '0%';
+    clear();
+  });
+
+  // 녹화 — 붓이 지나간 자리만 즉시 반사 찍힌다 (잔상 축적)
+  function recStep(du) {
+    recU += du;
+    var u = Math.min(1, recU / REC_DUR);
+    var prev = record.length ? [record[record.length - 1][1], record[record.length - 1][2]] : null;
+    var p = pathAt(u);
+    record.push([u, p[0], p[1]]);
+    pts.textContent = String(record.length);
+    if (prev) mirroredSeg(prev[0], prev[1], p[0], p[1], C1);
+    fill.style.width = String(Math.round(u * 100)) + '%';
+    if (u >= 1) { phase = 1; playU = 0; playPrev = null; clear(); }
+  }
+
+  // 재생 — 기록을 같은 속도로 되찍는다. 루프마다 색이 번갈아 온다
+  function playStep(du) {
+    playU += du;
+    var u = playU / REC_DUR;
+    if (u >= 1) { loops += 1; loop.textContent = String(loops); playU = 0; playPrev = null; u = 0; }
+    var col = (loops % 2 === 0) ? C2 : C1;
+    // 기록 보간 — u 에 가장 가까운 두 점
+    var i = Math.min(record.length - 1, Math.floor(u * (record.length - 1)));
+    var a = record[i], b = record[Math.min(record.length - 1, i + 1)];
+    var f = (u * (record.length - 1)) - i;
+    var x = a[1] + (b[1] - a[1]) * f, y = a[2] + (b[2] - a[2]) * f;
+    if (playPrev) mirroredSeg(playPrev[0], playPrev[1], x, y, col);
+    playPrev = [x, y];
+    // 재생 커서 — 초록 점
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = C3;
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.fill();
+    fill.style.width = String(Math.round(u * 100)) + '%';
+  }
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    t += dt;
+    if (phase === 0) recStep(dt);
+    else playStep(dt);
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 녹화 완료 + 재생 1바퀴 궤적
+    clear();
+    var prevP = null;
+    for (var j = 0; j <= 120; j++) {
+      var u2 = j / 120;
+      var p2 = pathAt(u2);
+      if (prevP) mirroredSeg(prevP[0], prevP[1], p2[0], p2[1], C1);
+      prevP = p2;
+    }
+    prevP = null;
+    for (var j2 = 0; j2 <= 90; j2++) {
+      var u3 = j2 / 90;
+      var p3 = pathAt(u3);
+      if (prevP) mirroredSeg(prevP[0], prevP[1], p3[0], p3[1], C2);
+      prevP = p3;
+    }
+    pts.textContent = '121'; loop.textContent = '1'; fill.style.width = '100%';
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

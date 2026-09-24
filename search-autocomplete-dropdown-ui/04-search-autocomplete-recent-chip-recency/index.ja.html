@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>最近の検索チップ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rc" id="rc">
+  <p class="rc__hint">
+    <svg class="rc__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88m64-88a8 8 0 0 1-8 8h-56a8 8 0 0 1-8-8V72a8 8 0 0 1 16 0v48h48a8 8 0 0 1 8 8"/></g></svg>
+    最近の検索は保存した時刻を毎回再計算して表示します
+  </p>
+  <ul class="rc__list" id="rcList" aria-label="最近の検索"></ul>
+</div>
+</main>
+<script>
+// 最近の検索 칩(04) — 검색어마다 {q, ts} 를 저장해 두고, 열 때마다 now-ts 를 분·시간·일
+// 버킷으로 다시 계산해 상대 시각 라벨을 만든다. 중복 검색어는 ts 만 now 로 갱신해 맨
+// 앞으로 옮기고(FLIP), 칩을 지우면 남은 칩들이 옛 위치→새 위치 델타만큼 스케일·이동
+// 트윈으로 좁혀진다(getBoundingClientRect 두 번 재서 델타 계산).
+(function () {
+  var list = document.getElementById('rcList');
+  if (!list) return;
+
+  var MIN = 60000, HOUR = 3600000, DAY = 86400000;
+  var STORE_KEY = 'rc-recent-demo';
+  var now = Date.now();
+
+  var seed = [
+    { q: 'バナナ', ts: now - 45 * 1000 },
+    { q: 'スイカ', ts: now - 40 * MIN },
+    { q: 'パイナップル', ts: now - 12 * MIN },
+    { q: 'グレープフルーツ', ts: now - 3 * HOUR },
+    { q: 'チェリー', ts: now - 2 * DAY }
+  ];
+
+  function loadItems() {
+    try {
+      var raw = window.localStorage.getItem(STORE_KEY);
+      if (!raw) return seed.slice();
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    } catch (e) { /* 저장소 접근 불가 시 시드로 대체 */ }
+    return seed.slice();
+  }
+
+  function saveItems() {
+    try { window.localStorage.setItem(STORE_KEY, JSON.stringify(items)); } catch (e) { /* 무시 */ }
+  }
+
+  var items = loadItems();
+
+  function label(delta) {
+    if (delta < MIN) return 'たった今';
+    if (delta < HOUR) return Math.floor(delta / MIN) + '分前';
+    if (delta < DAY) return Math.floor(delta / HOUR) + '時間前';
+    return Math.floor(delta / DAY) + '日前';
+  }
+
+  function render() {
+    var nowTick = Date.now();
+    var rows = items.map(function (it, i) {
+      return '<li class="rc__chip" data-i="' + i + '"><span class="rc__q">' + it.q +
+        '</span><span class="rc__time">' + label(nowTick - it.ts) + '</span>' +
+        '<button class="rc__del" type="button" data-i="' + i + '" aria-label="削除">' +
+        '<svg class="rc__delic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 56v144a16 16 0 0 1-16 16H56a16 16 0 0 1-16-16V56a16 16 0 0 1 16-16h144a16 16 0 0 1 16 16" opacity=".2"/><path d="M205.66 194.34a8 8 0 0 1-11.32 11.32L128 139.31l-66.34 66.35a8 8 0 0 1-11.32-11.32L116.69 128L50.34 61.66a8 8 0 0 1 11.32-11.32L128 116.69l66.34-66.35a8 8 0 0 1 11.32 11.32L139.31 128Z"/></g></svg>' +
+        '</button></li>';
+    });
+    list.innerHTML = rows.join('');
+  }
+  render();
+
+  function measure() {
+    var m = {};
+    var chips = list.querySelectorAll('.rc__chip');
+    chips.forEach(function (el) { m[el.getAttribute('data-i')] = el.getBoundingClientRect(); });
+    return m;
+  }
+
+  function flip(before) {
+    var chips = list.querySelectorAll('.rc__chip');
+    chips.forEach(function (el) {
+      var i = el.getAttribute('data-i');
+      var b = before[i];
+      if (!b) { el.style.transform = 'scale(.6)'; el.style.opacity = '0'; }
+      else {
+        var a = el.getBoundingClientRect();
+        var dx = b.left - a.left, dy = b.top - a.top;
+        if (dx || dy) {
+          el.style.transition = 'none';
+          el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+          el.getBoundingClientRect();
+        }
+      }
+      requestAnimationFrame(function () {
+        el.style.transition = '';
+        el.style.transform = '';
+        el.style.opacity = '';
+      });
+    });
+  }
+
+  function bump(q) {
+    var before = measure();
+    var idx = items.findIndex(function (it) { return it.q === q; });
+    if (idx === -1) return;
+    items[idx].ts = Date.now();
+    var moved = items.splice(idx, 1)[0];
+    items.unshift(moved);
+    saveItems();
+    render();
+    flip(before);
+    var frontEl = list.querySelector('.rc__chip[data-i="0"]');
+    if (frontEl) {
+      frontEl.classList.add('rc__chip--flash');
+      setTimeout(function () { frontEl.classList.remove('rc__chip--flash'); }, 480);
+    }
+  }
+
+  function removeAt(q) {
+    var before = measure();
+    items = items.filter(function (it) { return it.q !== q; });
+    saveItems();
+    render();
+    flip(before);
+  }
+
+  var playing = true;
+  function stop() { playing = false; }
+  list.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.rc__del') : null;
+    if (!btn) return;
+    stop();
+    var i = Number(btn.getAttribute('data-i'));
+    var it = items[i];
+    if (it) removeAt(it.q);
+  });
+  list.addEventListener('pointerdown', function (e) {
+    if (!e.target.closest || !e.target.closest('.rc__del')) stop();
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  if (!reduce && playing) {
+    var STEPS = [
+      { at: 300, fn: function () { bump('スイカ'); } },
+      { at: 1000, fn: function () { removeAt('チェリー'); } }
+    ];
+    STEPS.forEach(function (s) {
+      setTimeout(function () { if (playing) s.fn(); }, s.at);
+    });
+    setTimeout(function () {
+      if (!playing) return;
+      items = [
+        { q: 'バナナ', ts: Date.now() - 45 * 1000 },
+        { q: 'スイカ', ts: Date.now() - 40 * MIN },
+        { q: 'パイナップル', ts: Date.now() - 12 * MIN },
+        { q: 'グレープフルーツ', ts: Date.now() - 3 * HOUR },
+        { q: 'チェリー', ts: Date.now() - 2 * DAY }
+      ];
+      saveItems();
+      render();
+    }, 1750);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sort the values to work out the quartile boundaries, then translate them into box height and whisker length, so the median and how spread out the data is come together in one shape. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bxw is-demo" id="bxwRoot">
+  <canvas class="bxw__canvas" id="bxwCanvas" width="480" height="300"></canvas>
+  <p class="bxw__caption">Sort the values to work out the quartile boundaries, then translate them into box height and whisker length, so the median and how spread out the data is come together in one shape.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 두 그룹 각각에 표본 집합을 두 벌씩 두고 사분위(최소·1사분위·중앙값·3사분위·최대)를
+  // 미리 계산해둔다. 매 프레임 삼각파(0→1→0)로 두 표본 집합의 사분위 값을 요소별로 보간해
+  // 그 프레임의 상자·수염 좌표를 다시 계산해서 그린다 — 정적인 두 장을 겹쳐 페이드하는 것이
+  // 아니라 통계값 자체가 시간에 따라 움직인다.
+  var root = document.getElementById('bxwRoot');
+  var canvas = document.getElementById('bxwCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 480, CALC_H = 300;
+  var LOOP_MS = 800;
+  var T0 = 200;
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  var rand = seedRand(425051);
+  function sample(n) {
+    var out = [];
+    for (var i = 0; i < n; i += 1) out.push(20 + rand() * 80);
+    return out;
+  }
+  var GROUP_A_1 = sample(9), GROUP_A_2 = sample(9);
+  var GROUP_B_1 = sample(9), GROUP_B_2 = sample(9);
+
+  function quartiles(arr) {
+    var s = arr.slice().sort(function (a, b) { return a - b; });
+    function pct(p) {
+      var idx = (s.length - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx);
+      return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+    }
+    return { min: s[0], q1: pct(0.25), med: pct(0.5), q3: pct(0.75), max: s[s.length - 1] };
+  }
+  var qA1 = quartiles(GROUP_A_1), qA2 = quartiles(GROUP_A_2);
+  var qB1 = quartiles(GROUP_B_1), qB2 = quartiles(GROUP_B_2);
+
+  function lerp(x0, x1, f) { return x0 + (x1 - x0) * f; }
+  function lerpStats(s1, s2, f) {
+    return {
+      min: lerp(s1.min, s2.min, f),
+      q1: lerp(s1.q1, s2.q1, f),
+      med: lerp(s1.med, s2.med, f),
+      q3: lerp(s1.q3, s2.q3, f),
+      max: lerp(s1.max, s2.max, f)
+    };
+  }
+
+  var DOMAIN_MIN = 10, DOMAIN_MAX = 115;
+  var PLOT_TOP = 22, PLOT_BOTTOM = 292;
+  function valueToY(v) {
+    var f = (v - DOMAIN_MIN) / (DOMAIN_MAX - DOMAIN_MIN);
+    return PLOT_BOTTOM - f * (PLOT_BOTTOM - PLOT_TOP);
+  }
+
+  var BOX_FILL = ['47,109,246', '43,157,116'];
+  var CREAM_LINE = '255,247,230';
+  var BOX_WIDTH = 172;
+  var GROUP_X = [134, 346];
+  var OUTLIER_MULT = 1.2;
+
+  function drawBox(cx, stats, fillRgb, sx, sy, showOutlier) {
+    var yMin = valueToY(stats.min), yQ1 = valueToY(stats.q1);
+    var yMed = valueToY(stats.med), yQ3 = valueToY(stats.q3), yMax = valueToY(stats.max);
+    var xLeft = cx - BOX_WIDTH / 2;
+    var capHalf = BOX_WIDTH * 0.22;
+
+    ctx.strokeStyle = 'rgba(' + CREAM_LINE + ',.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx * sx, yMax * sy); ctx.lineTo(cx * sx, yQ3 * sy); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx * sx, yQ1 * sy); ctx.lineTo(cx * sx, yMin * sy); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo((cx - capHalf) * sx, yMax * sy); ctx.lineTo((cx + capHalf) * sx, yMax * sy); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo((cx - capHalf) * sx, yMin * sy); ctx.lineTo((cx + capHalf) * sx, yMin * sy); ctx.stroke();
+
+    ctx.fillStyle = 'rgba(' + fillRgb + ',.7)';
+    ctx.fillRect(xLeft * sx, yQ3 * sy, BOX_WIDTH * sx, (yQ1 - yQ3) * sy);
+    ctx.strokeStyle = 'rgba(' + CREAM_LINE + ',.9)';
+    ctx.strokeRect(xLeft * sx, yQ3 * sy, BOX_WIDTH * sx, (yQ1 - yQ3) * sy);
+
+    ctx.beginPath();
+    ctx.moveTo(xLeft * sx, yMed * sy);
+    ctx.lineTo((xLeft + BOX_WIDTH) * sx, yMed * sy);
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+
+    if (showOutlier) {
+      var yOut = valueToY(stats.max * OUTLIER_MULT);
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(' + CREAM_LINE + ',.95)';
+      ctx.arc(cx * sx, yOut * sy, 4.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(' + fillRgb + ',.95)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function draw(phase) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    var t = Math.max(0, phase - T0);
+    var half = (LOOP_MS - T0) / 2;
+    var blend = t < half ? t / half : 2 - t / half;
+    blend = clamp(blend, 0, 1);
+    var statsA = lerpStats(qA1, qA2, blend);
+    var statsB = lerpStats(qB1, qB2, blend);
+    drawBox(GROUP_X[0], statsA, BOX_FILL[0], sx, sy, blend > 0.62);
+    drawBox(GROUP_X[1], statsB, BOX_FILL[1], sx, sy, blend < 0.38);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  function phaseOf(ms) { return reduce ? LOOP_MS * 0.5 : (ms % LOOP_MS); }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(phaseOf(elapsed));
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) elapsed += dt;
+    draw(phaseOf(elapsed));
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(phaseOf(elapsed));
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

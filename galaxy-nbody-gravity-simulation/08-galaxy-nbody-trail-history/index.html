@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>궤적 히스토리 — 은하 n체 시뮬레이션 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gx is-demo" id="gxRoot">
+  <p class="gx__hint">
+    <span>지난 프레임을 알파로 깔아 두면 궤도가 부드러운 선으로 쌓이고, 나선팔이 한 장이 아니라 궤도의 누적임이 드러납니다</span>
+  </p>
+  <div class="gx__field" id="gxField" role="application" aria-label="궤적 히스토리 실험판" tabindex="0">
+    <canvas class="gx__cv" id="gxCv"></canvas>
+  </div>
+  <div class="gx__bar">
+    <span class="gx__meta">별 300개 · 잔상 누적 레이어</span>
+    <span class="gx__meta gx__meta--dim">canvas · globalAlpha history · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 궤적 히스토리(08) — 잔상을 "지우는" 게 아니라 "쌓는" 장면.
+// 01~07 의 잔상 체인은 destination-out 으로 매 프레임 조금씩 지웠다(흐름만 남긴다).
+// 여기선 정반대: 배경 위에 지난 프레임을 globalAlpha 로 깔아 두기만 한다 —
+// decay 가 없으므로 궤도가 계속 쌓여 나선팔이 "한 장의 팔"이 아니라
+// "수백 개 궤도의 누적"임이 시간이 지날수록 드러난다(장면의 주제 그 자체).
+// 계산은 02 와 같은 전 쌍 O(N²) + 중심질량 + leapfrog(근사 아님).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NSTARS = 300;   // 원반 별 수
+  var LAYERS = 3;     // 잔상 누적 단수(스텝당 깔리는 알파 겹) — 변형 "누적 깊이"
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('gxRoot');
+  var field = document.getElementById('gxField');
+  var cv = document.getElementById('gxCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--gx-ink');
+  var C_GLOW = tokRGB('--gx-glow');
+  var C_HOT  = tokRGB('--gx-hot');
+  var C_TAIL = tokRGB('--gx-tail');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var chainCv, chainCtx;
+
+  var N = 0, X = [], Y = [], VX = [], VY = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    chainCv = document.createElement('canvas');
+    chainCv.width = W * dpr; chainCv.height = H * dpr;
+    chainCtx = chainCv.getContext('2d');
+    chainCtx.scale(dpr, dpr);
+  }
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // G·질량은 캔버스 픽셀 단위 시뮬레이션 값(물리 상수 아님 — 글에서 설명)
+  var G = 60.0, SOFT2 = 36;
+  var DT = 1 / 60;
+  var MHALO = 6200;   // 중심 질량(핵+헤일로) — 그리지 않는다. 차등회전의 원천
+
+  var AX = [], AY = [];
+  function accel() {
+    // 중심 질량 + 전 쌍 O(N²) 뉴턴 — a_i = Σ G·(x_j - x_i)/(|d|²+ε²)^1.5 (근사 아님)
+    var i, j, dx, dy, d2, inv, f;
+    for (i = 0; i < N; i++) { AX[i] = 0; AY[i] = 0; }
+    var cx = W * 0.5, cy = H * 0.5;
+    for (i = 0; i < N; i++) {
+      dx = cx - X[i]; dy = cy - Y[i];
+      d2 = dx * dx + dy * dy + SOFT2;
+      inv = 1 / Math.sqrt(d2);
+      f = G * MHALO * inv * inv * inv;
+      AX[i] += dx * f; AY[i] += dy * f;
+    }
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        dx = X[j] - X[i]; dy = Y[j] - Y[i];
+        d2 = dx * dx + dy * dy + SOFT2;
+        inv = 1 / Math.sqrt(d2);
+        f = G * inv * inv * inv;
+        AX[i] += dx * f; AY[i] += dy * f;
+        AX[j] -= dx * f; AY[j] -= dy * f;
+      }
+    }
+  }
+
+  var aReady = false;
+  function stepLeap() {
+    if (!aReady) { accel(); aReady = true; }
+    var h = DT * 0.5;
+    for (var i = 0; i < N; i++) {
+      VX[i] += AX[i] * h; VY[i] += AY[i] * h;
+      X[i]  += VX[i] * DT; Y[i] += VY[i] * DT;
+    }
+    accel();
+    for (var j = 0; j < N; j++) {
+      VX[j] += AX[j] * h; VY[j] += AY[j] * h;
+    }
+  }
+
+  function seed() {
+    X = []; Y = []; VX = []; VY = []; N = 0; aReady = false;
+    var rnd = mulberry32(21);
+    var cx = W * 0.5, cy = H * 0.5;
+    var R = Math.min(W, H) * 0.46;
+    for (var i = 0; i < NSTARS; i++) {
+      var far = rnd() < 0.44;                       // 상당수 별은 이심 궤도 — 궤적이 원반 밖까지 뻗는다
+      var r = far
+        ? R * (0.22 + 2.30 * rnd())                 // 먼 별: 최대 ~2.5R 바깥까지 오가는 궤도
+        : 0.10 * R + R * 0.80 * Math.sqrt(rnd());
+      var a = rnd() * Math.PI * 2 + 0.14 * Math.sin(r * 0.16);   // 초기 밀도 요동 — 쌓이면 나선팔
+      var v = Math.sqrt(G * MHALO / Math.max(r, 8)) * (far ? 0.80 : 1.06);  // 원반 살짝 과속 → 궤적이 살짝 벌어진다
+      X.push(cx + Math.cos(a) * r);
+      Y.push(cy + Math.sin(a) * r * 0.94);
+      VX.push(-Math.sin(a) * v + (rnd() - 0.5) * 1.5);
+      VY.push( Math.cos(a) * v * 0.94 + (rnd() - 0.5) * 1.5);
+      N++;
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // decay 가 없다 — 잔상 체인은 지워지지 않고 계속 쌓인다(이 데모의 주제).
+  // 대신 루프 되감을 때만 통째로 지운다.
+
+  var prev = null;
+  function stamp() {
+    // 누적 — 스텝마다 globalAlpha 를 낮게 해 여러 겹 깔면 궤도가 선으로 굳는다
+    if (prev) {
+      for (var L = 0; L < LAYERS; L++) {   // LAYERS 겹 — 쌓임 속도 변형
+        chainCtx.globalAlpha = 0.22 / LAYERS * (L + 1);
+        for (var i = 0; i < N; i++) {
+          var r = Math.hypot(X[i] - W * 0.5, Y[i] - H * 0.5);
+          var col = r < Math.min(W, H) * 0.18 ? C_HOT : C_GLOW;
+          chainCtx.strokeStyle = rgba(col, 0.9);
+          chainCtx.lineWidth = r < Math.min(W, H) * 0.18 ? 2.6 : 2.1;
+          chainCtx.beginPath();
+          chainCtx.moveTo(prev[0][i], prev[1][i]);
+          chainCtx.lineTo(X[i], Y[i]);
+          chainCtx.stroke();
+        }
+      }
+      chainCtx.globalAlpha = 1;
+    }
+    if (!prev) { prev = [X.slice(), Y.slice()]; }
+    else { prev[0] = X.slice(); prev[1] = Y.slice(); }
+  }
+
+  function draw() {
+    var ctx = cv.getContext('2d');   // CanvasRenderingContext2D — 이 데모의 그리기 문맥
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+    var rnd = mulberry32(23);
+    ctx.fillStyle = rgba(C_GLOW, 0.35);
+    for (var k = 0; k < 40; k++) {
+      var bx = rnd() * W, by = rnd() * H, br = rnd() * 0.8 + 0.3;
+      ctx.globalAlpha = 0.12 + rnd() * 0.22;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // 누적 레이어 — 지워지지 않은 궤도 전체가 한 번에 얹힌다
+    ctx.drawImage(chainCv, 0, 0, W, H);
+    // 현재 별 위치 — 밝은 코어(쌓인 궤도 위 지나가는 "지금")
+    var R = Math.min(W, H);
+    for (var i = 0; i < N; i++) {
+      var r = Math.hypot(X[i] - W * 0.5, Y[i] - H * 0.5);
+      var col = r < R * 0.16 ? C_HOT : C_GLOW;
+      ctx.fillStyle = rgba(col, 0.18);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 4.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(col, 0.9);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 2.4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = rgba(C_HOT, 0.9);
+    ctx.beginPath(); ctx.arc(W * 0.5, H * 0.5, 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  var simSteps = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 5.0;      // 5초 루프 — 길게 흘려 궤도가 충분히 쌓이게
+    var target = Math.floor(loop / DT);
+    while (simSteps < target) { stepLeap(); simSteps++; stamp(); }
+    if (target < simSteps - 3) { seed(); simSteps = 0; prev = null; chainCtx.clearRect(0, 0, W, H); }
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 궤도가 쌓여 팔이 드러난 장면까지 적분한 뒤 한 장 고정
+    for (var s = 0; s < 260; s++) { stepLeap(); stamp(); }
+    draw();
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); seed(); simSteps = 0; prev = null; aReady = false;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  seed();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

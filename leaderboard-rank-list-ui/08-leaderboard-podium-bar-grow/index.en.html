@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Podium bars grow in proportion to score — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbp is-demo" id="lbp">
+  <div class="lbp__podium" id="lbpPodium" role="list" aria-label="Top 3 podium"></div>
+  <p class="lbp__sr" id="lbpSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_PODIUM_BAR_MAX_PX = 96;
+  // 시연 스케줄: 2초 구간 안에서 score 갱신이 여러 번 겹쳐 일어나 막대가 크게 오르내리게 하는 고정 시각표.
+  // rAF 타임스탬프 차이(dt)만 쓴다 — new Date·Date.now·Math.random 없음.
+  // 첫 항목을 150ms 뒤로 둔다 — 렌더 하네스가 로드 150ms 시점에 진행 중인 CSS 전환(transition)이
+  // 있으면 "결정론 모드"(프레임당 실시간 20ms만 허용)로 바뀌어 시연 프레임 수가 줄어든다(실측).
+  var DEMO_SCHEDULE = [
+    { t: 200, id: "p3" }, { t: 560, id: "p2" }, { t: 920, id: "p1" },
+    { t: 1280, id: "p3" }, { t: 1640, id: "p2" }
+  ];
+  var DEMO_LOOP_MS = 2000;
+  var BAR_LO_RGB = [47, 109, 246];  // $subject-blue
+  var BAR_HI_RGB = [10, 79, 232];   // $subject-blue-deep
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbp");
+  var podium = document.getElementById("lbpPodium");
+  var sr = document.getElementById("lbpSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "SABER4", score: 640 },
+    { id: "p2", name: "MYRTLE2", score: 590 },
+    { id: "p3", name: "KESTREL9", score: 540 }
+  ];
+
+  var slotOrder = [1, 0, 2]; // 2위-1위-3위 배치 (가운데가 1위)
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function sortedPlayers() {
+    return players.slice().sort(function (a, b) { return b.score - a.score; });
+  }
+
+  // 계산 겹: 각 선수의 점수를 1위 점수로 나눈 비율(ratio)이 막대의 scaleY 그 자체다 —
+  // transform-origin 을 바닥에 두어 레이아웃을 건드리지 않고 순수 계산값만으로 키를 만든다.
+  // 같은 ratio 를 막대 명도(lo→hi 보간)·바닥 그림자·1위 기둥 배경에도 전파한다(계산 겹).
+  function applyBars(order) {
+    var maxScore = order[0].score || 1;
+    order.forEach(function (p, i) {
+      var ratio = Math.max(0.06, p.score / maxScore);
+      var node = nodes[p.id];
+      node.bar.style.transform = "scaleY(" + ratio.toFixed(3) + ")";
+      node.rank.textContent = String(i + 1);
+      node.score.textContent = String(p.score);
+      var r = Math.round(BAR_LO_RGB[0] + (BAR_HI_RGB[0] - BAR_LO_RGB[0]) * ratio);
+      var g = Math.round(BAR_LO_RGB[1] + (BAR_HI_RGB[1] - BAR_LO_RGB[1]) * ratio);
+      var b = Math.round(BAR_LO_RGB[2] + (BAR_HI_RGB[2] - BAR_LO_RGB[2]) * ratio);
+      node.bar.style.background = "rgb(" + r + "," + g + "," + b + ")";
+      node.wrap.style.boxShadow = "0 " + (ratio * 9).toFixed(1) + "px " + (ratio * 20).toFixed(1) + "px rgba(10,10,14," + (ratio * 0.34).toFixed(3) + ")";
+      node.col.style.background = "rgba(" + BAR_HI_RGB.join(",") + "," + (Math.max(0, ratio - 0.45) * 0.16).toFixed(3) + ")";
+    });
+  }
+
+  function relayout(announce) {
+    var order = sortedPlayers();
+    order.forEach(function (p, i) {
+      var slot = slotOrder.indexOf(i);
+      nodes[p.id].col.style.order = String(slot);
+      nodes[p.id].col.classList.toggle("lbp__col--first", i === 0);
+    });
+    applyBars(order);
+    if (announce) sr.textContent = order[0].name + " is rank 1, score " + order[0].score;
+  }
+
+  function bump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    p.score += 20 + Math.floor(rand() * 35);
+    relayout(true);
+  }
+
+  players.forEach(function (p) {
+    var col = document.createElement("div");
+    col.className = "lbp__col";
+    col.setAttribute("role", "listitem");
+    col.tabIndex = 0;
+
+    var name = document.createElement("span");
+    name.className = "lbp__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbp__score";
+    var barWrap = document.createElement("span");
+    barWrap.className = "lbp__barwrap";
+    var bar = document.createElement("span");
+    bar.className = "lbp__bar";
+    barWrap.appendChild(bar);
+    var rank = document.createElement("span");
+    rank.className = "lbp__rank";
+
+    col.appendChild(name);
+    col.appendChild(score);
+    col.appendChild(barWrap);
+    col.appendChild(rank);
+
+    nodes[p.id] = { col: col, name: name, score: score, bar: bar, wrap: barWrap, rank: rank };
+
+    col.addEventListener("click", function () { human(); bump(p.id); });
+    col.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+
+    podium.appendChild(col);
+  });
+
+  relayout(false);
+
+  function scheduledBump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    var maxScore = players.reduce(function (m, x) { return Math.max(m, x.score); }, 1);
+    var delta = Math.round(maxScore * (0.2 + rand() * 0.4));
+    p.score += delta;
+    relayout(true);
+  }
+
+  if (!reduce) {
+    var demoElapsed = 0, demoLast = null, demoIdx = 0, demoLap = 0;
+    function demoLoop(ts) {
+      if (root.classList.contains("is-demo")) {
+        if (demoLast === null) demoLast = ts;
+        demoElapsed += ts - demoLast;
+        demoLast = ts;
+        while (true) {
+          var entry = DEMO_SCHEDULE[demoIdx];
+          var target = demoLap * DEMO_LOOP_MS + entry.t;
+          if (demoElapsed < target) break;
+          scheduledBump(entry.id);
+          demoIdx++;
+          if (demoIdx >= DEMO_SCHEDULE.length) { demoIdx = 0; demoLap++; }
+        }
+      } else {
+        demoLast = null;
+      }
+      requestAnimationFrame(demoLoop);
+    }
+    requestAnimationFrame(demoLoop);
+  }
+})();
+</script>
+</body>
+</html>

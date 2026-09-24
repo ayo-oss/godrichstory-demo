@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One candle — color temperature rising off the wick — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 1 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>Fuel particles born at the wick rise by buoyancy and cool from yellow to orange to red — pointer x is wind, y is heat</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Candle particle board" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">240</b>fuel particles · color-temp cooling</span>
+    <span class="cd__meta cd__meta--dim">fillRect · globalCompositeOperation · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 촛불 하나(01). 불꽃은 연료 입자 다발 — 심지 끝에서 태어나 부력으로 오르며
+// 연료 k(1→0) 에 따라 노랑(gold)→주황(amber)→빨강(ember) 으로 색온도가 내려가고
+// 반경도 줄어든다(냉각). 살아 있는 연료 총합 flick 로 후광 3겹의 반경·알파를 정해
+// 촛불이 숨쉬는 밝기를 계산으로 만든다. 입자는 fillRect 사각형 픽셀로 찍고
+// 합성은 globalCompositeOperation 'lighter' 가 담당한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N_PART = 240;      // 연료 입자 수 — 변형 "입자 수" 축(240 → 480)
+  var LIFT   = 1.0;      // 부력 배율 — 불꽃 높이 축(0.7 → 1.4)
+  var TONE   = 0;        // 코어 색 변형 — 0: amber(#f0a868), 1: rose(#eca0a8)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 촛불로 살아 움직인다
+  var SEED = 0x5eed01;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+  var C_CORE  = TONE ? C_ROSE : C_AMBER;   // 색 변형 — 코어 톤 교체
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;   // 가상 wind/화력 포인터(0..1)
+  var manual = false;
+
+  // ── 연료 입자 — 심지 끝에서 태어나 부력으로 오르며 식는다 ──
+  var parts = [];
+  function spawn(p) {
+    p.x = (rand() - 0.5) * 3;            // 심지 폭 안 (px)
+    p.y = 0;                             // 심지 끝에서 출발
+    p.vx = (rand() - 0.5) * 7;
+    p.vy = -20 - rand() * 28;            // 부력 — 위로 (px/s)
+    p.k = 1;                             // 연료(열). 매초 K_BURN 닳는다
+    p.ph = rand() * TAU;                 // 개별 흔들림 위상
+  }
+  for (var i = 0; i < N_PART; i++) {
+    var p = {}; spawn(p); p.y = -rand() * 42; p.k = rand();  // 첫 프레임부터 불꽃이 차 있는 상태로
+    parts.push(p);
+  }
+
+  // ── 연기 입자 — 불꽃 끝에서 피어오르는 옅은 연기(소량) ──
+  var SMK = 14;
+  var smokes = [];
+  function spawnSmk(s) {
+    s.x = (rand() - 0.5) * 6;
+    s.y = 0;
+    s.vx = (rand() - 0.5) * 6;
+    s.vy = -13 - rand() * 13;
+    s.k = 1;
+    s.ph = rand() * TAU;
+  }
+  for (var s0 = 0; s0 < SMK; s0++) {
+    var sm = {}; spawnSmk(sm); sm.y = -rand() * 72; sm.k = rand();
+    smokes.push(sm);
+  }
+
+  var K_BURN = 2.3;      // 연료 소모율 (1/s)
+  var STILL_T = 1.6;     // reduce 에서 그리는 시각 — 후광이 가장 읽히는 한 장
+
+  function draw(tSec, dt) {
+    // 1) 무대 — 어두운 실내
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    var cx = W * 0.5;
+    var ground = H * 0.88;                 // 촛대 바닥
+    var candleTop = ground - 54;           // 초 몸통 윗면
+    var wickTop = candleTop - 9;           // 심지 끝 = 불꽃 태생점
+    var wind = (px01 - 0.5) * 2;           // -1..1 — 포인터 x
+    var power = 0.6 + py01 * 0.8;          // 포인터 y — 화력(부력·후광 세기)
+
+    // ── 2) 앙비언트 글로우 — 불은 주변 실내를 밝힌다 ──
+    // 반경별 감쇠 빛 겹 LAYERS 장을 lighter 로 쌓는다. 반경은 R0→RMAX(대각선 끝까지),
+    // 앞은 촘촘히(밝은 코어)·뒤는 성기게(넓은 은은함). 알파 바닥 0.05 — 가장 바깥 겹도 산다.
+    // A0 는 살아있는 연료 총합 flick 과 느린 sin 펄스로 매 프레임 재계산 —
+    // 글로우가 숨쉬는 밝기가 계산에서 나온다(고정값 아님).
+    var flick = 0;
+    for (var f = 0; f < N_PART; f++) flick += parts[f].k;
+    flick = (flick / N_PART) * power;      // 0..1 — 현재 불꽃 세기
+    // 반경 자체가 느리게 부풀었다 줄어든다(breathe) — 겹마다 지름이 진동해 그라디언트 정지점이
+    // 프레임마다 재배치되므로, 화면 넓은 영역이(중심에서 멀어도) 실제로 값이 바뀐다.
+    var breathe = (0.62 + 0.38 * flick) * (0.82 + 0.18 * Math.sin(tSec * 1.9));
+    var hx = cx + wind * 26;               // 글로우 중심이 바람에 실려 흔들린다(재튜닝: 게인 18→26)
+    var hy = wickTop - 17 - (power - 1) * 10 + Math.sin(tSec * 1.7) * 5;
+    var R0 = Math.min(W, H) * 0.13 * breathe;
+    var A0 = 0.60 * (0.66 + 0.34 * flick) * (0.72 + 0.28 * Math.sin(tSec * 2.3 + 0.9));
+    var RMAX = Math.hypot(W, H) * 0.99;    // 마지막 겹이 대각선 끝까지 — 방 전체를 데운다
+    var LAYERS = 13;
+    var FALLOFF = 1.05;                    // 완만한 감쇠 — 바닥알파에 갇히는 영역을 줄여 넓게 살아 있게 한다
+    ctx.globalCompositeOperation = 'lighter';
+    for (var L = 0; L < LAYERS; L++) {
+      var Lt = L / (LAYERS - 1);                     // 0..1
+      var R = R0 + (RMAX - R0) * Math.pow(Lt, 0.72); // 앞은 촘촘, 뒤는 성기게
+      var a = Math.max(0.06, A0 * Math.pow(R0 / R, FALLOFF));
+      var m1 = Lt;                                   // 안쪽 gold → 바깥 코어 톤으로 식는다
+      var lr = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m1;
+      var lg = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m1;
+      var lb = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m1;
+      var rg = ctx.createRadialGradient(hx, hy, R * 0.04, hx, hy, R);
+      rg.addColorStop(0, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + a.toFixed(3) + ')');
+      rg.addColorStop(0.72, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + (a * 0.6).toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(hx - R, hy - R, R * 2, R * 2);
+    }
+
+    // ── 잔열 바닥 띠 — 캔버스 전체 폭이 순수 검정으로 죽지 않게, 실내 바닥 전체가
+    // 은은한 잔열로 미세하게 맥동한다(중심이 좌우로 느리게 흘러 폭 전체가 실제로 변한다).
+    var hb = ground + 6;
+    var hbW = W * 0.75;
+    var hbX = cx + Math.sin(tSec * 0.6) * W * 0.3;
+    var hbA = 0.12 * (0.6 + 0.4 * flick) * (0.7 + 0.3 * Math.sin(tSec * 1.3 + 2.0));
+    var hbg = ctx.createRadialGradient(hbX, hb, 2, hbX, hb, hbW);
+    hbg.addColorStop(0, 'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',' + hbA.toFixed(3) + ')');
+    hbg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg;
+    ctx.fillRect(0, hb - hbW, W, hbW * 2);
+    // 반대쪽 모서리도 살짝 — 두 번째 잔열 점을 반대 위상으로 흘려보내 폭 전체의 죽은 구석을 없앤다
+    var hb2X = cx - Math.sin(tSec * 0.6) * W * 0.3;
+    var hbg2 = ctx.createRadialGradient(hb2X, hb, 2, hb2X, hb, hbW * 0.7);
+    hbg2.addColorStop(0, 'rgba(' + C_ROSE[0] + ',' + C_ROSE[1] + ',' + C_ROSE[2] + ',' + (hbA * 0.7).toFixed(3) + ')');
+    hbg2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg2;
+    ctx.fillRect(0, hb - hbW * 0.7, W, hbW * 1.4);
+
+    // ── 3) 연료 입자 — 색온도 사다리(gold→core→ember), fillRect 픽셀로 찍는다 ──
+    // wind: 위치가 wind * (1-k) * 26 만큼 옮겨간다 — 꼭대기(다 식은) 입자가 더 많이 눕는다
+    for (var j = 0; j < N_PART; j++) {
+      var q = parts[j];
+      q.k -= K_BURN * dt;
+      if (q.k <= 0) { spawn(q); continue; }
+      var sway = Math.sin(tSec * 7.3 + q.ph) * 8 * q.k;
+      var fx = cx + q.x + q.vx * q.k + sway + wind * (1 - q.k) * 26;
+      var fy = wickTop + q.y * (0.6 + 0.4 * power);
+      q.x += q.vx * dt; q.y += q.vy * LIFT * dt;
+      // 색온도 사다리 — k 가 1(갓 태어남·gold) → 0(다 탐·ember) 로 내려간다
+      var rC, gC, bC, rad;
+      if (q.k > 0.66) {
+        rC = C_GOLD[0]; gC = C_GOLD[1]; bC = C_GOLD[2];
+        rad = 2.4 + 1.6 * (q.k - 0.66) / 0.34;
+      } else if (q.k > 0.33) {
+        var m2 = (q.k - 0.33) / 0.33;
+        rC = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m2;
+        gC = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m2;
+        bC = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m2;
+        rad = 1.8 + 0.6 * m2;
+      } else {
+        var m3 = q.k / 0.33;
+        rC = C_CORE[0] + (C_EMBER[0] - C_CORE[0]) * (1 - m3);
+        gC = C_CORE[1] + (C_EMBER[1] - C_CORE[1]) * (1 - m3);
+        bC = C_CORE[2] + (C_EMBER[2] - C_CORE[2]) * (1 - m3);
+        rad = 1.0 + 0.8 * m3;
+      }
+      ctx.fillStyle = 'rgba(' + (rC | 0) + ',' + (gC | 0) + ',' + (bC | 0) + ',' + (0.16 + 0.5 * q.k).toFixed(3) + ')';
+      ctx.fillRect(fx - rad, fy - rad, rad * 2, rad * 2);
+    }
+
+    // ── 4) 연기 — 다 식은 입자 위의 옅은 연기 톤. 바람을 넓게 받아 흩어진다 ──
+    for (var m = 0; m < SMK; m++) {
+      var s2 = smokes[m];
+      s2.k -= 0.55 * dt;
+      if (s2.k <= 0) { spawnSmk(s2); continue; }
+      var sx = cx + s2.x + s2.vx * (1 - s2.k) + Math.sin(tSec * 1.6 + s2.ph) * 6 * (1 - s2.k) + wind * (1 - s2.k) * 34;
+      var sy = wickTop - 46 + s2.y;
+      s2.x += s2.vx * dt; s2.y += s2.vy * dt;
+      var sr = 1.5 + (1 - s2.k) * 4;
+      ctx.fillStyle = 'rgba(' + C_SMOKE[0] + ',' + C_SMOKE[1] + ',' + C_SMOKE[2] + ',' + (0.10 * s2.k).toFixed(3) + ')';
+      ctx.fillRect(sx - sr, sy - sr, sr * 2, sr * 2);
+    }
+
+    // ── 5) 초 몸통·심지 — 면 계산(source-over)으로 마감 ──
+    ctx.globalCompositeOperation = 'source-over';
+    var wax = [
+      C_INK[0] + (C_AMBER[0] - C_INK[0]) * 0.20,
+      C_INK[1] + (C_AMBER[1] - C_INK[1]) * 0.20,
+      C_INK[2] + (C_AMBER[2] - C_INK[2]) * 0.20
+    ];
+    ctx.fillStyle = 'rgb(' + (wax[0] | 0) + ',' + (wax[1] | 0) + ',' + (wax[2] | 0) + ')';
+    ctx.fillRect(cx - 11, candleTop, 22, ground - candleTop);
+    ctx.beginPath();
+    ctx.ellipse(cx, candleTop, 11, 3.4, 0, 0, TAU);
+    ctx.fill();
+    // 불꽃 쪽 몸통 면 — 림 라이트(온 금빛 한 줌)
+    ctx.fillStyle = 'rgba(' + C_GOLD[0] + ',' + C_GOLD[1] + ',' + C_GOLD[2] + ',0.12)';
+    ctx.fillRect(wind > 0 ? cx + 6 : cx - 10, candleTop + 2, 4, ground - candleTop - 4);
+    // 심지
+    ctx.strokeStyle = 'rgba(' + C_SMOKE[0] + ',' + C_SMOKE[1] + ',' + C_SMOKE[2] + ',0.55)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, candleTop + 2);
+    ctx.lineTo(cx + wind * 2, wickTop);
+    ctx.stroke();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    nOut.textContent = String(N_PART);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    if (!manual) {
+      // 미리보기 가상 wind — 시드 고정 Lissajous. x 가 wind, y 가 화력
+      var ph = t * TAU / 3.2;
+      px01 = 0.5 + 0.34 * Math.sin(ph + 0.4);
+      py01 = 0.5 + 0.30 * Math.sin(2 * ph + 0.7);
+    }
+    draw(t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T, 0.016); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 후광이 가장 읽히는 한 장만 그린다
+    draw(STILL_T, 0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

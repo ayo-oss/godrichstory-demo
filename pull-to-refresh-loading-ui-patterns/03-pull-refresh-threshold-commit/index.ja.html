@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>しきい値確定 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="prtc is-demo" id="prtc">
+  <div class="prtc__phone" id="prtcPhone">
+    <div class="prtc__zone">
+      <span class="prtc__disc" id="prtcDisc"></span>
+    </div>
+    <div class="prtc__list" id="prtcList">
+      <div class="prtc__row"></div>
+      <div class="prtc__row"></div>
+      <div class="prtc__row"></div>
+    </div>
+  </div>
+  <span class="prtc__hint" id="prtcHint">下に引っぱってください</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('prtcPhone');
+  var disc = document.getElementById('prtcDisc');
+  var list = document.getElementById('prtcList');
+  var hint = document.getElementById('prtcHint');
+  var root = document.getElementById('prtc');
+
+  // 계산 겹: 확정 여부(committed candidate)는 raw 하나의 부등호가 아니라 두 문턱의 히스테리시스로 정한다.
+  // ON(100px) 을 넘으면 true 로, 다시 OFF(70px) 아래로 내려가야만 false 로 — 경계 근처에서 깜빡이지 않는다.
+  var ON = 100, OFF = 70, MAX = 160;
+  var candidate = false, state = 'idle'; // idle -> dragging -> committing -> idle
+
+  function setCandidate(raw) {
+    if (!candidate && raw >= ON) { candidate = true; }
+    else if (candidate && raw < OFF) { candidate = false; }
+  }
+
+  function apply(raw) {
+    setCandidate(raw);
+    var pull = Math.min(raw, MAX) * 0.3;
+    disc.style.transform = 'translateY(' + pull.toFixed(1) + 'px) scale(' + (0.7 + 0.3 * Math.min(1, raw / ON)).toFixed(2) + ')';
+    disc.classList.toggle('prtc__disc--ready', candidate);
+    list.style.transform = 'translateY(' + pull.toFixed(1) + 'px)';
+    hint.textContent = candidate ? '離すと更新' : (raw > 4 ? 'もっと引っぱってください (' + Math.round(raw) + '/' + ON + 'px)' : '下に引っぱってください');
+  }
+
+  function commit() {
+    state = 'committing';
+    hint.textContent = '更新中';
+    disc.classList.add('prtc__disc--spin');
+    setTimeout(function () {
+      disc.classList.remove('prtc__disc--spin', 'prtc__disc--ready');
+      candidate = false; state = 'idle';
+      hint.textContent = '下に引っぱってください';
+      apply(0);
+    }, 620);
+  }
+
+  var dragging = false, startY = 0, startRaw = 0, raw = 0, target = 0, raf = null;
+  function settle() {
+    raw += (target - raw) * 0.3;
+    if (Math.abs(target - raw) < 0.3) { raw = target; }
+    apply(raw);
+    if (raw !== target) { raf = requestAnimationFrame(settle); } else { raf = null; }
+  }
+  function goTo(v) { target = v; if (raf === null) { raf = requestAnimationFrame(settle); } }
+
+  function onDown(y) {
+    if (state !== 'idle') { return; }
+    dragging = true; state = 'dragging'; startY = y; startRaw = raw;
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+  }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(MAX, startRaw + (y - startY)));
+    apply(raw);
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (candidate) { commit(); } else { state = 'idle'; goTo(0); }
+  }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  apply(0);
+
+  // 자동 루프: raw 를 단계적으로 MAX 까지 올려 같은 setCandidate()·commit() 경로를 탄다.
+  var autoRaw = 0, autoTimer = null;
+  function autoTick() {
+    if (state !== 'idle' && state !== 'dragging') { return; }
+    state = 'dragging';
+    autoRaw += 28;
+    if (autoRaw >= MAX) {
+      raw = MAX; apply(raw); autoRaw = 0;
+      if (candidate) { commit(); } else { state = 'idle'; goTo(0); }
+      return;
+    }
+    raw = autoRaw; apply(raw);
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 170); }
+})();
+</script>
+</body>
+</html>

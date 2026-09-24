@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>대문 숲 — L시스템 프랙탈 나무 9종 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <div class="ls__hero" role="application" aria-label="대문 숲 히어로 씬" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+    <div class="ls__veil" aria-hidden="true"></div>
+    <div class="ls__copy">
+      <p class="ls__kicker">문자 하나가 자라면</p>
+      <p class="ls__title">FRACTAL<br>FOREST</p>
+      <p class="ls__tag" id="lsTag">규칙이 모여 숲이 됩니다</p>
+    </div>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">나무 <b id="lsCount">5</b>그루 · 규칙 각각 다름</span>
+    <span class="ls__meta ls__meta--dim">canvas · createRadialGradient</span>
+  </div>
+</div>
+</main>
+<script>
+// 대문 숲(09) — 계산 화면 하나가 서비스 첫 화면이 되는 조립. 나무 다섯 그루가
+// 저마다 다른 문자 재쓰기 규칙(F→F[+F]F[-F] 류 세 가지를 섞어)으로 자라 문장 위에 이른다.
+// 층 3개: ① 숲 캔버스(세대 성장 + 08 과 같은 깊이비례 바람) ② 방사 그라디언트 비네팅
+// (createRadialGradient, 매 프레임 다시 그려 숨쉬듯 짙어졌다 옅어진다) ③ 타이포(kicker·title·tag).
+(function () {
+  // ── 변형 상수 블록 ──
+  var MAXGEN  = 4;
+  var CYCLE   = 2.0;
+  var N_TREE  = 5;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var hero = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var tagEl = document.getElementById('lsTag');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_BARK = tokRGB('--ls-bark');
+  var C_LEAF = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+  var C_INK2 = tokRGB('--ls-ink2');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = hero.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  // 나무마다 다른 재쓰기 규칙 세 가지를 돌려쓴다 — "각기 다른 규칙으로 자란다"를 문자 그대로 구현
+  var RULES = [
+    { 'F': 'F[+F]F[-F]' },
+    { 'F': 'F[+F][-F]F' },
+    { 'F': 'FF[+F][-F]' }
+  ];
+  function expand(rule, gen) {
+    var s = 'F';
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += rule[ch] !== undefined ? rule[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  var TREES = [];
+  (function seed() {
+    for (var i = 0; i < N_TREE; i++) {
+      var rule = RULES[i % RULES.length];
+      TREES.push({
+        xFrac: (i + 0.5) / N_TREE,
+        str: expand(rule, MAXGEN),
+        angle: 20 + (i % 3) * 5,
+        scale: 0.85 + (i % 2) * 0.22,
+        phase: i * 0.9,
+        genDelay: (i % N_TREE) * 0.06
+      });
+    }
+  })();
+
+  function rgb(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+
+  function drawTree(ctx, tr, ox, oy, sc, loop) {
+    var str = tr.str;
+    var grPhase = Math.min(Math.max(0, (loop - tr.genDelay)) / 0.5, 1);
+    var drawUpto = Math.floor(str.length * grPhase);
+    var windPhase = loop * Math.PI * 2 * 1.4 + tr.phase;
+
+    var x = 0, y = 0, a = -Math.PI / 2;
+    var stack = [];
+    var depth = 0, maxDepth = MAXGEN + 1;
+    for (var i = 0; i < drawUpto; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        var depthT = depth / maxDepth;
+        var sway = 10 * depthT * depthT * Math.sin(windPhase + depth * 0.8) * Math.PI / 180;
+        a += sway;
+        var segLen = tr.scale * 0.11 * Math.pow(0.72, depth);
+        var nx = x + Math.cos(a) * segLen;
+        var ny = y + Math.sin(a) * segLen;
+        var cr = C_BARK[0] + (C_LEAF[0] - C_BARK[0]) * depthT;
+        var cg = C_BARK[1] + (C_LEAF[1] - C_BARK[1]) * depthT;
+        var cb = C_BARK[2] + (C_LEAF[2] - C_BARK[2]) * depthT;
+        ctx.strokeStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+        ctx.lineWidth = Math.max(0.8, 3 * Math.pow(0.68, depth));
+        ctx.beginPath();
+        ctx.moveTo(ox + x * sc, oy + y * sc);
+        ctx.lineTo(ox + nx * sc, oy + ny * sc);
+        ctx.stroke();
+        x = nx; y = ny;
+      } else if (ch === '[') {
+        stack.push({ x: x, y: y, a: a, d: depth });
+        depth++;
+        a += tr.angle * Math.PI / 180;
+      } else if (ch === ']') {
+        var st = stack.pop();
+        if (st) { x = st.x; y = st.y; a = st.a; depth = st.d; }
+        a -= tr.angle * Math.PI / 180;
+      } else if (ch === '+') {
+        a += tr.angle * Math.PI / 180;
+      } else if (ch === '-') {
+        a -= tr.angle * Math.PI / 180;
+      }
+    }
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = H * 0.98;
+    for (var i = 0; i < TREES.length; i++) {
+      var tr = TREES[i];
+      drawTree(ctx, tr, W * tr.xFrac, H * 0.98, sc, loop);
+    }
+
+    // 방사 그라디언트 비네팅 — 문장이 잘 읽히도록 가운데를 밝히고 가장자리를 죽인다.
+    // 반지름을 호흡시켜 정지 구간에도 픽셀이 계속 갱신된다.
+    var breath = 0.5 + 0.5 * Math.sin(loop * Math.PI * 2 * 0.6);
+    var gx = W * 0.5, gy = H * 0.42;
+    var r0 = Math.min(W, H) * (0.08 + 0.02 * breath);
+    var r1 = Math.max(W, H) * 0.75;
+    var grad = ctx.createRadialGradient(gx, gy, r0, gx, gy, r1);
+    grad.addColorStop(0, rgb(C_INK, 0));
+    grad.addColorStop(0.55, rgb(C_INK, 0.18 + 0.06 * breath));
+    grad.addColorStop(1, rgb(C_INK2, 0.86));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    if (tagEl) tagEl.style.opacity = String((0.62 + 0.38 * breath).toFixed(2));
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(0.9);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.9);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

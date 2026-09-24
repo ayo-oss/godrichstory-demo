@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>輪郭ピン配置 — 스트링아트 실 감기 기하 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sg is-demo" id="sgRoot" role="application" aria-label="輪郭巻き板" tabindex="0">
+  <canvas class="sg__cv" id="sgCv"></canvas>
+  <p class="sg__hint">
+    <span class="sg__title">輪郭ピン配置</span>
+    <span class="sg__desc">絵の縁の明るさ急変ピクセルにピンを打つと、形そのものに糸が巻かれます</span>
+  </p>
+  <div class="sg__bar">
+    <span class="sg__meta">境界ピクセル90本 · 糸380本 · 周期2秒</span>
+    <span class="sg__meta sg__meta--dim">getImageData · エッジ検出</span>
+  </div>
+</div>
+</main>
+<script>
+// 스트링아트 輪郭ピン配置(07) — 이미지 경계(엣지) 검출로 핀 위치를 자동으로 정하는 계산.
+// 오프스크린 캔버스에 절차적으로 잎(leaf) 문양을 그리고 getImageData 로 밝기를 읽는다.
+// 바깥에서 흰 배경을 홍수 채우기해 닿는 지점만 골라 바깥 테두리에 90개 핀을 박는다 —
+// 잎맥 같은 속 무늬는 빼고 외곽선만 핀이 된다. 첫 바퀴는 이웃 핀을 이어 테두리를 그리고
+// 둘째 바퀴부터 몇 칸 건너뛴 올로 속을 채운다 — 모양 자체가 핀판이 되는 국면.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NPIN  = 90;    // 경계에서 뽑는 핀 개수
+  var STR   = 380;   // 감는 실 올 수
+  var CYCLE = 2.0;   // 감기 완료 주기(초)
+  var SS    = 110;   // 경계 검출 격자 크기(SS×SS)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('sgRoot');
+  var cvEl = document.getElementById('sgCv');
+  if (!root || !cvEl) return;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var COL_THRD  = tokRGB('--sg-thread');
+  var COL_PIN   = tokRGB('--sg-pin');
+  var COL_PANEL = tokRGB('--sg-panel');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  // ── 절차적 잎 문양 → 밝기 → 경계 픽셀 → 핀 90개(0..1 비율 좌표) ──
+  var PINS = [];
+  (function buildPins() {
+    var oc = document.createElement('canvas');
+    oc.width = SS; oc.height = SS;
+    var o = oc.getContext('2d');
+    // 배경 그라데이션 대신 두 톤 평면 — 경계가 또렷해야 핀이 정확히 나온다
+    o.fillStyle = '#fff'; o.fillRect(0, 0, SS, SS);
+    o.fillStyle = '#000';
+    // 잎 몸통 — 두 개의 2차 곡선으로 이은 통통한 잎사귀(폭을 넓게 — 실 감기 면적)
+    o.beginPath();
+    o.moveTo(SS * 0.50, SS * 0.06);
+    o.quadraticCurveTo(SS * 1.02, SS * 0.46, SS * 0.50, SS * 0.94);
+    o.quadraticCurveTo(SS * -0.02, SS * 0.46, SS * 0.50, SS * 0.06);
+    o.closePath(); o.fill();
+    // 잎맥 — 가운데 세로줄과 옆줄 3쌍을 하얗게 파낸다(경계 추가)
+    o.strokeStyle = '#fff'; o.lineWidth = 2.2; o.lineCap = 'round';
+    o.beginPath();
+    o.moveTo(SS * 0.50, SS * 0.14); o.lineTo(SS * 0.50, SS * 0.86);
+    o.stroke();
+    for (var v = 0; v < 3; v++) {
+      var yy = SS * (0.30 + v * 0.17);
+      var ww = SS * 0.30 * (1 - v * 0.22);
+      o.lineWidth = 1.6;
+      o.beginPath(); o.moveTo(SS * 0.50, yy); o.lineTo(SS * 0.50 - ww, yy - SS * 0.07); o.stroke();
+      o.beginPath(); o.moveTo(SS * 0.50, yy); o.lineTo(SS * 0.50 + ww, yy - SS * 0.07); o.stroke();
+    }
+
+    // 밝기 격자
+    var lum = new Float32Array(SS * SS);
+    var d = o.getImageData(0, 0, SS, SS).data;
+    for (var i = 0; i < SS * SS; i++) lum[i] = d[i * 4];
+
+    // 바깥 경계만 — 바깥에서 흰 배경을 홍수 채우기(BFS)해 어두운 몸통에 닿는 지점.
+    // 잎맥(속의 하얀 줄)은 어두운 몸에 둘러싸여 바깥과 이어지지 않으니 핀에서 제외된다.
+    var dark = new Uint8Array(SS * SS);
+    for (var b0 = 0; b0 < SS * SS; b0++) dark[b0] = lum[b0] < 128 ? 1 : 0;
+    var seen = new Uint8Array(SS * SS);
+    var bnd  = new Uint8Array(SS * SS);
+    var stack = [0];
+    seen[0] = 1;
+    var NX = [1, -1, 0, 0], NY = [0, 0, 1, -1];
+    while (stack.length) {
+      var q = stack.pop();
+      var qx = q % SS, qy = (q - qx) / SS;
+      for (var d4 = 0; d4 < 4; d4++) {
+        var nx = qx + NX[d4], ny = qy + NY[d4];
+        if (nx < 0 || ny < 0 || nx >= SS || ny >= SS) continue;
+        var qi = ny * SS + nx;
+        if (dark[qi]) bnd[q] = 1;            // 흰 픽셀 옆이 몸통 → 외곽선 바로 바깥 점
+        else if (!seen[qi]) { seen[qi] = 1; stack.push(qi); }
+      }
+    }
+    var ring = [];
+    for (var r0 = 0; r0 < SS * SS; r0++) if (bnd[r0]) ring.push([r0 % SS, (r0 - r0 % SS) / SS]);
+    // 각도 순 정렬 후 고리를 따라 일정 간격으로 NPIN개 — 감기가 모양을 따라 돌게
+    var cxg = SS / 2, cyg = SS / 2;
+    ring.sort(function (a, b) {
+      return Math.atan2(a[1] - cyg, a[0] - cxg) - Math.atan2(b[1] - cyg, b[0] - cxg);
+    });
+    var stepR = ring.length / NPIN;
+    for (var p = 0; p < NPIN; p++) {
+      var q2 = ring[Math.floor(p * stepR) % ring.length];
+      PINS.push([(q2[0] / SS - 0.5) * 1.12 + 0.5, (q2[1] / SS - 0.5) * 1.12 + 0.5]);
+    }
+  })();
+
+  var CX = 0, CY = 0;
+  function pinPx(i) {
+    var u = PINS[i % PINS.length];
+    var s = Math.min(W, H);
+    // 가로로 넓게 — 캔버스 폭(480)이 높이(300)보다 넓으니 잎을 넓적하게 펴 꽉 채운다
+    return [CX + (u[0] - 0.5) * s * 1.7, CY + (u[1] - 0.5) * s * 1.02];
+  }
+
+  function fit() {
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = Math.round(W * dpr); cvEl.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    CX = W / 2; CY = H / 2;
+  }
+
+  function draw(progress, t) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgb(' + COL_PANEL.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+    var n = PINS.length;
+    var full = Math.floor(progress * STR);
+
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = 'rgba(' + COL_THRD.join(',') + ',0.4)';
+    for (var i = 0; i < full; i++) {
+      // 감기 규칙 — 첫 바퀴(n올)는 이웃 핀만 이어 잎 테두리를 그리고,
+      // 둘째 바퀴부터 7·11·16칸 건너뛴 올을 순환해 속을 채운다(포락선이 잎을 메운다)
+      var K = i < n ? 1 : [7, 11, 16][(i - n) % 3];
+      var a = pinPx(i % n), b = pinPx((i + K) % n);
+      var recency = (full - i) / STR;
+      var alpha = 0.6 + 0.34 * Math.pow(recency, 1.2);
+      ctx.strokeStyle = 'rgba(' + COL_THRD.join(',') + ',' + Math.min(0.95, alpha).toFixed(3) + ')';
+      ctx.lineWidth = 3.1 + recency * 2.2;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // 핀 — 감긴 올이 닿은 핀은 밝게 커진다. 스캔 하이라이트(경계 검출 순서 흔적)
+    for (var p = 0; p < n; p++) {
+      var xy = pinPx(p);
+      var pulse = 0.5 + 0.5 * Math.sin(t * 4 - p * 0.35);
+      var rr = 1.6 + 1.3 * pulse;
+      ctx.fillStyle = 'rgba(' + COL_PIN.join(',') + ',' + (0.55 + 0.4 * pulse).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(xy[0], xy[1], rr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = ((now - t0) / 1000) % CYCLE;
+    // 0→0.8 감기 · 0.8→1 유지 — 유지 구간에도 핀 맥동이 계속 움직인다
+    var progress = Math.min(1, t / CYCLE / 0.8);
+    draw(progress, t);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(1, 0);
+  });
+  fit();
+  if (reduce) {
+    draw(1, 0);   // reduce — 다 감긴 잎 문양 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

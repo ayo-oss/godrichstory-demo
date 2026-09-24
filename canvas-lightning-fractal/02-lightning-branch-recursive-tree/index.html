@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>재귀 가지치기 번개 — 중점변위 분기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>줄기의 각 구간이 낮은 확률로 새 방향의 가지를 치고, 그 가지가 다시 중점변위로 갈라집니다. 두께와 밝기는 깊이마다 감쇠해 점점 가늘어집니다 — 게임 스킬 이펙트의 뼈대 그대로</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="재귀 가지치기 번개 실험판" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">0.15</b> 가지 확률 · 재귀 가지치기</span>
+    <span class="cd__meta cd__meta--dim">canvas · lineTo · globalCompositeOperation</span>
+  </div>
+</div>
+</main>
+<script>
+// 재귀 가지치기 번개(02). 중점변위로 줄기를 그리되, 분할 과정의 각 구간이 확률 BRANCH_P 로 가지를 친다.
+// 가지는 원 선분을 짧게 자른 뒤 선분 방향에서 무작위로 비틀어 새 방향을 정하고, 그 가지도 같은 규칙으로
+// 재귀 분할 + 가지치기를 되풀이한다. 깊이가 깊어질수록 두께·밝기·변위폭이 감쇠해 자연스러운 프랙탈이 된다.
+// 화면은 lighter 합성으로 겹치는 광이 더 밝아지게 하고, 스킬 시전 느낌의 쿨다운 리듬으로 시전-소멸을 반복한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var BRANCH_P = 0.15;  // 구간당 가지 확률 — 0.08 은 곧은 줄기, 0.24 는 잎같이 갈라짐
+  var MAX_GEN = 5;      // 가지 최대 세대 — 3 은 단순, 5 는 덤불
+  var CHARGE  = 0.4;    // 시전 주기(초) — 스킬 쿨다운 리듬(짧을수록 몰아쳐 화면이 계속 산다)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 가지 모양으로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x316B02);
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--bolt-ink');
+  var C_DUSK = tokRGB('--bolt-dusk');
+  var C_CORE = tokRGB('--bolt-core');
+  var C_LILA = tokRGB('--bolt-lilac');
+  var C_MINT = tokRGB('--bolt-mint');
+  var C_PINK = tokRGB('--bolt-pink');
+  var C_MIST = tokRGB('--bolt-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+
+  var ROUGH = 0.4;      // 중점변위 거칠기
+  var DEPTH = 6;        // 줄기 재귀 깊이
+  var DECAY = 0.66;     // 세대당 두께·밝기·변위 감쇠율
+
+  // ── 재귀 가지치기 — 세대별로 속성을 달리 한 번에 전체 트리를 뽑는다 ──
+  // segments: [{pts, gen}] — pts 는 displace 가 만든 꺾은선
+  function displace(ax, ay, bx, by, depth, amp, out) {
+    if (depth === 0) { out.push([bx, by]); return; }
+    var mx = (ax + bx) / 2, my = (ay + by) / 2;
+    var dx = bx - ax, dy = by - ay;
+    var len = Math.hypot(dx, dy) || 1;
+    var nx = -dy / len, ny = dx / len;
+    var off = (rand() * 2 - 1) * len * amp * 0.5;
+    mx += nx * off; my += ny * off;
+    displace(ax, ay, mx, my, depth - 1, amp, out);
+    displace(mx, my, bx, by, depth - 1, amp, out);
+  }
+
+  function grow(ax, ay, bx, by, gen, angle, depth, segments) {
+    var pts = [[ax, ay]];
+    displace(ax, ay, bx, by, depth, ROUGH * Math.pow(DECAY, gen), pts);
+    segments.push({ pts: pts, gen: gen });
+    if (gen >= MAX_GEN) return;
+    // 줄기를 따라 가지 후보를 넓게 검사한다
+    var baseA = Math.atan2(by - ay, bx - ax);
+    var k, idx, ba, bl, p;
+    for (k = 1; k <= 5; k++) {
+      idx = Math.floor(pts.length * k / 6);
+      if (idx < 1 || idx >= pts.length) continue;
+      if (rand() < BRANCH_P * (1.15 - gen / (MAX_GEN + 1))) {
+        p = pts[idx];
+        ba = baseA + (rand() < 0.5 ? -1 : 1) * (0.35 + rand() * 0.6);
+        bl = Math.hypot(bx - ax, by - ay) * (0.5 + rand() * 0.28);
+        grow(p[0], p[1], p[0] + Math.cos(ba) * bl, p[1] + Math.sin(ba) * bl, gen + 1, ba, depth - 1, segments);
+      }
+    }
+  }
+
+  var casts = [];       // [{segments, born, life, flickAt, ox, oy}]
+  var nextAt = 0.1;
+  var cycle = 0;
+  var SPOTS = [0.5, 0.26, 0.74, 0.4, 0.62, 0.14, 0.86];
+
+  // 밤하늘 잔불티 — 시전 사이 고요 구간에도 명도가 흔들리는 안전판(칩 없이도 화면이 계속 산다)
+  var specks = [];
+  function buildSpecks() {
+    specks = [];
+    for (var i = 0; i < 20; i++) {
+      specks.push({ rx: rand(), ry: rand() * 0.9, ph: rand() * TAU, spd: 1.2 + rand() * 1.8 });
+    }
+  }
+
+  function cast(t) {
+    var cx = SPOTS[cycle % SPOTS.length] * W + (rand() - 0.5) * W * 0.1;
+    cycle++;
+    var dir = rand() < 0.5 ? -1 : 1;   // 위로 뻗거나 아래로 꽂히거나
+    var ay = dir > 0 ? H * 0.86 : H * 0.2;
+    var by = dir > 0 ? H * 0.14 : H * 0.84;
+    var segments = [];
+    grow(cx, ay, cx + (rand() - 0.5) * W * 0.2, by, 0, 0, DEPTH, segments);
+    casts.push({ segments: segments, born: t, life: 1.15 + rand() * 0.25, flickAt: t, seedX: cx, dir: dir });
+  }
+
+  function env(s, t) {
+    var u = (t - s.born) / s.life;
+    if (u >= 1 || u < 0) return 0;
+    var b = Math.pow(1 - u, 1.4);
+    if (u > 0.25 && u < 0.32) b = Math.max(b, 0.78);   // 재점등
+    return b;
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function mix(c1, c2, k) {
+    return [c1[0] + (c2[0] - c1[0]) * k, c1[1] + (c2[1] - c1[1]) * k, c1[2] + (c2[2] - c1[2]) * k];
+  }
+
+  function draw(t) {
+    // 하늘 — 시전이 살아 있으면 전면이 띄어오른다(전면 플래시 라이팅 — 배경 픽셀이 변해 면적으로 직결)
+    var boost = 0;
+    var i0;
+    for (i0 = 0; i0 < casts.length; i0++) {
+      var s0 = casts[i0];
+      var b0 = env(s0, t);
+      var age0 = t - s0.born;
+      if (b0 > 0) boost = Math.max(boost, b0);
+      else if (age0 > s0.life && age0 < s0.life + 0.55) boost = Math.max(boost, 0.4 * (1 - (age0 - s0.life) / 0.55));
+    }
+    var top = mix(C_INK, C_DUSK, 0.16 + 0.5 * boost);
+    var bot = mix(C_INK, C_DUSK, 0.44 + 0.6 * boost);
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, rgba(top, 1));
+    sky.addColorStop(1, rgba(bot, 1));
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    for (var sI = 0; sI < specks.length; sI++) {
+      var sp = specks[sI];
+      var sa = 0.05 + 0.30 * (0.5 + 0.5 * Math.sin(t * sp.spd + sp.ph));
+      ctx.fillStyle = rgba(C_MIST, sa);
+      ctx.fillRect(sp.rx * W, sp.ry * H, 1.6, 1.6);
+    }
+
+    // 겹치는 광이 더해지게 — lighter 합성(칩: globalCompositeOperation)
+    ctx.globalCompositeOperation = 'lighter';
+    var i, j, s, b;
+    for (i = 0; i < casts.length; i++) {
+      s = casts[i];
+      b = env(s, t);
+      if (b <= 0) continue;
+      // 시전 원 — 스킬 발동 링
+      var oy = s.dir > 0 ? H * 0.86 : H * 0.2;
+      var ringR = 6 + 34 * b;
+      ctx.beginPath();
+      ctx.arc(s.seedX, oy, ringR, 0, TAU);
+      ctx.strokeStyle = rgba(C_MINT, 0.35 * b);
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(s.seedX, oy, ringR * 0.55, 0, TAU);
+      ctx.strokeStyle = rgba(C_PINK, 0.3 * b);
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      for (j = 0; j < s.segments.length; j++) {
+        var seg = s.segments[j];
+        var decay = Math.pow(DECAY, seg.gen);
+        var pts = seg.pts;
+        var wCore = Math.max(0.8, 2.2 * decay);
+        var col = seg.gen === 0 ? C_CORE : (seg.gen % 2 === 1 ? C_LILA : C_MINT);
+        // 헤일로
+        ctx.strokeStyle = rgba(C_LILA, 0.28 * b * decay);
+        ctx.lineWidth = Math.max(9, 24 * decay);
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (var m = 1; m < pts.length; m++) ctx.lineTo(pts[m][0], pts[m][1]);
+        ctx.stroke();
+        // 세대 색 중간광
+        ctx.strokeStyle = rgba(col, 0.55 * b * (0.4 + 0.6 * decay));
+        ctx.lineWidth = Math.max(1.2, 3.2 * decay);
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (m = 1; m < pts.length; m++) ctx.lineTo(pts[m][0], pts[m][1]);
+        ctx.stroke();
+        // 코어 — 세대 0·1 만 진한 코어
+        if (seg.gen <= 1) {
+          ctx.strokeStyle = rgba(C_CORE, b * decay);
+          ctx.lineWidth = wCore;
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0], pts[0][1]);
+          for (m = 1; m < pts.length; m++) ctx.lineTo(pts[m][0], pts[m][1]);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function update(t) {
+    if (t >= nextAt) {
+      cast(t);
+      nextAt = t + CHARGE * (0.8 + rand() * 0.4);
+    }
+    for (var i = 0; i < casts.length; i++) {
+      var s = casts[i];
+      if (t - s.born < s.life * 0.8 && t - s.flickAt > 0.07) s.flickAt = t;
+    }
+    while (casts.length && t - casts[0].born > 2.0) casts.shift();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+  }
+
+  function stillFrame() {
+    casts = [];
+    cast(0.05);
+    draw(0.05);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    update(t, dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  buildSpecks();
+  nOut.textContent = BRANCH_P.toFixed(2);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

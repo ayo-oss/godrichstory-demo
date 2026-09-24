@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0~180도 rotateY 로 뒷면에서 돌아 나오는 카드 탭 패널 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fp is-demo" id="fp">
+  <div class="fp__tabs" role="tablist" aria-label="대시보드 탭">
+    <button type="button" class="fp__tab is-active" role="tab" id="fp-tab-0" aria-selected="true" aria-controls="fpFront" data-idx="0">요약</button>
+    <button type="button" class="fp__tab" role="tab" id="fp-tab-1" aria-selected="false" aria-controls="fpFront" data-idx="1" tabindex="-1">상세</button>
+    <button type="button" class="fp__tab" role="tab" id="fp-tab-2" aria-selected="false" aria-controls="fpFront" data-idx="2" tabindex="-1">메모</button>
+  </div>
+  <div class="fp__persp">
+    <div class="fp__card" id="fpCard">
+      <div class="fp__face fp__face--front" id="fpFront" role="tabpanel" tabindex="0" aria-labelledby="fp-tab-0">
+        <span class="fp__num" id="fpFrontNum">01</span>
+        <p class="fp__line" id="fpFrontLine">핵심 지표 한눈에</p>
+      </div>
+      <div class="fp__face fp__face--back" id="fpBack" aria-hidden="true">
+        <span class="fp__num" id="fpBackNum">02</span>
+        <p class="fp__line" id="fpBackLine">항목별 수치 전체</p>
+      </div>
+    </div>
+  </div>
+  <p class="fp__meta">회전각 <b id="fpAngle">0</b>도</p>
+</div>
+<script>
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var DUR_MS = 600;
+  var HOLD_MS = 900;
+  var COUNT = 3;
+  var cats = [
+    { name: '요약', num: '01', line: '핵심 지표 한눈에' },
+    { name: '상세', num: '02', line: '항목별 수치 전체' },
+    { name: '메모', num: '03', line: '작성한 메모 목록' }
+  ];
+
+  var root = document.getElementById('fp');
+  var card = document.getElementById('fpCard');
+  var angleEl = document.getElementById('fpAngle');
+  var frontNum = document.getElementById('fpFrontNum');
+  var frontLine = document.getElementById('fpFrontLine');
+  var backNum = document.getElementById('fpBackNum');
+  var backLine = document.getElementById('fpBackLine');
+  var tabs = [0, 1, 2].map(function (i) { return document.getElementById('fp-tab-' + i); });
+
+  var isDemo = true;
+  var active = 0;
+  var busy = false;
+  var raf = 0;
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function renderFace(numEl, lineEl, idx) {
+    numEl.textContent = cats[idx].num;
+    lineEl.textContent = cats[idx].line;
+  }
+
+  function tickAngle(start, dir) {
+    function step(ts) {
+      var t = Math.min(1, (ts - start) / DUR_MS); // 계산 겹: 실측 경과시간 / 총 시간 = 진행률 t(0~1)
+      var angle = Math.round(t * 180); // 계산 겹: 진행률을 0~180도 rotateY 각도 값으로 변환
+      angleEl.textContent = String(angle);
+      if (t < 1 && busy) { raf = requestAnimationFrame(step); } else { raf = 0; }
+    }
+    raf = requestAnimationFrame(step);
+  }
+
+  function flipTo(idx) {
+    if (idx === active || busy) return;
+    busy = true;
+    var dir = idx > active ? 1 : -1; // 계산 겹: 목표 인덱스와의 부호로 회전 방향(시계/반시계) 결정
+    renderFace(backNum, backLine, idx);
+
+    tabs[active].classList.remove('is-active');
+    tabs[active].setAttribute('aria-selected', 'false');
+    tabs[active].setAttribute('tabindex', '-1');
+    tabs[idx].classList.add('is-active');
+    tabs[idx].setAttribute('aria-selected', 'true');
+    tabs[idx].setAttribute('tabindex', '0');
+
+    var startTs = performance.now();
+    requestAnimationFrame(function () {
+      card.style.transform = 'rotateY(' + (dir * 180) + 'deg)';
+    });
+    tickAngle(startTs, dir);
+
+    function onEnd(e) {
+      if (e.propertyName !== 'transform') return;
+      card.removeEventListener('transitionend', onEnd);
+      card.style.transition = 'none';
+      card.style.transform = 'rotateY(0deg)';
+      card.getBoundingClientRect();
+      card.style.transition = '';
+      renderFace(frontNum, frontLine, idx);
+      document.getElementById('fpFront').setAttribute('aria-labelledby', 'fp-tab-' + idx);
+      active = idx;
+      busy = false;
+      angleEl.textContent = '0';
+    }
+    card.addEventListener('transitionend', onEnd);
+  }
+
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { human(); flipTo(i); });
+  });
+
+  root.addEventListener('keydown', function (e) {
+    var idx = tabs.indexOf(document.activeElement);
+    if (idx === -1) return;
+    var next = null;
+    if (e.key === 'ArrowRight') next = (idx + 1) % COUNT;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + COUNT) % COUNT;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = COUNT - 1;
+    if (next === null) return;
+    e.preventDefault();
+    human();
+    tabs[next].focus({ preventScroll: true });
+    flipTo(next);
+  });
+
+  function loop() {
+    if (!isDemo) return;
+    flipTo((active + 1) % COUNT);
+    window.setTimeout(loop, HOLD_MS);
+  }
+
+  if (!reduce) {
+    window.setTimeout(loop, HOLD_MS);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

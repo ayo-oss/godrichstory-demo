@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>選んだ答えで経路線が分岐するステップ表示 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bm is-demo" id="bm">
+  <svg class="bm__svg" id="bmSvg" viewBox="0 0 100 100" role="img" aria-label="アンケートの分岐経路">
+    <path class="bm__trunk" d="M50 12 L50 42" />
+    <path class="bm__branch bm__branch--a" id="pathA" d="M50 42 C50 58 50 68 50 86" />
+    <path class="bm__branch bm__branch--b" id="pathB" d="M50 42 C50 58 50 68 50 86" />
+    <circle class="bm__dot bm__dot--start" cx="50" cy="12" r="6" />
+    <circle class="bm__dot bm__dot--a" id="dotA" cx="20" cy="90" r="6" />
+    <circle class="bm__dot bm__dot--b" id="dotB" cx="80" cy="90" r="6" />
+  </svg>
+  <div class="bm__labels">
+    <span class="bm__labelStart">質問</span>
+    <span class="bm__labelA">インストール型</span>
+    <span class="bm__labelB">サブスク型</span>
+  </div>
+  <p class="bm__status" id="bmStatus" aria-live="polite">答えを選ぶと経路が分かれます</p>
+  <div class="bm__controls">
+    <button type="button" class="bm__btn" id="bmA">インストール型を選ぶ</button>
+    <button type="button" class="bm__btn" id="bmB">サブスク型を選ぶ</button>
+    <button type="button" class="bm__btn bm__btn--ghost" id="bmReset">リセット</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_BRANCH_MORPH_MS = 420;
+  var CENTER_X = 50;
+  var TARGET_A_X = 20;
+  var TARGET_B_X = 80;
+  var MAX_OFFSET = TARGET_B_X - CENTER_X; // 표시 레이어 정규화 기준(로직 무관)
+
+  var root = document.getElementById('bm');
+  var status = document.getElementById('bmStatus');
+  var pathA = document.getElementById('pathA');
+  var pathB = document.getElementById('pathB');
+  var dotA = document.getElementById('dotA');
+  var dotB = document.getElementById('dotB');
+  var btnA = document.getElementById('bmA');
+  var btnB = document.getElementById('bmB');
+  var btnReset = document.getElementById('bmReset');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var choice = null; // null | 'a' | 'b'
+  var progress = { a: 0, b: 0 }; // 각 경로의 중심 이탈률(0~1) — 굵기·글로우·배경 톤이 여기서 파생
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function buildPath(midX, endX) {
+    return 'M50 42 C50 58 ' + midX.toFixed(2) + ' 68 ' + endX.toFixed(2) + ' 86';
+  }
+
+  function paintProgress() {
+    root.style.setProperty('--bm-progress', Math.max(progress.a, progress.b).toFixed(3));
+  }
+
+  function applyMorph(key, pathEl, targetX, fromX) {
+    if (reduce) {
+      pathEl.setAttribute('d', buildPath(targetX, targetX));
+      progress[key] = clamp(Math.abs(targetX - CENTER_X) / MAX_OFFSET, 0, 1);
+      paintProgress();
+      return;
+    }
+    var start = null;
+    function step(now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / STEP_BRANCH_MORPH_MS, 0, 1);
+      var eased = easeOutCubic(t);
+      var x = lerp(fromX, targetX, eased);
+      pathEl.setAttribute('d', buildPath(x, x));
+      var travelled = clamp(Math.abs(x - CENTER_X) / MAX_OFFSET, 0, 1);
+      progress[key] = travelled;
+      pathEl.style.strokeWidth = (2.4 + travelled * 2.6).toFixed(2);
+      pathEl.style.filter = travelled > 0.04
+        ? 'drop-shadow(0 0 ' + (travelled * 5.5).toFixed(1) + 'px rgba(10, 79, 232, ' + (travelled * 0.55).toFixed(2) + '))'
+        : 'none';
+      paintProgress();
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  function currentX(pathEl) {
+    var d = pathEl.getAttribute('d');
+    var m = /C50 58 ([\-0-9.]+) 68/.exec(d);
+    return m ? parseFloat(m[1]) : CENTER_X;
+  }
+
+  function setChoice(next) {
+    choice = next;
+    var aTarget = next === 'a' ? TARGET_A_X : CENTER_X;
+    var bTarget = next === 'b' ? TARGET_B_X : CENTER_X;
+    applyMorph('a', pathA, aTarget, currentX(pathA));
+    applyMorph('b', pathB, bTarget, currentX(pathB));
+    pathA.classList.toggle('is-chosen', next === 'a');
+    pathA.classList.toggle('is-dim', next === 'b');
+    pathB.classList.toggle('is-chosen', next === 'b');
+    pathB.classList.toggle('is-dim', next === 'a');
+    dotA.classList.toggle('is-chosen', next === 'a');
+    dotB.classList.toggle('is-chosen', next === 'b');
+    status.textContent = next === null ? '答えを選ぶと経路が分かれます'
+      : (next === 'a' ? 'インストール型の経路に分かれました' : 'サブスク型の経路に分かれました');
+  }
+
+  btnA.addEventListener('click', function () { root.classList.remove('is-demo'); setChoice(choice === 'a' ? null : 'a'); });
+  btnB.addEventListener('click', function () { root.classList.remove('is-demo'); setChoice(choice === 'b' ? null : 'b'); });
+  btnReset.addEventListener('click', function () { root.classList.remove('is-demo'); setChoice(null); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); setChoice('b'); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { root.classList.remove('is-demo'); setChoice('a'); e.preventDefault(); }
+  });
+
+  var DEMO_SCHEDULE = [
+    { t: 0.20, c: 'a' },
+    { t: 0.70, c: 'b' },
+    { t: 1.20, c: 'a' },
+    { t: 1.70, c: 'b' }
+  ];
+  var startTime = null;
+  var demoIdx = -1;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2;
+    if (root.classList.contains('is-demo')) {
+      if (t < DEMO_SCHEDULE[0].t && demoIdx !== -1) demoIdx = -1;
+      for (var i = 0; i < DEMO_SCHEDULE.length; i++) {
+        if (t >= DEMO_SCHEDULE[i].t && demoIdx < i) { setChoice(DEMO_SCHEDULE[i].c); demoIdx = i; }
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

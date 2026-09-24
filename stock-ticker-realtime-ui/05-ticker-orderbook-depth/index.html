@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>매수·매도 깊이가 늘었다 줄었다 하는 판 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ob is-demo" id="ob">
+  <div class="ob__board">
+    <div class="ob__head">
+      <p class="ob__title">호가창</p>
+      <span class="ob__sym">ORBIT</span>
+    </div>
+    <div class="ob__legend"><span>호가</span><span>잔량</span><span>누적</span></div>
+    <!-- 위쪽은 파는 쪽. 가운데에서 멀어질수록 쌓인 양이 커진다 -->
+    <ul class="ob__side" id="obAsk" data-ask="매도 {n}호가">
+      <li class="ob__row" data-lv="4"><button type="button" class="ob__cell ob__cell--ask"><span class="ob__bar ob__bar--ask" data-bar></span><span class="ob__price">18,480</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="3"><button type="button" class="ob__cell ob__cell--ask"><span class="ob__bar ob__bar--ask" data-bar></span><span class="ob__price">18,470</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="2"><button type="button" class="ob__cell ob__cell--ask"><span class="ob__bar ob__bar--ask" data-bar></span><span class="ob__price">18,462</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="1"><button type="button" class="ob__cell ob__cell--ask"><span class="ob__bar ob__bar--ask" data-bar></span><span class="ob__price">18,455</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+    </ul>
+    <div class="ob__mid">
+      <!-- 두 장을 같은 칸에 겹쳐 두고 steps(1, end) 로 컷 교체한다 — 반투명 유령 프레임이 안 생긴다 -->
+      <span class="ob__nowWrap">
+        <span class="ob__now ob__now--a is-up" data-now>▲ 18,450</span>
+        <span class="ob__now ob__now--b is-down">▼ 18,447</span>
+      </span>
+      <span class="ob__spread"><span class="ob__spreadK">스프레드</span><span class="ob__spreadV" data-spread>0</span></span>
+    </div>
+    <!-- 아래쪽은 사는 쪽 -->
+    <ul class="ob__side" id="obBid" data-bid="매수 {n}호가">
+      <li class="ob__row" data-lv="1"><button type="button" class="ob__cell ob__cell--bid"><span class="ob__bar ob__bar--bid" data-bar></span><span class="ob__price">18,445</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="2"><button type="button" class="ob__cell ob__cell--bid"><span class="ob__bar ob__bar--bid" data-bar></span><span class="ob__price">18,438</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="3"><button type="button" class="ob__cell ob__cell--bid"><span class="ob__bar ob__bar--bid" data-bar></span><span class="ob__price">18,430</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+      <li class="ob__row" data-lv="4"><button type="button" class="ob__cell ob__cell--bid"><span class="ob__bar ob__bar--bid" data-bar></span><span class="ob__price">18,421</span><span class="ob__qty" data-qty>0</span><span class="ob__cum" data-cum>0</span></button></li>
+    </ul>
+  </div>
+</div>
+</main>
+<script>
+// 가짜 시세는 시드 PRNG 로 만든다 — 같은 시드면 누가 열어도 같은 흐름이 재현되고 외부 API·키가 필요 없다.
+// 심볼도 실존 종목이 아니다.
+var SEED = 296;
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var rand = mulberry32(SEED);
+
+var STEP_MS = 400;       // 갱신 간격 — 2초에 5회. 막대는 transition 이 이어 주고 숫자만 갈린다
+var BEST_BID = 18445;
+var BEST_ASK = 18455;
+
+var root = document.getElementById('ob');
+var askList = document.getElementById('obAsk');
+var bidList = document.getElementById('obBid');
+// 가운데에서 바깥으로 세는 순서로 뒤집는다 — 쌓인 양은 체결가에 가까운 줄부터 더해 간다
+var askCells = [].slice.call(askList.querySelectorAll('.ob__cell')).reverse();
+var bidCells = [].slice.call(bidList.querySelectorAll('.ob__cell'));
+var nowEl = root.querySelector('[data-now]');
+
+function money(n) { return n.toLocaleString('en-US'); }
+
+// 한 쪽을 굴려 줄마다 남은 수량과 거기까지 쌓인 양을 만든다
+function roll(cells) {
+  var sum = 0, out = [];
+  cells.forEach(function (el) {
+    var q = 120 + Math.round(rand() * 880);
+    sum += q;
+    out.push({ el: el, q: q, sum: sum });
+  });
+  return out;
+}
+
+function repaint() {
+  var rows = roll(askCells).concat(roll(bidCells));
+  var max = 0;
+  rows.forEach(function (r) { if (r.sum > max) { max = r.sum; } });
+  rows.forEach(function (r) {
+    r.el.querySelector('[data-qty]').textContent = money(r.q);
+    r.el.querySelector('[data-cum]').textContent = money(r.sum);
+    // 막대는 width 가 아니라 scaleX 로 늘린다 — 레이아웃을 다시 계산하지 않으니 줄이 흔들리지 않고,
+    // 길이 변화는 transition 이 이어 준다
+    r.el.querySelector('[data-bar]').style.transform = 'scaleX(' + (0.16 + 0.84 * r.sum / max).toFixed(3) + ')';
+  });
+}
+
+var price = 18450, before = 18448;
+function paintPrice() {
+  var up = price >= before;
+  // 방향을 색만으로 전하지 않는다 — 화살표를 숫자 앞에 같이 적는다
+  nowEl.textContent = (up ? '▲' : '▼') + ' ' + money(price);
+  nowEl.className = 'ob__now ob__now--a ' + (up ? 'is-up' : 'is-down');
+}
+
+var askTpl = askList.getAttribute('data-ask');
+var bidTpl = bidList.getAttribute('data-bid');
+askCells.forEach(function (el, i) { el.setAttribute('aria-label', askTpl.replace('{n}', i + 1)); });
+bidCells.forEach(function (el, i) { el.setAttribute('aria-label', bidTpl.replace('{n}', i + 1)); });
+root.querySelector('[data-spread]').textContent = money(BEST_ASK - BEST_BID);
+repaint();
+paintPrice();
+
+// 격자 미리보기(.is-demo) 동안에는 CSS 키프레임만 돌고 JS 는 값을 안 건드린다 — 렌더 24프레임이 같은
+// 순간을 재현해야 측정이 안 흔들린다. 포인터를 올리거나 키보드로 들어오면 그때부터 시드 시세가 갱신된다.
+function live() { if (root.classList.contains('is-demo')) { root.classList.remove('is-demo'); } }
+['pointerdown', 'pointermove', 'focusin'].forEach(function (ev) { root.addEventListener(ev, live); });
+
+var timer = setInterval(function () {
+  if (root.classList.contains('is-demo')) { return; }
+  if (document.visibilityState === 'hidden') { return; }
+  before = price;
+  price = BEST_BID + Math.round(rand() * (BEST_ASK - BEST_BID));
+  repaint();
+  paintPrice();
+}, STEP_MS);
+
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') { paintPrice(); }
+});
+window.addEventListener('pagehide', function () { clearInterval(timer); });
+</script>
+</body>
+</html>

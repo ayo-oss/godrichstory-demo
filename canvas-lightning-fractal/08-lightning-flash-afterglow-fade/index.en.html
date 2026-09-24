@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스트라이크 플래시 — 타격 직후 화면 전체가 지수로 식는다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 64h-32l-16-24H96L80 64H48a16 16 0 0 0-16 16v112a16 16 0 0 0 16 16h160a16 16 0 0 0 16-16V80a16 16 0 0 0-16-16m-80 104a36 36 0 1 1 36-36a36 36 0 0 1-36 36" opacity=".2"/><path d="M208 56h-27.72l-13.63-20.44A8 8 0 0 0 160 32H96a8 8 0 0 0-6.65 3.56L75.71 56H48a24 24 0 0 0-24 24v112a24 24 0 0 0 24 24h160a24 24 0 0 0 24-24V80a24 24 0 0 0-24-24m8 136a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8V80a8 8 0 0 1 8-8h32a8 8 0 0 0 6.66-3.56L100.28 48h55.43l13.63 20.44A8 8 0 0 0 176 72h32a8 8 0 0 1 8 8ZM128 88a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28"/></g></svg>
+    <span>On the strike frame the full-screen flash is pushed to maximum, then each frame multiplies the last value by a decay rate — an afterglow that briefly lights the silhouette hills before cooling like a camera flash</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Strike-Flash Afterglow test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">decay <b class="cd__val" id="cdVal">0.95</b> · afterglow</span>
+    <span class="cd__meta cd__meta--dim">fillRect · globalCompositeOperation · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 스트라이크 플래시(08). 중점변위 낙뢰가 화면 꼭대기에서 지면으로 떨어지는 순간,
+// 전면 플래시 광원(하늘 방사형 그라디언트 + 하늘색 배경 증폭)을 최대치로 켠 뒤
+// 매 프레임 flash *= DECAY 로 지수 감쇠시킨다. 배경 실루엣(뒷산·언덕 능선·작은 탑)도
+// 플래시에 함께 밝아졌다 식으므로 변하는 픽셀이 화면 대부분을 덮는다 — 면적 확보의 핵심.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var DECAY = 0.95;        // 프레임당 플래시 decay — 1 에 가까울수록 잔광이 오래 남는다
+  var DISPLACE_PX = 30;    // 중점변위 최대 폭 — 늘리면 줄기가 더 거칠어진다
+  var CYCLE_MS = 1000;     // 낙뢰 반복 주기(2000ms 의 약수 — gif 가 안 끊긴다)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var valOut = document.getElementById('cdVal');
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x517c08;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--bolt-*)에서 getComputedStyle 로 읽는다
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK = tokRGB('--bolt-ink');
+  var C_SKY = tokRGB('--bolt-sky');
+  var C_SLAB = tokRGB('--bolt-slab');
+  var C_RIDGE = tokRGB('--bolt-ridge');
+  var C_CORE = tokRGB('--bolt-core');
+  var C_LILAC = tokRGB('--bolt-lilac');
+  var C_MINT = tokRGB('--bolt-mint');
+  var C_NODE = tokRGB('--bolt-node');
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function mix(a, b, k) {
+    return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var STILL_T = 60;   // reduce 에서 그리는 시각(ms) — 플래시가 살짝 남은 낙뢰 순간
+
+  // 실루엣 지형 — 능선 높이 배열. 화면 비율로 정의해 크기와 무관하게 같은 산골짜기가 그려진다
+  var RIDGE_FR = [
+    [0.00, 0.66], [0.08, 0.60], [0.18, 0.68], [0.30, 0.58], [0.42, 0.64],
+    [0.54, 0.56], [0.66, 0.62], [0.78, 0.58], [0.90, 0.63], [1.00, 0.60]
+  ];
+  var HILL_FR = [
+    [0.00, 0.80], [0.10, 0.76], [0.24, 0.82], [0.38, 0.74], [0.52, 0.79],
+    [0.66, 0.73], [0.80, 0.80], [0.92, 0.75], [1.00, 0.78]
+  ];
+  function ridgePath(fr) {
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (var i = 0; i < fr.length; i++) ctx.lineTo(fr[i][0] * W, fr[i][1] * H);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+  }
+
+  // 이번 주기의 낙뢰 — 시드를 주기 시작 시점에 고정해 매 주기 같은 줄기가 떨어진다
+  var boltSeedBase = SEED;
+  function boltPoints(x1, y1, x2, y2, disp) {
+    var pts = [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+    var amt = disp;
+    for (var depth = 0; depth < 7; depth++) {
+      var next = [pts[0]];
+      for (var i = 0; i < pts.length - 1; i++) {
+        var a = pts[i], b = pts[i + 1];
+        var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        var dx = b.x - a.x, dy = b.y - a.y;
+        var len = Math.hypot(dx, dy) || 1;
+        var off = (rand() - 0.5) * 2 * amt;
+        next.push({ x: mx + (-dy / len) * off, y: my + (dx / len) * off });
+        next.push(b);
+      }
+      pts = next;
+      amt *= 0.55;
+    }
+    return pts;
+  }
+
+  // 낙뢰 봉투 — 0~120ms 스트로크(밝게 유지), 120~320ms 급격히 소멸
+  function boltAlpha(t) {
+    if (t < 0 || t > 320) return 0;
+    if (t < 120) return 1;
+    return 1 - (t - 120) / 200;
+  }
+
+  var flash = 0;   // 전면 플래시 세기 0~1 — 낙뢰 프레임에 1 로 셋, 매 프레임 DECAY 곱해 감쇠
+
+  // 밤하늘 별빛 — 낙뢰 플래시가 다 식은 휴지 구간에도 화면이 완전히 죽지 않게 하는 안전판
+  // (082 잔광은 주기 시작 직후 몇 프레임 안에 다 꺼진다 — 별빛이 그 사이 프레임에도 diff 를 만든다)
+  // 반짝임은 45ms 계단(scintillation) — 부드러운 사인파는 프레임간 변화가 픽셀 문턱 아래로 내려간다
+  var stars = [];
+  function buildStars() {
+    stars = [];
+    for (var i = 0; i < 20; i++) {
+      stars.push({ rx: rand(), ry: rand() * 0.55, ph: (rand() * 97) | 0 });
+    }
+  }
+
+  // 정수 해시(murmur3 혼합) — (별 번호, 계단) → 0~1 유사난수. 시드 고정이라 렌더링이 결정론적이다
+  function starHash(a, b) {
+    var h = (a * 374761393 + b * 668265263) >>> 0;
+    h = ((h ^ (h >>> 13)) * 1274126177) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+
+  function draw(tAbs, t, dt) {
+    // 플래시 감쇠 — 이전 값에 감쇠율을 곱하는 지수 감쇠가 이 데모의 주제다
+    flash *= Math.pow(DECAY, dt * 60);
+    // 낙뢰 순간(주기 시작 0~120ms)엔 플래시가 최대치를 유지한다
+    if (t < 120) flash = 1;
+
+    // 하늘 — 플래시가 켜질수록 깊은 슬레이트가 라일락 광으로 밝아진다
+    var skyCol = mix(C_SKY, C_LILAC, flash * 0.5);
+    ctx.fillStyle = rgba(skyCol, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    // 별빛 — 45ms 계단으로 반짝여 플래시가 다 식은 휴지 구간에도 프레임마다 확실히 값이 바뀐다
+    var starStep = (tAbs / 45) | 0;
+    for (var si = 0; si < stars.length; si++) {
+      var st = stars[si];
+      var sa = 0.14 + 0.62 * starHash(si + st.ph, starStep);
+      ctx.fillStyle = rgba(C_MINT, sa);
+      ctx.fillRect(st.rx * W, st.ry * H, 2.2, 2.2);
+    }
+
+    // 플래시 광원 — 낙뢰 상단에서 퍼지는 방사형 그라디언트(전경 번개의 light sources)
+    if (flash > 0.02) {
+      var gr = ctx.createRadialGradient(W * 0.5, H * 0.04, 4, W * 0.5, H * 0.04, H * 1.1);
+      gr.addColorStop(0, rgba(C_CORE, flash * 0.85));
+      gr.addColorStop(0.35, rgba(C_LILAC, flash * 0.4));
+      gr.addColorStop(1, rgba(C_LILAC, 0));
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = gr;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // 실루엣 뒷산 — 플래시에 함께 밝아진다(역광 산골짜기)
+    ridgePath(RIDGE_FR);
+    ctx.fillStyle = rgba(mix(C_RIDGE, C_MINT, flash * 0.24), 1);
+    ctx.fill();
+
+    // 낙뢰 줄기 — 주기 시작마다 시드를 되돌려 같은 줄기가 반복 떨어지게 한다
+    var ba = boltAlpha(t);
+    if (ba > 0.01) {
+      prngState = boltSeedBase >>> 0;
+      var strikeX = W * 0.5 + W * 0.08 * Math.sin(boltSeedBase % 7);
+      var pts = boltPoints(strikeX, H * 0.02, strikeX + W * 0.06, H * 0.72, DISPLACE_PX);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      var passes = [[10, 0.15], [6, 0.25], [3.2, 0.42]];
+      for (var p = 0; p < passes.length; p++) {
+        ctx.strokeStyle = rgba(C_LILAC, passes[p][1] * ba);
+        ctx.lineWidth = passes[p][0];
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = rgba(C_CORE, Math.min(1, ba * 1.1));
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (var j = 1; j < pts.length; j++) ctx.lineTo(pts[j].x, pts[j].y);
+      ctx.stroke();
+      // 낙뢰 지점 폭발 광
+      var gg = ctx.createRadialGradient(pts[pts.length - 1].x, pts[pts.length - 1].y, 1, pts[pts.length - 1].x, pts[pts.length - 1].y, 46);
+      gg.addColorStop(0, rgba(C_CORE, ba));
+      gg.addColorStop(1, rgba(C_CORE, 0));
+      ctx.fillStyle = gg;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // 앞 언덕 — 실루엣. 플래시에 약간만 밝아진다(뒷산보다 가까워 어둡게 남는다)
+    ridgePath(HILL_FR);
+    ctx.fillStyle = rgba(mix(C_SLAB, C_LILAC, flash * 0.16), 1);
+    ctx.fill();
+
+    // 작은 탑 실루엣 — 언덕 능선 위 인공물 한 점
+    var tx = W * 0.78, ty = H * 0.73;
+    ctx.fillStyle = rgba(mix(C_SLAB, C_LILAC, flash * 0.2), 1);
+    ctx.fillRect(tx - 2, ty - 16, 4, 16);
+    ctx.fillRect(tx - 5, ty - 3, 10, 3);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    buildStars();
+  }
+
+  var prevNow = 0;
+  function frame(now) {
+    if (t0 < 0) { t0 = now; prevNow = now; }
+    var t = (now - t0) % CYCLE_MS;
+    var dt = Math.min(0.05, (now - prevNow) / 1000);
+    prevNow = now;
+    draw(now - t0, t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T, STILL_T, 0.016); });
+  fit();
+  if (reduce) {
+    flash = 0.4;
+    draw(STILL_T, STILL_T, 0.016);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>굵기가 변하는 署名 패드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp is-demo" id="sp">
+  <div class="sp__card">
+    <div class="sp__bar">
+      <p class="sp__label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" class="sp__ico" aria-hidden="true"><path d="M221.66,90.34,192,120,136,64l29.66-29.66a8,8,0,0,1,11.31,0L221.66,79A8,8,0,0,1,221.66,90.34Z" opacity="0.2"/><path d="M227.32,73.37,182.63,28.69a16,16,0,0,0-22.63,0L36.69,152A15.86,15.86,0,0,0,32,163.31V208a16,16,0,0,0,16,16H92.69A15.86,15.86,0,0,0,104,219.31l83.67-83.66,3.48,13.9-36.8,36.79a8,8,0,0,0,11.31,11.32l40-40a8,8,0,0,0,2.11-7.6l-6.9-27.61L227.32,96A16,16,0,0,0,227.32,73.37ZM48,208V179.31L76.69,208Zm48-3.31L51.31,160,136,75.31,180.69,120Zm96-96L147.32,64l24-24L216,84.69Z"/></svg><span>ここに署名してください</span></p>
+      <div class="sp__acts">
+        <button type="button" class="sp__btn" id="undoBtn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" class="sp__ico" aria-hidden="true"><path d="M216,128a88,88,0,1,1-88-88A88,88,0,0,1,216,128Z" opacity="0.2"/><path d="M224,128a96,96,0,0,1-94.71,96H128A95.38,95.38,0,0,1,62.1,197.8a8,8,0,0,1,11-11.63A80,80,0,1,0,71.43,71.39a3.07,3.07,0,0,1-.26.25L44.59,96H72a8,8,0,0,1,0,16H24a8,8,0,0,1-8-8V56a8,8,0,0,1,16,0V85.8L60.25,60A96,96,0,0,1,224,128Z"/></svg><span>一筆を取り消す</span></button>
+        <button type="button" class="sp__btn sp__btn--wipe" id="clearBtn">消す</button>
+      </div>
+    </div>
+    <div class="sp__pad" id="pad">
+      <canvas class="sp__ink" id="ink" role="img" aria-label="署名欄、0画"></canvas>
+      <svg class="sp__ghost" viewBox="0 0 300 96" preserveAspectRatio="none" aria-hidden="true">
+        <path class="sp__stroke sp__stroke--a" pathLength="100" d="M26,68 C40,26 58,20 64,40 C70,60 54,78 47,68 C40,58 62,32 86,34 C108,36 100,68 116,68 C132,68 134,38 148,38 C162,38 154,70 170,66"/>
+        <path class="sp__stroke sp__stroke--b" pathLength="100" d="M162,70 C190,64 216,50 242,32"/>
+        <path class="sp__stroke sp__stroke--c" pathLength="100" d="M246,36 C210,76 152,88 92,80"/>
+      </svg>
+      <span class="sp__rule" aria-hidden="true"></span>
+    </div>
+    <p class="sp__live">
+      <span class="sp__liveReal" id="live" aria-live="polite">0画</span>
+      <span class="sp__liveDemo sp__liveDemo--zero" aria-hidden="true">0画</span>
+      <span class="sp__liveDemo sp__liveDemo--one" aria-hidden="true">1画</span>
+      <span class="sp__liveDemo sp__liveDemo--two" aria-hidden="true">2画</span>
+      <span class="sp__liveDemo sp__liveDemo--three" aria-hidden="true">3画</span>
+    </p>
+  </div>
+</div>
+</main>
+<script>
+var sp = document.getElementById('sp');
+var pad = document.getElementById('pad');
+var ink = document.getElementById('ink');
+var live = document.getElementById('live');
+var ctx = ink.getContext('2d');
+var strokes = [], current = null, lastPoint = null;
+var PAD_LABEL = '署名欄、%d画';
+var LIVE_LABEL = '%d画';
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function resize() {
+  var r = pad.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  ink.width = Math.round(r.width * dpr);
+  ink.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  repaint();
+}
+
+// 필압이 있으면 그 값, 없으면 직전 점과의 거리(속도)로 굵기를 정한다 — 빠를수록 가늘게
+function widthFor(point) {
+  if (point.pressure > 0 && point.pressure !== 0.5) { return 1.2 + point.pressure * 5.2; }
+  var dx = point.x - lastPoint.x, dy = point.y - lastPoint.y;
+  return Math.max(1.4, 5.4 - Math.sqrt(dx * dx + dy * dy) * 0.34);
+}
+
+function midOf(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+
+function repaint() {
+  ctx.clearRect(0, 0, ink.width, ink.height);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#17141a';
+  for (var s = 0; s < strokes.length; s++) {
+    var pts = strokes[s];
+    if (pts.length < 2) { continue; }
+    // 구간은 중점에서 중점으로 잇고 꺾이는 점은 제어점으로 쓴다.
+    // 시작점을 중점이 아니라 점 자체에 두면 중점과 그 점 사이가 매번 비어 획이 절반씩 끊긴다
+    var start = pts[0];
+    for (var i = 1; i < pts.length - 1; i++) {
+      var end = midOf(pts[i], pts[i + 1]);
+      ctx.lineWidth = pts[i].w;
+      ctx.beginPath();
+      ctx.moveTo(start.x, start.y);
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, end.x, end.y);
+      ctx.stroke();
+      start = end;
+    }
+    var last = pts[pts.length - 1];
+    ctx.lineWidth = last.w;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(last.x, last.y);
+    ctx.stroke();
+  }
+  ink.setAttribute('aria-label', PAD_LABEL.replace('%d', strokes.length));
+  live.textContent = LIVE_LABEL.replace('%d', strokes.length);
+}
+
+function toLocal(e) {
+  var r = ink.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top, pressure: e.pressure, w: 3 };
+}
+
+pad.addEventListener('pointerdown', function (e) {
+  sp.classList.remove('is-demo');
+  lastPoint = toLocal(e);
+  current = [lastPoint];
+  strokes.push(current);
+  pad.setPointerCapture(e.pointerId);
+});
+pad.addEventListener('pointermove', function (e) {
+  if (!current) { return; }
+  var point = toLocal(e);
+  point.w = widthFor(point);
+  current.push(point);
+  lastPoint = point;
+  repaint();
+});
+window.addEventListener('pointerup', function () { current = null; });
+document.getElementById('undoBtn').addEventListener('click', function () { strokes.pop(); repaint(); });
+document.getElementById('clearBtn').addEventListener('click', function () { strokes = []; repaint(); });
+window.addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>

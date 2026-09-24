@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notification panel that opens after its badge pulses — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="nb is-demo" id="nb">
+    <button class="nb__bell" id="nbBell" type="button" aria-expanded="false" aria-controls="nbPanel">
+      <svg class="nb__ic" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
+        <g fill="currentColor">
+          <path opacity=".2" d="M208 192H48a8 8 0 0 1-6.88-12C47.71 168.6 56 139.81 56 104a72 72 0 0 1 144 0c0 35.82 8.3 64.6 14.9 76a8 8 0 0 1-6.9 12"/>
+          <path d="M221.8 175.94c-5.55-9.56-13.8-36.61-13.8-71.94a80 80 0 1 0-160 0c0 35.34-8.26 62.38-13.81 71.94A16 16 0 0 0 48 200h40.81a40 40 0 0 0 78.38 0H208a16 16 0 0 0 13.8-24.06M128 216a24 24 0 0 1-22.62-16h45.24A24 24 0 0 1 128 216m-80-32c7.7-13.24 16-43.92 16-80a64 64 0 1 1 128 0c0 36.05 8.28 66.73 16 80Z"/>
+        </g>
+      </svg>
+      <span class="nb__badge" id="nbBadge" aria-hidden="true">0</span>
+      <span class="nb__pulseRing" id="nbRing" aria-hidden="true"></span>
+      <span class="nb__sr" id="nbSr" aria-live="polite">Unread notifications 0</span>
+    </button>
+    <div class="nb__panel" id="nbPanel" role="region" aria-label="Notification panel">
+      <ul class="nb__list" role="list" id="nbList"></ul>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var NOTIF_BADGE_PULSE_MS = 900; // 뱃지가 값이 오를 때 두 번 숨쉬듯 부풀었다 가라앉는 데 걸리는 시간
+
+  var NAMES = [
+    "Payment approved", "New comment added", "Meeting starts in 10 minutes",
+    "Upload finished", "An invitation arrived"
+  ];
+  var TIMES = ["just now", "5 min ago", "1 hour ago", "yesterday", "2 days ago"];
+
+  var root = document.getElementById("nb");
+  var bell = document.getElementById("nbBell");
+  var badge = document.getElementById("nbBadge");
+  var ring = document.getElementById("nbRing");
+  var sr = document.getElementById("nbSr");
+  var panel = document.getElementById("nbPanel");
+  var list = document.getElementById("nbList");
+
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  badge.style.animationDuration = NOTIF_BADGE_PULSE_MS + "ms";
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  var items = [];
+  var open = false;
+  var seq = 0;
+
+  function renderList() {
+    list.innerHTML = "";
+    items.forEach(function (it) {
+      var li = document.createElement("li");
+      li.className = "nb__item";
+      li.setAttribute("role", "listitem");
+      li.innerHTML =
+        '<span class="nb__itemName">' + it.name + "</span>" +
+        '<span class="nb__itemTime">' + it.time + "</span>";
+      list.appendChild(li);
+    });
+  }
+
+  function pulseBadge() {
+    badge.classList.remove("nb__badge--pulse");
+    ring.classList.remove("nb__pulseRing--go");
+    if (!reduce) {
+      // 계산 겹: 배지의 실측 지름(getBoundingClientRect)에서 링이 퍼져나갈 배율을 구한다 —
+      // 고정 px 가 아니라 그 순간 배지 크기 비례라 320px 무대에서도 배지 밖으로 정확히 퍼진다
+      var bw = badge.getBoundingClientRect().width || 20;
+      var targetD = bw * 2.6;
+      ring.style.width = bw + "px";
+      ring.style.height = bw + "px";
+      ring.style.setProperty("--ring-scale", (targetD / bw).toFixed(2));
+      // eslint-disable-next-line no-unused-expressions
+      void badge.offsetWidth;
+      void ring.offsetWidth;
+      badge.classList.add("nb__badge--pulse");
+      ring.classList.add("nb__pulseRing--go");
+    }
+  }
+
+  // 계산 겹: 패널을 실제로 펼치기 전, 화면 밖(visibility hidden)에서 콘텐츠의 실제 높이를
+  // getBoundingClientRect 로 미리 재서(항목 수마다 다른 값) 그 값으로 0 → 실측치를 전환한다.
+  function measureHeight() {
+    var prevVis = panel.style.visibility;
+    var prevH = panel.style.height;
+    panel.style.visibility = "hidden";
+    panel.style.height = "auto";
+    var h = panel.getBoundingClientRect().height;
+    panel.style.visibility = prevVis;
+    panel.style.height = prevH;
+    return h;
+  }
+
+  function setOpen(v) {
+    open = v;
+    bell.setAttribute("aria-expanded", v ? "true" : "false");
+    if (v) {
+      var h = measureHeight();
+      panel.style.height = "0px";
+      requestAnimationFrame(function () {
+        panel.style.height = h + "px";
+      });
+    } else {
+      panel.style.height = measureHeight() + "px";
+      requestAnimationFrame(function () {
+        panel.style.height = "0px";
+      });
+    }
+  }
+
+  function addNotification() {
+    var idx = seq % NAMES.length;
+    items.unshift({ name: NAMES[idx], time: TIMES[seq % TIMES.length] });
+    seq++;
+    if (items.length > 5) items.pop();
+    badge.textContent = String(items.length);
+    sr.textContent = "Unread notifications " + items.length + " ";
+    pulseBadge();
+    renderList();
+    // 패널이 열려 있는 동안 새 알림이 오면 높이도 새 내용에 맞춰 다시 잰다(고정폭 안 잘림)
+    if (open) panel.style.height = measureHeight() + "px";
+  }
+
+  function toggle() {
+    human();
+    setOpen(!open);
+  }
+
+  bell.addEventListener("click", toggle);
+  bell.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle();
+    }
+  });
+
+  addNotification();
+  addNotification();
+
+  if (reduce) {
+    panel.style.transition = "none";
+    setOpen(true);
+    addNotification();
+  } else {
+    var loopTimer = 0;
+    var step = 0;
+    // 시연 주기 간격(펄스→열림→추가→닫힘) — 측정창(2초) 안에 패널 열림이 다 보이도록 조정했다.
+    // NOTIF_BADGE_PULSE_MS 자체는 그대로, 다음 단계로 넘어가는 대기시간만 다르게 준다.
+    var STEP_WAIT_MS = [500, 500, 400, 900];
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      synthetic = true;
+      if (step === 0) {
+        addNotification();
+      } else if (step === 1) {
+        setOpen(true);
+      } else if (step === 2) {
+        addNotification();
+      } else {
+        setOpen(false);
+      }
+      synthetic = false;
+      loopTimer = window.setTimeout(loop, STEP_WAIT_MS[step]);
+      step = (step + 1) % 4;
+    }
+    loopTimer = window.setTimeout(loop, 200);
+  }
+})();
+</script>
+</body>
+</html>

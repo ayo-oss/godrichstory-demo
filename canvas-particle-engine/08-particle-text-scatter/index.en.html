@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>글자가 파티클로 흩어지는 판 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pt" id="pt">
+  <p class="pt__hint">
+    <svg class="pt__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M228 128a100 100 0 1 1-100-100a100 100 0 0 1 100 100" opacity=".2"/><path d="M128 28a100 100 0 1 0 100 100A100.11 100.11 0 0 0 128 28m0 184a84 84 0 1 1 84-84a84.09 84.09 0 0 1-84 84"/><path d="M128 84a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28"/><rect x="124" y="8" width="8" height="24" rx="4"/><rect x="124" y="224" width="8" height="24" rx="4"/><rect x="8" y="124" width="24" height="8" rx="4"/><rect x="224" y="124" width="24" height="8" rx="4"/></g></svg>
+    <span>Rest the pointer on the letters and they scatter into grains; move away and they gather back</span>
+  </p>
+  <div class="pt__field" id="field" role="application" aria-label="Text particle test board" tabindex="0">
+    <canvas class="pt__cv" id="cv"></canvas>
+  </div>
+</div>
+</main>
+<script>
+// 글자가 파티클로 흩어지는 판 — 화면 밖 캔버스에 글자를 그리고 픽셀을 읽어 알갱이의 집을 정한다.
+// 포인터는 알갱이를 밀어내고, 치우면 스프링이 집으로 되돌린다.
+var root = document.getElementById('pt');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var WORD = 'GODRICH';
+var GAP = 4;                                        // 샘플링 격자 간격(CSS 픽셀)
+var PALETTE = ['#17141a', '#2f6df6', '#c2361a', '#2b9d74'];
+var SPRING = 14;                                    // 집으로 당기는 스프링 힘
+var PUSH = 2600;                                    // 포인터가 밀어내는 최대 가속
+var RADIUS = 46;                                    // 포인터 영향 Radius
+var W = 0, H = 0, dpr = 1;
+var dots = [];
+var edges = [];                                     // 글자별 오른쪽 경계 — 알갱이 색은 몇 번째 글자인지로 정한다
+var pointer = { x: -9999, y: -9999, on: false };
+
+// 화면 밖 캔버스 — 보이지 않는 곳에 글자를 그리고 getImageData 로 되돌려 받는다
+var off = document.createElement('canvas');
+var offCtx = off.getContext('2d', { willReadFrequently: true });
+
+function build() {
+  var r = field.getBoundingClientRect();
+  W = r.width; H = r.height;
+  dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  off.width = Math.max(1, Math.round(W));
+  off.height = Math.max(1, Math.round(H));
+  offCtx.clearRect(0, 0, off.width, off.height);
+  // 글자 크기는 판 폭에서 정한다 — 폭이 좁아도 글자가 잘리지 않게 한다
+  offCtx.font = '700 100px sans-serif';
+  var full = offCtx.measureText(WORD).width;
+  var size = Math.min(100 * (W * 0.9) / full, H * 0.72);
+  offCtx.font = '700 ' + Math.round(size) + 'px sans-serif';
+  var total = offCtx.measureText(WORD).width;
+  var startX = (W - total) / 2;
+  offCtx.textAlign = 'left';
+  offCtx.textBaseline = 'middle';
+  offCtx.fillStyle = '#17141a';
+  offCtx.fillText(WORD, startX, H * 0.54);
+  edges = [];
+  var acc = startX;
+  for (var c = 0; c < WORD.length; c++) {
+    acc += offCtx.measureText(WORD[c]).width;
+    edges.push(acc);
+  }
+
+  // 알파가 128 을 넘는 격자점마다 알갱이 하나 — 그 자리가 집(home)이 된다
+  var img = offCtx.getImageData(0, 0, off.width, off.height).data;
+  dots = [];
+  for (var y = GAP / 2; y < H; y += GAP) {
+    var iy = Math.min(off.height - 1, Math.round(y)) * off.width;
+    for (var x = GAP / 2; x < W; x += GAP) {
+      var ix = Math.min(off.width - 1, Math.round(x));
+      if (img[(iy + ix) * 4 + 3] < 128) continue;
+      var li = 0;
+      while (li < edges.length - 1 && x >= edges[li]) li++;
+      dots.push({
+        hx: x, hy: y,
+        x: Math.random() * W, y: Math.random() * H,   // 처음에는 판 전체에 뿌려 두고 집으로 모여 들어온다
+        vx: 0, vy: 0,
+        r: GAP * 0.42,
+        color: PALETTE[li % PALETTE.length],
+        ph: Math.random() * Math.PI * 2,              // 쉬고 있을 때 살짝 숨쉬는 움직임의 위상
+        sp: 0.5 + Math.random() * 0.9
+      });
+    }
+  }
+}
+
+function step(dt) {
+  var damp = Math.exp(-6 * dt);                       // 마찰 — 스프링이 지나치게 출렁이지 않게 한다
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var ax = (d.hx - d.x) * SPRING;
+    var ay = (d.hy - d.y) * SPRING;
+    if (pointer.on) {
+      var dx = d.x - pointer.x;
+      var dy = d.y - pointer.y;
+      var dist2 = dx * dx + dy * dy;
+      if (dist2 < RADIUS * RADIUS) {
+        var dist = Math.sqrt(dist2) || 0.001;
+        var force = (1 - dist / RADIUS) * PUSH;       // 포인터에 가까울수록 세게 밀려난다
+        ax += (dx / dist) * force;
+        ay += (dy / dist) * force;
+      }
+    }
+    d.vx = (d.vx + ax * dt) * damp;
+    d.vy = (d.vy + ay * dt) * damp;
+    d.x += d.vx * dt;
+    d.y += d.vy * dt;
+  }
+}
+
+function draw(nowSec) {
+  ctx.clearRect(0, 0, W, H);
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var ox = Math.sin(nowSec * d.sp + d.ph) * 0.7;    // 다 모인 뒤에도 완전히 죽은 화면이 되지 않게 한다
+    var oy = Math.cos(nowSec * d.sp * 0.8 + d.ph) * 0.7;
+    ctx.fillStyle = d.color;
+    ctx.beginPath();
+    ctx.arc(d.x + ox, d.y + oy, d.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw(now / 1000);
+  requestAnimationFrame(frame);
+}
+
+// 키보드 대체 — 판에 포커스를 두고 Enter 나 Space 를 누르면 알갱이 전부가 사방으로 튀어 오른다
+function kick() {
+  for (var i = 0; i < dots.length; i++) {
+    var a = Math.random() * Math.PI * 2;
+    var s = 320 + Math.random() * 420;
+    dots[i].vx += Math.cos(a) * s;
+    dots[i].vy += Math.sin(a) * s;
+  }
+}
+
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  pointer.x = e.clientX - r.left;
+  pointer.y = e.clientY - r.top;
+  pointer.on = true;
+});
+field.addEventListener('pointerleave', function () { pointer.on = false; });
+field.addEventListener('pointerup', function () { pointer.on = false; });
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); kick(); }
+});
+window.addEventListener('resize', function () { build(); draw(0); });
+
+build();
+if (reduce) {
+  // reduce — 루프를 돌리지 않고 글자가 온전히 모인 한 장만 그린다
+  for (var i = 0; i < dots.length; i++) { dots[i].x = dots[i].hx; dots[i].y = dots[i].hy; }
+  root.classList.add('is-still');
+  draw(0);
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ノイズバースト値が収まる通知バナー転換 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="nb is-demo" id="nb">
+  <p class="nb__hint"><span>クリックまたはEnterキーを押すと、ノイズバースト値が最大まで跳ね上がってから0に収まります</span></p>
+  <div class="nb__panel" id="panel" tabindex="0" role="button" aria-label="ノイズバースト値が収まる通知バナー転換をもう一度再生">
+    <canvas class="nb__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('nb');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BG1 = tok('--scene-bg1', '#1c2f66');
+  var BG2 = tok('--scene-bg2', '#2f6df6');
+  var CARD = tok('--scene-card', '#fff7e6');
+  var ICON = tok('--scene-icon', '#8be6c4');
+  var LINE = tok('--scene-line', '#9fc3ff');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(알림 배너가 탭 위에 뜬 자리) — 전부 캔버스로 직접 그린다. 외부 사진·파일 0.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    var g = bc.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, BG1); g.addColorStop(1, BG2);
+    bc.fillStyle = g;
+    bc.fillRect(0, 0, w, h);
+
+    var bx = w * 0.1, by = h * 0.2, bw = w * 0.8, bh = h * 0.6, r = Math.min(bw, bh) * 0.12;
+    bc.fillStyle = CARD;
+    if (bc.roundRect) { bc.beginPath(); bc.roundRect(bx, by, bw, bh, r); bc.fill(); }
+    else { bc.fillRect(bx, by, bw, bh); }
+
+    bc.fillStyle = ICON;
+    bc.beginPath();
+    bc.arc(bx + bh * 0.24, by + bh * 0.5, bh * 0.16, 0, Math.PI * 2);
+    bc.fill();
+
+    bc.fillStyle = LINE;
+    for (var i = 0; i < 4; i++) {
+      var lw = bw * (0.42 - rng() * 0.14);
+      var ly = by + bh * 0.28 + i * bh * 0.14;
+      bc.fillRect(bx + bh * 0.46, ly, lw, bh * 0.07);
+    }
+  }
+
+  var SEED = 705;
+  var NOISE_BURST_DURATION = 560;
+  var data, outImg, iw, ih;
+
+  function PRECOMPUTE() {
+    iw = cv.width; ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+  }
+
+  function hash01(n) {
+    n = (n ^ 61) ^ (n >>> 16);
+    n = (n + (n << 3)) | 0;
+    n = n ^ (n >>> 4);
+    n = Math.imul(n, 0x27d4eb2d);
+    n = n ^ (n >>> 15);
+    return (n >>> 0) / 4294967295;
+  }
+
+  var frameCounter = 0;
+
+  function clamp255(v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+  function RENDER(p) {
+    frameCounter = (frameCounter + 1) >>> 0;
+    var o = outImg.data;
+    var fSalt = Math.imul(frameCounter, 2246822519) >>> 0;
+    for (var y = 0; y < ih; y++) {
+      var ySalt = Math.imul(y, 668265263) >>> 0;
+      var base = y * iw;
+      for (var x = 0; x < iw; x++) {
+        var seed = (Math.imul(x, 374761393) ^ ySalt ^ fSalt) >>> 0;
+        var h0 = hash01(seed);
+        var h1 = hash01(seed ^ 0x9e3779b9);
+        var h2 = hash01(seed ^ 0x85ebca6b);
+        var h3 = hash01(seed ^ 0xc2b2ae35);
+        var g = 198 + h0 * 57;
+        var nr = clamp255(g + (h1 - 0.5) * 60);
+        var ng = clamp255(g + (h2 - 0.5) * 60);
+        var nb = clamp255(g + (h3 - 0.5) * 60);
+        var k = (base + x) * 4;
+        o[k] = data[k] * (1 - p) + nr * p;
+        o[k + 1] = data[k + 1] * (1 - p) + ng * p;
+        o[k + 2] = data[k + 2] * (1 - p) + nb * p;
+        o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    buf.width = cv.width; buf.height = cv.height;
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / NOISE_BURST_DURATION);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

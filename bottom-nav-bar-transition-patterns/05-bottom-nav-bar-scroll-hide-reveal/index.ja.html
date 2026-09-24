@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクロール方向で隠れるトランジション — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sh is-demo" id="sh">
+  <div class="sh__phone">
+    <div class="sh__scrollArea" id="shScroll">
+      <div class="sh__row" data-n="1"></div>
+      <div class="sh__row" data-n="2"></div>
+      <div class="sh__row" data-n="3"></div>
+      <div class="sh__row" data-n="4"></div>
+      <div class="sh__row" data-n="5"></div>
+      <div class="sh__row" data-n="6"></div>
+      <div class="sh__row" data-n="7"></div>
+      <div class="sh__row" data-n="8"></div>
+      <div class="sh__row" data-n="9"></div>
+    </div>
+    <div class="sh__track" id="shTrack">
+      <button type="button" class="sh__tab is-active" data-idx="0">
+        <svg class="sh__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 120v96h-64v-64h-48v64H40v-96a8 8 0 0 1 2.34-5.66l80-80a8 8 0 0 1 11.32 0l80 80A8 8 0 0 1 216 120" opacity=".2"/><path d="m219.31 108.68l-80-80a16 16 0 0 0-22.62 0l-80 80A15.87 15.87 0 0 0 32 120v96a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-56h32v56a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-96a15.87 15.87 0 0 0-4.69-11.32M208 208h-48v-56a8 8 0 0 0-8-8h-48a8 8 0 0 0-8 8v56H48v-88l80-80l80 80Z"/></g></svg>
+        <span class="sh__label">ホーム</span>
+      </button>
+      <button type="button" class="sh__tab" data-idx="1">
+        <svg class="sh__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 80v120a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8V80a8 8 0 0 1 8-8h176a8 8 0 0 1 8 8" opacity=".2"/><path d="M216 64h-40a48 48 0 0 0-96 0H40a16 16 0 0 0-16 16v120a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V80a16 16 0 0 0-16-16m-88-32a32 32 0 0 1 32 32H96a32 32 0 0 1 32-32m88 168H40V80h176Z"/></g></svg>
+        <span class="sh__label">ショッピング</span>
+      </button>
+      <button type="button" class="sh__tab" data-idx="2">
+        <svg class="sh__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 96a64 64 0 1 1-64-64a64 64 0 0 1 64 64" opacity=".2"/><path d="M230.92 212c-15.23-26.33-38.7-45.21-66.09-54.16a72 72 0 1 0-73.66 0c-27.39 8.94-50.86 27.82-66.09 54.16a8 8 0 1 0 13.85 8c18.84-32.56 52.14-52 89.07-52s70.23 19.44 89.07 52a8 8 0 1 0 13.85-8M72 96a56 56 0 1 1 56 56a56.06 56.06 0 0 1-56-56"/></g></svg>
+        <span class="sh__label">プロフィール</span>
+      </button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var BAR_H = 58; // px, 숨을 때 내려가는 거리(바 자신의 높이)
+  var VEL_HIDE = 90; // px/s, 이 이상 빠르게 내려 스크롤하면 숨긴다
+  var VEL_SHOW = 40; // px/s, 이 이상 빠르게 올려 스크롤하면 보인다(임계가 비대칭 — 덜 민감하게 다시 나타남)
+  var LERP_RATE = 14; // 계산 겹: navY 목표 추종 지수 평활 상수(1/s)
+  var CYCLE_MS = 2200; // 계산 겹: 자동 루프 왕복 주기
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var sh = document.getElementById('sh');
+  var scrollArea = document.getElementById('shScroll');
+  var track = document.getElementById('shTrack');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.sh__tab'));
+
+  var isDemo = true;
+  var hiddenTarget = 0;
+  var navY = 0;
+  var lastScrollTop = 0;
+  var lastTs = 0;
+  var cycleStart = 0;
+  var maxScroll = 1;
+
+  function measure() {
+    maxScroll = Math.max(1, scrollArea.scrollHeight - scrollArea.clientHeight);
+  }
+
+  function onScrollFrame(scrollTop, dtSec) {
+    // 계산 겹: 실제 scrollTop 변화량으로 속도(px/s)를 구해 비대칭 임계와 비교한다
+    if (dtSec <= 0) return;
+    var delta = scrollTop - lastScrollTop;
+    lastScrollTop = scrollTop;
+    var vel = delta / dtSec;
+    if (scrollTop <= 2) {
+      hiddenTarget = 0;
+    } else if (vel > VEL_HIDE) {
+      hiddenTarget = 1;
+    } else if (vel < -VEL_SHOW) {
+      hiddenTarget = 0;
+    }
+  }
+
+  function render(dtSec) {
+    navY += (hiddenTarget * BAR_H - navY) * (1 - Math.exp(-LERP_RATE * dtSec));
+    track.style.transform = 'translateY(' + navY.toFixed(2) + 'px)';
+  }
+
+  function human() {
+    if (isDemo) { sh.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    scrollArea.addEventListener(evt, human, { passive: true });
+  });
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      human();
+      tabs.forEach(function (o) { o.classList.remove('is-active'); });
+      t.classList.add('is-active');
+    });
+  });
+
+  function triangle(t) {
+    // 0..1..0 삼각파 — 내려갔다 다시 올라오는 스크롤을 흉내낸다
+    var x = (t % CYCLE_MS) / CYCLE_MS;
+    return x < 0.5 ? x * 2 : 2 - x * 2;
+  }
+
+  function loop(ts) {
+    if (!lastTs) { lastTs = ts; cycleStart = ts; }
+    var dtSec = Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+
+    if (isDemo) {
+      var st = triangle(ts - cycleStart) * maxScroll;
+      scrollArea.scrollTop = st;
+    }
+
+    onScrollFrame(scrollArea.scrollTop, dtSec);
+    render(dtSec);
+    requestAnimationFrame(loop);
+  }
+
+  measure();
+  window.addEventListener('resize', measure);
+  render(0);
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

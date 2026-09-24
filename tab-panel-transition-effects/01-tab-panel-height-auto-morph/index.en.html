@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab container that stretches by measured panel height diff — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tp is-demo" id="tp">
+  <div class="tp__tabs" role="tablist" aria-label="Settings tabs">
+    <button type="button" class="tp__tab is-active" role="tab" id="tp-tab-0" aria-selected="true" aria-controls="tp-panel-0" data-idx="0">Summary</button>
+    <button type="button" class="tp__tab" role="tab" id="tp-tab-1" aria-selected="false" aria-controls="tp-panel-1" data-idx="1" tabindex="-1">Details</button>
+    <button type="button" class="tp__tab" role="tab" id="tp-tab-2" aria-selected="false" aria-controls="tp-panel-2" data-idx="2" tabindex="-1">History</button>
+  </div>
+  <div class="tp__wrap" id="tpWrap">
+    <div class="tp__panel" id="tp-panel-0" role="tabpanel" aria-labelledby="tp-tab-0" tabindex="0">
+      <p class="tp__line tp__line--a"></p>
+      <p class="tp__line tp__line--b"></p>
+    </div>
+    <div class="tp__panel" id="tp-panel-1" role="tabpanel" aria-labelledby="tp-tab-1" tabindex="0" hidden>
+      <p class="tp__line tp__line--a"></p>
+      <p class="tp__line tp__line--b"></p>
+      <p class="tp__line tp__line--c"></p>
+      <div class="tp__bars"><span></span><span></span><span></span><span></span></div>
+    </div>
+    <div class="tp__panel" id="tp-panel-2" role="tabpanel" aria-labelledby="tp-tab-2" tabindex="0" hidden>
+      <p class="tp__line tp__line--a"></p>
+      <ul class="tp__list">
+        <li></li><li></li><li></li><li></li><li></li>
+      </ul>
+    </div>
+  </div>
+  <p class="tp__meta" id="tpMeta">Height diff <b id="tpDiff">0</b>px · transition <b id="tpDur">0</b>ms</p>
+</div>
+<script>
+(function () {
+  var BASE_MS = 180; // 계산 겹 상수: 높이 차이가 0px 이어도 최소한의 스무딩을 준다
+  var MS_PER_PX = 1.1; // 계산 겹 상수: Height diff 1px 마다 전환 시간이 이만큼 늘어난다
+  var MIN_MS = 180, MAX_MS = 620;
+  var HOLD_MS = 760; // 자동 순환이 탭 하나에 머무는 시간
+  var COUNT = 3;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('tp');
+  var wrap = document.getElementById('tpWrap');
+  var diffEl = document.getElementById('tpDiff');
+  var durEl = document.getElementById('tpDur');
+  var tabs = [0, 1, 2].map(function (i) { return document.getElementById('tp-tab-' + i); });
+  var panels = [0, 1, 2].map(function (i) { return document.getElementById('tp-panel-' + i); });
+
+  var isDemo = true;
+  var active = 0;
+  var busy = false;
+
+  function rectHeight(idx) {
+    // 계산 겹: 숨은 패널도 잠깐 측정 가능한 상태로 만들어 getBoundingClientRect 로 실측한다 — 짐작값을 쓰지 않는다
+    var p = panels[idx];
+    var wasHidden = p.hasAttribute('hidden');
+    if (wasHidden) {
+      p.style.visibility = 'hidden';
+      p.style.position = 'absolute';
+      p.style.width = wrap.clientWidth + 'px';
+      p.removeAttribute('hidden');
+    }
+    var h = p.getBoundingClientRect().height;
+    if (wasHidden) {
+      p.setAttribute('hidden', '');
+      p.style.visibility = '';
+      p.style.position = '';
+      p.style.width = '';
+    }
+    return h;
+  }
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function select(idx) {
+    if (idx === active || busy) return;
+    busy = true;
+    var fromH = rectHeight(active);
+    var toH = rectHeight(idx);
+    var diff = Math.abs(toH - fromH); // 계산 겹: 두 패널의 실측 Height diff(px)
+    var dur = Math.min(MAX_MS, Math.max(MIN_MS, BASE_MS + diff * MS_PER_PX)); // 계산 겹: 차이가 클수록 전환이 길다
+
+    wrap.style.setProperty('--tp-dur', dur.toFixed(0) + 'ms');
+    wrap.style.height = fromH.toFixed(2) + 'px';
+    wrap.getBoundingClientRect(); // 강제 리플로우 — 시작 높이를 확정한 뒤에 목표 높이를 건다
+
+    tabs[active].classList.remove('is-active');
+    tabs[active].setAttribute('aria-selected', 'false');
+    tabs[active].setAttribute('tabindex', '-1');
+    panels[active].setAttribute('hidden', '');
+
+    tabs[idx].classList.add('is-active');
+    tabs[idx].setAttribute('aria-selected', 'true');
+    tabs[idx].setAttribute('tabindex', '0');
+    panels[idx].removeAttribute('hidden');
+
+    requestAnimationFrame(function () {
+      wrap.style.height = toH.toFixed(2) + 'px';
+    });
+
+    diffEl.textContent = Math.round(diff);
+    durEl.textContent = Math.round(dur);
+    active = idx;
+    window.setTimeout(function () {
+      busy = false;
+      wrap.style.height = panels[active].getBoundingClientRect().height + 'px';
+    }, dur + 40);
+  }
+
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { human(); select(i); });
+  });
+
+  root.addEventListener('keydown', function (e) {
+    var idx = tabs.indexOf(document.activeElement);
+    if (idx === -1) return;
+    var next = null;
+    if (e.key === 'ArrowRight') next = (idx + 1) % COUNT;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + COUNT) % COUNT;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = COUNT - 1;
+    if (next === null) return;
+    e.preventDefault();
+    human();
+    tabs[next].focus({ preventScroll: true });
+    select(next);
+  });
+
+  function loop() {
+    if (!isDemo) return;
+    select((active + 1) % COUNT);
+    window.setTimeout(loop, HOLD_MS);
+  }
+
+  wrap.style.height = rectHeight(0) + 'px';
+  if (!reduce) {
+    window.setTimeout(loop, HOLD_MS);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

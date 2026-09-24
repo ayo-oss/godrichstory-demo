@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>뜬 섬 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fi is-demo" id="fiRoot">
+  <p class="fi__hint">
+    <svg class="fi__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path opacity=".2" d="M40 132c0-22 40-36 88-36s88 14 88 36-40 30-88 30-88-8-88-30Z"/><path d="M214 106c-8-24-46-40-86-40s-78 16-86 40a10 10 0 0 0 4 12c4 22 44 38 82 38s78-16 82-38a10 10 0 0 0 4-12ZM60 118c8-16 38-28 68-28s60 12 68 28c-6 14-36 24-68 24s-62-10-68-24Z"/></g></svg>
+    <span>島ごとに波の位相が違うので別々に浮かびます — ポインター左右で視点が回り、上下で高さが変わります</span>
+  </p>
+  <div class="fi__field" id="fiField" role="application" aria-label="浮遊島遠近実験盤" tabindex="0">
+    <canvas class="fi__cv" id="fiCv"></canvas>
+  </div>
+  <div class="fi__bar">
+    <label class="fi__dial">浮遊幅
+      <input type="range" id="fiAmp" min="4" max="28" step="2" value="14" aria-label="浮遊幅">
+      <b class="fi__val" id="fiAmpVal">14px</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 뜬 섬 — 섬 7개를 극좌표(각도·반지름)로 흩뿌려 3D 위치(x,y,z)로 옮긴다(translate3d).
+// 원근 투영 배율 s 를 크기에 곱해(scale) 먼 섬은 작게, 가까운 섬은 크게 보이게 하고,
+// 섬마다 다른 위상의 sin 파동으로 높이를 흔들어 따로 떠 있는 것처럼 만든다.
+// 반딧불 입자도 같은 좌표계에 얹어 z 정렬(화가 알고리즘) 한 바구니로 함께 그린다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var FLOAT_SPEED = 0.55;   // 부양 파동 기본 속도
+  var STAR_N = 26;          // 배경 별 개수
+  var PARTICLE_N = 12;      // 반딧불 입자 개수
+  var LOOP_MS = 2800;       // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('fiRoot');
+  var field = document.getElementById('fiField');
+  var cv = document.getElementById('fiCv');
+  var ctx = cv.getContext('2d');
+  var ampIn = document.getElementById('fiAmp');
+  var ampOut = document.getElementById('fiAmpVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var CREAM = tok('--fi-cream');
+  var PAL = [tok('--fi-mint'), tok('--fi-lilac'), tok('--fi-pink'), tok('--fi-sky')];   // 섬 흙 색 순환
+  var GRASS = [tok('--fi-lilac'), tok('--fi-mint')];
+  var GLOW = tok('--fi-sky');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var FOCAL = 320, BACK = 40;
+  var spin = 0.3, pitch = 0.12;
+  var px01 = 0.5, py01 = 0.5;         // 포인터 위치 비율(0~1) — 자동재생 중엔 가상 경로가 채운다
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  // 섬 배치 — 각도·반지름·크기 배율·기준 높이·파동 위상(고정 표)
+  var ISL = [
+    { ang: 0.20, r: 66,  size: 1.15, baseY: 30, phase: 0.0, speedK: 1.0 },
+    { ang: 1.35, r: 118, size: 0.82, baseY: 66, phase: 1.1, speedK: 0.8 },
+    { ang: 2.55, r: 58,  size: 1.0,  baseY: 6,  phase: 2.3, speedK: 1.2 },
+    { ang: 3.55, r: 132, size: 0.66, baseY: 92, phase: 3.4, speedK: 0.7 },
+    { ang: 4.45, r: 86,  size: 1.32, baseY: 46, phase: 4.2, speedK: 0.9 },
+    { ang: 5.35, r: 48,  size: 0.58, baseY: 112, phase: 5.1, speedK: 1.35 },
+    { ang: 0.85, r: 150, size: 0.52, baseY: 4,  phase: 5.9, speedK: 0.6 }
+  ];
+  var stars = [];
+  for (var si = 0; si < STAR_N; si++) {
+    stars.push({ x: (si * 97) % 100 / 100, y: (si * 53) % 60 / 100, r: 0.6 + (si % 3) * 0.5 });
+  }
+  var particles = [];
+  for (var pi = 0; pi < PARTICLE_N; pi++) {
+    var host = ISL[pi % ISL.length];
+    particles.push({ ang: host.ang + 0.4 + pi * 0.31, r: host.r + 20 + (pi % 4) * 9, baseY: host.baseY + 24 + (pi % 3) * 10, phase: pi * 0.9 });
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 카메라 — yaw(y축, spin) 뒤 pitch(x축)
+  function camRot(p) {
+    var ca = Math.cos(spin), sa = Math.sin(spin);
+    var x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca;
+    var cb = Math.cos(pitch), sb = Math.sin(pitch);
+    return { x: x1, y: p.y * cb - z1 * sb, z: p.y * sb + z1 * cb };
+  }
+
+  function project(p) { var s = FOCAL / (FOCAL + p.z + BACK); return { sx: W * 0.5 + p.x * s, sy: H * 0.52 - p.y * s, s: s }; }
+
+  // 섬의 3D 위치 — 극좌표를 x,y,z 로 옮기고(translate3d) 물결 위상으로 y 를 흔든다(sin)
+  function islandWorld(isl, now) {
+    var amp = Number(ampIn.value);
+    var by = isl.baseY + Math.sin(now / 1000 * FLOAT_SPEED * isl.speedK + isl.phase) * amp;
+    return { x: Math.cos(isl.ang) * isl.r, y: by, z: Math.sin(isl.ang) * isl.r };
+  }
+  function particleWorld(p2, now) {
+    var by = p2.baseY + Math.sin(now / 1000 * 0.9 + p2.phase) * 10;
+    var wob = Math.cos(now / 1000 * 0.6 + p2.phase) * 6;
+    return { x: Math.cos(p2.ang) * p2.r + wob, y: by, z: Math.sin(p2.ang) * p2.r };
+  }
+
+  function step(dt) {
+    spin += (0.05 + (px01 - 0.5) * 0.7) * dt;
+    var aim = 0.12 + (py01 - 0.5) * 0.5;
+    pitch += (aim - pitch) * 0.08;
+  }
+
+  // 섬 하나 — 아래로 갈수록 좁아지는 바위(quadraticCurveTo 로 매끄러운 실루엣) + 잔디 윗면
+  function drawIsland(cx, cy, s, size, col, grass) {
+    var w = 46 * size * s, h = 34 * size * s;
+    ctx.beginPath();
+    ctx.moveTo(cx - w * 0.5, cy);
+    ctx.quadraticCurveTo(cx - w * 0.42, cy + h * 0.55, cx, cy + h * 0.92);
+    ctx.quadraticCurveTo(cx + w * 0.42, cy + h * 0.55, cx + w * 0.5, cy);
+    ctx.quadraticCurveTo(cx + w * 0.5, cy - h * 0.22, cx, cy - h * 0.22);
+    ctx.quadraticCurveTo(cx - w * 0.5, cy - h * 0.22, cx - w * 0.5, cy);
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - h * 0.22, w * 0.5, h * 0.2, 0, 0, TAU);
+    ctx.fillStyle = grass;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx - w * 0.14, cy - h * 0.28, w * 0.16, h * 0.07, 0, 0, TAU);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fill();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+
+    // 배경 — 별(고정 위치) + 은은한 달빛
+    for (var si = 0; si < stars.length; si++) {
+      var st = stars[si];
+      ctx.beginPath();
+      ctx.arc(st.x * W, st.y * H, st.r, 0, TAU);
+      ctx.fillStyle = 'rgba(255,247,230,0.55)';
+      ctx.fill();
+    }
+    var moonGlow = ctx.createRadialGradient(W * 0.82, H * 0.16, 0, W * 0.82, H * 0.16, W * 0.34);
+    moonGlow.addColorStop(0, 'rgba(255,247,230,0.30)');
+    moonGlow.addColorStop(1, 'rgba(255,247,230,0)');
+    ctx.fillStyle = moonGlow;
+    ctx.beginPath(); ctx.arc(W * 0.82, H * 0.16, W * 0.34, 0, TAU); ctx.fill();
+
+    // ── 그릴 아이템을 모아 z 내림차순(먼 것 먼저) — 화가 알고리즘 ──
+    var items = [];
+
+    for (var i = 0; i < ISL.length; i++) {
+      (function (isl, idx) {
+        var pw = camRot(islandWorld(isl, now));
+        items.push({ z: pw.z, fn: function () {
+          var pr = project(pw);
+          drawIsland(pr.sx, pr.sy, pr.s, isl.size, PAL[idx % PAL.length], GRASS[idx % GRASS.length]);
+        }});
+      })(ISL[i], i);
+    }
+
+    for (var p2 = 0; p2 < particles.length; p2++) {
+      (function (pt) {
+        var pw = camRot(particleWorld(pt, now));
+        items.push({ z: pw.z + 0.5, fn: function () {
+          var pr = project(pw);
+          ctx.beginPath();
+          ctx.arc(pr.sx, pr.sy, 1.6 * pr.s, 0, TAU);
+          ctx.fillStyle = GLOW;
+          ctx.globalAlpha = 0.7;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }});
+      })(particles[p2]);
+    }
+
+    items.sort(function (a, b) { return b.z - a.z; });
+    for (var q = 0; q < items.length; q++) items[q].fn();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. 표 영역을 벗어난 자연스러운 경로
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setAmp(v) { ampOut.textContent = v + 'px'; if (reduce) draw(t0 < 0 ? 0 : last); }
+
+  ampIn.addEventListener('input', function () { setAmp(ampIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0); draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0); draw(last); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 섬들이 각자 자리에 뜬 한 장만 남는다(빈 화면이 아니다)
+    px01 = 0.6; py01 = 0.42;
+    step(0);
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

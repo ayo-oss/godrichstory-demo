@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rangoli grid — dot the polar lattice and join with curves — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kr" id="kr">
+  <p class="kr__hint">Polar grid points are placed one by one, then neighbors are joined with curves</p>
+  <div class="kr__row">
+    <div class="kr__field" id="field" role="application" aria-label="Rangoli grid lab" tabindex="0">
+      <canvas class="kr__cv" id="cv"></canvas>
+    </div>
+    <div class="kr__side">
+      <label class="kr__lab" for="link">Link pattern</label>
+      <select class="kr__sel" id="link" aria-label="Link pattern">
+        <option value="0">Petal link</option>
+        <option value="1">Zigzag</option>
+        <option value="2">Star mesh</option>
+      </select>
+      <b class="kr__num" id="dots">0</b>
+      <span class="kr__unit">dots placed</span>
+      <p class="kr__meta">Dots grow ring by ring — a new layer relinks the curves</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 랑골 격자 — 인도 랑골(바닥 그림)의 극좌표 점 배치를 재현한다. 링 r 개 × 스포크 N 개
+// 격자점을 안쪽 링부터 바깥까지 나선 순서로 찍는다. 점을 다 찍은 뒤엔 이웃 링의 점을
+// quadraticCurveTo 로 잇는 곡선 층을 올린다. 무늬(꽃잎·Zigzag·별그물)는 링 간
+// 스포크 오프셋으로 만든다 — change 이벤트로 갈아끼운다.
+(function () {
+  var root = document.getElementById('kr');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var link = document.getElementById('link');
+  var dots = document.getElementById('dots');
+  if (!root || !field || !cv || !link || !dots) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var C3 = css.getPropertyValue('--c3').trim();
+  var GRID = css.getPropertyValue('--grid').trim();
+
+  var N = 16;                      // 스포크 수
+  var RINGS = 4;                   // 링 수
+  var pattern = 0;                 // 0 꽃잎 · 1 Zigzag · 2 별그물
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 8;
+  }
+
+  function pt(ring, k) {
+    var off = (pattern === 1 && ring % 2 === 1) ? 0.5 : 0;   // 지그재그는 링마다 반 cells
+    var r = R * (ring + 1) / (RINGS + 1);
+    var a = (k + off) * 2 * Math.PI / N;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  }
+
+  function drawDot(x, y, s, col) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, s, 0, 2 * Math.PI); ctx.fill();
+  }
+
+  // 곡선 연결 — 링 ring 과 ring+1 사이. 무늬별로 잇는 상대 스포크가 다르다
+  function drawLink(ring, k) {
+    var a0 = pt(ring, k), a1;
+    var step = pattern === 2 ? Math.round(N / 5) : (pattern === 1 ? 0.5 : (ring % 2 === 0 ? 1 : -1));
+    if (pattern === 1) {
+      a1 = pt(ring + 1, k + ((k % 2 === 0) ? 0.5 : -0.5));
+    } else {
+      a1 = pt(ring + 1, k + step);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = C2; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(a0[0], a0[1]);
+    var mx = (a0[0] + a1[0]) / 2 + (a1[1] - a0[1]) * 0.35;
+    var my = (a0[1] + a1[1]) / 2 - (a1[0] - a0[0]) * 0.35;
+    ctx.quadraticCurveTo(mx, my, a1[0], a1[1]);
+    ctx.stroke();
+  }
+
+  // 격자 안내 — 옅은 링
+  function drawGrid() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+    for (var g = 1; g <= RINGS; g++) {
+      ctx.beginPath(); ctx.arc(cx, cy, R * g / (RINGS + 1), 0, 2 * Math.PI); ctx.stroke();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var total = RINGS * N;
+  var t = 0, last = 0, fired = 0, phase2 = false, linked = 0;
+
+  link.addEventListener('change', function () {
+    pattern = parseInt(link.value, 10) || 0;
+    redrawAll();
+  });
+
+  function redrawAll() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    drawGrid();
+    for (var i = 0; i < fired; i++) placeDot(i);
+    for (var j = 0; j < linked; j++) placeLink(j);
+  }
+
+  function placeDot(i) {
+    var ring = Math.floor(i / N), k = i % N;
+    var p = pt(ring, k);
+    drawDot(p[0], p[1], 2.4 + ring * 0.5, ring === 0 ? C3 : C1);
+  }
+  function placeLink(j) {
+    var ring = Math.floor(j / N), k = j % N;
+    if (ring < RINGS - 1) drawLink(ring, k);
+  }
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    t += dt;
+    if (!phase2) {
+      var want = Math.min(total, Math.floor(t / 0.045));  // 점 성상 속도
+      while (fired < want) { placeDot(fired); fired += 1; }
+      dots.textContent = String(fired);
+      if (fired >= total) phase2 = true;
+    } else {
+      var want2 = Math.floor((t - total * 0.045) / 0.06);  // 곡선 연결 속도
+      while (linked < Math.min(want2, (RINGS - 1) * N)) { placeLink(linked); linked += 1; }
+      if (linked >= (RINGS - 1) * N) {
+        // 한 바퀴 끝 — 2초 쉬고 다음 무늬로
+        t = -2; fired = 0; linked = 0; phase2 = false;
+        pattern = (pattern + 1) % 3;
+        link.value = String(pattern);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, W, H);
+        drawGrid();
+        dots.textContent = '0';
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 점·곡선 전부 완성된 랑골
+    for (var i2 = 0; i2 < total; i2++) placeDot(i2);
+    for (var j2 = 0; j2 < (RINGS - 1) * N; j2++) placeLink(j2);
+    dots.textContent = String(total);
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

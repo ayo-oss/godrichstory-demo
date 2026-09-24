@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로딩 시작 기준선 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ltt is-demo" id="ltt">
+  <div class="ltt__badge" id="lttBadge">기준선 40px</div>
+  <div class="ltt__view" id="lttView">
+    <ul class="ltt__track" id="lttTrack">
+      <li class="ltt__sentinel" id="lttSentinel" aria-hidden="true">
+        <span class="ltt__dot" id="lttDot"></span>
+      </li>
+    </ul>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var view = document.getElementById('lttView');
+  var track = document.getElementById('lttTrack');
+  var sentinel = document.getElementById('lttSentinel');
+  var dot = document.getElementById('lttDot');
+  var badge = document.getElementById('lttBadge');
+  var root = document.getElementById('ltt');
+
+  var BASE_THRESHOLD_PX = 40;
+  var MAX_THRESHOLD_PX = 220;
+  var SPEED_GAIN = 900;    // px 임계값 = BASE + 속도(px/ms) * GAIN
+  var LOAD_DELAY_MS = 520;
+  var MAX_BATCHES = 5;
+
+  var rowSeq = 0;
+  var batches = 0;
+  var loading = false;
+  var lastTop = 0;
+  var lastTime = performance.now();
+  var threshold = BASE_THRESHOLD_PX;
+  var dir = 1;
+  var phase = 0;
+  var autoplayTimer = null;
+
+  function addRow() {
+    var li = document.createElement('li');
+    li.className = 'ltt__row';
+    li.textContent = '사진 스트림 ' + String(rowSeq + 1).padStart(2, '0');
+    track.insertBefore(li, sentinel);
+    rowSeq += 1;
+  }
+  for (var i = 0; i < 6; i += 1) { addRow(); }
+
+  // 계산 겹: 이번 스크롤 이벤트와 지난 이벤트 사이의 이동 거리 값을 걸린 시간 값으로 나눠
+  // 속도(px/ms)를 구하고, 그 속도에 비례해 기준선 거리 값을 다시 계산한다 — 빠르게 훑을수록
+  // 화면 끝에 닿기 전에 더 일찍 다음 목록을 부른다.
+  function recomputeThreshold() {
+    var now = performance.now();
+    var dt = Math.max(now - lastTime, 1);
+    var speed = Math.abs(view.scrollTop - lastTop) / dt;
+    lastTop = view.scrollTop;
+    lastTime = now;
+    threshold = Math.min(BASE_THRESHOLD_PX + speed * SPEED_GAIN, MAX_THRESHOLD_PX);
+    badge.textContent = '기준선 ' + Math.round(threshold) + 'px';
+  }
+
+  function recompute() {
+    recomputeThreshold();
+    var remaining = sentinel.getBoundingClientRect().top - view.getBoundingClientRect().bottom;
+    dot.classList.toggle('ltt__dot--armed', remaining <= threshold);
+    if (remaining <= threshold && !loading && batches < MAX_BATCHES) { startLoad(); }
+  }
+
+  function startLoad() {
+    loading = true;
+    dot.classList.add('ltt__dot--loading');
+    setTimeout(function () {
+      for (var n = 0; n < 3; n += 1) { addRow(); }
+      loading = false;
+      batches += 1;
+      dot.classList.remove('ltt__dot--loading');
+      recompute();
+    }, LOAD_DELAY_MS);
+  }
+
+  view.addEventListener('scroll', recompute);
+
+  function userTakesOver() {
+    if (!root.classList.contains('is-demo')) { return; }
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  view.addEventListener('wheel', userTakesOver, { passive: true });
+  view.addEventListener('touchstart', userTakesOver, { passive: true });
+
+  function autoplayTick() {
+    var max = view.scrollHeight - view.clientHeight;
+    if (batches >= MAX_BATCHES && view.scrollTop >= max - 1 && dir !== 0) {
+      dir = 0;
+      setTimeout(function () {
+        while (track.firstChild !== sentinel) { track.removeChild(track.firstChild); }
+        rowSeq = 0; batches = 0; phase = 0;
+        for (var i = 0; i < 6; i += 1) { addRow(); }
+        view.scrollTop = 0; lastTop = 0;
+        dir = 1;
+      }, 600);
+      return;
+    }
+    if (dir === 0) { return; }
+    phase += 1;
+    var step = (phase % 40 < 20) ? 2 : 14;   // 느린 구간과 빠른 구간을 번갈아 속도 계산이 보이게
+    view.scrollTop = Math.min(view.scrollTop + step, max);
+    recompute();
+  }
+
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(autoplayTick, 55);
+  }
+})();
+</script>
+</body>
+</html>

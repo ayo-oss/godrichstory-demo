@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>サムネイル列が追従して動くライトボックス — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--a"></span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="サムネイル列と一緒に見る">
+    <span class="fullImg" id="fullImg"></span>
+    <div class="strip" id="strip">
+      <div class="stripTrack" id="stripTrack">
+        <button class="stripThumb" id="stripThumb0" type="button" aria-label="1枚目の写真"><span class="thumbImg thumbImg--a"></span></button>
+        <button class="stripThumb" id="stripThumb1" type="button" aria-label="2枚目の写真"><span class="thumbImg thumbImg--b"></span></button>
+        <button class="stripThumb" id="stripThumb2" type="button" aria-label="3枚目の写真"><span class="thumbImg thumbImg--c"></span></button>
+        <button class="stripThumb" id="stripThumb3" type="button" aria-label="4枚目の写真"><span class="thumbImg thumbImg--d"></span></button>
+        <button class="stripThumb" id="stripThumb4" type="button" aria-label="5枚目の写真"><span class="thumbImg thumbImg--e"></span></button>
+      </div>
+    </div>
+    <button class="closeBtn" id="closeBtn" type="button">閉じる</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var SYNC_MS = 320;
+  var HOLD_MS = 340;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var fullImg = document.getElementById('fullImg');
+  var strip = document.getElementById('strip');
+  var stripTrack = document.getElementById('stripTrack');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumb = document.getElementById('thumb0');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var stripThumbs = [].slice.call(document.querySelectorAll('.stripThumb'));
+  var imgClassByIdx = ['a', 'b', 'c', 'd', 'e'];
+  var COUNT = stripThumbs.length;
+
+  var open = false;
+  var idx = 0;
+  var currentX = 0;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // 활성 썸네일을 줄 가운데로 오게 하는 이동량을 그때그때 실측한다 — index * 고정폭이 아니다.
+  // (082/256 의 정적 배열형 스트립과 다른 지점: 여기는 화면 폭이 바뀌거나 썸네일 크기가 달라져도
+  // offsetLeft·clientWidth 실측으로 다시 계산되므로 항상 정중앙에 맞는다.)
+  function centerOffsetFor(el) {
+    var thumbLeft = el.offsetLeft;
+    var thumbW = el.offsetWidth;
+    var stripW = strip.clientWidth;
+    var trackW = stripTrack.scrollWidth;
+    var target = stripW / 2 - thumbLeft - thumbW / 2;
+    var minOffset = Math.min(0, stripW - trackW);
+    return clamp(target, minOffset, 0);
+  }
+
+  function setStripX(px) { stripTrack.style.transform = 'translateX(' + px.toFixed(2) + 'px)'; }
+
+  function goTo(nextIdx, onDone) {
+    nextIdx = clamp(nextIdx, 0, COUNT - 1);
+    idx = nextIdx;
+    fullImg.className = 'fullImg fullImg--' + imgClassByIdx[idx];
+    stripThumbs.forEach(function (t, i) { t.classList.toggle('is-active', i === idx); });
+    var target = centerOffsetFor(stripThumbs[idx]);
+    var fromX = currentX;
+    animate(SYNC_MS, function (e) {
+      var x = fromX + (target - fromX) * e;
+      setStripX(x);
+    }, function () {
+      currentX = target;
+      if (onDone) onDone();
+    });
+  }
+
+  function openFrom() {
+    if (open) return;
+    open = true;
+    idx = 0;
+    currentX = 0;
+    setStripX(0);
+    fullImg.className = 'fullImg fullImg--a';
+    stripThumbs.forEach(function (t, i) { t.classList.toggle('is-active', i === 0); });
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    animate(220, function (e) { backdrop.style.opacity = (e * 0.78).toFixed(3); }, function () {
+      closeBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox() {
+    if (!open) return;
+    animate(200, function (e) { backdrop.style.opacity = (0.78 * (1 - e)).toFixed(3); }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumb.focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumb.addEventListener('click', function () { human(); openFrom(); });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(); });
+  stripThumbs.forEach(function (t, i) {
+    t.addEventListener('click', function () { human(); goTo(i); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (!open) return;
+    if (e.key === 'Escape') { human(); closeLightbox(); }
+    else if (e.key === 'ArrowRight') { human(); goTo(idx + 1); }
+    else if (e.key === 'ArrowLeft') { human(); goTo(idx - 1); }
+  });
+
+  function cycle() {
+    openFrom();
+    timers.push(setTimeout(function () { goTo(2); }, 300));
+    timers.push(setTimeout(function () { goTo(4); }, 300 + SYNC_MS + HOLD_MS));
+    timers.push(setTimeout(closeLightbox, 300 + (SYNC_MS + HOLD_MS) * 2));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

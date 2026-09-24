@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>흐르는 색 팔레트 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs" id="hs">
+  <p class="hs__hint">
+    <svg class="hs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M164 128a36 36 0 1 1-36-36a36 36 0 0 1 36 36" opacity=".2"/><path d="M128 84a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28m0-128a100 100 0 1 0 100 100A100.11 100.11 0 0 0 128 28m0 184a84 84 0 1 1 84-84a84.09 84.09 0 0 1-84 84"/></g></svg>
+    <span>帯にポインタを重ねると、その場所がわずかに膨らみます</span>
+  </p>
+  <div class="hs__field" id="field" role="application" aria-label="流れる色のパレットの実験台" tabindex="0">
+    <canvas class="hs__cv" id="cv"></canvas>
+    <b class="hs__live" aria-hidden="true"><span class="hs__liveLabel">色相</span><span class="hs__liveNum" id="driftOut">+0°</span></b>
+  </div>
+  <div class="hs__bar">
+    <label class="hs__dial">流れ
+      <input type="range" id="speed" min="0.5" max="2" step="0.25" value="1" aria-label="流れの速さ">
+      <b class="hs__val" id="speedVal">1.0倍</b>
+    </label>
+    <button class="hs__reset" id="reset" type="button">
+      <svg class="hs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>撒き直し</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 흐르는 색 팔레트 — 세 겹의 사인 띠 위 알갱이가 위치로 hsl 색상을 물려받는다.
+// 색을 다시 계산하지 않고 색상에 매초 더하는 값(drift) 하나로 줄무늬 전체가 옆으로 흐른다.
+var root = document.getElementById('hs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var speedIn = document.getElementById('speed');
+var speedVal = document.getElementById('speedVal');
+var driftOut = document.getElementById('driftOut');
+var resetBtn = document.getElementById('reset');
+
+var BANDS = 3, PER = 46;        // 띠 3겹 × 알갱이 46개 = 138개
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var dots = [];
+var pointer = { x: 0, y: 0, on: false };
+var bulge = [0, 0, 0];          // 띠마다 부푼 정도 — 포인터가 가까우면 1 을 향해 오른다
+var drift = 0;                  // 색상에 더하는 값(도) — 이 숫자만 커지면 색이 흐른다
+var speedMul = 1;
+var clock = 0;
+
+// 알갱이 한 개 — 어느 띠의 어느 지점에서 몇 픽셀씩 흐르는지만 가진다
+function seedDot(d, i) {
+  d.band = Math.floor(i / PER);
+  d.x = Math.random() * W;
+  d.r = 1.6 + Math.random() * 1.8;
+  d.wob = Math.random() * Math.PI * 2;      // 띠 위에서 좌우로 흔들리는 위상
+  d.sp = (26 + d.band * 9) * (0.8 + Math.random() * 0.4);
+  return d;
+}
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 띠의 중심선 — 사인 두 겹을 겹쳐 흐름의 굽이를 만든다. 포인터 근처에서만 살짝 부풀린다.
+function bandY(b, x) {
+  var cx = H * (0.30 + b * 0.20);
+  var amp = 9 + b * 2.5;
+  var grow = 1;
+  if (pointer.on) {
+    var dx = x - pointer.x;
+    grow = 1 + bulge[b] * Math.exp(-(dx * dx) / 2600);
+  }
+  return cx + Math.sin(x * 0.02 + clock * (0.7 + b * 0.25) + b * 2.1) * amp * grow
+            + Math.sin(x * 0.006 - clock * 0.4 + b) * 4 * grow;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 띠 길 — 얇은 잉크 실로 흐름의 중심선을 먼저 그려 둔다
+  ctx.strokeStyle = 'rgba(23, 20, 26, .2)';
+  ctx.lineWidth = 1;
+  for (var b = 0; b < BANDS; b++) {
+    ctx.beginPath();
+    for (var x = 0; x <= W; x += 10) {
+      var gy = bandY(b, x);
+      if (x === 0) ctx.moveTo(x, gy); else ctx.lineTo(x, gy);
+    }
+    ctx.stroke();
+  }
+  // 알갱이 — 위치가 곧 색상이다. 주황 무대 위라 채도와 명도 대역(34~54%)으로 대비를 잡는다.
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    var y = bandY(d.band, d.x) + Math.sin(clock * 2 + d.wob) * 3;
+    var hue = (d.x * 0.85 + drift + d.band * 24) % 360;
+    var sat = 72 + (i * 37) % 24;
+    var lig = 34 + (i * 53) % 21;
+    var near = 0;
+    if (pointer.on) {
+      var ndx = d.x - pointer.x, ndy = y - pointer.y;
+      near = Math.exp(-(ndx * ndx + ndy * ndy) / 2600);   // 포인터에 가까울수록 몰린다
+    }
+    var r = d.r * (1 + bulge[d.band] * 0.25 + near * 0.8);
+    // 어두운 밑칠 — 어떤 색상이든 주황 바탕에서 떨어져 보이게 한다
+    ctx.fillStyle = 'rgba(23, 20, 26, .3)';
+    ctx.beginPath();
+    ctx.arc(d.x, y, r * 1.9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'hsl(' + Math.round(hue) + ', ' + sat + '%, ' + lig + '%)';
+    ctx.beginPath();
+    ctx.arc(d.x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  driftOut.textContent = '+' + Math.round(drift) + '°';
+}
+
+function step(dt) {
+  clock += dt;
+  drift = (drift + dt * 16 * speedMul) % 360;
+  for (var b = 0; b < BANDS; b++) {
+    var target = 0;
+    if (pointer.on) {
+      var dist = Math.abs(pointer.y - H * (0.30 + b * 0.20));
+      target = Math.max(0, 1 - dist / 56);
+    }
+    bulge[b] += (target - bulge[b]) * Math.min(1, dt * 5);
+  }
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    d.x += d.sp * speedMul * dt;
+    if (d.x > W + 8) d.x = -8;
+  }
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function reseed() {
+  for (var i = 0; i < dots.length; i++) seedDot(dots[i], i);
+  drift = 0;
+  draw();
+}
+
+speedIn.addEventListener('input', function () {
+  speedMul = Number(speedIn.value);
+  speedVal.textContent = speedMul.toFixed(1) + '倍';
+});
+resetBtn.addEventListener('click', reseed);
+field.addEventListener('click', reseed);
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reseed(); }
+});
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  pointer.x = e.clientX - r.left;
+  pointer.y = e.clientY - r.top;
+  pointer.on = true;
+});
+field.addEventListener('pointerleave', function () { pointer.on = false; });
+window.addEventListener('resize', function () { fit(); draw(); });
+
+// 조작 실측용 — run/012/_probe/interact_b.py 가 살아 있는 참조를 읽는다
+window.__state = {
+  dots: dots, bulge: bulge,
+  snap: function () { return { drift: drift, speedMul: speedMul }; }
+};
+
+fit();
+for (var i0 = 0; i0 < BANDS * PER; i0++) dots.push(seedDot({}, i0));
+if (reduce) {
+  // reduce — 루프를 아예 돌리지 않고 색상이 물려받은 한 장만 그린다
+  root.classList.add('is-still');
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>方向転換ラバーナビ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rpn is-demo" id="rpn">
+  <div class="rpn__frame">
+    <div class="rpn__nav" id="rpnNav"><span>区間案内</span></div>
+    <div class="rpn__viewport" id="rpnViewport" role="application" aria-label="方向転換ラバーナビ実験パネル" tabindex="0">
+      <div class="rpn__track" id="rpnTrack">
+        <div class="rpn__row">セクション1</div>
+        <div class="rpn__row">セクション2</div>
+        <div class="rpn__row">セクション3</div>
+        <div class="rpn__row">セクション4</div>
+        <div class="rpn__row">セクション5</div>
+        <div class="rpn__row">セクション6</div>
+      </div>
+    </div>
+  </div>
+  <p class="rpn__hint">スクロール方向を切り替えるたびに、上のナビバーがゴムのように弾みます</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('rpn');
+  var viewport = document.getElementById('rpnViewport');
+  var track = document.getElementById('rpnTrack');
+  var nav = document.getElementById('rpnNav');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹 ①: 목록은 입력에 1:1 로 즉시 따라간다(scrollPos, 경계 clamp).
+  var rowH = 40, rowCount = 6;
+  var maxScroll = Math.max(0, rowH * rowCount - viewport.clientHeight);
+  var scrollPos = 0;
+  var lastVel = 0;
+
+  // 계산 겹 ②: 스크롤 속도(vel)의 부호가 바뀌는 순간(방향 전환)에만 네비 바에 충격을 주고,
+  // 그 뒤엔 스프링 적분(SPRING_K·SPRING_C)이 scale 을 1로 되돌리며 튕긴다 — 경계에 닿아서가 아니다.
+  var MIN_VEL = 1.2;
+  var KICK = 0.4;
+  var SPRING_K = 260;
+  var SPRING_C = 14;
+  var navScale = 1, navVel = 0;
+  var navRaf = null;
+
+  function paintTrack() { track.style.transform = 'translateY(-' + scrollPos.toFixed(1) + 'px)'; }
+  function paintNav() { nav.style.transform = 'scaleY(' + navScale.toFixed(3) + ')'; }
+  function navTick() {
+    var force = -SPRING_K * (navScale - 1) - SPRING_C * navVel;
+    navVel += force * 0.016;
+    navScale += navVel * 0.016;
+    if (reduce) { navScale = 1; navVel = 0; paintNav(); navRaf = null; return; }
+    if (Math.abs(navScale - 1) < 0.003 && Math.abs(navVel) < 0.02) {
+      navScale = 1; navVel = 0; paintNav(); navRaf = null; return;
+    }
+    paintNav();
+    navRaf = requestAnimationFrame(navTick);
+  }
+  function ensureNavLoop() { if (navRaf === null) { navRaf = requestAnimationFrame(navTick); } }
+  function kickNav(sign) {
+    if (reduce) { return; }
+    navVel += sign * KICK;
+    ensureNavLoop();
+  }
+  function applyVel(vel) {
+    if (lastVel !== 0 && vel !== 0 && (lastVel > 0) !== (vel > 0) && Math.abs(lastVel) > MIN_VEL && Math.abs(vel) > MIN_VEL) {
+      kickNav(vel > 0 ? 1 : -1);
+    }
+    if (Math.abs(vel) > 0.1) { lastVel = vel; }
+  }
+  function setScroll(v, vel) {
+    var next = Math.max(0, Math.min(maxScroll, v));
+    applyVel(vel);
+    scrollPos = next;
+    paintTrack();
+  }
+  paintTrack(); paintNav();
+
+  function wireReal() {
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay();
+      setScroll(scrollPos + e.deltaY, e.deltaY);
+    }, { passive: false });
+
+    var dragging = false, lastY = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay();
+      dragging = true; lastY = e.clientY;
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      var dy = -(e.clientY - lastY);
+      setScroll(scrollPos + dy, dy);
+      lastY = e.clientY;
+    });
+    viewport.addEventListener('pointerup', function () { dragging = false; });
+    viewport.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') { return; }
+      root.classList.remove('is-demo'); stopAutoplay();
+      var dy = (e.key === 'ArrowDown' ? 40 : -40);
+      setScroll(scrollPos + dy, dy);
+    });
+  }
+  wireReal();
+
+  // 자동 루프: 아래로 갔다가 위로 되짚어 방향 전환을 주기적으로 만든다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    phase += 1;
+    var dir = (phase % 2 === 0) ? -1 : 1;
+    setScroll(scrollPos + dir * 60, dir * 60);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 900); autoTick(); }
+})();
+</script>
+</body>
+</html>

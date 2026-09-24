@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>채널 어긋남 값으로 갈라졌다 합쳐지는 이미지 전환 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rv">
+  <p class="rv__hint"><span>클릭하거나 Enter 를 누르면 채널 어긋남 값이 커졌다가 0 으로 줄며 이미지가 다시 맞춰집니다</span></p>
+  <div class="rv__panel" id="panel" tabindex="0" role="button" aria-label="채널 어긋남 값으로 갈라졌다 합쳐지는 이미지 전환 다시 재생">
+    <canvas class="rv__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('rv');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BG1 = tok('--scene-bg1', '#2f6df6');
+  var BG2 = tok('--scene-bg2', '#6ec8ff');
+  var CARD = tok('--scene-card', '#fff7e6');
+  var DOT1 = tok('--scene-dot1', '#ff9ebb');
+  var DOT2 = tok('--scene-dot2', '#4cd4a6');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(제품 상세 이미지 자리) — 전부 캔버스로 직접 그린다. 외부 사진·파일 0.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    var g = bc.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, BG1); g.addColorStop(1, BG2);
+    bc.fillStyle = g;
+    bc.fillRect(0, 0, w, h);
+    var cw = w * 0.62, ch = h * 0.62, cx = (w - cw) / 2, cy = (h - ch) / 2;
+    bc.fillStyle = CARD;
+    bc.beginPath();
+    if (bc.roundRect) bc.roundRect(cx, cy, cw, ch, Math.min(cw, ch) * 0.08);
+    else bc.rect(cx, cy, cw, ch);
+    bc.fill();
+    for (var i = 0; i < 5; i++) {
+      bc.fillStyle = i % 2 ? DOT1 : DOT2;
+      var r = Math.min(cw, ch) * (0.06 + rng() * 0.07);
+      bc.beginPath();
+      bc.arc(cx + r + rng() * (cw - r * 2), cy + r + rng() * (ch - r * 2), r, 0, Math.PI * 2);
+      bc.fill();
+    }
+  }
+
+  var SEED = 301;
+  var PLAY_MS = 700;
+  var RGB_OFFSET_MAX = 24; // 채널 어긋남 최대치(px) — 변형: 24 -> 60(로드 순간 더 크게 벌어졌다 돌아온다)
+  var ROW_JITTER = 0.55; // 행마다 어긋남 배율을 흔드는 진폭(0~1) — 채널 분리가 장면 전체에 걸치게
+  var BRIGHT_PULSE = 0.22; // 전환 중 배경 밝기 펄스 진폭
+  var GHOST_MIX = 0.28; // 분리된 채널의 고스트 겹침 비율(알파 겹침 강화)
+  var data, outImg, rowJitter;
+
+  function PRECOMPUTE() {
+    var iw = cv.width, ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+    var rng = makeLcg(SEED + 7);
+    rowJitter = new Float32Array(ih);
+    for (var y = 0; y < ih; y++) rowJitter[y] = 1 + (rng() * 2 - 1) * ROW_JITTER;
+  }
+
+  function clampI(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function RENDER(p) {
+    var iw = cv.width, ih = cv.height;
+    var offset = Math.round(RGB_OFFSET_MAX * dpr * p);
+    var voffset = Math.round(offset / 2);
+    var o = outImg.data;
+    if (offset === 0) {
+      for (var i = 0; i < data.length; i++) o[i] = data[i];
+      ctx.putImageData(outImg, 0, 0);
+      return;
+    }
+    var pulse = 1 + BRIGHT_PULSE * Math.sin(Math.PI * p);
+    for (var y = 0; y < ih; y++) {
+      var rowOffset = Math.round(offset * rowJitter[y]);
+      var gy = clampI(y - voffset, 0, ih - 1);
+      for (var x = 0; x < iw; x++) {
+        var rx = clampI(x - rowOffset, 0, iw - 1);
+        var bx = clampI(x + rowOffset, 0, iw - 1);
+        var rx2 = clampI(x - Math.round(rowOffset * 1.6), 0, iw - 1);
+        var bx2 = clampI(x + Math.round(rowOffset * 1.6), 0, iw - 1);
+        var k = (y * iw + x) * 4;
+        var kr = (y * iw + rx) * 4;
+        var kr2 = (y * iw + rx2) * 4;
+        var kg = (gy * iw + x) * 4;
+        var kb = (y * iw + bx) * 4;
+        var kb2 = (y * iw + bx2) * 4;
+        o[k] = clampI(Math.round((data[kr] * (1 - GHOST_MIX) + data[kr2] * GHOST_MIX) * pulse), 0, 255);
+        o[k + 1] = clampI(Math.round(data[kg + 1] * pulse), 0, 255);
+        o[k + 2] = clampI(Math.round((data[kb + 2] * (1 - GHOST_MIX) + data[kb2 + 2] * GHOST_MIX) * pulse), 0, 255);
+        o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    buf.width = cv.width; buf.height = cv.height;
+    bctx.setTransform(1, 0, 0, 1, 0, 0);
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    // 실사용 경로 — 클릭·Enter·Space 로 채널 어긋남 값을 다시 흔든다.
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000; // 렌더 캐처 창(설정 초=2.0)과 같은 주기 — 시연 전용
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

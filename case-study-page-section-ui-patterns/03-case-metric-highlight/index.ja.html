@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>메트릭 하이라이트 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="panel" id="panel">
+  <p class="hint" id="hint">前後の数値の改善幅を実際に割って比率を求め、その比率ぶん円周を計算してゲージを満たします</p>
+  <div class="gaugeWrap">
+    <svg class="gaugeSvg" width="132" height="132" viewBox="0 0 132 132" aria-hidden="true">
+      <circle class="gaugeTrack" cx="66" cy="66" r="54"></circle>
+      <circle class="gaugeFill" id="gaugeFill" cx="66" cy="66" r="54"></circle>
+    </svg>
+    <div class="gaugeCenter">
+      <span class="gaugePercent" id="gaugePercent">0%</span>
+      <span class="gaugeCaption" id="gaugeCaption">改善</span>
+    </div>
+  </div>
+  <p class="metricName" id="metricName">応答時間</p>
+  <p class="metricPair">
+    <span class="metricBefore" id="metricBefore">420ms</span>
+    <span class="metricArrow" aria-hidden="true">→</span>
+    <span class="metricAfter" id="metricAfter">420ms</span>
+  </p>
+</section>
+</main>
+<script>
+// 메트릭 하이라이트(03) — 전/후 두 수치만 데이터로 두고, 개선율을 매 사이클 직접 나눠 구한 뒤
+// 원 둘레(2*PI*R)를 계산해 그 비율만큼 stroke-dashoffset 을 역산한다. 게이지 값은 어디에도
+// 미리 적어두지 않고, 전/후 수치로부터 매번 다시 계산된다(계산 한 겹).
+(function () {
+  var fill = document.getElementById('gaugeFill');
+  var percentEl = document.getElementById('gaugePercent');
+  var captionEl = document.getElementById('gaugeCaption');
+  var nameEl = document.getElementById('metricName');
+  var beforeEl = document.getElementById('metricBefore');
+  var afterEl = document.getElementById('metricAfter');
+  if (!fill || !percentEl || !nameEl || !beforeEl || !afterEl) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var RADIUS = 54;
+  var CIRC = 2 * Math.PI * RADIUS;
+  fill.style.strokeDasharray = String(CIRC);
+
+  var METRICS = [
+    { label: '応答時間', before: 420, after: 180, unit: 'ms', lowerIsBetter: true, caption: '改善' },
+    { label: 'コンバージョン率', before: 2.1, after: 5.8, unit: '%', lowerIsBetter: false, caption: '上昇' },
+    { label: '離脱率', before: 61, after: 34, unit: '%', lowerIsBetter: true, caption: '改善' }
+  ];
+
+  var MAX_IMPROVEMENT = 0.7; // 게이지가 항상 꽉 차지 않도록 잡은 정규화 상한
+  var ANIM_MS = 1100;
+  var CYCLE_MS = 2200;
+
+  function computeRatio(metric) {
+    var delta = metric.lowerIsBetter ? (metric.before - metric.after) : (metric.after - metric.before);
+    var improvement = delta / metric.before;
+    return Math.max(0, Math.min(1, improvement / MAX_IMPROVEMENT));
+  }
+
+  function computePercent(metric) {
+    var delta = metric.lowerIsBetter ? (metric.before - metric.after) : (metric.after - metric.before);
+    return Math.round((delta / metric.before) * 100);
+  }
+
+  function applyGauge(ratio) {
+    var offset = CIRC * (1 - ratio);
+    fill.style.strokeDashoffset = String(offset);
+  }
+
+  function fmt(metric, value) {
+    if (metric.unit === 'ms') return Math.round(value) + 'ms';
+    return (Math.round(value * 10) / 10) + '%';
+  }
+
+  var idx = 0;
+
+  function runMetric(metric) {
+    nameEl.textContent = metric.label;
+    captionEl.textContent = metric.caption;
+    beforeEl.textContent = fmt(metric, metric.before);
+    var targetPercent = computePercent(metric);
+    var targetRatio = computeRatio(metric);
+
+    if (reduce) {
+      afterEl.textContent = fmt(metric, metric.after);
+      percentEl.textContent = targetPercent + '%';
+      applyGauge(targetRatio);
+      return;
+    }
+
+    var start = null;
+    function frame(ts) {
+      if (start === null) start = ts;
+      var t = Math.min((ts - start) / ANIM_MS, 1);
+      var eased = 1 - Math.pow(1 - t, 3);
+      var curAfter = metric.before + (metric.after - metric.before) * eased;
+      var curRatio = targetRatio * eased;
+      var curPercent = Math.round(targetPercent * eased);
+      afterEl.textContent = fmt(metric, curAfter);
+      percentEl.textContent = curPercent + '%';
+      applyGauge(curRatio);
+      if (t < 1) requestAnimationFrame(frame);
+    }
+    applyGauge(0);
+    percentEl.textContent = '0%';
+    afterEl.textContent = fmt(metric, metric.before);
+    requestAnimationFrame(frame);
+  }
+
+  runMetric(METRICS[0]);
+  if (!reduce) {
+    setInterval(function () {
+      idx = (idx + 1) % METRICS.length;
+      runMetric(METRICS[idx]);
+    }, CYCLE_MS);
+  }
+})();
+</script>
+</body>
+</html>

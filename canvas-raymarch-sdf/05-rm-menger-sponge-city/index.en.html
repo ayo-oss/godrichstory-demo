@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>멩거 스펀지 도시 — 재귀 구멍의 규칙 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <p class="mg__hint">
+    <svg class="mg__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>The punch-hole rule repeats inside the distance function — the pointer orbits the view</span>
+  </p>
+  <div class="mg__field" id="mgField" role="application" aria-label="Menger sponge ray marching board" tabindex="0">
+    <canvas class="mg__cv" id="mgCv"></canvas>
+  </div>
+  <div class="mg__bar">
+    <span class="mg__meta"><b class="mg__val" id="mgRes">48×30</b> render target · 72 steps</span>
+    <span class="mg__meta mg__meta--dim">trisection recursion · 4 levels</span>
+  </div>
+</div>
+</main>
+<script>
+// 멩거 스펀지 도시(05) — 정육면체를 3×3×3 으로 나눠 십자 가운데를 뚫는 규칙의 반복.
+// 반복문 안에서 p 를 3배 늘리고(스케일 s=3^n) 박스 거리와 구멍 거리를 max 로 쌓는다 —
+// subtraction(파기)는 max(박스, -구멍) 로 표현된다. 내적 SDF 는 아니지만 각 단계가
+// conservative(실제보다 짧게만 재므로 안전)라 시각적으로 정확한 형태가 나온다.
+// WebGL 없이 ImageData 픽셀 계산만으로 나온다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var RT_W = 48;          // render target 폭(버퍼 픽셀). 재귀 map 이 무거워 48px 로 예산
+  var STEPS = 72;         // 최대 전진 스텝 수 — 변형 "스텝 수" 축(56 → 96)
+  var HIT_EPS = 0.005;    // 표면 도달 판정 거리(월드 단위)
+  var LOOP_MS = 2000;     // 미리보기 가상 포인터 주기
+  var LEVELS = 4;         // 재귀 단계 수 — 변형 "단계" 축(2·3·4) — 늘수록 구멍이 잘다
+  var SAFETY = 0.85;      // 근사 SDF 안전 계수 — conservative 라 여유를 둔다
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mgRoot');
+  var field = document.getElementById('mgField');
+  var cv = document.getElementById('mgCv');
+  var ctx = cv.getContext('2d');
+  var resOut = document.getElementById('mgRes');
+
+  // 색은 CSS 커스텀 프로퍼티(--rm-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    if (s.charAt(0) === '#') {
+      var hx = s.length === 4
+        ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+        : s.slice(1);
+      return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+    }
+    var p = s.replace(/[^\d,.]/g, '').split(',');
+    return [Number(p[0]) || 0, Number(p[1]) || 0, Number(p[2]) || 0];
+  }
+  var C_BLOCK = tokRGB('--rm-block');
+  var C_TOWER = tokRGB('--rm-tower');
+  var C_HILITE = tokRGB('--rm-hilite');
+  var C_FLOOR  = tokRGB('--rm-floor');
+  var C_SHADE  = tokRGB('--rm-shade');
+  var C_SKY    = tokRGB('--rm-sky');
+  var C_SKY2   = tokRGB('--rm-sky2');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var buf, bctx, img;             // 저해상 render target 버퍼(캔버스와 별개)
+  var heading = 0.55;             // 편요(라디안) — 포인터 좌우
+  var pitch = 0.27;               // 상하각(라디안) — 포인터 상하
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var raf = 0, t0 = -1;
+
+  // 축 정렬 박스 거리 — 중심 원점, 반폭 b. 클램프 방식(안쪽도 대략 거리)
+  function sdBox(px, py, pz, b) {
+    var qx = Math.abs(px) - b, qy = Math.abs(py) - b, qz = Math.abs(pz) - b;
+    var ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0, oz = qz > 0 ? qz : 0;
+    return Math.sqrt(ox * ox + oy * oy + oz * oz) + Math.max(qx, qy, qz, 0);
+  }
+  // 부호 없는 나머지 — JS % 는 음수에 음수를 돌려주므로 직접 만든다
+  function mod2(v) { var m = v % 2.0; return m < 0 ? m + 2.0 : m; }
+
+  var lastCell = 0.5;             // 직전 map 호출의 셀 인덱스(3×3 위치 코드) — 색 변조용
+  // 멩거 스펀지 — 각 단계에서 좌표를 mod 2 로 접고 십자 관의 거리를 max 로 얹는다.
+  // 반환값은 conservative 근사(실제 거리보다 작거나 같음) — 안전 계수만 있으면 형태가 정확하다
+  function map(px, py, pz) {
+    var cy = py - 1.0;            // 스펀지 중심 (0,1,0) · 반폭 1
+    var d = sdBox(px, cy, pz, 1.0);
+    var s = 1.0;
+    var cell = 0;
+    for (var n = 0; n < LEVELS; n++) {
+      var ax = mod2(px * s) - 1.0;
+      var ay = mod2(cy * s) - 1.0;
+      var az = mod2(pz * s) - 1.0;
+      s *= 3.0;
+      var rx = Math.abs(1.0 - 3.0 * Math.abs(ax));
+      var ry = Math.abs(1.0 - 3.0 * Math.abs(ay));
+      var rz = Math.abs(1.0 - 3.0 * Math.abs(az));
+      var da = Math.max(rx, ry);              // 십자 관의 세 방향 성분
+      var db = Math.max(ry, rz);
+      var dc = Math.max(rz, rx);
+      var c = (Math.min(da, Math.min(db, dc)) - 1.0) / s;
+      d = Math.max(d, c);
+      cell = (ax + 1) * 4 + (ay + 1) * 2 + (az + 1);   // 0..8 셀 코드 — 색 변조용
+    }
+    lastCell = cell;
+    return d;
+  }
+
+  // 거리장의 기울기(전방 차분) = 표면 법선
+  function normalAt(px, py, pz) {
+    var e = 0.002;
+    var nx = map(px + e, py, pz) - map(px - e, py, pz);
+    var ny = map(px, py + e, pz) - map(px, py - e, pz);
+    var nz = map(px, py, pz + e) - map(px, py, pz - e);
+    var l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    return [nx / l, ny / l, nz / l];
+  }
+
+  function mix3(c1, c2, t) {
+    return [c1[0] + (c2[0] - c1[0]) * t, c1[1] + (c2[1] - c1[1]) * t, c1[2] + (c2[2] - c1[2]) * t];
+  }
+  function clamp255(v) { return v > 255 ? 255 : (v < 0 ? 0 : v); }
+
+  function draw(tSec) {
+    if (!img) return;
+    var data = img.data;
+    var bw = buf.width, bh = buf.height;
+
+    // 카메라 — 스펀지 중심(0,1,0) 을 도는 궤도. heading/pitch 를 눈 위치로
+    var ch = Math.cos(heading), sh = Math.sin(heading);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var D = 4.4;                                    // 눈-스펀지 거리
+    var ex = sh * cp * D, ey = 1.0 + sp * D, ez = ch * cp * D;
+    // 전방(눈→스펀지 중심) · 오른쪽 · 위 — 오른손 기저
+    var fx = -sh * cp, fy = -sp, fz = -ch * cp;
+    var rx = -fz, rz = fx;                          // right = normalize(f × worldUp)
+    var rl = Math.sqrt(rx * rx + rz * rz) || 1;
+    rx /= rl; rz /= rl;
+    var ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;   // up = right × forward
+    // 광원 궤도 — 왼쪽 위를 도는 파스텔 키 라이트. 구멍 속 명암이 프레임마다 흘러간다
+    var lph = tSec * 0.9 + 2.1;
+    var lx = -0.44 + 0.3 * Math.cos(lph), ly = 0.72, lz = 0.42 + 0.3 * Math.sin(lph);
+    var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    lx /= ll; ly /= ll; lz /= ll;
+
+    var i = 0;
+    for (var y = 0; y < bh; y++) {
+      var vy = (1 - 2 * (y + 0.5) / bh) * 0.5;      // -0.5..+0.5 (화면 위가 +)
+      for (var x = 0; x < bw; x++) {
+        var vx = (2 * (x + 0.5) / bw - 1) * 0.8;    // -0.8..+0.8
+        // 레이 방향 = 전방 + 화면 오프셋, 정규화
+        var dx = fx + rx * vx + ux * vy;
+        var dy = fy + uy * vy;
+        var dz = fz + rz * vx + uz * vy;
+        var dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        dx /= dl; dy /= dl; dz /= dl;
+
+        // ── march 루프 — conservative 근사라 SAFETY 를 곱해 전진한다 ──
+        var t = 0.0, hit = 0, px = ex, py = ey, pz = ez, steps = 0;
+        for (var s = 0; s < STEPS; s++) {
+          var d = map(px, py, pz);
+          if (d < HIT_EPS) { hit = 1; break; }      // 표면 도달
+          if (t > 10.0) break;                      // 멀어지면 하늘로 놓아준다
+          t += d * SAFETY;
+          steps = s;
+          px = ex + dx * t; py = ey + dy * t; pz = ez + dz * t;
+        }
+
+        var r, g, b;
+        if (hit) {
+          var n = normalAt(px, py, pz);
+          var lam = Math.max(0, n[0] * lx + n[1] * ly + n[2] * lz);
+          // AO 근사 — 구멍 깊은 픽셀은 스텝을 더 쓴다
+          var ao = 1 - (steps / STEPS) * 0.5;
+          // 셀 위치 코드로 두 파스텔 사이를 점프 — 블록마다 색이 나뉜 "도시" 느낌.
+          // 위상이 천천히 돌아 블록 색 배정이 흘러간다
+          var cellMix = ((lastCell * 7) % 13 + 1.5 * Math.sin(tSec * 0.8)) / 12;
+          cellMix = cellMix - Math.floor(cellMix);
+          var base = mix3(C_BLOCK, C_TOWER, cellMix);
+          if (py < 0.008) {
+            // 바닥 평면 히트 — 옅은 하늘색 바닥에 스펀지 접촉 음영
+            var lit0 = (0.42 + 0.58 * lam) * ao;
+            r = C_FLOOR[0] * lit0 + C_SHADE[0] * (1 - lit0);
+            g = C_FLOOR[1] * lit0 + C_SHADE[1] * (1 - lit0);
+            b = C_FLOOR[2] * lit0 + C_SHADE[2] * (1 - lit0);
+          } else {
+            var dif = (0.24 + 0.76 * lam) * ao;
+            var rim = Math.max(0, n[0] * -dx + n[1] * -dy + n[2] * -dz);
+            var spec = Math.pow(rim, 12) * 0.35;
+            r = base[0] * dif + C_HILITE[0] * spec;
+            g = base[1] * dif + C_HILITE[1] * spec;
+            b = base[2] * dif + C_HILITE[2] * spec;
+          }
+        } else {
+          // 하늘 — 하늘색↔라일락 파동 그라데이션이 프레임마다 흐른다
+          var sky = dy > 0 ? dy : 0;
+          var wave = 0.5 + 0.5 * Math.sin(tSec * 1.4 + vx * 3.0);
+          var gr = 0.35 * wave;
+          r = C_SKY[0] + (C_HILITE[0] - C_SKY[0]) * sky * 0.3 + (C_SKY2[0] - C_SKY[0]) * gr;
+          g = C_SKY[1] + (C_HILITE[1] - C_SKY[1]) * sky * 0.3 + (C_SKY2[1] - C_SKY[1]) * gr;
+          b = C_SKY[2] + (C_HILITE[2] - C_SKY[2]) * sky * 0.3 + (C_SKY2[2] - C_SKY[2]) * gr;
+        }
+        data[i] = clamp255(r);
+        data[i + 1] = clamp255(g);
+        data[i + 2] = clamp255(b);
+        data[i + 3] = 255;
+        i += 4;
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+    // 저해상 버퍼를 캔버스 CSS 크기로 부드럽게 확대 — dpr 을 곱하지 않는다(버퍼가 저해상)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(buf, 0, 0, W, H);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    var bh = Math.max(12, Math.round(RT_W * H / W));
+    buf = document.createElement('canvas');
+    buf.width = RT_W; buf.height = bh;
+    bctx = buf.getContext('2d');
+    img = bctx.createImageData(RT_W, bh);
+    resOut.textContent = RT_W + '×' + bh;
+  }
+
+  function aim() {
+    // 포인터/키 입력 → 목표 각도. 구멍 속까지 들여다보는 heading ±1.8 · pitch 0.05..0.6
+    return [(px01 - 0.5) * 3.6, 0.32 + (py01 - 0.5) * 0.55];
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous(표 밖 자연 경로). 진폭을 끝까지 쓴다
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.48 * Math.sin(ph);
+      py01 = 0.5 + 0.42 * Math.sin(2 * ph + 0.7);
+    }
+    var a = aim();
+    heading += (a[0] - heading) * 0.14;
+    pitch += (a[1] - pitch) * 0.14;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { var a1 = aim(); heading = a1[0]; pitch = a1[1]; draw(0.6); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { var a2 = aim(); heading = a2[0]; pitch = a2[1]; draw(0.6); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(0.6); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 구멍이 읽히는 각도의 한 장만 그린다
+    heading = 0.55; pitch = 0.32;
+    draw(0.6);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

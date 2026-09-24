@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>横ラインのオフセットを固定シードで計算するグリッチ転換 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rv is-demo" id="rv">
+  <p class="rv__hint"><span>クリックまたはEnterキーを押すと、横ラインが順番にずれて次の場面に変わります</span></p>
+  <div class="rv__panel" id="panel" tabindex="0" role="button" aria-label="横ラインのオフセットを固定シードで計算するグリッチ転換をもう一度再生">
+    <canvas class="rv__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('rv');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — 이 데모는 Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var COLOR_A1 = tok('--img-a1', '#ff5a2e');
+  var COLOR_A2 = tok('--img-a2', '#fff3e6');
+  var COLOR_B1 = tok('--img-b1', '#2e6bff');
+  var COLOR_B2 = tok('--img-b2', '#bfe4ff');
+
+  var W = 0, H = 0, dpr = 1;
+  var bufA = document.createElement('canvas');
+  var bufB = document.createElement('canvas');
+  var bctxA = bufA.getContext('2d');
+  var bctxB = bufB.getContext('2d');
+
+  // 장면 A(따뜻한 톤)·B(차가운 톤) — 전부 캔버스로 직접 그린다. 외부 사진·파일 0.
+  function paintScene(bctx, w, h, seed, warm) {
+    var rng = makeLcg(seed);
+    var g = bctx.createLinearGradient(0, 0, w, h);
+    if (warm) { g.addColorStop(0, COLOR_A1); g.addColorStop(1, COLOR_A2); }
+    else { g.addColorStop(0, COLOR_B1); g.addColorStop(1, COLOR_B2); }
+    bctx.fillStyle = g;
+    bctx.fillRect(0, 0, w, h);
+    bctx.globalAlpha = 0.55;
+    if (warm) {
+      for (var i = 0; i < 8; i++) {
+        bctx.fillStyle = i % 2 ? COLOR_A2 : COLOR_A1;
+        bctx.beginPath();
+        bctx.arc(rng() * w, rng() * h, 12 + rng() * 30, 0, Math.PI * 2);
+        bctx.fill();
+      }
+    } else {
+      var bandW = Math.max(14, w * 0.05);
+      for (var x = -h; x < w + h; x += bandW * 2) {
+        bctx.fillStyle = COLOR_B2;
+        bctx.beginPath();
+        bctx.moveTo(x, 0); bctx.lineTo(x + bandW, 0); bctx.lineTo(x + bandW - h, h); bctx.lineTo(x - h, h);
+        bctx.closePath(); bctx.fill();
+      }
+      for (var j = 0; j < 6; j++) {
+        bctx.fillStyle = COLOR_A2;
+        bctx.beginPath(); bctx.arc(rng() * w, rng() * h, 5 + rng() * 9, 0, Math.PI * 2); bctx.fill();
+      }
+    }
+    bctx.globalAlpha = 1;
+  }
+
+  var SEED_A = 601, SEED_B = 602, SEED_GLITCH = 603;
+  var PLAY_MS = 450;
+  var ROW_PX = 6; // 줄 두께 — 변형: 6px -> 3px(더 촘촘한 줄)
+  var GLITCH_WINDOW = 0.06;
+  var GLITCH_MAX_PX = 14;
+  var rowsN, rowOffset, rowOrder;
+
+  function PRECOMPUTE() {
+    rowsN = Math.ceil(H / ROW_PX);
+    var rng = makeLcg(SEED_GLITCH); // 고정 시드 — 프레임마다 다시 뽑지 않는다
+    rowOffset = new Float32Array(rowsN);
+    rowOrder = new Float32Array(rowsN);
+    for (var i = 0; i < rowsN; i++) {
+      rowOffset[i] = (rng() * 2 - 1) * GLITCH_MAX_PX;
+      rowOrder[i] = i / rowsN;
+    }
+  }
+
+  function RENDER(p) {
+    for (var i = 0; i < rowsN; i++) {
+      var order = rowOrder[i];
+      var src = order <= p ? bufA : bufB;
+      var near = Math.abs(order - p);
+      var dx = near < GLITCH_WINDOW ? rowOffset[i] * (1 - near / GLITCH_WINDOW) : 0;
+      var dy = i * ROW_PX;
+      var sh = Math.min(ROW_PX, H - dy);
+      if (sh <= 0) continue;
+      var sy = Math.round(dy * dpr), shPx = Math.round(sh * dpr);
+      ctx.drawImage(src, 0, sy, cv.width, shPx, dx, dy, W, sh);
+    }
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bufA.width = bufB.width = cv.width;
+    bufA.height = bufB.height = cv.height;
+    bctxA.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bctxB.setTransform(dpr, 0, 0, dpr, 0, 0);
+    paintScene(bctxA, W, H, SEED_A, true);
+    paintScene(bctxB, W, H, SEED_B, false);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    // 실사용 경로 — 클릭·Enter·Space 로 두 장면을 다시 전환한다.
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000; // 렌더 캐처 창(설정 초=2.0)과 같은 주기 — 시연 전용
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) { // .is-demo && !reduce 경로에서만 실행된다(아래 reduce 분기)
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    // reduce — 자동 루프 없음, 계산은 그대로 둘고 즉시 전환만 허용한다.
+    root.classList.add('is-still');
+    progress = 0.5; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

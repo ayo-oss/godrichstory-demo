@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Score and level — 동시 클리어에 지수로 보상하기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc" id="sc">
+  <p class="sc__hint">Simultaneous clear multiplier 1, 2, 3, 4x</p>
+  <div class="sc__row">
+    <div class="sc__field" id="field" role="application" aria-label="Score and level" tabindex="0">
+      <canvas class="sc__cv" id="cv"></canvas>
+    </div>
+    <div class="sc__side">
+      <span class="sc__label">Score</span>
+      <b class="sc__score" id="score" aria-live="polite">0</b>
+      <div class="sc__lvRow"><span class="sc__label">Level</span><b class="sc__lv" id="lv">1</b></div>
+      <span class="sc__iv">Drop interval <b id="iv">500</b>ms</span>
+      <div class="sc__meter" id="meter"><i id="mfill"></i></div>
+      <div class="sc__graph" id="graph" role="img" aria-label="Clear multiplier log"><canvas id="gcv"></canvas></div>
+      <span class="sc__best">Best <b id="best">0</b></span>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// Score and level — 한 번에 지운 lines 수 n 에 대해 Score = 100 × n × n (지수 보상:
+// 1lines 100 · 2lines 400 · 3lines 900 · 4lines 1600). 누적 줄이 4lines 늘 때마다 레벨이 오르고
+// 낙하 간격은 BASE × 0.85^(Level−1) 로 줄어든다 — 레벨이 숫자가 아니라 속도로 느껴진다.
+// 최고점은 localStorage 에 남는다.
+(function () {
+  var root = document.getElementById('sc');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var graph = document.getElementById('graph');
+  var gcv = document.getElementById('gcv');
+  var scoreEl = document.getElementById('score');
+  var lvEl = document.getElementById('lv');
+  var ivEl = document.getElementById('iv');
+  var bestEl = document.getElementById('best');
+  var mfill = document.getElementById('mfill');
+  if (!root || !field || !cv || !graph || !gcv || !scoreEl || !lvEl || !ivEl || !bestEl || !mfill) return;
+  var ctx = cv.getContext('2d');
+  var ctx2 = gcv.getContext('2d');
+  var css = getComputedStyle(root);
+  function v(name) { return css.getPropertyValue(name).trim(); }
+  var FILL = { I: v('--c-i'), O: v('--c-o'), T: v('--c-t'), S: v('--c-s'), Z: v('--c-z'), J: v('--c-j'), L: v('--c-l') };
+  var EDGE = { I: v('--d-i'), O: v('--d-o'), T: v('--d-t'), S: v('--d-s'), Z: v('--d-z'), J: v('--d-j'), L: v('--d-l') };
+  var LINE = v('--grid-line');
+  var POPC = v('--pop');
+  var BARC = v('--bar');
+
+  var COLS = 10, ROWS = 14;
+  var TYPES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
+  var SHAPES = {
+    I: [[0, 1], [1, 1], [2, 1], [3, 1]],
+    O: [[1, 1], [2, 1], [1, 2], [2, 2]],
+    T: [[1, 0], [0, 1], [1, 1], [2, 1]],
+    S: [[1, 0], [2, 0], [0, 1], [1, 1]],
+    Z: [[0, 0], [1, 0], [1, 1], [2, 1]],
+    J: [[0, 0], [0, 1], [1, 1], [2, 1]],
+    L: [[2, 0], [0, 1], [1, 1], [2, 1]]
+  };
+  var BOX = { I: 4, O: 4, T: 3, S: 3, Z: 3, J: 3, L: 3 };
+  var BASE_IV = 0.50, FACTOR = 0.85, LINES_PER_LV = 4; // Drop interval 초 · Level 계수 · lines 수
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rnd = mulberry32(3304);
+
+  function rotCW(cells, n) {
+    var out = [];
+    for (var i = 0; i < cells.length; i++) out.push([cells[i][1], n - 1 - cells[i][0]]);
+    return out;
+  }
+  function hits(grid, cells, row, col) {
+    for (var i = 0; i < cells.length; i++) {
+      var x = col + cells[i][0], y = row + cells[i][1];
+      if (x < 0 || x >= COLS || y >= ROWS) return true;
+      if (y >= 0 && grid[y][x]) return true;
+    }
+    return false;
+  }
+  function landingRow(grid, cells, col) {
+    var row = -4;
+    while (!hits(grid, cells, row + 1, col)) row += 1;
+    return row;
+  }
+  function emptyGrid() {
+    var g = [];
+    for (var y = 0; y < ROWS; y++) { g.push([]); for (var x = 0; x < COLS; x++) g[y].push(0); }
+    return g;
+  }
+  function cloneGrid(g) {
+    var o = [];
+    for (var y = 0; y < ROWS; y++) o.push(g[y].slice());
+    return o;
+  }
+  // 1수 탐색 — 완성 줄을 최우선, 그다음 구멍. (SHAPES 원본은 건드리지 않는다)
+  function choose(grid, t) {
+    var best = null;
+    for (var r = 0; r < 4; r++) {
+      var cells = SHAPES[t].map(function (c) { return c.slice(); }), n = BOX[t];
+      for (var k = 0; k < r; k++) cells = rotCW(cells, n);
+      for (var c = -2; c < COLS; c++) {
+        if (hits(grid, cells, 0, c)) continue;
+        var row = landingRow(grid, cells, c);
+        if (row < 0) continue;
+        var g2 = cloneGrid(grid);
+        for (var i = 0; i < cells.length; i++) g2[row + cells[i][1]][c + cells[i][0]] = t;
+        var full = 0, holes = 0;
+        for (var y = 0; y < ROWS; y++) {
+          var f = 0;
+          for (var x = 0; x < COLS; x++) if (g2[y][x]) f += 1;
+          if (f === COLS) full += 1;
+        }
+        for (var x2 = 0; x2 < COLS; x2++) {
+          var seen = false;
+          for (var y2 = 0; y2 < ROWS; y2++) {
+            if (g2[y2][x2]) seen = true;
+            else if (seen) holes += 1;
+          }
+        }
+        var score = full * 1000 - holes * 800 - row;
+        if (!best || score > best.score) best = { r: r, c: c, score: score };
+      }
+    }
+    return best;
+  }
+
+  // 시작 쓰레기 — 아래 5lines, 구멍 1칸씩 (01 과 같은 구성)
+  var grid = emptyGrid();
+  for (var gy0 = ROWS - 5; gy0 < ROWS; gy0++) {
+    var h0 = Math.floor(rnd() * COLS);
+    for (var gx0 = 0; gx0 < COLS; gx0++) grid[gy0][gx0] = gx0 === h0 ? 0 : TYPES[Math.floor(rnd() * 7)];
+  }
+
+  var bag = [];
+  function refill() {
+    bag = TYPES.slice();
+    for (var i = bag.length - 1; i > 0; i--) {
+      var j = Math.floor(rnd() * (i + 1)), tmp = bag[i]; bag[i] = bag[j]; bag[j] = tmp;
+    }
+  }
+  refill();
+
+  // Score 상태
+  var score = 0, lines = 0, level = 1;
+  var pops = [];               // 배율 팝 {txt, x, y, t}
+  var history = [];            // Clear multiplier log (그래프)
+  var flashRows = [], flashT = 0;
+  var popT = 0;
+
+  // localStorage — Best. 파일 경로에서도 동작, 실패해도 게임은 계속
+  var BEST_KEY = 'p330-04-best';
+  var best = 0;
+  try { best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) { best = 0; }
+  bestEl.textContent = String(best);
+  function saveBest() {
+    if (score > best) {
+      best = score;
+      bestEl.textContent = String(best);
+      try { localStorage.setItem(BEST_KEY, String(best)); } catch (e) { /* 저장 실패는 무시 */ }
+    }
+  }
+
+  function dropIv() { return Math.max(0.06, BASE_IV * Math.pow(FACTOR, level - 1)); }
+  function fmtIv() { return String(Math.round(dropIv() * 1000)); }
+
+  var piece = null, fallT = 0, restT = 0, slideT = 0;
+  function spawn() {
+    if (!bag.length) refill();
+    var t = bag.pop();
+    var plan = choose(grid, t);
+    if (!plan) { grid = emptyGrid(); plan = choose(grid, t); }
+    piece = { t: t, r: 0, cells: SHAPES[t].slice(), x: 3, y: -0.4, plan: plan };
+    fallT = 0; restT = 0; slideT = 0;
+  }
+  function lock() {
+    var rx = Math.round(piece.x), ry = Math.floor(piece.y), dead = false;
+    for (var i = 0; i < piece.cells.length; i++) {
+      var gx = rx + piece.cells[i][0], gy = ry + piece.cells[i][1];
+      if (gy < 0) { dead = true; break; }
+      grid[gy][gx] = piece.t;
+    }
+    if (dead) { grid = emptyGrid(); }
+    else {
+      flashRows = [];
+      for (var y = 0; y < ROWS; y++) {
+        var n2 = 0;
+        for (var x = 0; x < COLS; x++) if (grid[y][x]) n2 += 1;
+        if (n2 === COLS) flashRows.push(y);
+      }
+      if (flashRows.length) {
+        // 지수 보상 — Score = 100 × n × n (1·2·3·4x)
+        var n = flashRows.length;
+        var add = 100 * n * n;
+        score += add; lines += n;
+        scoreEl.textContent = String(score);
+        pops.push({ txt: n + 'x bonus' + add, t: 1.0 });
+        history.push(n);
+        if (history.length > 26) history.shift();
+        var nl = 1 + Math.floor(lines / LINES_PER_LV);
+        if (nl !== level) {
+          level = nl;
+          lvEl.textContent = String(level);
+          ivEl.textContent = fmtIv();
+          pops.push({ txt: 'Level ' + level, t: 1.2 });
+        }
+        saveBest();
+        flashT = 0.18;
+      }
+    }
+    piece = null;
+  }
+  function spliceRows() {
+    flashRows.sort(function (a, b) { return a - b; });
+    for (var i = 0; i < flashRows.length; i++) {
+      grid.splice(flashRows[i], 1);
+      grid.unshift(new Array(COLS).fill(0));
+    }
+    flashRows = [];
+    // 판이 얇아지면 쓰레기 보충 — Clear 리듬이 계속되게
+    var filled = 0;
+    for (var y = 0; y < ROWS; y++) for (var x = 0; x < COLS; x++) if (grid[y][x]) filled += 1;
+    if (filled < COLS * 3) {
+      for (var gy = ROWS - 4; gy < ROWS; gy++) {
+        var h = Math.floor(rnd() * COLS);
+        for (var gx = 0; gx < COLS; gx++) grid[gy][gx] = gx === h ? 0 : TYPES[Math.floor(rnd() * 7)];
+      }
+    }
+  }
+
+  var W = 0, H = 0, GW = 0, GH = 0, dpr = 1, cell = 8, ox = 0, oy = 0;
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    GW = graph.clientWidth; GH = graph.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    gcv.width = Math.round(GW * dpr); gcv.height = Math.round(GH * dpr);
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cell = Math.floor(Math.min(H / ROWS, W / COLS));
+    ox = Math.floor((W - cell * COLS) / 2); oy = Math.floor((H - cell * ROWS) / 2);
+  }
+  function paintCell(gx, gy, t, alpha) {
+    var r = Math.max(2, cell * 0.22);
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    ctx.beginPath();
+    ctx.roundRect(ox + gx * cell + 1, oy + gy * cell + 1, cell - 2, cell - 2, r);
+    ctx.fillStyle = FILL[t]; ctx.fill();
+    ctx.lineWidth = Math.max(1, cell * 0.14);
+    ctx.strokeStyle = EDGE[t]; ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  var last = 0, raf = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = LINE; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = 0; x <= COLS; x++) { ctx.moveTo(ox + x * cell + .5, oy); ctx.lineTo(ox + x * cell + .5, oy + ROWS * cell); }
+    for (var y = 0; y <= ROWS; y++) { ctx.moveTo(ox, oy + y * cell + .5); ctx.lineTo(ox + COLS * cell, oy + y * cell + .5); }
+    ctx.stroke();
+    for (var gy = 0; gy < ROWS; gy++) for (var gx = 0; gx < COLS; gx++) if (grid[gy][gx]) paintCell(gx, gy, grid[gy][gx]);
+    if (flashT > 0) {
+      ctx.globalAlpha = Math.min(1, flashT / 0.18) * 0.85;
+      ctx.fillStyle = POPC;
+      for (var f = 0; f < flashRows.length; f++) ctx.fillRect(ox, oy + flashRows[f] * cell, cell * COLS, cell);
+      ctx.globalAlpha = 1;
+    }
+    if (piece) {
+      for (var i = 0; i < piece.cells.length; i++) {
+        var cy = piece.y + piece.cells[i][1];
+        if (cy >= 0) paintCell(Math.round(piece.x + piece.cells[i][0]), Math.round(cy), piece.t);
+      }
+    }
+  }
+  function drawGraph(dt) {
+    if (!GW || !GH) return;
+    ctx2.clearRect(0, 0, GW, GH);
+    var bw = GW / 13;
+    var start = Math.max(0, history.length - 13);
+    for (var i = start; i < history.length; i++) {
+      var n = history[i];
+      var hh = (n / 4) * GH;
+      ctx2.fillStyle = BARC;
+      ctx2.globalAlpha = 0.45 + 0.55 * (n / 4);
+      ctx2.fillRect((i - start) * bw + 1, GH - hh, bw - 2, hh);
+    }
+    ctx2.globalAlpha = 1;
+  }
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (flashT > 0) {
+      flashT -= dt;
+      if (flashT <= 0) spliceRows();
+    } else if (!piece) {
+      spawn();
+    } else {
+      // 계획 열로 미끄러지며 동시에 서서히 내려온다 (초당 5cells). 정렬되면 착지점까지
+      // 0.12초에 내려 놓는다 — 팝 리듬이 초당 한 번 이상 이어진다
+      var dx = piece.plan.c - piece.x;
+      piece.x += Math.max(-12 * dt, Math.min(12 * dt, dx));
+      if (piece.r !== piece.plan.r && Math.abs(dx) < 0.6 && restT === 0) {
+        var rc = rotCW(piece.cells, BOX[piece.t]);
+        if (!hits(grid, rc, Math.floor(piece.y), Math.round(piece.x))) {
+          piece.cells = rc; piece.r = (piece.r + 1) % 4;
+        } else piece.r = piece.plan.r;
+      }
+      var target = landingRow(grid, piece.cells, Math.round(piece.x));
+      if (Math.abs(dx) < 0.05 && piece.r === piece.plan.r) {
+        // 일정 속도 낙하 — 착지 행까지 상속 속도로 내려온 뒤 딱 잠근다
+        var ny = piece.y + 42 * dt;
+        piece.y = ny >= target ? target : ny;
+        if (piece.y === target) lock();
+      } else {
+        piece.y += 5 * dt;
+        var ry0 = Math.floor(piece.y) + 1;
+        if (hits(grid, piece.cells, ry0, Math.round(piece.x))) { piece.y = ry0 - 1; lock(); }
+      }
+    }
+    // 배율 팝 — Board 안에서 떠오른다
+    for (var p = pops.length - 1; p >= 0; p--) {
+      pops[p].t -= dt;
+      if (pops[p].t <= 0) { pops.splice(p, 1); continue; }
+      ctx.font = '700 ' + Math.max(11, cell * 0.9) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = Math.min(1, pops[p].t);
+      ctx.fillStyle = POPC;
+      ctx.fillText(pops[p].txt, ox + COLS * cell / 2, oy + ROWS * cell * 0.35 - (1 - pops[p].t) * 18);
+      ctx.globalAlpha = 1;
+    }
+    // Drop interval 게이지 — 간격이 짧아질수록 채워진다
+    var ratio = 1 - (dropIv() - 0.06) / (BASE_IV - 0.06);
+    mfill.style.height = Math.round(Math.max(0.04, Math.min(1, ratio)) * 100) + '%';
+    draw();
+    drawGraph(dt);
+    raf = requestAnimationFrame(step);
+  }
+
+  field.addEventListener('pointerdown', function () {
+    // 누르면 Hard drop — Next 클리어와 배율이 바로 보인다
+    if (piece) {
+      piece.x = piece.plan.c; piece.r = piece.plan.r;
+      var c2 = SHAPES[piece.t].map(function (c) { return c.slice(); }), n = BOX[piece.t];
+      for (var k = 0; k < piece.plan.r; k++) c2 = rotCW(c2, n);
+      piece.cells = c2;
+      piece.y = landingRow(grid, piece.cells, Math.round(piece.x));
+      lock();
+    }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) { draw(); drawGraph(0); } });
+  fit();
+  if (reduce) {
+    // 정지 한 장 — Score·Level·간격이 다 보이는 상태로 만들어 둔다
+    score = 1600; lines = 6; level = 2;
+    scoreEl.textContent = String(score);
+    lvEl.textContent = String(level);
+    ivEl.textContent = fmtIv();
+    history = [1, 1, 2, 1, 3, 2, 1, 4];
+    for (var g2y = ROWS - 3; g2y < ROWS; g2y++) for (var g2x = 0; g2x < COLS - 2; g2x++) grid[g2y][g2x] = TYPES[(g2x + g2y) % 7];
+    draw(); drawGraph(0);
+    var ratio2 = 1 - (dropIv() - 0.06) / (BASE_IV - 0.06);
+    mfill.style.height = Math.round(Math.max(0.04, Math.min(1, ratio2)) * 100) + '%';
+    root.classList.add('is-still');
+  } else {
+    spawn();
+    last = performance.now();
+    raf = requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>녹았다 얼기 반복 — 가장 바깥 입자부터 떼어내 다시 붙이는 순환 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="round"><path d="M128 26v204"/><path d="M43 74l170 128"/><path d="M213 74L43 202"/><circle cx="128" cy="128" r="18"/></g></svg>
+    <span>결정 표면의 입자를 확률적으로 떼어내 주변에 다시 풀어놓으면 오래된 코어는 남고 가장자리만 계속 다시 자랍니다 — 숨을 쉬는 결정의 온도 순환입니다</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="녹기·재결정 순환 결정 실험판" tabindex="0">
+    <canvas class="cd__cv" id="cdCv" width="424" height="180"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">주기 <b class="cd__val" id="cdVal">4.0</b>s · 표면 녹이기 → 재응집</span>
+    <span class="cd__meta cd__meta--dim">ImageData · putImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 녹았다 얼기 반복(08). DLA 로 완전히 자란 결정을 무대에 올리고, 온도 사이클을 돌린다.
+// 주기의 뒷반(더운 기류)에는 결정 표면(노출된 셀)을 확률적으로 떼어내 근처에 랜덤워크 입자로
+// 풀어놓고, 앞반(찬 기류)에는 그 입자들이 표면에 다시 붙는다. 코어(오래된 셀)는 녹을 확률이
+// 낮아 남고, 가장자리만 계속 새로 자란다 — 나무 나이테 같은 온도 연륜이 남는다.
+// 화면은 5겹으로 산다: ① 온도에 따라 색온도가 도는 배경 조명 ② 격자 확대 blur 광륜
+// ③ 격자 ImageData 본체(나이 색) ④ 녹아 떨어져 떠다니는 방류 입자 ⑤ 표면 반짝임.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var CYCLE_MS        = 2000;   // 온도 순환 한 바퀴(측정 gif 2초의 약수 — 주기가 정확히 겹친다)
+  var MELT_FRAC       = 0.5;    // 주기 뒷반(녹는 구간) 비율
+  var MELT_RATE       = 4.6;    // 프레임당 표면 박리 시도 수(온도 스케일) — 늘리면 더 많이 녹는다
+  var FREEZE_PER_FR   = 60;     // 프레임당 재응집 입자 수
+  var RMAX            = 38;     // 결정 반경(셀)
+  // ────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var valOut = document.getElementById('cdVal');
+
+  var W = cv.width, H = cv.height;              // 내부 해상도 고정 424×180
+  var CELL = 2, GW = W / CELL, GH = H / CELL;   // 격자 212×90
+  var CX = (GW / 2) | 0, CY = ((GH / 2) | 0) - 6;
+
+  // 시드 고정 PRNG — mulberry32. 순환의 결이 매 실행 같은 성격으로 흐른다
+  var prngState = 0x31908c >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 scss 의 --flake-* 에서 getComputedStyle 로
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK = tokRGB('--flake-ink');
+  var C_CORE = tokRGB('--flake-core');
+  var C_LILAC = tokRGB('--flake-lilac');
+  var C_MINT = tokRGB('--flake-mint');
+  var C_PINK = tokRGB('--flake-pink');
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // ── 격자 상태 ──
+  var tStick = new Float32Array(GW * GH);   // 셀에 붙은 시각(ms) — 나이·연륜의 원료
+  var frozen = new Uint8Array(GW * GH);     // 1 = 언 셀
+  tStick.fill(-1);
+
+  // 6각 인접(odd-r)
+  var NX_EVEN = [1, -1, 0, -1, 0, -1], NY_EVEN = [0, 0, -1, -1, 1, 1];
+  var NX_ODD  = [1, -1, 0,  1, 0,  1], NY_ODD  = [0, 0, -1, -1, 1, 1];
+  function idx(x, y) { return y * GW + x; }
+  function inside(x, y) { return x >= 0 && x < GW && y >= 0 && y < GH; }
+  function nbX(y) { return (y & 1) ? NX_ODD : NX_EVEN; }
+  function nbY(y) { return (y & 1) ? NY_ODD : NY_EVEN; }
+  function frozenNb(x, y) {
+    var nx = nbX(y), ny = nbY(y), n = 0;
+    for (var k = 0; k < 6; k++) {
+      var ax = x + nx[k], ay = y + ny[k];
+      if (inside(ax, ay) && frozen[idx(ax, ay)]) n++;
+    }
+    return n;
+  }
+  function stick(x, y, now) { frozen[idx(x, y)] = 1; tStick[idx(x, y)] = now; }
+
+  // ── 초기 성장 — DLA 로 이글 하나를 완전히 자려둔다(첫 프레임 전에 끝난다) ──
+  function growFull() {
+    stick(CX, CY, -9900);
+    var nx = nbX(CY), ny = nbY(CY);
+    for (var k = 0; k < 6; k++) {
+      var ax = CX + nx[k], ay = CY + ny[k];
+      if (inside(ax, ay)) stick(ax, ay, -9800);
+    }
+    var maxR = 2, want = 2050;
+    var got = 7, tries = 0;
+    while (got < want && tries < want * 260) {
+      tries++;
+      var ang = rand() * Math.PI * 2;
+      var rr = maxR + 6 + rand() * 16;
+      var x = Math.round(CX + Math.cos(ang) * rr);
+      var y = Math.round(CY + Math.sin(ang) * rr * 0.94);
+      var steps = 0;
+      while (steps < 480) {
+        steps++;
+        var dir = (rand() * 6) | 0;
+        var bx = nbX(y), by = nbY(y);
+        x += bx[dir]; y += by[dir];
+        if (!inside(x, y)) break;
+        if (frozen[idx(x, y)]) { x -= bx[dir]; y -= by[dir]; continue; }
+        var n = frozenNb(x, y);
+        if (n > 0) {
+          var p = n === 1 ? 1 : n === 2 ? 0.55 : 0.14;
+          var dist = Math.hypot(x - CX, y - CY);
+          p *= 0.35 + 0.65 * Math.min(1, dist / (maxR + 4));
+          if (dist < RMAX && rand() < p) {
+            stick(x, y, -9900 + got * 3);   // 나이를 골고루 — 연륜 여러 겹
+            got++;
+            if (dist > maxR) maxR = dist;
+            break;
+          }
+        }
+      }
+    }
+    return got;
+  }
+
+  // ── 녹기 — 표면(노출 ≥3) 셀을 온도 확률로 떼어 방류 입자로 바꾼다 ──
+  var drifters = [];   // {x, y, vx, vy, born, hot} 얼었다 녹아 떠도는 입자
+  function meltStep(heat, now) {
+    var tries = Math.round(MELT_RATE * heat * 10);
+    for (var i = 0; i < tries; i++) {
+      var x = (rand() * GW) | 0, y = (rand() * GH) | 0;
+      var id = idx(x, y);
+      if (!frozen[id]) continue;
+      var n = frozenNb(x, y);
+      if (n >= 6) continue;                                  // 완전 매립 셀은 안 녹는다
+      var age = now - tStick[id];
+      var pCore = Math.max(0.02, 1 - age / 5200);            // 오래된 코어는 녹을 확률이 낮다
+      var p = (n / 6) * heat * pCore * 0.5;
+      if (rand() < p) {
+        frozen[id] = 0;
+        var ang = rand() * Math.PI * 2, sp = 0.25 + rand() * 0.8;
+        drifters.push({
+          x: x * CELL + 1, y: y * CELL + 1,
+          vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+          born: now, hot: true
+        });
+      }
+    }
+  }
+
+  // ── 재응집 — 방류 입자를 결정 표면에 다시 붙인다 ──
+  function refreezeStep(now) {
+    var stuck = 0, i = 0;
+    while (i < drifters.length && stuck < FREEZE_PER_FR) {
+      var d = drifters[i];
+      // 방류 입자의 표면 스캔 — 격자 좌표로 환산해 인접 언 셀을 찾는다
+      var gx = (d.x / CELL) | 0, gy = (d.y / CELL) | 0;
+      var landed = false;
+      if (inside(gx, gy) && !frozen[idx(gx, gy)]) {
+        var n = frozenNb(gx, gy);
+        if (n > 0) {
+          var p = n === 1 ? 0.9 : n === 2 ? 0.5 : 0.12;
+          if (rand() < p) { stick(gx, gy, now); landed = true; stuck++; }
+        }
+      }
+      if (landed) drifters.splice(i, 1); else i++;
+    }
+  }
+
+  // 방류 입자 물리 — 찬 기류엔 결정 쪽으로 끌려간다(응집의 시각적 예고)
+  function stepDrifters(now, heat) {
+    for (var i = drifters.length - 1; i >= 0; i--) {
+      var d = drifters[i];
+      d.hot = now - d.born < 900;
+      var toC = [CX * CELL - d.x, CY * CELL - d.y];
+      var len = Math.hypot(toC[0], toC[1]) || 1;
+      var pull = (1 - heat) * 0.028;
+      d.vx += (toC[0] / len) * pull + (rand() - 0.5) * 0.05;
+      d.vy += (toC[1] / len) * pull + (rand() - 0.5) * 0.05;
+      var v = Math.hypot(d.vx, d.vy);
+      if (v > 1.4) { d.vx *= 1.4 / v; d.vy *= 1.4 / v; }
+      d.x += d.vx; d.y += d.vy;
+      if (d.x < 1 || d.x > W - 1 || d.y < 1 || d.y > H - 1) { drifters.splice(i, 1); }
+    }
+  }
+
+  // ── 격자 → ImageData — 나이(붙은 시각)를 파스텔 연륜으로 새긴다 ──
+  var gridCv = document.createElement('canvas'); gridCv.width = GW; gridCv.height = GH;
+  var gtx = gridCv.getContext('2d');
+  var img = gtx.createImageData(GW, GH);
+  var px = img.data;
+  var RINGS = [C_CORE, C_LILAC, C_MINT, C_PINK, C_CORE, C_LILAC];  // 나이 밴드 순환
+  function repaintGrid(now) {
+    for (var y = 0; y < GH; y++) {
+      for (var x = 0; x < GW; x++) {
+        var id = y * GW + x, o = id * 4;
+        if (!frozen[id]) { px[o + 3] = 0; continue; }
+        var age = now - tStick[id];
+        var band = ((age / 1050) | 0) % RINGS.length;    // 나이테 — 약 1초당 한 색
+        var tint = RINGS[band];
+        var k = Math.min(1, age / 500) * 0.8;
+        var lift = frozenNb(x, y) <= 2 ? 26 : 0;
+        px[o]     = Math.min(255, C_CORE[0] + (tint[0] - C_CORE[0]) * k + lift);
+        px[o + 1] = Math.min(255, C_CORE[1] + (tint[1] - C_CORE[1]) * k + lift);
+        px[o + 2] = Math.min(255, C_CORE[2] + (tint[2] - C_CORE[2]) * k + lift);
+        px[o + 3] = 255;
+      }
+    }
+    gtx.putImageData(img, 0, 0);
+  }
+
+  // ── 배경 — 온도 색온도가 도는 조명. 찬 기류 = 라일락, 더운 기류 = 핑크 워시 ──
+  var bgCv = document.createElement('canvas'); bgCv.width = W; bgCv.height = H;
+  var btx = bgCv.getContext('2d');
+  function repaintBg(now, heat) {
+    btx.globalCompositeOperation = 'source-over';
+    btx.fillStyle = rgba(C_INK, 1);
+    btx.fillRect(0, 0, W, H);
+    var warm = btx.createRadialGradient(CX * CELL, CY * CELL, 0, CX * CELL, CY * CELL, 240);
+    warm.addColorStop(0, rgba(C_LILAC, 0.13 + 0.07 * Math.sin(now / 830)));
+    warm.addColorStop(1, rgba(C_LILAC, 0));
+    btx.fillStyle = warm; btx.fillRect(0, 0, W, H);
+    var wx = W * (0.5 + 0.32 * Math.sin(now / 2300));
+    var wy = H * (0.28 + 0.16 * Math.sin(now / 1700 + 2.1));
+    var wg = btx.createRadialGradient(wx, wy, 0, wx, wy, 190);
+    wg.addColorStop(0, rgba(C_PINK, 0.04 + 0.095 * heat));   // 더워질수록 핑크 워시가 깊어진다
+    wg.addColorStop(1, rgba(C_PINK, 0));
+    btx.fillStyle = wg; btx.fillRect(0, 0, W, H);
+    var cg = btx.createRadialGradient(CX * CELL, CY * CELL, 0, CX * CELL, CY * CELL, 150);
+    cg.addColorStop(0, rgba(C_MINT, 0.08 + 0.07 * (1 - heat)));
+    cg.addColorStop(1, rgba(C_MINT, 0));
+    btx.fillStyle = cg; btx.fillRect(0, 0, W, H);
+    // 반대편 코너를 도는 두 번째 안개 — 네 겹이 각자 다른 주기로 숨쉰다
+    var ax2 = W * (0.5 - 0.34 * Math.sin(now / 2800));
+    var ay2 = H * (0.85 + 0.12 * Math.sin(now / 2000 + 1.1));
+    var ag = btx.createRadialGradient(ax2, ay2, 0, ax2, ay2, 175);
+    ag.addColorStop(0, rgba(C_MINT, 0.06 + 0.04 * Math.sin(now / 1450 + 3.1)));
+    ag.addColorStop(1, rgba(C_MINT, 0));
+    btx.fillStyle = ag; btx.fillRect(0, 0, W, H);
+  }
+
+  // ── 합성 ──
+  function draw(now, heat) {
+    repaintBg(now, heat);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1; ctx.filter = 'none';
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(bgCv, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(5px)';
+    ctx.globalAlpha = 0.24 + 0.09 * Math.sin(now / 900) + 0.05 * heat;
+    ctx.drawImage(gridCv, 0, 0, W, H);
+    ctx.filter = 'none'; ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(gridCv, 0, 0, W, H);
+    // 방류 입자 — 뜨거울 땐 핑크로 반짝, 식으면 코어 화이트로 접어든다
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < drifters.length; i++) {
+      var d = drifters[i];
+      var col = d.hot ? C_PINK : C_CORE;
+      var r = d.hot ? 1.9 : 1.4;
+      ctx.fillStyle = rgba(col, d.hot ? 0.8 : 0.55);
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 표면 반짝임 — 최근에 붙은 셀 근처에서 미세 광점이 흐른다
+    var n = 14;
+    for (var s = 0; s < n; s++) {
+      var a2 = (s / n) * Math.PI * 2 + now / 1400;
+      var rr2 = RMAX * CELL * (0.86 + 0.09 * Math.sin(now / 620 + s * 1.3));
+      var sx = CX * CELL + Math.cos(a2) * rr2;
+      var sy = CY * CELL + Math.sin(a2) * rr2 * 0.94;
+      var tw = 0.5 + 0.5 * Math.sin(now / 210 + s * 2.2);
+      ctx.fillStyle = rgba(C_MINT, 0.10 + 0.22 * tw * (1 - heat));
+      ctx.fillRect(sx - 1, sy - 1, 2, 2);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function heatOf(now) {
+    // 주기 뒷반 = 더운(녹는) 구간 — 사인으로 부드럽게 오르내린다
+    var ph = (now % CYCLE_MS) / CYCLE_MS;
+    return ph < (1 - MELT_FRAC) ? 0 : Math.sin((ph - (1 - MELT_FRAC)) / MELT_FRAC * Math.PI);
+  }
+
+  var t0 = -1;
+  function frame(nowRaw) {
+    if (t0 < 0) t0 = nowRaw;
+    var now = nowRaw - t0;
+    var heat = heatOf(now);
+    if (heat > 0) meltStep(heat, now);
+    refreezeStep(now);
+    stepDrifters(now, heat);
+    repaintGrid(now);
+    draw(now, heat);
+    requestAnimationFrame(frame);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var total = growFull();
+  valOut.textContent = (CYCLE_MS / 1000).toFixed(1);
+  if (reduce) {
+    repaintGrid(0); repaintBg(0, 0); draw(0, 0);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

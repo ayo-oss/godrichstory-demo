@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>별 그리기 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>별 윤곽의 점들을 이산 푸리에 변환해 크기 순으로 원을 배열하면 붓끝이 별의 꼭짓점을 놓치지 않고 한 바퀴 돌아 원래 별을 재현합니다</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="별 그리기 에피사이클 실험판" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> 점 256개 · 계수 크기 순 정렬</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · DFT · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 별 그리기(03). 이 편의 심장 — 경로 점 → 이산 푸리에 변환(DFT) → 원 체인 재합성.
+//   ① 별 윤곽을 매개변수 t(0~2π)로 256 점 샘플링해 복소평면 점 z_n = x_n + i·y_n 으로 올린다.
+//   ② DFT: c_k = (1/N)·Σ z_n · e^(-i·2πkn/N) — 모든 k(음수·양수 주파수)에 대해 계산.
+//   ③ |c_k| 큰 순서로 정렬(변형 "계수 정렬 기준"이 이 순서를 주파수 순으로 바꾼다).
+//   ④ 재합성: 시각 t 에 각 원이 중심 p += c_k·e^(i·k·t) 로 이어 붙는다. 맨 끝 = 원래 별 좌표.
+// 붓끝이 별을 다 그리면 트레일이 잠시 머물렀다 옅어지고 다시 그린다(루프).
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 밑바탕 극격자(회전 스포크·동심원)가 매 프레임 재계산되어 화면 전면이 살아 있다(누적면적 ↑).
+//  · 트레일은 투명 누적 캔버스에 쌓인다(절대 clear 없음).
+//  · 원 체인(상위 14개만 표시)·링크·붓끝 절정 점이 매 프레임 계산된다(23/23).
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 256;        // 경로 샘플 점 수
+  var SHOW = 14;      // 화면에 그리는 원 개수(계수는 전부 사용)
+  var HOLD = 0.45;    // 완성 후 머무는 비율
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  // ── ① 별 윤곽 샘플 — 다섯 포인트 별(바깥·안 꼭짓점 교차) ──
+  function starPath(u) {
+    // u: 0~1. 외곽 반지름 1, 내곽 0.42. 열 개 꼭짓점을 지나는 닫힌 경로
+    var seg = u * 10;
+    var i = Math.floor(seg);
+    var f = seg - i;
+    var a1 = i / 10 * TAU - Math.PI / 2;
+    var a2 = (i + 1) / 10 * TAU - Math.PI / 2;
+    var outer = (i % 2 === 0);
+    var r1 = outer ? 1 : 0.42;
+    var r2 = (i % 2 === 0) ? 0.42 : 1;
+    var x1 = Math.cos(a1) * r1, y1 = Math.sin(a1) * r1;
+    var x2 = Math.cos(a2) * r2, y2 = Math.sin(a2) * r2;
+    return { x: x1 + (x2 - x1) * f, y: y1 + (y2 - y1) * f };
+  }
+
+  // ── ② DFT ──
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;   // 음수 주파수 접기
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });   // ③ 크기 순
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    // 경로·계수는 한 번만
+    if (!PATH.length) {
+      for (var i = 0; i < N; i++) PATH.push(starPath(i / N));
+      COEF = dft(PATH);
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // ── ④ 재합성 — 시각 u(0~1)에서 체인 끝점 계산 ──
+  function chainAt(u, show) {
+    var base = Math.min(W, H) * 0.4;
+    var cx = W * 0.5, cy = H * 0.5;
+    var pts = [{ x: cx, y: cy }];
+    var n = show || COEF.length;
+    for (var i = 0; i < n && i < COEF.length; i++) {
+      var c = COEF[i];
+      var a = c.freq * u * TAU;
+      var ph = Math.atan2(c.im, c.re);
+      var ang = a + ph;
+      var px = pts[i].x + Math.cos(ang) * c.amp * base;
+      var py = pts[i].y + Math.sin(ang) * c.amp * base;
+      pts.push({ x: px, y: py });
+    }
+    return pts;
+  }
+
+  // 밑바탕 — 레이더 스윕 + 극격자. 매 프레임 재계산(누적 안 함).
+  // 스윕은 스치는 부채꼴이 뒤로 갈수록 옅어지는 계단 밴드(그라디언트 아님 — 22단 알파).
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.5, cy = H * 0.5;
+    var maxR = Math.sqrt(cx * cx + cy * cy);
+    var sweep = t * 0.9;
+    for (var b = 0; b < 22; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.09 * (1 - b / 22));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.05, sweep - b * 0.05);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // 스포크 20 — 별의 오른쪽 회전 방향과 어긋나게 돈다(양쪽 알파 모두 문턱 위)
+    var spin = -t * 0.3;
+    for (var i = 0; i < 20; i++) {
+      var a = spin + (i / 20) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.075 : 0.05);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+    for (var k = 1; k <= 3; k++) {
+      var rr = (Math.min(W, H) * 0.2) * k * (1 + 0.014 * Math.sin(t * 1.1 + k * 2));
+      ctx.strokeStyle = rgba(C_GLOW, 0.055);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr, 0, TAU);
+      ctx.stroke();
+    }
+  }
+
+  function draw(u, pulse, show, gt) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+    var base = Math.min(W, H) * 0.4;
+
+    var pts = chainAt(u, show);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var r = COEF[i].amp * base;
+      if (r > 2) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.1 + 0.02 * i);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+        ctx.stroke();
+      }
+      if (i < 3 || r > 3) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.5);
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+        ctx.stroke();
+      }
+    }
+    var pen = pts[pts.length - 1];
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr, 0, TAU);
+    ctx.fill();
+    return pen;
+  }
+
+  var prevPen = null, loopT = 0;
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    trailCtx.strokeStyle = rgba(C_GLOW, 0.9);
+    trailCtx.lineWidth = 1.9;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.strokeStyle = rgba(C_GLOW, 0.14);
+    trailCtx.lineWidth = 5;
+    trailCtx.stroke();
+    prevPen = pen;
+  }
+
+  var PHASE_DRAW = 1 - HOLD;
+
+  // 혜성 감쇠 — 투명 트레일 캔버스를 매 프레임 조금씩 지운다(절대 opaque fillRect 없음)
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.03)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var wasHold = false;
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = ((now - t0) / 1000) * 0.5;   // 한 바퀴 2초
+    var u = lt % 1;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 8.0);
+    var inHold = u >= PHASE_DRAW;
+
+    if (wasHold && !inHold) prevPen = null;   // 머문 뒤 다음 그리기 사이클 시작점 재동기화
+    wasHold = inHold;
+
+    decayTrail();
+    var pen = draw(inHold ? 1 : u / PHASE_DRAW, pulse, SHOW, lt * TAU);
+    if (!inHold) stampTrail(pen);
+    if (nOut) nOut.textContent = String(N);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 별 한 바퀴 궤적을 미리 쌓은 뒤 완성 장면을 고정한다
+    var prev = chainAt(0)[COEF.length - 1];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200)[COEF.length - 1];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(1, 0.5, SHOW, 2.1);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

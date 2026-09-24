@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위상 모프 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>Keep magnitudes, offset only the phases — the figure morphs continuously from star to petal to swirl, an experiment in what magnitude versus phase each contribute to a drawing</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="Phase Morph Demo" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> phase offset oscillates · size fixed</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · phase offset · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 위상 모프(07). 계수의 두 축 — 크기와 위상 — 중 위상만 흔든다.
+//   ① 별 경로(03 과 동일)의 DFT 계수에서 진폭은 얼리고 위상에만 오프셋 φ_k = d·k 를 더한다.
+//   ② d 가 0 이면 원래 별. d 가 커질수록 각 원의 시각이 어긋나 무늬가 별→꽃잎→소용돌이로 변한다.
+//   ③ d 를 사인파로 왕복시키면 무늬가 계속 모프한다 — 크기는 무늬의 "에너지"·위상은 "배치"임을 보여준다.
+// 두 번째 시각화: 같은 계수를 오른쪽 위상 원반(각 계수를 단위원 위의 점으로)에 띄운다 —
+// 위상이 흔들리면 점들이 원반을 따라 미끄러진다.
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 궤적이 투명 캔버스에 쌓이며 혜성 감쇠 — 모프가 지나간 자리가 잔상으로 겹친다.
+//  · 방사 스윕·스포크가 매 프레임 재계산된다. 위상 원반 점들이 매 프레임 미끄러진다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 256;
+  var SHOW = 16;       // 체인에 쓰는 계수 수
+  var SWEEP = 2.4;     // 위상 오프셋 왕복 주기(초)
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  function starPath(u) {
+    var seg = u * 10;
+    var i = Math.floor(seg);
+    var f = seg - i;
+    var a1 = i / 10 * TAU - Math.PI / 2;
+    var a2 = (i + 1) / 10 * TAU - Math.PI / 2;
+    var r1 = (i % 2 === 0) ? 1 : 0.42;
+    var r2 = (i % 2 === 0) ? 0.42 : 1;
+    var x1 = Math.cos(a1) * r1, y1 = Math.sin(a1) * r1;
+    var x2 = Math.cos(a2) * r2, y2 = Math.sin(a2) * r2;
+    return { x: x1 + (x2 - x1) * f, y: y1 + (y2 - y1) * f };
+  }
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    if (!PATH.length) {
+      for (var i = 0; i < N; i++) PATH.push(starPath(i / N));
+      COEF = dft(PATH);
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // 위상 오프셋 체인 — d 만큼 각 계수 위상을 민다
+  function chainAt(u, d, show) {
+    var base = Math.min(W, H) * 0.36;
+    var cx = W * 0.32, cy = H * 0.5;
+    var pts = [{ x: cx, y: cy }];
+    for (var i = 0; i < show && i < COEF.length; i++) {
+      var c = COEF[i];
+      var ph = Math.atan2(c.im, c.re) + c.freq * d;
+      var ang = c.freq * u * TAU + ph;
+      pts.push({
+        x: pts[i].x + Math.cos(ang) * c.amp * base,
+        y: pts[i].y + Math.sin(ang) * c.amp * base
+      });
+    }
+    return pts;
+  }
+
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    // 왼쪽 체인 자리 스윕
+    var cx = W * 0.32, cy = H * 0.5;
+    var maxR = Math.min(W, H) * 0.52;
+    var sweep = t * 0.8;
+    for (var b = 0; b < 16; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.1 * (1 - b / 16));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.06, sweep - b * 0.06);
+      ctx.closePath();
+      ctx.fill();
+    }
+    var spin = t * 0.3;
+    for (var i = 0; i < 14; i++) {
+      var a = spin + (i / 14) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.1 : 0.06);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+    // 오른쪽 위상 원반 자리 — 반대 방향 스윕(계단 밴드)
+    var px = W * 0.78, py = H * 0.5, prad = Math.min(W, H) * 0.42;
+    var sweep2 = -t * 0.95;
+    for (var b2 = 0; b2 < 12; b2++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.1 * (1 - b2 / 12));
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.arc(px, py, prad, sweep2 - (b2 + 1) * 0.07, sweep2 - b2 * 0.07);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // 하단 가로 스캔 밴드 — 전체 폭을 흐른다(계단 12단)
+    var bandY = H - 18 - ((t * 22) % (H - 24));
+    for (var sb = 0; sb < 12; sb++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.08 * (1 - sb / 12));
+      ctx.fillRect(0, bandY + sb * 5, W, 5);
+    }
+  }
+
+  function draw(u, pulse, d, gt) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+
+    var pts = chainAt(u, d, SHOW);
+    var base = Math.min(W, H) * 0.36;
+    for (var i = 0; i < pts.length - 1; i++) {
+      var r = COEF[i].amp * base;
+      if (r > 2) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.01 * i);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+        ctx.stroke();
+      }
+      if (i < 4 || r > 3) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.46);
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+        ctx.stroke();
+      }
+    }
+    var pen = pts[pts.length - 1];
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr, 0, TAU);
+    ctx.fill();
+
+    // ── 오른쪽 위상 원반 — 상위 계수의 위상을 단위원 위 점으로 ──
+    var px = W * 0.78, py = H * 0.5, prad = Math.min(W, H) * 0.3;
+    ctx.strokeStyle = rgba(C_GLOW, 0.22);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(px, py, prad, 0, TAU);
+    ctx.stroke();
+    ctx.strokeStyle = rgba(C_GLOW, 0.1);
+    ctx.beginPath();
+    ctx.moveTo(px - prad - 6, py); ctx.lineTo(px + prad + 6, py);
+    ctx.moveTo(px, py - prad - 6); ctx.lineTo(px, py + prad + 6);
+    ctx.stroke();
+    // 계수별 위상 각도(오프셋 적용 뒤)에 점 — 주파수 비례 반지름
+    for (var k = 0; k < 12 && k < COEF.length; k++) {
+      var c = COEF[k];
+      var ph2 = Math.atan2(c.im, c.re) + c.freq * d;
+      var rr = prad * (1 - k / 14);
+      var qx = px + Math.cos(ph2) * rr, qy = py + Math.sin(ph2) * rr;
+      ctx.fillStyle = rgba(k === 0 ? C_HOT : C_GLOW, 0.85);
+      ctx.beginPath();
+      ctx.arc(qx, qy, k === 0 ? 3 : 2, 0, TAU);
+      ctx.fill();
+    }
+    return pen;
+  }
+
+  var prevPen = null;
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    // globalAlpha 로 코어/확산 두께를 한 경로에서 두 번 칠한다(계수 개수가 흔들려도 잔상이 곱해진다)
+    trailCtx.globalAlpha = 0.8;
+    trailCtx.strokeStyle = rgba(C_GLOW, 1);
+    trailCtx.lineWidth = 1.7;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.globalAlpha = 0.12;
+    trailCtx.lineWidth = 4.4;
+    trailCtx.stroke();
+    trailCtx.globalAlpha = 1;
+    prevPen = pen;
+  }
+
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.03)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = (now - t0) / 1000;
+    var u = (lt * 0.5) % 1;
+    var d = Math.sin(lt * TAU / SWEEP) * 0.8;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 8.0);
+    decayTrail();
+    var pen = draw(u, pulse, d, lt * TAU);
+    stampTrail(pen);
+    if (nOut) nOut.textContent = String(SHOW);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    var prev = chainAt(0, 0, SHOW)[SHOW];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200, 0, SHOW)[SHOW];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(0.5, 0.5, 0, 2.1);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

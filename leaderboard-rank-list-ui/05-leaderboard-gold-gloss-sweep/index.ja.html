@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1位の行に金色の光沢が流れるリーダーボード — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbg is-demo" id="lbg">
+  <ul class="lbg__list" id="lbgList" role="list"></ul>
+  <p class="lbg__sr" id="lbgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_GOLD_SWEEP_FAST_MS = 520;
+  var LEADERBOARD_GOLD_SWEEP_SLOW_MS = 1300;
+  var LEADERBOARD_GOLD_TICK_MS = 460;
+  var LEADERBOARD_GOLD_RGB = "255,210,63";
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  function smoothstep(x) {
+    var c = Math.max(0, Math.min(1, x));
+    return c * c * (3 - 2 * c);
+  }
+
+  var root = document.getElementById("lbg");
+  var list = document.getElementById("lbgList");
+  var sr = document.getElementById("lbgSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "AMBER7", score: 940 },
+    { id: "p2", name: "FLARE2", score: 905 },
+    { id: "p3", name: "QUILL8", score: 870 },
+    { id: "p4", name: "NOMAD5", score: 835 },
+    { id: "p5", name: "WISP_3", score: 800 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function sortedPlayers() {
+    return players.slice().sort(function (a, b) { return b.score - a.score; });
+  }
+
+  var prevGoldId = null;
+
+  function relayout(announce) {
+    var order = sortedPlayers();
+    order.forEach(function (p, i) {
+      list.appendChild(nodes[p.id].li);
+      nodes[p.id].rank.textContent = String(i + 1);
+      nodes[p.id].score.textContent = String(p.score);
+      nodes[p.id].li.classList.toggle("lbg__row--gold", i === 0);
+    });
+    if (order[0].id !== prevGoldId) {
+      if (prevGoldId && nodes[prevGoldId]) {
+        nodes[prevGoldId].li.style.boxShadow = "";
+        nodes[prevGoldId].li.style.background = "";
+      }
+      prevGoldId = order[0].id;
+    }
+    if (announce) sr.textContent = order[0].name + " が1位、スコア " + order[0].score;
+    return order;
+  }
+
+  function bump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    p.score += 15 + Math.floor(rand() * 30);
+    relayout(true);
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbg__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var rank = document.createElement("span");
+    rank.className = "lbg__rank";
+    var name = document.createElement("span");
+    name.className = "lbg__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbg__score";
+    var sweep = document.createElement("span");
+    sweep.className = "lbg__sweep";
+    sweep.setAttribute("aria-hidden", "true");
+
+    li.appendChild(rank);
+    li.appendChild(name);
+    li.appendChild(score);
+    li.appendChild(sweep);
+
+    nodes[p.id] = { li: li, rank: rank, score: score, sweep: sweep };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+
+    list.appendChild(li);
+  });
+
+  relayout(false);
+
+  // 계산 겹: 1위와 2위의 スコア 차(marginRatio)로 광택이 흐르는 주기를 매 프레임 다시 잰다 —
+  // 격차가 클수록 느긋하게, 격차가 좁을수록 빠르게 흐른다. 위치는 smoothstep 로 완만하게 이징한다.
+  // 같은 위상(phase)을 sin 으로 접어 "쓸고 지나가는 가운데"에서 정점을 찍는 hump 로 만들고,
+  // 1등 행 배경 톤·그림자(box-shadow, overflow:hidden 밖으로 번짐)에 그대로 전파한다.
+  function sweepFrame(now) {
+    var order = sortedPlayers();
+    var goldNode = nodes[order[0].id];
+    var margin = order.length > 1
+      ? Math.max(0, Math.min(1, (order[0].score - order[1].score) / order[0].score))
+      : 1;
+    var period = LEADERBOARD_GOLD_SWEEP_FAST_MS + margin * (LEADERBOARD_GOLD_SWEEP_SLOW_MS - LEADERBOARD_GOLD_SWEEP_FAST_MS);
+    var phase = (now % period) / period;
+    var pos = smoothstep(phase) * 160 - 30;
+    goldNode.sweep.style.transform = "translateX(" + pos.toFixed(1) + "%) skewX(-18deg)";
+    var hump = Math.sin(phase * Math.PI);
+    goldNode.li.style.boxShadow =
+      "0 0 " + (6 + hump * 22).toFixed(1) + "px rgba(" + LEADERBOARD_GOLD_RGB + "," + (0.25 + hump * 0.45).toFixed(3) + "), " +
+      "0 " + (2 + hump * 9).toFixed(1) + "px " + (10 + hump * 16).toFixed(1) + "px rgba(0,0,0," + (0.22 * hump).toFixed(3) + ")";
+    goldNode.li.style.background = "rgba(" + LEADERBOARD_GOLD_RGB + "," + (0.12 + hump * 0.26).toFixed(3) + ")";
+    requestAnimationFrame(sweepFrame);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(sweepFrame);
+    (function loop() {
+      if (root.classList.contains("is-demo")) {
+        var order = sortedPlayers();
+        var idx = Math.floor(rand() * order.length);
+        order[idx].score += 12 + Math.floor(rand() * 24);
+        relayout(true);
+      }
+      window.setTimeout(loop, LEADERBOARD_GOLD_TICK_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

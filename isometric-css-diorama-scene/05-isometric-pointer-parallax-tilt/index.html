@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터 시차 기울임 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pt" id="pt">
+  <p class="pt__hint">등각 기본 각도 위에 포인터 위치를 clamp() 로 가둔 만큼만 더 기울입니다 — 손을 떼면 자동으로 훑습니다</p>
+  <div class="pt__field" role="application" aria-label="포인터를 올리면 등각 장면이 시차만큼 기울고, 손을 떼면 자동으로 훑는 장면" tabindex="0" id="field">
+    <div class="pt__tilt" id="tilt">
+      <div class="pt__world" id="world"></div>
+    </div>
+  </div>
+  <p class="pt__meta">기울임 x <b id="rx">0</b>° · y <b id="ry">0</b>°</p>
+</div>
+</main>
+<script>
+// 포인터 시차 기울임(05) — 등각 고정 각도(35.264°) 는 그대로 두고, 그 바깥 래퍼에
+// 포인터 좌표를 clamp() 로 제한한 소량의 rotateX/rotateY 를 더해 "시차"를 만든다.
+// 실제 포인터가 들어오면 pointermove 로 목표각을 갱신하고, 1.1초 넘게 입력이 없으면
+// requestAnimationFrame 루프가 자체 계산한 경로로 자동 훑기를 재개한다(자동 시연).
+(function () {
+  var root = document.getElementById('pt');
+  var field = document.getElementById('field');
+  var tilt = document.getElementById('tilt');
+  var world = document.getElementById('world');
+  var rxEl = document.getElementById('rx');
+  var ryEl = document.getElementById('ry');
+  if (!root || !field || !tilt || !world || !rxEl || !ryEl) return;
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function mat4RotateX(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  }
+  function mat4RotateZ(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+  function mat4Mul(a, b) {
+    var out = new Array(16);
+    for (var col = 0; col < 4; col++) {
+      for (var row = 0; row < 4; row++) {
+        var sum = 0;
+        for (var k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+  function mat4ToCss(m) {
+    var s = '';
+    for (var i = 0; i < m.length; i++) s += (i ? ',' : '') + m[i].toFixed(6);
+    return 'matrix3d(' + s + ')';
+  }
+
+  var TILT = -35.264;
+  world.style.transform = mat4ToCss(mat4Mul(mat4RotateX(TILT), mat4RotateZ(45)));
+
+  var mm = window.matchMedia('(max-width: 340px)').matches;
+  var TILE_W = mm ? 30 : 38, TILE_H = mm ? 15 : 19;
+  var N = 3;
+  for (var row = 0; row < N; row++) {
+    for (var col = 0; col < N; col++) {
+      var b = document.createElement('div');
+      b.className = 'pt__block';
+      var x = (col - row) * TILE_W / 2;
+      var y = (col + row) * TILE_H / 2;
+      b.style.setProperty('--tx', x.toFixed(2) + 'px');
+      b.style.setProperty('--ty', y.toFixed(2) + 'px');
+      b.style.zIndex = String(Math.round((col + row) * 10));
+      world.appendChild(b);
+    }
+  }
+
+  var LIMIT = 9;           // 최대 기울임 각도(도) — clamp 의 상하한
+  var targetX = 0, targetY = 0;
+  var curX = 0, curY = 0;
+  var lastInput = -Infinity;
+  var IDLE_MS = 1100;
+
+  field.addEventListener('pointermove', function (ev) {
+    var rect = field.getBoundingClientRect();
+    var nx = ((ev.clientX - rect.left) / rect.width) * 2 - 1;   // -1..1
+    var ny = ((ev.clientY - rect.top) / rect.height) * 2 - 1;
+    targetX = clamp(-ny * LIMIT, -LIMIT, LIMIT);
+    targetY = clamp(nx * LIMIT, -LIMIT, LIMIT);
+    lastInput = performance.now();
+  });
+  field.addEventListener('pointerleave', function () { lastInput = -Infinity; });
+
+  function autoPath(t) {
+    targetX = Math.sin(t * 0.6) * LIMIT * 0.85;
+    targetY = Math.cos(t * 0.42) * LIMIT;
+  }
+
+  function paint(now, t) {
+    if (now - lastInput > IDLE_MS) autoPath(t);
+    curX += (targetX - curX) * 0.16;
+    curY += (targetY - curY) * 0.16;
+    tilt.style.transform = 'rotateX(' + curX.toFixed(2) + 'deg) rotateY(' + curY.toFixed(2) + 'deg)';
+    rxEl.textContent = curX.toFixed(1);
+    ryEl.textContent = curY.toFixed(1);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    autoPath(0.7);
+    curX = targetX; curY = targetY;
+    paint(0, 0.7);
+    root.classList.add('is-still');
+  } else {
+    var start = performance.now();
+    (function step(now) {
+      paint(now, (now - start) / 1000);
+      requestAnimationFrame(step);
+    })(start);
+  }
+})();
+</script>
+</body>
+</html>

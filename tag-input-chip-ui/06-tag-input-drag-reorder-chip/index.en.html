@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tag chip input reordered by dragging — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dr is-demo" id="dr">
+  <ul class="dr__row" id="drRow" role="listbox" aria-label="Tag order, drag to reorder">
+    <li class="dr__chip" id="drChip0" role="option" aria-selected="false" tabindex="0" data-word="Planning">Planning</li>
+    <li class="dr__chip" id="drChip1" role="option" aria-selected="false" tabindex="0" data-word="Design">Design</li>
+    <li class="dr__chip" id="drChip2" role="option" aria-selected="false" tabindex="0" data-word="Dev">Dev</li>
+    <li class="dr__chip" id="drChip3" role="option" aria-selected="false" tabindex="0" data-word="QA">QA</li>
+  </ul>
+  <p class="dr__meta">Order: <b id="drOrder">Plan, Design, Dev, QA</b></p>
+  <p class="dr__sr" role="status" aria-live="polite" id="drLive"></p>
+</div>
+<script>
+(function () {
+  var HOLD_MS = 700, BACK_MS = 700, PAUSE_MS = 500;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('dr');
+  var row = document.getElementById('drRow');
+  var orderEl = document.getElementById('drOrder');
+  var live = document.getElementById('drLive');
+
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+  function orderText() {
+    return Array.prototype.map.call(row.children, function (c) { return c.dataset.word; }).join(', ');
+  }
+  function renderOrder() { orderEl.textContent = orderText(); }
+
+  var dragEl = null, startClientX = 0, swapCompensation = 0, lastDx = 0, dragging = false;
+
+  function applyTransform(dx) {
+    lastDx = dx;
+    dragEl.style.transform = 'translateX(' + (dx + swapCompensation) + 'px)';
+  }
+
+  // 계산 겹: 잡은 칩의 화면 중심 x 를 이웃 칩의 중심 x 와 계속 비교해, 지나치는 순간에만 DOM 순서를 바꾼다.
+  function checkSwap() {
+    var dr = dragEl.getBoundingClientRect();
+    var dragCenter = dr.left + dr.width / 2;
+    var prev = dragEl.previousElementSibling;
+    if (prev) {
+      var pr = prev.getBoundingClientRect();
+      if (dragCenter < pr.left + pr.width / 2) { doSwap(prev, true); return; }
+    }
+    var next = dragEl.nextElementSibling;
+    if (next) {
+      var nr = next.getBoundingClientRect();
+      if (dragCenter > nr.left + nr.width / 2) { doSwap(next, false); return; }
+    }
+  }
+
+  function doSwap(sibling, moveBefore) {
+    var oldLeft = dragEl.offsetLeft;
+    if (moveBefore) { row.insertBefore(dragEl, sibling); }
+    else { row.insertBefore(sibling, dragEl); }
+    var newLeft = dragEl.offsetLeft;
+    swapCompensation += (oldLeft - newLeft);
+    applyTransform(lastDx);
+    renderOrder();
+    live.textContent = orderText();
+  }
+
+  function onPointerMove(e) {
+    if (!dragging) return;
+    e.preventDefault();
+    applyTransform(e.clientX - startClientX);
+    checkSwap();
+  }
+
+  function onPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    dragEl.classList.remove('dr__chip--dragging');
+    dragEl.style.transform = '';
+    swapCompensation = 0;
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    dragEl = null;
+  }
+
+  function startDrag(chip, clientX, trusted) {
+    if (trusted) human();
+    dragging = true;
+    dragEl = chip;
+    startClientX = clientX;
+    swapCompensation = 0;
+    chip.classList.add('dr__chip--dragging');
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  }
+
+  Array.prototype.forEach.call(row.children, function (chip) {
+    chip.addEventListener('pointerdown', function (e) {
+      startDrag(chip, e.clientX, e.isTrusted);
+    });
+    chip.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      human();
+      var sib = e.key === 'ArrowLeft' ? chip.previousElementSibling : chip.nextElementSibling;
+      if (!sib) return;
+      if (e.key === 'ArrowLeft') row.insertBefore(chip, sib); else row.insertBefore(sib, chip);
+      renderOrder();
+      live.textContent = orderText();
+      chip.focus({ preventScroll: true });
+    });
+  });
+
+  var timer = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function simFrom(chip, fromX, toX, ms, cb) {
+    var t0 = null;
+    function step(ts) {
+      if (!root.classList.contains('is-demo')) return;
+      if (t0 === null) t0 = ts;
+      var p = Math.min(1, (ts - t0) / ms);
+      var x = fromX + (toX - fromX) * p;
+      dragEl && onPointerMove({ clientX: x, preventDefault: function () {} });
+      if (p < 1) { requestAnimationFrame(step); } else { cb && cb(); }
+    }
+    requestAnimationFrame(step);
+  }
+
+  function loop() {
+    if (!root.classList.contains('is-demo')) return;
+    var chip = row.children[0];
+    var r0 = chip.getBoundingClientRect();
+    var startX = r0.left + r0.width / 2;
+    var endX = startX + 170;
+    startDrag(chip, startX, false);
+    simFrom(chip, startX, endX, HOLD_MS, function () {
+      onPointerUp();
+      schedule(function () {
+        if (!root.classList.contains('is-demo')) return;
+        var back = row.children[row.children.length - 1];
+        var rb = back.getBoundingClientRect();
+        var bStart = rb.left + rb.width / 2;
+        var bEnd = bStart - 170;
+        startDrag(back, bStart, false);
+        simFrom(back, bStart, bEnd, BACK_MS, function () {
+          onPointerUp();
+          schedule(loop, PAUSE_MS);
+        });
+      }, PAUSE_MS);
+    });
+  }
+
+  renderOrder();
+  if (!reduce) {
+    schedule(loop, 300);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

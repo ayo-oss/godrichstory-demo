@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>흐름장 값이 커질수록 연기 기둥이 위로 갈수록 더 크게 옆으로 휘어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">흐름장 값이 커질수록 연기 기둥이 위로 갈수록 더 크게 옆으로 휘어진다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 값 노이즈로 만든 방향장(flow field)의 각도를 입자 위치·시간에서 샘플링해 수평
+  // 속도로 쓴다. 흐름장 세기(WIND_FLOW_STRENGTH)에 바람이 부는 세기가 시간에 따라 오르내리는
+  // 게인(gustEnvelope)을 곱해, 같은 상수라도 순간마다 휘는 정도가 달라지는 걸 보여준다.
+  // 높이 비율(f)을 곱해 위로 갈수록 휘어짐이 커지도록 전파한다.
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_RISE_SPEED_PX = 26;
+  var WIND_FLOW_STRENGTH = 60;
+  var PLUME_SPAWN_PER_S = 40;
+  var PLUME_LIFE_MS = 2400;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423021);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+  function flowAngle(x, y, t) {
+    return (valueNoise2D(x * 0.06, y * 0.06 + t * 0.0004) - 0.5) * Math.PI * 2.2;
+  }
+  function gustEnvelope(t) {
+    return 0.5 + 0.5 * Math.sin(t * 0.0009);
+  }
+
+  var pRand = seedRand(423022);
+  var particles = [];
+  var spawnAcc = 0;
+
+  function spawn(bornMs) {
+    particles.push({
+      x: CALC_W * 0.5 + (pRand() - 0.5) * 8,
+      y: CALC_H - 6,
+      born: bornMs
+    });
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * PLUME_SPAWN_PER_S / 1000;
+    while (spawnAcc >= 1) { spawn(nowMs); spawnAcc -= 1; }
+    var gust = gustEnvelope(nowMs);
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var ang = flowAngle(p.x, p.y, nowMs);
+      p.x += Math.sin(ang) * WIND_FLOW_STRENGTH * gust * f * dtS;
+      p.y -= SMOKE_RISE_SPEED_PX * dtS;
+      if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var r = 6 + f * 26;
+      var alpha = Math.sin(f * Math.PI) * 0.6;
+      if (alpha <= 0.01) continue;
+      var dx = p.x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(40,34,26,' + alpha + ')');
+      g.addColorStop(1, 'rgba(40,34,26,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 160 : 120;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

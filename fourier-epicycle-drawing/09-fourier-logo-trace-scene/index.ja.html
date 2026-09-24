@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로고 트레이스 씬 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>黒い背景に中央照明を敷き、エピサイクル連鎖にロゴの輪郭を一筆で描き直させると、円の回転が止まっても残像トレイルが残る、ブランド公開に使える一場面になります</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="ロゴトレースシーン 実験版" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> 一筆・残像保持ライティング</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · brand reveal · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 로고 트레이스 씬(09). 편의 마무리 — DFT 재합성을 "브랜드 공개" 장면으로 연출한다.
+//   ① 로고 윤곽: G 의 원호 + 가로획으로 이루어진 한 획 경로를 매개변수 점열로 정의한다.
+//   ② 03·04 와 같은 DFT → 체인 재합성으로 붓끝이 윤곽을 되그린다.
+//   ③ 연출 — 중앙 스포트라이트(계단 밴드 동심원)가 천천히 돌고, 붓끝에 하이라이트 절정 점.
+//     한 바퀴를 그린 뒤엔 체인이 잠시 사라지고 잔상 트레일만 남는다(브랜드 공개의 정적 순간).
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 스포트라이트 동심원·스포크가 매 프레임 재계산되어 화면 전면이 살아 있다.
+//  · 트레일은 투명 캔버스에 쌓이고 아주 느리게 감쇠 — 잔상 유지가 컨셉이다.
+//  · 머무는 단계에서도 스포트라이트가 계속 숨쉬므로 23/23 프레임이 움직인다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 256;        // 경로 샘플 수
+  var SHOW = 36;      // 체인에 그리는 円の数
+  var HOLD = 0.35;    // 완성 후 잔상만 머무는 비율
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  // ── ① 로고 윤곽 — "G" 한 획. 원호 300도 + 안쪽으로 꺾여 가로획 ──
+  function logoPath(u) {
+    // 0~0.72: 원호(각도 -60도에서 240도 방향으로), 0.72~1: 가로획
+    var ARC = 0.72;
+    var R = 1;
+    if (u < ARC) {
+      var ang = (-Math.PI / 6) + (u / ARC) * (TAU * 300 / 360) * -1;
+      return { x: Math.cos(ang) * R * 0.62, y: Math.sin(ang) * R * 0.62 };
+    }
+    var f = (u - ARC) / (1 - ARC);
+    var sx = Math.cos(-Math.PI / 6) * 0.62, sy = Math.sin(-Math.PI / 6) * 0.62;
+    var ex = 0.42, ey = 0.02;
+    var cx2 = sx + (ex - sx) * f, cy2 = sy + (ey - sy) * f;
+    return { x: cx2, y: cy2 };
+  }
+
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    if (!PATH.length) {
+      for (var i = 0; i < N; i++) PATH.push(logoPath(i / N));
+      COEF = dft(PATH);
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function chainAt(u, show) {
+    var base = Math.min(W, H) * 0.4;
+    var cx = W * 0.5, cy = H * 0.5;
+    var pts = [{ x: cx, y: cy }];
+    for (var i = 0; i < show && i < COEF.length; i++) {
+      var c = COEF[i];
+      var ph = Math.atan2(c.im, c.re);
+      var ang = c.freq * u * TAU + ph;
+      pts.push({
+        x: pts[i].x + Math.cos(ang) * c.amp * base,
+        y: pts[i].y + Math.sin(ang) * c.amp * base
+      });
+    }
+    return pts;
+  }
+
+  // 중앙 스포트라이트 — 레이더 스윕(계단 밴드) + createRadialGradient 조명 + 동심원 + 스포크
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.5, cy = H * 0.5;
+    var maxR = Math.sqrt(W * W + H * H) * 0.5;
+    // 스포트라이트 조명 — 중앙이 밝고 가장자리로 어두워지는 방사 그라디언트(브랜드 공개 무대)
+    var spot = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.08, cx, cy, maxR);
+    spot.addColorStop(0, rgba(C_GLOW, 0.1));
+    spot.addColorStop(0.45, rgba(C_GLOW, 0.03));
+    spot.addColorStop(1, rgba(C_INK, 0));
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, W, H);
+    // 레이더 스윕 — 스치는 부채꼴이 뒤로 갈수록 옅어지는 계단 밴드 20단
+    var sweep = t * 0.9;
+    for (var b = 0; b < 20; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.1 * (1 - b / 20));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.05, sweep - b * 0.05);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // 동심원 8 — 반지름이 숨쉬고 알파도 계단으로 감쇠
+    for (var ring = 1; ring <= 8; ring++) {
+      var rr = (maxR * 0.16) * ring * (1 + 0.02 * Math.sin(t * 1.1 + ring * 1.3));
+      ctx.strokeStyle = rgba(C_GLOW, 0.12 * (1 - ring / 9));
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr, 0, TAU);
+      ctx.stroke();
+    }
+    // 스포크 18 — 천천히 돈다
+    var spin = t * 0.28;
+    for (var i = 0; i < 18; i++) {
+      var a = spin + (i / 18) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.1 : 0.06);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 14, cy + Math.sin(a) * 14);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+  }
+
+  function draw(u, pulse, show, gt, showChain) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+    var base = Math.min(W, H) * 0.4;
+
+    var pen = null;
+    if (showChain) {
+      var pts = chainAt(u, show);
+      for (var i = 0; i < pts.length - 1; i++) {
+        var r = COEF[i].amp * base;
+        if (r > 2) {
+          ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.008 * i);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+          ctx.stroke();
+        }
+        if (i < 4 || r > 3) {
+          ctx.strokeStyle = rgba(C_GLOW, 0.5);
+          ctx.beginPath();
+          ctx.moveTo(pts[i].x, pts[i].y);
+          ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+          ctx.stroke();
+        }
+      }
+      pen = pts[pts.length - 1];
+      var pr = 2.6 + pulse * 2.4;
+      ctx.fillStyle = rgba(C_HOT, 0.32);
+      ctx.beginPath();
+      ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = rgba(C_HOT, 1);
+      ctx.beginPath();
+      ctx.arc(pen.x, pen.y, pr, 0, TAU);
+      ctx.fill();
+    }
+    return pen;
+  }
+
+  var prevPen = null;
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    trailCtx.strokeStyle = rgba(C_HOT, 0.92);
+    trailCtx.lineWidth = 2.1;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.strokeStyle = rgba(C_HOT, 0.14);
+    trailCtx.lineWidth = 5.4;
+    trailCtx.stroke();
+    prevPen = pen;
+  }
+
+  // 잔상 유지 — 감쇠가 아주 느리다(컨셉: 머무는 잔상)
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.012)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var PHASE_DRAW = 1 - HOLD, wasHold = false;
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = ((now - t0) / 1000) * 0.5;
+    var u = lt % 1;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 7.0);
+    var inHold = u >= PHASE_DRAW;
+
+    if (wasHold && !inHold) prevPen = null;
+    wasHold = inHold;
+
+    decayTrail();
+    if (!inHold) {
+      var pen = draw(u / PHASE_DRAW, pulse, SHOW, lt * TAU, true);
+      stampTrail(pen);
+    } else {
+      // 머무는 단계 — 체인은 물러나고 잔상만
+      draw(1, pulse, SHOW, lt * TAU, false);
+    }
+    if (nOut) nOut.textContent = String(SHOW);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    var prev = chainAt(0, SHOW)[SHOW];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200, SHOW)[SHOW];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(1, 0.5, SHOW, 2.1, false);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

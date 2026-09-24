@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>탈출 시간 기본 — 만델브로 탈출 시간 프랙탈 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>화면 모든 픽셀을 복소수 c 로 삼아 z = z² + c 를 반복하고, 크기가 2를 넘어 발산하기까지의 횟수를 색으로 칠하면 심장 모양 명치와 전구가 나타납니다</span>
+  </p>
+  <div class="mb__field" role="application" aria-label="탈출 시간 기본 실험판" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta">내부 해상도 240px · 최대 반복 96</span>
+    <span class="mb__meta mb__meta--dim">canvas · z = z² + c · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 탈출 시간 기본(01) — 만델브로 집합의 첫 장면.
+// 모든 픽셀 = 복소수 c. z 를 0 에서 시작해 z = z² + c 를 반복하고 |z| > 2 가 되는 순간의
+// 반복 횟수 n 이 그 픽셀의 색이 된다. 96회 안에 발산하지 않는 픽셀은 집합 내부로 본다(먹색).
+// 움직임 = 팔레트 순환. 반복 횟수는 정수라 색 띠는 계단형인데(띠가 시각적으로 계단인 게 08 번
+// 스무스 채색으로 넘어가는 다리 역할), 띠 전체가 위상을 옮겨 순환하면 명치 가장자리가 물결처럼 흐른다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var MAXIT  = 96;    // 최대 반복 횟수 — 깊이와 계산량의 비율
+  var CYCLE  = 2.0;   // 팔레트 순환 주기(초) — 설정 초(2s)와 같아 한 바퀴가 한 루프
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var field = document.getElementById('mbCv').parentElement;
+  var cv = document.getElementById('mbCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  // 렌더러가 읽는 색 — 팔레트 5색(짙은 남보라 → 라벤더 → 크림 → 복숭아 → 다시 짙은 보라)
+  var PAL = ['--mb-c0', '--mb-c1', '--mb-c2', '--mb-c3', '--mb-c4'].map(tokRGB);
+  var C_SET  = tokRGB('--mb-set');   // 집합 내부 — 먹보라
+  var C_INK  = tokRGB('--mb-ink');   // 관측창 바닥
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, IRES = 240;              // 내부 계산 해상도(가로 픽셀) — 성능 조절 노브
+  var ov, octx;                             // 저해상도 오프스크린 캔버스
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ov = document.createElement('canvas');
+    ov.width = IRES; ov.height = Math.max(2, Math.round(IRES * H / W));
+  }
+
+  // c 평면 뷰포트 — 만덜브로 표준 프레임(가로 -2.5 ~ 1.0, 세로 ±1.15 근사)
+  var CX = -0.75, CY = 0, SPAN = 2.9;
+
+  function render(phase) {
+    var iw = ov.width, ih = ov.height;
+    var img = octx.createImageData(iw, ih);
+    var px = img.data;
+    var dx = SPAN / iw, dy = SPAN / iw;      // dy 를 dx 와 같게 — 정사각 픽셀(종횡비 보정)
+    var oy0 = CY - (ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var ci = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var cr = CX - SPAN / 2 + i * dx;
+        // z = 0 부터 z = z² + c 반복 — 발산 시점의 n 이 색 인덱스
+        var zr = 0, zi = 0, n = 0;
+        while (n < MAXIT && zr * zr + zi * zi <= 4) {
+          var t = zr * zr - zi * zi + cr;
+          zi = 2 * zr * zi + ci;
+          zr = t;
+          n++;
+        }
+        var r, g, b;
+        if (n >= MAXIT) {
+          r = C_SET[0]; g = C_SET[1]; b = C_SET[2];
+        } else {
+          // 팔레트 순환 — n 에 phase 를 더해 5색 파장을 반복 통과시킨다
+          var u = (n / MAXIT) * 4 + phase;
+          var seg = u - Math.floor(u / 4) * 4;
+          var a = PAL[Math.floor(seg) % 4], bb = PAL[(Math.floor(seg) + 1) % 4];
+          var f = seg - Math.floor(seg);
+          r = a[0] + (bb[0] - a[0]) * f;
+          g = a[1] + (bb[1] - a[1]) * f;
+          b = a[2] + (bb[2] - a[2]) * f;
+        }
+        px[k++] = r; px[k++] = g; px[k++] = b; px[k++] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    var ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(ov, 0, 0, W, H);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % CYCLE;   // 2초 주기 순환 — 결정론 루프
+    render((loop / CYCLE) * 4);               // 파장 4칸을 주기 안에 한 바퀴
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.6 : ((performance.now() - t0) / 1000 % CYCLE) / CYCLE * 4);
+  });
+
+  fit();
+  octx = ov.getContext('2d');
+  if (reduce) {
+    render(0.6);                              // reduce — 순환 한 장면만 고정
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

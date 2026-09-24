@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>팀 히어로 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="hero" id="hero">
+  <p class="hero__hint" id="heroHint">섹션이 화면에 들어온 시점 하나만 기준으로 인원수에 맞춰 등장 간격을 압축합니다</p>
+  <div class="hero__row" id="heroRow" aria-label="팀원 사진 줄" role="list">
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M1</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M2</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M3</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M4</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M5</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M6</span></div>
+    <div class="hero__avatar" role="listitem"><canvas class="hero__cv" width="48" height="48" aria-hidden="true"></canvas><span class="hero__tag">M7</span></div>
+  </div>
+  <p class="hero__meta"><span class="hero__chip" id="heroChip">n=5 · step 96ms</span></p>
+</section>
+</main>
+<script>
+// 팀 히어로(01) — IntersectionObserver 로 섹션이 화면에 들어온 시점 하나만 기준을 잡고,
+// 등장 예산(ENTRANCE_MS)을 그 순간의 인원수로 나눠 인덱스마다 곱하는 간격(step)을 매번 계산한다.
+// 인원이 늘어도 등장 예산은 고정이라 총 등장 시간이 무한히 늘지 않는다(계산 한 겹).
+// 자동 시연은 인원수를 5·7·4·6 으로 순환시켜 매번 다시 계산되는 것을 보여준다.
+(function () {
+  var hero = document.getElementById('hero');
+  var row = document.getElementById('heroRow');
+  var chip = document.getElementById('heroChip');
+  if (!hero || !row || !chip) return;
+  var avatars = Array.prototype.slice.call(row.querySelectorAll('.hero__avatar'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  var HEXES = ['#9fc9ec', '#93d9c0', '#b9a0ff', '#f6c6d3'];
+
+  function drawAvatar(cv, seed, label) {
+    var ctx = cv.getContext('2d');
+    if (!ctx) return;
+    var rnd = mulberry32(seed);
+    var s = cv.width;
+    ctx.clearRect(0, 0, s, s);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(s / 2, s / 2, s / 2, 0, Math.PI * 2); ctx.clip();
+    var cell = 8;
+    for (var y = 0; y < s; y += cell) {
+      for (var x = 0; x < s; x += cell) {
+        var v = rnd();
+        ctx.fillStyle = v > .5 ? HEXES[Math.floor(rnd() * HEXES.length)] : 'rgba(23,20,26,.10)';
+        ctx.fillRect(x, y, cell, cell);
+      }
+    }
+    ctx.restore();
+    ctx.fillStyle = 'rgba(23,20,26,.55)';
+    ctx.beginPath(); ctx.arc(s / 2, s / 2, s / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff7e6';
+    ctx.font = '700 ' + Math.round(s * .38) + 'px -apple-system, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, s / 2, s / 2 + 1);
+  }
+
+  avatars.forEach(function (el, i) {
+    var cv = el.querySelector('.hero__cv');
+    if (cv) drawAvatar(cv, 31 + i * 17, 'M' + (i + 1));
+  });
+
+  var ENTRANCE_MS = 480;   // 등장 예산 — 인원수와 무관하게 고정
+  var counts = [5, 7, 4, 6];
+  var idx = 0;
+
+  // 등장 간격 계산 — 예산을 이번 인원수로 나눈 몫이 step, 인덱스를 인원수로 나눈 나머지로
+  // 매 순환마다 압축 폭을 다시 맞춘다(headcount 가 바뀌어도 같은 공식 재사용)
+  function layout(count) {
+    var step = ENTRANCE_MS / count;
+    avatars.forEach(function (el, i) {
+      var visible = i < count;
+      el.style.display = visible ? '' : 'none';
+      if (visible) el.style.setProperty('--delay', ((i % count) * step).toFixed(1) + 'ms');
+    });
+    chip.textContent = 'n=' + count + ' · step ' + Math.round(step) + 'ms';
+    row.classList.remove('is-in');
+    void row.offsetWidth;   // 강제 리플로우 — 트랜지션 재시작
+    row.classList.add('is-in');
+  }
+
+  var fired = false;
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting && !fired) { fired = true; layout(counts[0]); }
+    });
+  }, { threshold: .3 });
+  io.observe(hero);
+
+  if (reduce) {
+    layout(counts[0]);
+  } else {
+    layout(counts[0]);
+    setInterval(function () {
+      idx = (idx + 1) % counts.length;
+      layout(counts[idx]);
+    }, 650);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>デバウンス・スケルトン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="db" id="db">
+  <p class="db__hint">入力が止まって300ms後に一度だけ検索します</p>
+  <div class="db__field" role="combobox" aria-expanded="false" aria-owns="dbList" aria-haspopup="listbox" id="dbField">
+    <svg class="db__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M192 112a80 80 0 1 1-80-80a80 80 0 0 1 80 80" opacity=".35"/><path d="m229.66 218.34l-50.06-50.06a88.21 88.21 0 1 0-11.32 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32M40 112a72 72 0 1 1 72 72a72.08 72.08 0 0 1-72-72"/></g></svg>
+    <input class="db__input" id="dbInput" type="text" role="searchbox" aria-autocomplete="list" aria-controls="dbList" aria-label="フルーツ検索" autocomplete="off">
+  </div>
+  <ul class="db__list" id="dbList" role="listbox" aria-label="候補リスト"></ul>
+</div>
+</main>
+<script>
+// 디바운스 스켈레톤(02) — 키 입력마다 타이머를 지운 뒤 새로 건다(디바운스). 대기 중엔
+// 스켈레톤 행을 보이고, 타이머가 실제로 만료된 뒤에만 가짜 지연(FAKE_LATENCY_MS) 후 결과를
+// 반영한다. 요청마다 번호를 매겨(pendingId) 응답이 도착했을 때 그 번호가 최신이 아니면
+// 버린다(진행 중 요청 폐기 패턴) — 사용자가 다시 타이핑해 새 요청을 보냈는데 이전 응답이
+// 늦게 와도 화면을 덮어쓰지 않는다.
+(function () {
+  var field = document.getElementById('dbField');
+  var input = document.getElementById('dbInput');
+  var list = document.getElementById('dbList');
+  if (!field || !input || !list) return;
+
+  var WORDS = ['バナナ', 'パパイヤ', 'アボカド', 'パイナップル', 'グレープフルーツ', 'チェリー', '桃', 'スイカ'];
+  var DEBOUNCE_MS = 300;
+  var FAKE_LATENCY_MS = 220;
+  var SKELETON_ROWS = 4;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var pendingId = 0;
+  var debounceTimer = null;
+  var state = 'idle';
+  var results = [];
+
+  function renderSkeleton() {
+    var rows = [];
+    for (var i = 0; i < SKELETON_ROWS; i++) {
+      rows.push('<li class="db__item db__item--skel" aria-hidden="true"><span class="db__bar"><span class="db__sweep"></span></span></li>');
+    }
+    list.innerHTML = rows.join('');
+    field.setAttribute('aria-expanded', 'true');
+  }
+
+  function renderResults(query) {
+    if (!results.length) {
+      list.innerHTML = '<li class="db__item db__item--empty">一致するフルーツがありません</li>';
+      field.setAttribute('aria-expanded', 'true');
+      return;
+    }
+    list.innerHTML = results.map(function (w) {
+      return '<li class="db__item" role="option">' + w + '</li>';
+    }).join('');
+    field.setAttribute('aria-expanded', 'true');
+  }
+
+  function renderIdle() {
+    list.innerHTML = '';
+    field.setAttribute('aria-expanded', 'false');
+  }
+
+  function onChange(value) {
+    clearTimeout(debounceTimer);
+    pendingId++;
+    var myId = pendingId;
+    if (!value) {
+      state = 'idle';
+      renderIdle();
+      return;
+    }
+    state = 'loading';
+    renderSkeleton();
+    debounceTimer = setTimeout(function () {
+      setTimeout(function () {
+        if (myId !== pendingId) return;
+        var q = value.toLowerCase();
+        results = WORDS.filter(function (w) { return w.toLowerCase().indexOf(q) !== -1; });
+        state = 'done';
+        renderResults(value);
+      }, FAKE_LATENCY_MS);
+    }, DEBOUNCE_MS);
+  }
+  renderIdle();
+
+  var playing = true;
+  function stop() { playing = false; }
+  input.addEventListener('input', function () { stop(); onChange(input.value); });
+  input.addEventListener('keydown', stop);
+  input.addEventListener('pointerdown', stop);
+
+  var KEY_INTERVAL_MS = 120;
+  var READ_HOLD_MS = 500;
+  var CLEAR_MS = 150;
+  var WORD_SEQUENCE = ['桃', 'グレープフルーツ'];
+
+  function typeWord(word, cb) {
+    var i = 0;
+    (function nextChar() {
+      if (!playing) return;
+      i++;
+      input.value = word.slice(0, i);
+      onChange(input.value);
+      if (i < word.length) setTimeout(nextChar, KEY_INTERVAL_MS);
+      else setTimeout(cb, READ_HOLD_MS);
+    })();
+  }
+
+  function clearInput(cb) {
+    if (!playing) return;
+    input.value = '';
+    onChange('');
+    setTimeout(cb, CLEAR_MS);
+  }
+
+  function loopPlay(qi) {
+    if (!playing) return;
+    var word = WORD_SEQUENCE[qi % WORD_SEQUENCE.length];
+    typeWord(word, function () { clearInput(function () { loopPlay(qi + 1); }); });
+  }
+
+  if (reduce) {
+    input.value = WORD_SEQUENCE[0];
+    onChange(WORD_SEQUENCE[0]);
+  } else {
+    loopPlay(0);
+    (function sweep() {
+      var bars = list.querySelectorAll('.db__sweep');
+      var t = (performance.now() % 900) / 900;
+      var x = -120 + t * 240;
+      for (var i = 0; i < bars.length; i++) bars[i].style.transform = 'translateX(' + x + '%)';
+      requestAnimationFrame(sweep);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>육중 대칭 거울 — 60도 섹터의 여섯 배 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round"><path d="M128 28v200"/><path d="M45 76l166 104"/><path d="M211 76L45 180"/></g></svg>
+    <span>Only one 60-degree fan-shaped sector is simulated, and the rest is filled in by rotating and mirroring it — the computation drops to 1/6 while a perfectly symmetric hexagonal crystal still grows</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Six-Fold Symmetry Crystal Demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">sectors <b class="cd__val" id="cdSector"></b> · stamps <b class="cd__val" id="cdCopies"></b> · aggregated <b class="cd__val" id="cdRate"></b>/sec</span>
+    <span class="cd__meta cd__meta--dim">Canvas · rotate · ImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 육중 대칭 거울(04). 60도 sectors 하나에서만 DLA 랜덤워크를 돌린다. 입자가 섹터를 벗어나면
+// 각도를 60도 주기로 접어(회전 접기) 안으로 되돌려 보내고, 붙은 셀은 화면에 그릴 때
+// 여섯 방향 회전 + 거울(±각) 도장 12장으로 펼친다. 시뮬레이션 비용은 1/6 인데 대칭은
+// 픽셀 하나 안 어긋난다 — 눈결정이 원래 가진 D6 대칭(회전 6 × 거울) 그대로.
+// 화면은 매 프레임 배경 그라디언트 + 오로라 맥동 + 부유 입자 + 결정 도장을 ImageData 한 장으로 다시 쓴다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var SECTOR_DEG = 60;   // sectors 각(도) — 변형 "대칭 접기" 축(60 → 30, 도장 수는 360/각×2)
+  var SPS        = 320;  // 초당 응집 입자 수 — 변형 "여섯 배 속도" 축(90 → 320)
+  var N          = 44;   // sectors grid cells 반경(셀 수) — 셀이 커질수록 결정이 화면을 넓게 채운다
+  // ────────────────────────────────────────────────────
+  var SECTOR = SECTOR_DEG * Math.PI / 180;
+  var COPIES = Math.round(360 / SECTOR_DEG);
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  document.getElementById('cdSector').textContent = SECTOR_DEG + '°';
+  document.getElementById('cdCopies').textContent = String(COPIES * 2);
+  document.getElementById('cdRate').textContent = String(SPS);
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x3190404;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 scss 의 --flake-* 커스텀 프로퍼티에서 받는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--flake-ink');
+  var C_DUSK = tokRGB('--flake-dusk');
+  var C_CORE = tokRGB('--flake-core');
+  var C_HALO = tokRGB('--flake-halo');
+  var C_MINT = tokRGB('--flake-mint');
+  var C_SKY  = tokRGB('--flake-sky');
+  var C_MIST = tokRGB('--flake-mist');
+
+  // LUT — 나이 t(0=코어 쪽 오래된 셀, 1=막 붙은 팁)를 잉크→어스름→라일락→코어→흰끼 ramp 로
+  var lutR = new Uint8ClampedArray(256), lutG = new Uint8ClampedArray(256), lutB = new Uint8ClampedArray(256);
+  function buildLUT() {
+    var m = [0, 0.30, 0.60, 0.86, 1];
+    var cs = [
+      [C_INK[0], C_INK[1], C_INK[2]],
+      [C_INK[0] + (C_DUSK[0] - C_INK[0]) * 0.7, C_INK[1] + (C_DUSK[1] - C_INK[1]) * 0.7, C_INK[2] + (C_DUSK[2] - C_INK[2]) * 0.7],
+      [C_HALO[0], C_HALO[1], C_HALO[2]],
+      [C_CORE[0], C_CORE[1], C_CORE[2]],
+      [255, 253, 255]
+    ];
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255, k = 0;
+      while (k < 3 && t > m[k + 1]) k++;
+      var f = (t - m[k]) / (m[k + 1] - m[k] || 1);
+      lutR[i] = cs[k][0] + (cs[k + 1][0] - cs[k][0]) * f;
+      lutG[i] = cs[k][1] + (cs[k + 1][1] - cs[k][1]) * f;
+      lutB[i] = cs[k][2] + (cs[k + 1][2] - cs[k][2]) * f;
+    }
+  }
+
+  // ── sectors grid cells — 꼭짓점(결정 중심)을 원점, +y 방향 ±30도 부채꼴 ──
+  var WS = 2 * N + 8, HS = N + 6, AX = N + 4, AY = 2;
+  var occ = new Uint8Array(WS * HS);
+  var cells = [];            // 붙은 셀 [각도, 반경, 순서] 납작 배열 — 도장할 때 그대로 순회
+  var order = 0, maxR = 1.5;
+  var phase = 0;             // 0 자라기 · 1 샤인(다 자란 뒤 반짝임) · 리셋
+  var shineT = 0;
+  var walkers = [];          // {fx, fy} — 꼭짓점 기준 상대 좌표
+  var gRot = 0;              // 결정 전체의 느린 자전(도 단위로 치면 분당 몇 바퀴)
+  var WALKERS = 42;
+
+  // 각도를 sectors(-SECTOR/2 .. SECTOR/2)로 60도 cycle 접는다 — 회전 접기(C6). 걸음이 부채꼴을
+  // 나가도 접혀 안으로 되돌아오므로 시뮬레이션 공간이 sectors 하나로 끝난다.
+  function foldTh(th) {
+    var P = SECTOR, m = (th + P * 0.5) % P;
+    if (m < 0) m += P;
+    return m - P * 0.5;
+  }
+  // 상대 좌표 → 접힌 (각도, 반경)
+  function fold(fx, fy) {
+    var r = Math.sqrt(fx * fx + fy * fy);
+    var th = r < 1e-9 ? 0 : foldTh(Math.atan2(fx, fy));
+    return [th, r];
+  }
+  function cellOcc(fx, fy) {
+    var fo = fold(fx, fy);
+    if (fo[1] > N) return 0;
+    var gx = AX + Math.round(Math.sin(fo[0]) * fo[1]);
+    var gy = AY + Math.round(Math.cos(fo[0]) * fo[1]);
+    if (gx < 1 || gx >= WS - 1 || gy < 1 || gy >= HS - 1) return 0;
+    return occ[gy * WS + gx];
+  }
+  function respawn(w) {
+    var r0 = Math.min(maxR + 12, N - 1);
+    var a = (rand() * 2 - 1) * (SECTOR * 0.46);
+    w.fx = Math.sin(a) * r0;
+    w.fy = Math.cos(a) * r0;
+  }
+  var DX = [1, -1, 0, 0], DY = [0, 0, 1, -1];
+  function stepWalker(w) {
+    var d = (rand() * 4) | 0;
+    w.fx += DX[d]; w.fy += DY[d];
+    var fo = fold(w.fx, w.fy);
+    if (fo[1] > N) { respawn(w); return false; }
+    var gx = AX + Math.round(Math.sin(fo[0]) * fo[1]);
+    var gy = AY + Math.round(Math.cos(fo[0]) * fo[1]);
+    if (gx < 1 || gx >= WS - 1 || gy < 1 || gy >= HS - 1) { respawn(w); return false; }
+    var idx = gy * WS + gx;
+    if (occ[idx]) return false;
+    // 이웃 접촉 — 이웃도 접어서 본다(부채꼴 경계 너머 접촉을 놓치지 않게)
+    var nc = cellOcc(w.fx + 1, w.fy) + cellOcc(w.fx - 1, w.fy) + cellOcc(w.fx, w.fy + 1) + cellOcc(w.fx, w.fy - 1);
+    if (!nc) return false;
+    // 팁 쪽에 잘 붙게 — 이웃이 많은 자리(움푹한 곳)는 붙을 확률을 낮춘다(수지상 가지)
+    var p = nc === 1 ? 1.0 : nc === 2 ? 0.62 : nc === 3 ? 0.22 : 0.10;
+    if (rand() >= p) { respawn(w); return false; }
+    occ[idx] = 1;
+    cells.push(fo[0], fo[1], order);
+    order++;
+    if (fo[1] > maxR) maxR = fo[1];
+    respawn(w);
+    return true;
+  }
+  function resetSim() {
+    occ.fill(0);
+    cells = [];
+    order = 0;
+    maxR = 3;
+    phase = 0;
+    shineT = 0;
+    // 씨앗 — 꼭짓점에서 +y 로 세 셀(중심축)
+    for (var s = 1; s <= 3; s++) { occ[(AY + s) * WS + AX] = 1; cells.push(0, s, order); order++; }
+    walkers = [];
+    for (var i = 0; i < WALKERS; i++) { var w = { fx: 0, fy: 0 }; respawn(w); walkers.push(w); }
+  }
+
+  // ── 화면 ──
+  var W = 0, H = 0, img = null;
+  var motes = [];            // 부유 수증기 — 결정 중심으로 흘러들며 먹이가 된다
+  var MOTES = 90;
+  function spawnMote(m, edge) {
+    var side = (rand() * 4) | 0;
+    if (side === 0) { m.x = rand() * W; m.y = edge ? -4 : rand() * H; }
+    else if (side === 1) { m.x = edge ? W + 4 : rand() * W; m.y = rand() * H; }
+    else if (side === 2) { m.x = rand() * W; m.y = edge ? H + 4 : rand() * H; }
+    else { m.x = edge ? -4 : rand() * W; m.y = rand() * H; }
+    m.c = rand();
+  }
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+    img = ctx.createImageData(W, H);
+    var d = img.data;
+    for (var i = 3; i < d.length; i += 4) d[i] = 255;
+    prngState = SEED >>> 0;
+    gRot = 0;
+    motes = [];
+    for (var m = 0; m < MOTES; m++) { var mo = { x: 0, y: 0, c: 0 }; spawnMote(mo, false); motes.push(mo); }
+    resetSim();
+  }
+
+  function sim(dt) {
+    if (phase === 1) {
+      shineT += dt;
+      if (shineT > 950) resetSim();
+      return;
+    }
+    var quota = SPS * dt / 1000;      // 이번 프레임에 붙일 입자 수(시간 비례)
+    var stuck = 0, steps = 0, maxSteps = (dt / 16.7) * WALKERS * 9;
+    while (stuck < quota && steps < maxSteps) {
+      for (var i = 0; i < walkers.length; i++) {
+        if (stepWalker(walkers[i])) stuck++;
+        steps++;
+        if (stuck >= quota || steps >= maxSteps) break;
+      }
+    }
+    if (maxR > N - 2) { phase = 1; shineT = 0; }
+  }
+
+  // 알파 블렌드 도장 — img 위에 직접(배경은 이미 그려져 있다)
+  function stamp(px, py, R, G, B, a) {
+    var x = px | 0, y = py | 0;
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+    var j = (y * W + x) << 2, d = img.data;
+    d[j]     = d[j]     * (1 - a) + R * a;
+    d[j + 1] = d[j + 1] * (1 - a) + G * a;
+    d[j + 2] = d[j + 2] * (1 - a) + B * a;
+  }
+  function stampSoft(px, py, R, G, B, a) {
+    // 5×5 옅은 헤일로 → 3×3 반투명 → 중심 진하게
+    var x = px | 0, y = py | 0;
+    for (var yy = y - 2; yy <= y + 2; yy++)
+      for (var xx = x - 2; xx <= x + 2; xx++)
+        stamp(xx, yy, C_HALO[0], C_HALO[1], C_HALO[2], a * 0.10);
+    for (var y2 = y - 1; y2 <= y + 1; y2++)
+      for (var x2 = x - 1; x2 <= x + 1; x2++)
+        stamp(x2, y2, R, G, B, a * 0.42);
+    stamp(x, y, R, G, B, Math.min(1, a));
+  }
+
+  var fr = 0;
+  function compose() {
+    var d = img.data;
+    // ① 배경 — 세로 그라디언트(잉크→어스름) + 움직이는 오로라 얼룩 네 개(결정 주위 수증기 빛)
+    var topR = C_INK[0] + 6, topG = C_INK[1] + 6, topB = C_INK[2] + 9;
+    var botR = C_INK[0] + (C_DUSK[0] - C_INK[0]) * 0.34, botG = C_INK[1] + (C_DUSK[1] - C_INK[1]) * 0.34, botB = C_INK[2] + (C_DUSK[2] - C_INK[2]) * 0.34;
+    var a1x = W * (0.18 + 0.10 * Math.sin(fr * 0.011)), a1y = H * (0.24 + 0.12 * Math.cos(fr * 0.013));
+    var a2x = W * (0.84 + 0.09 * Math.cos(fr * 0.009)), a2y = H * (0.28 + 0.10 * Math.sin(fr * 0.015));
+    var a3x = W * (0.24 + 0.08 * Math.cos(fr * 0.012 + 2)), a3y = H * (0.82 + 0.09 * Math.sin(fr * 0.010 + 1));
+    var a4x = W * (0.78 + 0.10 * Math.sin(fr * 0.008 + 4)), a4y = H * (0.78 + 0.11 * Math.cos(fr * 0.014 + 3));
+    var p1 = 0.085 + 0.050 * Math.sin(fr * 0.021);
+    var p2 = 0.075 + 0.045 * Math.cos(fr * 0.017);
+    var p3 = 0.070 + 0.040 * Math.sin(fr * 0.019 + 2);
+    var p4 = 0.080 + 0.048 * Math.cos(fr * 0.016 + 1);
+    var sig = 1 / (H * H * 0.55);
+    for (var y = 0; y < H; y++) {
+      var ty = y / H;
+      var br = topR + (botR - topR) * ty, bg = topG + (botG - topG) * ty, bb = topB + (botB - topB) * ty;
+      var row = y * W;
+      for (var x = 0; x < W; x++) {
+        var dx1 = x - a1x, dy1 = y - a1y, dx2 = x - a2x, dy2 = y - a2y;
+        var dx3 = x - a3x, dy3 = y - a3y, dx4 = x - a4x, dy4 = y - a4y;
+        var g = p1 * Math.exp(-(dx1 * dx1 + dy1 * dy1) * sig)
+              + p2 * Math.exp(-(dx2 * dx2 + dy2 * dy2) * sig)
+              + p3 * Math.exp(-(dx3 * dx3 + dy3 * dy3) * sig)
+              + p4 * Math.exp(-(dx4 * dx4 + dy4 * dy4) * sig);
+        var j = (row + x) << 2;
+        d[j]     = br + (C_HALO[0] - br) * g;
+        d[j + 1] = bg + (C_HALO[1] - bg) * g;
+        d[j + 2] = bb + (C_HALO[2] - bb) * g;
+      }
+    }
+    // ② 결정 도장 — sectors 셀 하나를 회전 COPIES + 거울(±각) 2배 = COPIES*2 장으로 펼친다
+    var cx = W / 2, cy = H / 2;
+    var scale = (Math.min(W, H) / 2 - 8) / N;
+    var shineWave = phase === 1 ? shineT * 0.018 : 0;
+    for (var i = 0; i < cells.length; i += 3) {
+      var th = cells[i], r = cells[i + 1], q = order > 1 ? cells[i + 2] / order : 1;
+      var li = 0.40 + 0.60 * q;                                    // 새 팁일수록 밝다
+      if (phase === 1) li += 0.30 * Math.sin(shineWave - r * 0.22); // 샤인 — 반경 파동
+      if (li < 0) li = 0; else if (li > 1) li = 1;
+      var ci = (li * 255) | 0;
+      var R = lutR[ci], G = lutG[ci], B = lutB[ci];
+      var rr = r * scale;
+      for (var k = 0; k < COPIES; k++) {
+        var base = gRot + k * SECTOR;
+        stampSoft(cx + rr * Math.sin(base + th), cy + rr * Math.cos(base + th), R, G, B, 0.85);
+        stampSoft(cx + rr * Math.sin(base - th), cy + rr * Math.cos(base - th), R, G, B, 0.85);
+      }
+    }
+    // ③ 부유 수증기 — 중심으로 살랑이며 흘러들어가는 먹이
+    for (var m = 0; m < motes.length; m++) {
+      var mo = motes[m];
+      var ddx = cx - mo.x, ddy = cy - mo.y, dd = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
+      var sp = 0.05 + mo.c * 0.05;
+      mo.x += (ddx / dd) * sp + (rand() - 0.5) * 1.5;
+      mo.y += (ddy / dd) * sp + (rand() - 0.5) * 1.5;
+      if (dd < 12) spawnMote(mo, true);
+      var mc = mo.c < 0.34 ? C_MINT : (mo.c < 0.67 ? C_SKY : C_MIST);
+      var ma = 0.34 + 0.22 * Math.sin(fr * 0.09 + m * 1.7);
+      stamp(mo.x, mo.y, mc[0], mc[1], mc[2], ma);
+      stamp(mo.x + 1, mo.y, mc[0], mc[1], mc[2], ma * 0.45);
+      stamp(mo.x, mo.y + 1, mc[0], mc[1], mc[2], ma * 0.45);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, prev = 0;
+  function frame(now) {
+    var dt = Math.min(50, now - (prev || now));
+    prev = now;
+    gRot += dt * 0.00022;      // 느린 자전 — 결정 전체가 12도/초 로 돈다
+    sim(dt);
+    compose();
+    fr++;
+    raf = requestAnimationFrame(frame);
+  }
+  // reduce 용 한 장 — 1.4초 치 성장을 몰아 시뮬레이션하고 정지 화면 한 장만 남긴다
+  function stillDraw() {
+    fit();
+    for (var i = 0; i < 42; i++) sim(33);
+    gRot = 0.3;
+    compose();
+  }
+
+  window.addEventListener('resize', function () { if (reduce) stillDraw(); });
+
+  fit();
+  buildLUT();
+  if (reduce) {
+    stillDraw();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

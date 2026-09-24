@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>매크로 사진 씬 — 다크 배경 위 촛점 심도로 뜨는 결정 한 편 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="round"><path d="M128 26v204"/><path d="M43 74l170 128"/><path d="M213 74L43 202"/><path d="M106 40l22 18 22-18"/><path d="M106 216l22-18 22 18"/><path d="M40 106l18 22-18 22"/><path d="M216 106l-18 22 18 22"/></g></svg>
+    <span>黒い舞台に中央照明を当てて結晶を大きく育てると、顕微鏡マクロ撮影の一枚になります — 残光の筋と浮遊する粒子がフレームを絶えず生き生きと動かします</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="マクロ写真結晶シーン実験版" tabindex="0">
+    <canvas class="cd__cv" id="cdCv" width="424" height="180"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">焦点距離 <b class="cd__val" id="cdVal">1.00</b> · 浅い被写界深度</span>
+    <span class="cd__meta cd__meta--dim">createRadialGradient · ImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 매크로 사진 씬(09). DLA 로 결정 하나를 크게 자라게 하고, 촬영 스튜디오처럼 연출한다.
+// ① 중앙 radial gradient 키 라이트(현미경 광원) ② 미세 필름 그레인(매 프레임 새로운 노이즈 —
+// 어두운 배경이 정적으로 죽지 않게 한다) ③ 결정 본체(格子 ImageData, 촛점면 안쪽은 선명하게
+// 바깥 가지는 DOF 만큼 뿌옇게 — 얕은 심도) ④ 잔광 줄기(라이트에서 비스듬히 흐르는 반짝 먼지)
+// ⑤ 결정 주위 부유 입자(포어그라운드 보케 — 크고 흐리게).
+// 결정도 멈추지 않는다: 성장이 다 차면 표면이 슬금슬금 재배열되며 결이 계속 꿈틀한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var STICKS_PER_FRAME = 160;   // 한 프레임에 붙는 입자 — 2초 안에 결정이 화면을 채우는 타임랩스 속도
+  var RMAX             = 40;    // 결정 반경(셀) — 화면의 절반 이상을 차지는 큰 결정
+  var DOF_CELLS        = 26;    // 초점면 깊이(셀) — 이 안은 선명, 바깥은 뿌옇다
+  var RESHUFFLE_RATE   = 1.6;   // 성장 완료 후 프레임당 표면 재배열 시도(성김) — 결이 꿈틀한다
+  // ────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var valOut = document.getElementById('cdVal');
+
+  var W = cv.width, H = cv.height;              // 내부 424×180 고정
+  var CELL = 2, GW = W / CELL, GH = H / CELL;
+  var CX = (GW / 2) | 0, CY = ((GH / 2) | 0) - 4;
+
+  // 시드 고정 PRNG — mulberry32
+  var prngState = 0x31909d >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 scss 의 --flake-* 에서 getComputedStyle 로
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK = tokRGB('--flake-ink');
+  var C_LAMP = tokRGB('--flake-lamp');
+  var C_CORE = tokRGB('--flake-core');
+  var C_LILAC = tokRGB('--flake-lilac');
+  var C_MINT = tokRGB('--flake-mint');
+  var C_PINK = tokRGB('--flake-pink');
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  // ── 格子 상태 ──
+  var frozen = new Uint8Array(GW * GH);
+  var tStick = new Float32Array(GW * GH); tStick.fill(-1);
+  var distC = new Float32Array(GW * GH);           // 중심 거리(초점 심도 계산용) — 캐시
+  for (var yy = 0; yy < GH; yy++) for (var xx = 0; xx < GW; xx++) distC[yy * GW + xx] = Math.hypot(xx - CX, yy - CY);
+
+  var NX_EVEN = [1, -1, 0, -1, 0, -1], NY_EVEN = [0, 0, -1, -1, 1, 1];
+  var NX_ODD  = [1, -1, 0,  1, 0,  1], NY_ODD  = [0, 0, -1, -1, 1, 1];
+  function idx(x, y) { return y * GW + x; }
+  function inside(x, y) { return x >= 0 && x < GW && y >= 0 && y < GH; }
+  function nbX(y) { return (y & 1) ? NX_ODD : NX_EVEN; }
+  function nbY(y) { return (y & 1) ? NY_ODD : NY_EVEN; }
+  function frozenNb(x, y) {
+    var nx = nbX(y), ny = nbY(y), n = 0;
+    for (var k = 0; k < 6; k++) {
+      var ax = x + nx[k], ay = y + ny[k];
+      if (inside(ax, ay) && frozen[idx(ax, ay)]) n++;
+    }
+    return n;
+  }
+  function stick(x, y, now) { frozen[idx(x, y)] = 1; tStick[idx(x, y)] = now; }
+
+  // ── DLA 성장 — 팁 바이어스로 가지가 뻗는 큰 결정 ──
+  var maxR = 2, grown = false, grownAt = 0;
+  function aggregate(now, budget) {
+    var stuck = 0, attempts = 0;
+    while (stuck < budget && attempts < budget * 9) {
+      attempts++;
+      var ang = rand() * Math.PI * 2;
+      var rr = maxR + 6 + rand() * 16;
+      var x = Math.round(CX + Math.cos(ang) * rr);
+      var y = Math.round(CY + Math.sin(ang) * rr * 0.95);
+      var steps = 0;
+      while (steps < 460) {
+        steps++;
+        var dir = (rand() * 6) | 0;
+        var bx = nbX(y), by = nbY(y);
+        x += bx[dir]; y += by[dir];
+        if (!inside(x, y)) break;
+        if (frozen[idx(x, y)]) { x -= bx[dir]; y -= by[dir]; continue; }
+        var n = frozenNb(x, y);
+        if (n > 0) {
+          var p = n === 1 ? 1 : n === 2 ? 0.5 : 0.13;
+          var dist = distC[idx(x, y)];
+          p *= 0.35 + 0.65 * Math.min(1, dist / (maxR + 4));
+          if (dist < RMAX && rand() < p) {
+            stick(x, y, now); stuck++;
+            if (dist > maxR) maxR = dist;
+            break;
+          }
+        }
+      }
+    }
+    if (maxR >= RMAX - 1.5) { grown = true; grownAt = now; }
+  }
+
+  // ── 재배열 — 완성된 결정의 표면이 느리게 꿈틀(녹았다 붙는 미세 순환) ──
+  function reshuffle(now) {
+    for (var i = 0; i < RESHUFFLE_RATE * 10; i++) {
+      var x = (rand() * GW) | 0, y = (rand() * GH) | 0;
+      var id = idx(x, y);
+      if (!frozen[id]) continue;
+      var n = frozenNb(x, y);
+      if (n >= 5 || n === 0) continue;            // 매립·고립 셀은 그대로
+      if (distC[id] < maxR * 0.55) continue;      // 코어는 안정 — 가장자리만
+      if (rand() < 0.35) { frozen[id] = 0; }      // 떼고
+      // 그 자리 근처에 다시 붙여 결이 미세하게 밀린다
+      var nx2 = nbX(y), ny2 = nbY(y);
+      var k = (rand() * 6) | 0;
+      var ax = x + nx2[k], ay = y + ny2[k];
+      if (inside(ax, ay) && !frozen[idx(ax, ay)] && frozenNb(ax, ay) > 0) stick(ax, ay, now);
+    }
+  }
+
+  // ── 格子 → ImageData(선명 레이어) + 블러 레이어(초점 밖 가지) ──
+  var sharpCv = document.createElement('canvas'); sharpCv.width = GW; sharpCv.height = GH;
+  var stx = sharpCv.getContext('2d');
+  var softCv = document.createElement('canvas'); softCv.width = GW; softCv.height = GH;
+  var ftx = softCv.getContext('2d');
+  var imgS = stx.createImageData(GW, GH), pxS = imgS.data;
+  var imgF = ftx.createImageData(GW, GH), pxF = imgF.data;
+
+  function repaintGrids(now) {
+    for (var y = 0; y < GH; y++) {
+      for (var x = 0; x < GW; x++) {
+        var id = y * GW + x;
+        var o = id * 4;
+        if (!frozen[id]) { pxS[o + 3] = 0; pxF[o + 3] = 0; continue; }
+        var age = now - tStick[id];
+        var k = Math.min(1, age / 850);
+        // 결정 축 방향에 따른 은은한 색 분산 — 현미경 편광 느낌의 파스텔
+        var ang = Math.atan2(y - CY, x - CX);
+        var tint = (ang > -0.5 && ang <= 0.5) || (ang > Math.PI - 0.5 || ang <= -Math.PI + 0.5) ? C_LILAC
+                 : ang > 0.5 && ang <= 2.1 ? C_MINT : C_PINK;
+        var lift = frozenNb(x, y) <= 2 ? 24 : 0;
+        var R = Math.min(255, C_CORE[0] + (tint[0] - C_CORE[0]) * k * 0.55 + lift);
+        var G = Math.min(255, C_CORE[1] + (tint[1] - C_CORE[1]) * k * 0.55 + lift);
+        var B = Math.min(255, C_CORE[2] + (tint[2] - C_CORE[2]) * k * 0.55 + lift);
+        pxS[o] = R; pxS[o + 1] = G; pxS[o + 2] = B; pxS[o + 3] = 255;
+        // 초점면 안쪽 = 선명 레이어에, 바깥 = 소프트 레이어로 나눠 싣는다
+        var dof = distC[id] <= DOF_CELLS;
+        if (dof) { pxF[o + 3] = 0; }
+        else {
+          pxF[o] = R; pxF[o + 1] = G; pxF[o + 2] = B; pxF[o + 3] = 255;
+          pxS[o + 3] = 0;
+        }
+      }
+    }
+    stx.putImageData(imgS, 0, 0);
+    ftx.putImageData(imgF, 0, 0);
+  }
+
+  // ── 배경 — 키 라이트 + 숨쉬는 림 + 필름 그레인 ──
+  var grainCv = document.createElement('canvas'); grainCv.width = W; grainCv.height = H;
+  var gtx2 = grainCv.getContext('2d');
+  var gImg = gtx2.createImageData(W, H), gPx = gImg.data;
+  function repaintGrain() {
+    // 매 프레임 새로운 미세 노이즈 + 산발적 핫픽셀(센서 반응) — 어두운 면이 정적으로 죽지 않는다
+    for (var i = 0; i < gPx.length; i += 4) {
+      var v = 10 + (rand() * 34) | 0;
+      var hot = rand() < 0.0022 ? 150 + (rand() * 90 | 0) : 0;
+      gPx[i] = Math.min(255, v + hot); gPx[i + 1] = Math.min(255, v + hot); gPx[i + 2] = Math.min(255, v + 5 + hot);
+      gPx[i + 3] = 22 + (hot ? 60 : 0);
+    }
+    gtx2.putImageData(gImg, 0, 0);
+  }
+
+  // ── 잔광 줄기 — 라이트에서 비스듬히 흐르는 반짝 먼지(부유 입자) ──
+  var motes = [];
+  var MOTE_COLS = [C_CORE, C_LILAC, C_MINT, C_PINK];
+  function initMotes() {
+    for (var i = 0; i < 78; i++) {
+      motes.push({
+        x: rand() * W, y: rand() * H,
+        vx: 0.12 + rand() * 0.5, vy: -0.05 - rand() * 0.16,
+        r: 0.7 + rand() * 1.8, ph: rand() * Math.PI * 2,
+        col: MOTE_COLS[(rand() * MOTE_COLS.length) | 0]
+      });
+    }
+  }
+  function stepMotes(now) {
+    for (var i = 0; i < motes.length; i++) {
+      var mo = motes[i];
+      mo.x += mo.vx * (0.7 + 0.3 * Math.sin(now / 900 + mo.ph));
+      mo.y += mo.vy;
+      if (mo.x > W + 6) { mo.x = -6; mo.y = rand() * H; }
+      if (mo.y < -6) { mo.y = H + 6; mo.x = rand() * W * 0.6; }
+    }
+  }
+
+  // ── 합성 ──
+  function draw(now) {
+    // 1. 무대 — 잉크 바탕 + 중앙 키 라이트(radial) + 숨쉬는 림 라이트
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1; ctx.filter = 'none';
+    ctx.fillStyle = rgba(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+    var key = ctx.createRadialGradient(CX * CELL, CY * CELL, 0, CX * CELL, CY * CELL, 240);
+    key.addColorStop(0, rgba(C_LAMP, 0.24 + 0.09 * Math.sin(now / 760)));
+    key.addColorStop(0.55, rgba(C_LILAC, 0.09 + 0.05 * Math.sin(now / 760)));
+    key.addColorStop(1, rgba(C_LILAC, 0));
+    ctx.fillStyle = key; ctx.fillRect(0, 0, W, H);
+    var rimX = W * (0.5 + 0.34 * Math.sin(now / 2900));
+    var rim = ctx.createRadialGradient(rimX, -30, 0, rimX, -30, 220);
+    rim.addColorStop(0, rgba(C_MINT, 0.09 + 0.08 * Math.sin(now / 1250 + 1.2)));
+    rim.addColorStop(1, rgba(C_MINT, 0));
+    ctx.fillStyle = rim; ctx.fillRect(0, 0, W, H);
+    // 두 번째 워시 — 반대편에서 도는 핑크 안개(필름의 온도 분산)
+    var wx2 = W * (0.5 - 0.34 * Math.sin(now / 3400));
+    var wash = ctx.createRadialGradient(wx2, H + 20, 0, wx2, H + 20, 200);
+    wash.addColorStop(0, rgba(C_PINK, 0.07 + 0.07 * Math.sin(now / 1000 + 2.6)));
+    wash.addColorStop(1, rgba(C_PINK, 0));
+    ctx.fillStyle = wash; ctx.fillRect(0, 0, W, H);
+    // 2. 필름 그레인 — 매 프레임 새 노이즈
+    repaintGrain();
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(grainCv, 0, 0);
+    ctx.globalAlpha = 1;
+    // 3. 결정 광륜 — 전체 격자를 뿌옇게(할로)
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(7px)';
+    ctx.globalAlpha = 0.30 + 0.07 * Math.sin(now / 880);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(sharpCv, 0, 0, W, H);
+    ctx.drawImage(softCv, 0, 0, W, H);
+    // 4. 초점면 바깥 가지 — 소프트 레이어(얕은 심도)
+    ctx.filter = 'blur(2.6px)';
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(softCv, 0, 0, W, H);
+    // 5. 결정 본체 — 초점면 안쪽 선명 픽셀
+    ctx.filter = 'none'; ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sharpCv, 0, 0, W, H);
+    // 6. 잔광 줄기 + 부유 입자 — 흐르는 보케
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < motes.length; i++) {
+      var mo = motes[i];
+      var tw = 0.45 + 0.55 * Math.sin(now / 260 + mo.ph * 3);
+      var a = (mo.r > 1.6 ? 0.10 : 0.30) * tw;
+      if (mo.r > 1.6) {
+        var g = ctx.createRadialGradient(mo.x, mo.y, 0, mo.x, mo.y, mo.r * 4);
+        g.addColorStop(0, rgba(mo.col, a));
+        g.addColorStop(1, rgba(mo.col, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(mo.x - mo.r * 4, mo.y - mo.r * 4, mo.r * 8, mo.r * 8);
+      } else {
+        ctx.fillStyle = rgba(mo.col, a);
+        ctx.beginPath();
+        ctx.arc(mo.x, mo.y, mo.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // 7. 비네트 — 매크로 렌즈의 어두운 가장자리. 살짝 숨쉬게 해서 테두리도 죽지 않게
+    ctx.globalCompositeOperation = 'source-over';
+    var vg = ctx.createRadialGradient(W / 2, H / 2, 95, W / 2, H / 2, 250);
+    vg.addColorStop(0, rgba(C_INK, 0));
+    vg.addColorStop(1, rgba(C_INK, 0.50 + 0.05 * Math.sin(now / 1500)));
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  var t0 = -1;
+  var dofT = -1;
+  function frame(nowRaw) {
+    if (t0 < 0) t0 = nowRaw;
+    var now = nowRaw - t0;
+    if (!grown) aggregate(now, STICKS_PER_FRAME);
+    else reshuffle(now);
+    stepMotes(now);
+    repaintGrids(now);
+    draw(now);
+    // 焦点距離 라벨 — 미세하게 흔들리는 랙킹(촛점 당김)
+    if (now - dofT > 120) { dofT = now; valOut.textContent = (0.96 + 0.08 * Math.abs(Math.sin(now / 1700))).toFixed(2); }
+    requestAnimationFrame(frame);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  initMotes();
+  stick(CX, CY, -9000);
+  var nx0 = nbX(CY), ny0 = nbY(CY);
+  for (var k0 = 0; k0 < 6; k0++) {
+    var ax0 = CX + nx0[k0], ay0 = CY + ny0[k0];
+    if (inside(ax0, ay0)) stick(ax0, ay0, -9000);
+  }
+  if (reduce) {
+    aggregate(0, 4000);   // 다 자란 한 장
+    repaintGrids(2000);
+    draw(2000);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

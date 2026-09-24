@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit trap coloring — Mandelbrot escape-time fractal — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <span>Record how close the orbit of z brushed the real axis, imaginary axis or a circle, and color by that — a second fractal pattern overlays the set itself</span>
+  </p>
+  <div class="mb__field" role="application" aria-label="Orbit trap coloring lab" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta">3 traps: real, imaginary, circle · cycling</span>
+    <span class="mb__meta mb__meta--dim">canvas · Math.hypot · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 궤도 트랙 채색(04) — 같은 집합, 다른 질문.
+// 탈출 시간은 "몇 번 만에 떠났나"만 묻는다. 궤도 트랩은 반복이 지나간 길을 본다:
+//   축 트랩  — 궤적이 실수축(zr=0)·허수축(zi=0)에 얼마나 근접했는가 → 대칭 무늬
+//   원 트랩  — 원점에서의 최근접 거리 → 동심원문
+// 최근접 거리 d 를 기억해 두면 색은 1/d 처럼 밝아진다(가까이 스칠수록 밝게).
+// 트랩 3종을 2초 루프 안에서 교체하며(팔레트 위상도 함께 순환) 같은 집합이 완전히 다른 그림이
+// 되는 과정을 한눈에 보여준다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var MAXIT  = 110;   // 최대 반복 — 궤적을 충분히 걷는 깊이
+  var CYCLE  = 2.0;   // 트랩 교체 + 팔레트 순환 주기(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var cv = document.getElementById('mbCv');
+  var field = cv.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = ['--mb-c0', '--mb-c1', '--mb-c2', '--mb-c3', '--mb-c4'].map(tokRGB);
+  var C_SET = tokRGB('--mb-set');
+  var C_TRAP = tokRGB('--mb-trap');   // 트랩 강조색 — 파스텔 골드
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, IRES = 240;
+  var ov, octx;
+
+  var CX = -0.75, CY = 0, SPAN = 2.9;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ov = document.createElement('canvas');
+    ov.width = IRES; ov.height = Math.max(2, Math.round(IRES * H / W));
+  }
+
+  // 트랩 종류: 0 실수축 | 1 허수축 | 2 원(반지름 0.62)
+  // 궤적이 각 트랩에 남긴 최근접 거리를 돌려준다. 집합 내부(null)는 색을 바꾼다
+  function trapDist(zr, zi, kind, best) {
+    var d;
+    if (kind === 0) d = Math.abs(zi);                    // 실수축 근접
+    else if (kind === 1) d = Math.abs(zr);               // 허수축 근접
+    else d = Math.abs(Math.hypot(zr, zi) - 0.62);        // 원 근접 — 반지름 0.62 원문
+    return d < best ? d : best;
+  }
+
+  function render(kind, phase) {
+    var iw = ov.width, ih = ov.height;
+    var img = octx.createImageData(iw, ih);
+    var px = img.data;
+    var dx = SPAN / iw, dy = SPAN / iw;
+    var oy0 = CY - (ih * dy) / 2;
+    var k = 0;
+    for (var j = 0; j < ih; j++) {
+      var ci = oy0 + j * dy;
+      for (var i = 0; i < iw; i++) {
+        var cr = CX - SPAN / 2 + i * dx;
+        var zr = 0, zi = 0, n = 0;
+        var best = 1e9;                     // 이 픽셀 궤적의 트랩 최근접 거리
+        while (n < MAXIT && zr * zr + zi * zi <= 4) {
+          var t = zr * zr - zi * zi + cr;
+          zi = 2 * zr * zi + ci;
+          zr = t;
+          best = trapDist(zr, zi, kind, best);
+          n++;
+        }
+        var r, g, b;
+        if (n >= MAXIT) {
+          r = C_SET[0]; g = C_SET[1]; b = C_SET[2];
+        } else {
+          // 스친 거리 → 밝기. d 가 작을수록 밝게(1/d 포화 곡선).
+          // 위상 phase 로 트랩 강조색과 팔레트를 번갈아 섞어 순환시킨다.
+          var glow = 1 / (1 + best * 26);            // 0(멀리) ~ 1(아주 가까이)
+          var u = glow * 4 + phase;
+          var seg = u - Math.floor(u / 4) * 4;
+          var a = (Math.floor(seg) % 4 === 3) ? C_TRAP : PAL[Math.floor(seg) % 4];
+          var bb2 = PAL[(Math.floor(seg) + 1) % 4];
+          var f = seg - Math.floor(seg);
+          var w1 = glow, w2 = 1 - glow;              // 가까울수록 트랩색 · 멀수록 짙은 팔레트
+          r = (a[0] * w1 + bb2[0] * w2) * f + a[0] * (1 - f);
+          g = (a[1] * w1 + bb2[1] * w2) * f + a[1] * (1 - f);
+          b = (a[2] * w1 + bb2[2] * w2) * f + a[2] * (1 - f);
+          // 바닥은 짙은 남보라로 눌러 트랩 무늬가 뜨도록
+          var dim = 0.35 + glow * 0.65;
+          r = C_SET[0] + (r - C_SET[0]) * dim;
+          g = C_SET[1] + (g - C_SET[1]) * dim;
+          b = C_SET[2] + (b - C_SET[2]) * dim;
+        }
+        px[k++] = r; px[k++] = g; px[k++] = b; px[k++] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    cv.getContext('2d').drawImage(ov, 0, 0, W, H);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % CYCLE;
+    var t = loop / CYCLE;
+    // 2초를 3구간으로 — 축(실수) → 축(허수) → 원. 경계는 색이 자연 섞이며 넘어간다
+    var kind = t < 1 / 3 ? 0 : (t < 2 / 3 ? 1 : 2);
+    var phase = t * 4;
+    render(kind, phase);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); render(0, reduce ? 0.8 : 0.8);
+  });
+
+  fit();
+  octx = ov.getContext('2d');
+  if (reduce) {
+    render(2, 0.8);                      // reduce — 원 트랩 한 장 고정(가장 무늬가 또렷)
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

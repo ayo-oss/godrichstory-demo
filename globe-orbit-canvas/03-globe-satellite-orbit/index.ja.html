@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>衛星軌道の地球儀 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gs" id="gs">
+  <p class="gs__hint">
+    <svg class="gs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M144 128a16 16 0 1 1-16-16a16 16 0 0 1 16 16" opacity=".2"/><path d="M232 112a24 24 0 0 0-22.84-23.9A64 64 0 0 0 84 76.53A40 40 0 0 0 72 152h8.91a64 64 0 0 0 106 30.16l-9.46-13.27A48 48 0 0 1 93.54 152H192a24 24 0 0 0 40-40m-56-24a48 48 0 0 1 46.31 35.44A8 8 0 0 1 214.58 132H96a48 48 0 0 1 48-44h16Zm36 32h-1.28l1.1 3.53c.05-.5.18-1 .18-1.53Z" fill-rule="evenodd"/></g></svg>
+    <span>複数の衛星がそれぞれ異なる楕円軌道を周回します</span>
+  </p>
+  <div class="gs__field" id="field" role="application" aria-label="衛星軌道の実験台" tabindex="0" data-sort="z-sort">
+    <canvas class="gs__cv" id="cv"></canvas>
+  </div>
+</div>
+</main>
+<script>
+// 衛星軌道の地球儀 — 각 위성은 3D 타원 궤도 위를 등각 속도로 돈다.
+// 화가 알고리즘(painter's algorithm): 지구본(원)과 위성을 z 깊이(z-sort)로 한 번에 정렬해 뒤→앞 순서로 그린다.
+// 지구본 뒤(z&lt;0)의 위성은 지구본 원이 나중에 덮으니 자연히 가려진다.
+var root = document.getElementById('gs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var TAU = Math.PI * 2;
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+
+// 위성 궤도 — a(장반경 배율) b(단반경 배율) inc(궤도 기울기 rad) phase(시작 위상) speed(각속도)
+var SATS = [
+  { a: 1.62, b: 1.62, inc: 0.00, phase: 0.0,  speed: 0.55 },
+  { a: 1.95, b: 1.38, inc: 0.55, phase: 2.1,  speed: 0.42 },
+  { a: 2.30, b: 1.72, inc: 1.05, phase: 4.0,  speed: 0.34 },
+  { a: 1.80, b: 1.24, inc: 1.62, phase: 1.2,  speed: 0.48 },
+  { a: 2.55, b: 2.05, inc: 0.82, phase: 5.2,  speed: 0.28 },
+  { a: 1.44, b: 1.44, inc: 2.20, phase: 3.3,  speed: 0.62 }
+];
+var rotY = 0;             // 지구본 자전
+var last = 0, raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 궤도 평면계 좌표(ex, ey)를 기울기 inc 만큼 돌려 3D 로, 다시 지구본 자전(rotY)을 곱해 카메라계로
+function satPos(s, t) {
+  var th = s.phase + t * s.speed;
+  var ex = Math.cos(th) * s.a;
+  var ey = Math.sin(th) * s.b;
+  var y = ey * Math.cos(s.inc);
+  var zi = ey * Math.sin(s.inc);
+  var cx = Math.cos(rotY), sx = Math.sin(rotY);
+  return {
+    x: ex * cx + zi * sx,
+    y: y,
+    z: -ex * sx + zi * cx
+  };
+}
+
+function draw(t) {
+  ctx.clearRect(0, 0, W, H);
+  var cx = W / 2, cy = H / 2;
+  var R = Math.min(W, H) * 0.26;    // 지구본 반지름 — 궤도가 화면 안에 다 들어오게
+
+  var cs = getComputedStyle(root);
+  var C_sphere = cs.getPropertyValue('--gs-sphere').trim();
+  var C_deep = cs.getPropertyValue('--gs-deep').trim();
+  var C_orbit = cs.getPropertyValue('--gs-orbit').trim();
+  var C_orbitHi = cs.getPropertyValue('--gs-orbit-hi').trim();
+  var C_sat = cs.getPropertyValue('--gs-sat').trim();
+  var C_satHi = cs.getPropertyValue('--gs-sat-hi').trim();
+
+  // 위성 위치 전부 계산
+  var sats = [];
+  for (var i = 0; i < SATS.length; i++) {
+    var p = satPos(SATS[i], t);
+    sats.push({ def: SATS[i], p: p });
+  }
+
+  // ── 1단계: 궤도선 (언제나 지구본보다 아래 층)
+  for (var k = 0; k < SATS.length; k++) {
+    var s = SATS[k];
+    ctx.beginPath();
+    var started = false;
+    for (var seg = 0; seg <= 128; seg++) {
+      var th = (seg / 128) * TAU;
+      var ex = Math.cos(th) * s.a;
+      var ey = Math.sin(th) * s.b;
+      var yy = ey * Math.cos(s.inc);
+      var zi = ey * Math.sin(s.inc);
+      var ccx = Math.cos(rotY), ssx = Math.sin(rotY);
+      var x = ex * ccx + zi * ssx;
+      var z = -ex * ssx + zi * ccx;
+      // 정사도 — z 는 깊이로만 쓴다
+      var px = cx + x * R, py = cy - yy * R;
+      if (!started) { ctx.moveTo(px, py); started = true; }
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    // 뒤쪽 절반은 흐리게 — z 부호로 알파를 갈라 입체를 읽게 한다
+    ctx.strokeStyle = s.speed > 0.45 ? C_orbitHi : C_orbit;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // ── 2단계: 지구본 + 위성을 z 로 한번에 정렬(화가 알고리즘)
+  var items = [{ kind: 'globe', z: 0 }];
+  for (var m = 0; m < sats.length; m++) {
+    items.push({ kind: 'sat', z: sats[m].p.z, ref: sats[m] });
+  }
+  items.sort(function (a, b) { return a.z - b.z; });   // 뒤(z 작음)부터 — z-sort 키로 오름차순
+
+  for (var q = 0; q < items.length; q++) {
+    var it = items[q];
+    if (it.kind === 'globe') {
+      // 지구본 — 위성 궤도가 살아 보이게 위성보다 반지름을 작게 둔다
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, 0, TAU);
+      ctx.fillStyle = C_sphere;
+      ctx.fill();
+      // 은은한 편구 셰이딩 — 왼쪽 위가 밝다
+      var g = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.35, R * 0.1, cx, cy, R);
+      g.addColorStop(0, C_deep);
+      g.addColorStop(1, C_sphere);
+      ctx.fillStyle = g;
+      ctx.fill();
+    } else {
+      var sp = it.ref;
+      var depth = (sp.p.z + 2.6) / 5.2;                    // 0..1
+      var px2 = cx + sp.p.x * R, py2 = cy - sp.p.y * R;
+      ctx.globalAlpha = 0.35 + depth * 0.65;
+      // 위성 — 크기도 깊이로
+      var r2 = 2.2 + depth * 2.6;
+      ctx.fillStyle = sp.def.speed > 0.45 ? C_satHi : C_sat;
+      ctx.beginPath();
+      ctx.arc(px2, py2, r2, 0, TAU);
+      ctx.fill();
+      // 앞쪽 위성에만 발광 헤일로 — 뒤는 지구본에 가려졌음이 또렷해진다
+      if (depth > 0.5) {
+        ctx.globalAlpha = 0.28 * depth;
+        ctx.beginPath();
+        ctx.arc(px2, py2, r2 * 2.4, 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  rotY += dt * 0.18;
+  draw(now * 0.001);
+  raf = requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', function () { fit(); draw(0); });
+
+fit();
+if (reduce) {
+  draw(0.4);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

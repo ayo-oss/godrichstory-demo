@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>河川浸食デモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tre" id="tre">
+  <p class="tre__hint">
+    <svg class="tre__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M112 56a32 32 0 1 1 32-32a32 32 0 0 1-32 32" opacity=".2"/><path d="M105.46,210.4l-67-144.87a8,8,0,0,1,8.93-11.25L215.75,86A8,8,0,0,1,219,99.62l-107.52,47.12,15.4,67.6a8,8,0,0,1-15.53,4.6Z" opacity=".2"/><path d="M30.93,48.81a16,16,0,0,1,19.4-6.36l154.72,61.76a16,16,0,0,1-.77,29.84l-107.5,47.12L74.4,248.16a16,16,0,0,1-29.51-5.95Z"/></g></svg>
+    <span>シードを変えると水路が別の谷へ分かれます</span>
+  </p>
+  <div class="tre__field" id="field" role="img" aria-label="高度帯の地形を川が流れ下る浸食マップ">
+    <canvas class="tre__cv" id="cv"></canvas>
+    <b class="tre__badge" id="badge">水源 7か所</b>
+  </div>
+  <div class="tre__bar">
+    <label class="tre__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="浸食シード">
+    </label>
+    <b class="tre__val" id="flowOut">追跡 0%</b>
+  </div>
+</div>
+</main>
+<script>
+// 강줄기 침식 — 2D fbm 높이맵 위 최급경사(steepest descent) 추적.
+// ① 격자(46×28)마다 fbm 높이를 구해 고도띠 6단으로 지형을 칠한다.
+// ② 시작점(水源)마다 이웃 8칸 중 값이 가장 낮은 칸으로 한 칸씩 내려가는 추적을 반복해
+//    그 경로를 lineTo 로 이어 강줄기를 긋는다 — 계곡을 따라 굽이치는 건 노이즈가 아니라
+//    "어디가 더 낮은가"라는 계산의 결과다(077 기준선: 계산 한 겹).
+// ③ 시간에는 노이즈 샘플링 창(z)을 천천히 흘려 산이 다시 태어나면 물길도 같이 다시 판다.
+// 물길은 매 프레임 처음부터 다시 추적한다 — 캐시 없이, 침식이 살아 움직이는 모습을 그대로.
+var root = document.getElementById('tre');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+var flowOut = document.getElementById('flowOut');
+
+var GW = 46, GH = 28;                    // 높이맵 격자 — 추적은 이 칸 단위로 일어난다
+var heights = new Float32Array(GW * GH); // 한 프레임 동안 쓰는 높이 버퍼(추적·채색 함께)
+
+// ── 결정적 난수 — mulberry32. シード 하나 → 같은 테이블 ────────────────────────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var PERM = new Uint8Array(512);
+var VAL = new Float32Array(256);
+function buildTables(seed) {
+  var rng = mulberry32(seed >>> 0);
+  var p = [], i, j, t;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) { j = (rng() * (i + 1)) | 0; t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  for (i = 0; i < 256; i++) VAL[i] = rng();
+}
+
+function fade(t) { return t * t * (3 - 2 * t); }   // 스무스스텝 — 격자 경계에서 각이 안 지게
+
+// 3차원 값 노이즈(x·y·z — z 가 시간축). 트리플린어 보간
+function vnoise(x, y, z) {
+  var xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  var xf = x - xi, yf = y - yi, zf = z - zi;
+  xi &= 255; yi &= 255; zi &= 255;
+  var u = fade(xf), v = fade(yf), w = fade(zf);
+  var a = PERM[xi] + yi, b = PERM[xi + 1] + yi;
+  var aa = PERM[a] + zi, ab = PERM[a + 1] + zi;
+  var ba = PERM[b] + zi, bb = PERM[b + 1] + zi;
+  var c000 = VAL[PERM[aa]], c100 = VAL[PERM[ba]];
+  var c010 = VAL[PERM[ab]], c110 = VAL[PERM[bb]];
+  var c001 = VAL[PERM[aa + 1]], c101 = VAL[PERM[ba + 1]];
+  var c011 = VAL[PERM[ab + 1]], c111 = VAL[PERM[bb + 1]];
+  var x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+  var x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+  var y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  return y0 + (y1 - y0) * w;
+}
+
+// fbm — 옥타브 적층. z 가 흐르면 산·골짜기가 통째로 천천히 다시 태어난다
+function fbm(x, y, z) {
+  var sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (var i = 0; i < 5; i++) {
+    sum += vnoise(x * f, y * f, z * f) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+// ── 색 — 고도띠 6단을 CSS 커스텀 프로퍼티(파스텔 토큰)에서 읽어 온다 ────────────────
+var css = getComputedStyle(root);
+function rgbOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+var BANDS = [rgbOf('--c0'), rgbOf('--c1'), rgbOf('--c2'), rgbOf('--c3'), rgbOf('--c4'), rgbOf('--c5')];
+var RIVER = rgbOf('--river');
+var SPRING = rgbOf('--spring');
+
+var SCALE = 0.075;   // 격자 간격(노이즈 공간) — 산·골짜기의 굵기
+var FLOW = 0.7;      // z(시간축) 흐름 — 산이 다시 태어나는 빠르기(고도띠가 눈에 띄게 넘실댄다)
+var SPRINGS = 7;     // 水源(시작점) 수
+var MAX_STEP = 90;   // 추적 최대 걸음 — 무한 루프 방지(분지 사이클·평지에서 멈춘다)
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 水源 배치 — 격자 위 균등한 칸에 오프셋을 줘 시작점이 겹치지 않게. 시드가 바뀌면
+// 지형 자체가 달라지므로 같은 배치로도 완전히 다른 골짜기로 흘러간다
+function springCell(k) {
+  var cols = Math.ceil(SPRINGS / 2);
+  var col = k % cols, row = (k / cols) | 0;
+  var cx = Math.round(((col + 0.55) / cols) * (GW - 3)) + 1;
+  var cy = Math.round((row === 0 ? 0.18 : 0.62) * (GH - 3)) + 1;
+  if (cx < 1) cx = 1; if (cx > GW - 2) cx = GW - 2;
+  if (cy < 1) cy = 1; if (cy > GH - 2) cy = GH - 2;
+  return cx + cy * GW;
+}
+
+// 최급경사 추적 — (x,y) 에서 이웃 8칸 중 가장 낮은 칸으로 한 칸. 더 낮은 이웃이 없으면
+// (호수·분지) 추적을 멈춘다. 경로를 배열로 돌려준다
+function trace(ix) {
+  var path = [ix];
+  var x = ix % GW, y = (ix / GW) | 0;
+  for (var s = 0; s < MAX_STEP; s++) {
+    var best = -1, bestH = heights[y * GW + x];
+    for (var dy = -1; dy <= 1; dy++) {
+      var ny = y + dy; if (ny < 0 || ny >= GH) continue;
+      for (var dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        var nx = x + dx; if (nx < 0 || nx >= GW) continue;
+        var h = heights[ny * GW + nx];
+        if (h < bestH) { bestH = h; best = ny * GW + nx; }
+      }
+    }
+    if (best < 0) break;                 // 분지 도달 — 강이 호수로 닫는다
+    x = best % GW; y = (best / GW) | 0;
+    path.push(best);
+    if (y === GH - 1 || y === 0) break;  // 지도 밖(바다)으로 나갔다
+  }
+  return path;
+}
+
+function paint(sec) {
+  var z = sec * FLOW;
+  // ① 높이맵 + 고도띠 채색 — 격자 칸을 화면 크기의 직사각형으로 넉넉히 그린다
+  var cw = W / GW + 1, ch = H / GH + 1;
+  var hi = 0, maxSteps = 0, stepSum = 0;
+  for (var gy = 0; gy < GH; gy++) {
+    for (var gx = 0; gx < GW; gx++) {
+      var n = fbm(gx * SCALE + 13.7, gy * SCALE + 71.3, z);
+      n = n * 1.5 - 0.25;                // 값 노이즈는 가운데로 몰린다 — 대비를 펴 준다
+      if (n < 0) n = 0; else if (n > 1) n = 1;
+      heights[hi++] = n;
+      // 표시 색은 굵은 6단 고도띠로 고르되(BANDS), 색 사이 위치를 FINE(18) 단계로 잘게
+      // 쪼개 경계를 자주 넘나들게 한다 — 같은 색 팔레트를 그대로 두고 화면이 살아 움직이게
+      // 만드는 계산(파스텔 톤은 그대로, 경계만 촘촘해진다)
+      var bandF = n * 5;
+      var lo = bandF | 0; if (lo > 4) lo = 4;
+      var hi2 = lo + 1; if (hi2 > 5) hi2 = 5;
+      var frac = bandF - lo;
+      var FINE = 18;
+      var step = (frac * FINE) | 0;
+      var mixT = step / FINE;
+      var cl = BANDS[lo], ch2 = BANDS[hi2];
+      var r = cl[0] + (ch2[0] - cl[0]) * mixT;
+      var g = cl[1] + (ch2[1] - cl[1]) * mixT;
+      var bch = cl[2] + (ch2[2] - cl[2]) * mixT;
+      ctx.fillStyle = 'rgb(' + (r | 0) + ',' + (g | 0) + ',' + (bch | 0) + ')';
+      ctx.fillRect(gx * W / GW - 0.5, gy * H / GH - 0.5, cw, ch);
+    }
+  }
+  // ② 최급경사 추적 — 수원마다 경로를 구해 lineTo 로 강줄기를 긋는다.
+  //    하류로 갈수록 선이 굵어진다(유량이 모인다) — 발원지는 가늘게, 하류는 굵게
+  for (var k = 0; k < SPRINGS; k++) {
+    var path = trace(springCell(k));
+    if (path.length < 2) continue;
+    if (path.length > maxSteps) maxSteps = path.length;
+    stepSum += path.length;
+    var jx = (path[0] % GW) + 0.5, jy = ((path[0] / GW) | 0) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(jx * (W / GW), jy * (H / GH));
+    for (var p = 1; p < path.length; p++) {
+      var px = (path[p] % GW) + 0.5, py = ((path[p] / GW) | 0) + 0.5;
+      ctx.lineTo(px * (W / GW), py * (H / GH));
+    }
+    var wOut = 1.6 + path.length / MAX_STEP * 3.4;   // 1.6px → 5px
+    ctx.lineWidth = wOut;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(' + RIVER[0] + ',' + RIVER[1] + ',' + RIVER[2] + ',0.92)';
+    ctx.stroke();
+    // 발원지 표식 — 水源(샘) 점
+    ctx.beginPath();
+    ctx.arc(jx * (W / GW), jy * (H / GH), 2.6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgb(' + SPRING[0] + ',' + SPRING[1] + ',' + SPRING[2] + ')';
+    ctx.fill();
+  }
+  // 상태 라벨 — 추적이 얼마나 내려갔는지(침식 진행)
+  var avg = stepSum / SPRINGS;
+  flowOut.textContent = '追跡  ' + Math.round(avg / MAX_STEP * 100) + '%';
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function applySeed(v) {
+  var s = Math.max(1, Math.min(9999, Math.floor(v) || 1));
+  seedIn.value = String(s);
+  badge.textContent = '水源 ' + SPRINGS + 'か所';
+  buildTables(s);
+  if (reduce) paint(0);
+}
+
+seedIn.addEventListener('input', function () { applySeed(Number(seedIn.value)); });
+seedIn.addEventListener('change', function () { applySeed(Number(seedIn.value)); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+fit();
+applySeed(Number(seedIn.value));
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 시드가 정한 물길 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

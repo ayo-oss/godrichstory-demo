@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>내 선 그리기 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>キャンバスにマウスで好きな線を引くと、その点が即座に複素係数へ変わり、描いたばかりの署名や落書きをエピサイクルが一筆ずつ描き直します</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="自分の線を描く 実験版" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> サンプル落書き・自分でも描いてみて</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · live DFT · pointer events</span>
+  </div>
+</div>
+</main>
+<script>
+// 내 선 그리기(05). 편의 인터랙티브 축 — 손으로 그은 선이 그대로 DFT 입력이 된다.
+//   ① 기본 상태: 예시 낙서(물결 서명)를 낮은 알파로 깔아두고 에피사이클이 반복해서 되그린다.
+//   ② pointerdown~move 로 점을 모으면(최대 512) 기존 계수를 지우고 즉시 dft() 재계산 —
+//     계산은 O(N²) 이지만 N=512 로 순식간이고, 체인이 새 경로를 다시 그리기 시작한다.
+//   ③ 같은 재합성 루프(투명 트레일 누적 + 혜성 감쇠)를 공유한다.
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 밑바탕 방사 스윕·스포크가 매 프레임 재계산되어 화면 전면이 살아 있다.
+//  · 손 궤적(입력)도 옅은 잔상으로 함께 남는다 — 그은 즉시 바뀌는 계수를 눈으로 읽는다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var MAXPTS = 512;    // 입력 받는 최대 점 수
+  var SHOW = 48;       // 화면에 그리는 円の数
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  // ── DFT (03·04 와 같은 계산) ──
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+  var normPath = [];   // 정규화된 경로(체인 재현용)
+
+  function normalize() {
+    // 그은 점을 무대 중심·단위반지름으로 정규화
+    var minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+    for (var i = 0; i < PATH.length; i++) {
+      if (PATH[i].x < minx) minx = PATH[i].x;
+      if (PATH[i].x > maxx) maxx = PATH[i].x;
+      if (PATH[i].y < miny) miny = PATH[i].y;
+      if (PATH[i].y > maxy) maxy = PATH[i].y;
+    }
+    var cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
+    var span = Math.max(maxx - minx, maxy - miny) || 1;
+    normPath = [];
+    for (var j = 0; j < PATH.length; j++) {
+      normPath.push({ x: (PATH[j].x - cx) / span, y: (PATH[j].y - cy) / span });
+    }
+    COEF = dft(normPath);
+  }
+
+  function sampleDoodle() {
+    // 예시 낙서 — 서명 같은 물결. t 0~1 로 닫힌 물결 무늬
+    PATH = [];
+    for (var i = 0; i < 200; i++) {
+      var t = i / 200;
+      PATH.push({
+        x: Math.cos(t * TAU) * (0.36 + 0.16 * Math.sin(t * TAU * 3)),
+        y: Math.sin(t * TAU) * (0.24 + 0.12 * Math.cos(t * TAU * 2))
+      });
+    }
+    normalize();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    if (!COEF.length) sampleDoodle();
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function chainAt(u, show) {
+    var base = Math.min(W, H) * 0.4;
+    var cx = W * 0.5, cy = H * 0.5;
+    var pts = [{ x: cx, y: cy }];
+    var n = show || COEF.length;
+    for (var i = 0; i < n && i < COEF.length; i++) {
+      var c = COEF[i];
+      var a = c.freq * u * TAU;
+      var ph = Math.atan2(c.im, c.re);
+      var ang = a + ph;
+      var px = pts[i].x + Math.cos(ang) * c.amp * base;
+      var py = pts[i].y + Math.sin(ang) * c.amp * base;
+      pts.push({ x: px, y: py });
+    }
+    return pts;
+  }
+
+  // 밑바탕 — 방사 스윕(계단 밴드) + 스포크
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.5, cy = H * 0.5;
+    var maxR = Math.sqrt(W * W + H * H) * 0.5;
+    var sweep = t * 1.1;
+    for (var b = 0; b < 16; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.085 * (1 - b / 16));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.06, sweep - b * 0.06);
+      ctx.closePath();
+      ctx.fill();
+    }
+    var spin = t * 0.26;
+    for (var i = 0; i < 16; i++) {
+      var a = spin + (i / 16) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.08 : 0.05);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+  }
+
+  function draw(u, pulse, show, gt) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    // 손 궤적 잔상 — 사용자가 그은 원본(정규화 전 화면 좌표)을 옅게
+    if (handCv) ctx.drawImage(handCv, 0, 0, W, H);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+    var base = Math.min(W, H) * 0.4;
+
+    var pts = chainAt(u, show);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var r = COEF[i].amp * base;
+      if (r > 2) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.01 * i);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+        ctx.stroke();
+      }
+      if (i < 4 || r > 3) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.48);
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+        ctx.stroke();
+      }
+    }
+    var pen = pts[pts.length - 1];
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr, 0, TAU);
+    ctx.fill();
+    return pen;
+  }
+
+  var prevPen = null;
+  var handCv = null, handCtx = null;   // 손 궤적 잔상 캔버스
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    trailCtx.strokeStyle = rgba(C_GLOW, 0.88);
+    trailCtx.lineWidth = 1.9;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.strokeStyle = rgba(C_GLOW, 0.14);
+    trailCtx.lineWidth = 5;
+    trailCtx.stroke();
+    prevPen = pen;
+  }
+
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.03)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = ((now - t0) / 1000) * 0.5;
+    var u = lt % 1;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 8.0);
+    decayTrail();
+    var pen = draw(u, pulse, SHOW, lt * TAU);
+    stampTrail(pen);
+    if (nOut) nOut.textContent = String(PATH.length);
+    raf = requestAnimationFrame(frame);
+  }
+
+  // ── 입력 — 그으면 즉시 DFT 재계산 ──
+  var drawing = false, lastPt = null;
+  function toField(e) {
+    var r = cv.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  function startDraw(e) {
+    drawing = true; lastPt = toField(e);
+    PATH = [lastPt];
+    if (!handCv) {
+      handCv = document.createElement('canvas');
+      handCv.width = W * dpr; handCv.height = H * dpr;
+      handCtx = handCv.getContext('2d');
+      handCtx.scale(dpr, dpr);
+    }
+    handCtx.clearRect(0, 0, W, H);
+    prevPen = null;
+    e.preventDefault();
+  }
+  function moveDraw(e) {
+    if (!drawing) return;
+    var p = toField(e);
+    if (Math.abs(p.x - lastPt.x) + Math.abs(p.y - lastPt.y) < 4) return;
+    PATH.push(p);
+    if (PATH.length > MAXPTS) PATH.shift();
+    handCtx.strokeStyle = rgba(C_HOT, 0.28);
+    handCtx.lineWidth = 2;
+    handCtx.lineCap = 'round';
+    handCtx.beginPath();
+    handCtx.moveTo(lastPt.x, lastPt.y);
+    handCtx.lineTo(p.x, p.y);
+    handCtx.stroke();
+    lastPt = p;
+    normalize();
+    prevPen = null;
+    e.preventDefault();
+  }
+  function endDraw() {
+    if (!drawing) return;
+    drawing = false;
+    if (PATH.length > 8) normalize();
+  }
+  cv.addEventListener('pointerdown', startDraw);
+  cv.addEventListener('pointermove', moveDraw);
+  window.addEventListener('pointerup', endDraw);
+
+  function stillFrame() {
+    var prev = chainAt(0, SHOW)[SHOW];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200, SHOW)[SHOW];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(0.5, 0.5, SHOW, 2.1);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null; handCv = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

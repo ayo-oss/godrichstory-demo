@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ノイズの流れ場に沿って粒子80個が色の軌跡を残す背景 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">ノイズの流れ場に沿って粒子80個が色の軌跡を残す背景</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 2D 값 노이즈로 방향장(flow field)을 만들고, 입자 PLASMA_PARTICLE_COUNT 개가
+  // 각자의 자리에서 그 방향을 따라 흐르며 지나간 자리를 옅게 남긴다(트레일). 트레일은
+  // 매 프레임 살짝 페이드되는 offBuf 위에 누적되므로, 매 프레임을 독립 계산하는 다른
+  // 항목과 달리 상태(입자 위치·트레일)를 이어간다 — reduce 에서는 이 상태 갱신 자체를 멈춘다.
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_PARTICLE_COUNT = 80;
+  var PLASMA_FLOW_SCALE = 0.05;
+  var PLASMA_SPEED_PX_S = 34;
+  var PLASMA_FADE_ALPHA = 0.10;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return 'rgb(' + Math.round((r + m) * 255) + ',' + Math.round((g + m) * 255) + ',' + Math.round((b + m) * 255) + ')';
+  }
+
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(417082);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  octx.fillStyle = '#0c0e16';
+  octx.fillRect(0, 0, CALC_W, CALC_H);
+
+  var pRand = seedRand(417083);
+  var particles = [];
+  for (var pi = 0; pi < PLASMA_PARTICLE_COUNT; pi += 1) {
+    particles.push({
+      x: pRand() * CALC_W,
+      y: pRand() * CALC_H,
+      hueSeed: pRand() * 360
+    });
+  }
+
+  var flowT = 0;
+  function stepSim(dtMs) {
+    octx.fillStyle = 'rgba(12,14,22,' + PLASMA_FADE_ALPHA + ')';
+    octx.fillRect(0, 0, CALC_W, CALC_H);
+    flowT += dtMs * 0.00035;
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var ang = valueNoise2D(p.x * PLASMA_FLOW_SCALE + flowT, p.y * PLASMA_FLOW_SCALE) * Math.PI * 4;
+      p.x += Math.cos(ang) * PLASMA_SPEED_PX_S * dtS;
+      p.y += Math.sin(ang) * PLASMA_SPEED_PX_S * dtS;
+      if (p.x < 0) p.x += CALC_W; if (p.x >= CALC_W) p.x -= CALC_W;
+      if (p.y < 0) p.y += CALC_H; if (p.y >= CALC_H) p.y -= CALC_H;
+      var hue = (ang * 57.3 + p.hueSeed + flowT * 40) % 360;
+      octx.fillStyle = hslToRgb(hue, 0.75, 0.58);
+      octx.fillRect(p.x - 0.6, p.y - 0.6, 1.6, 1.6);
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    present();
+  }
+
+  function present() {
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) {
+    root.classList.remove('is-demo');
+    for (var w = 0; w < 70; w += 1) stepSim(1000 / 30);
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      stepSim(Math.min(dt, 48));
+    }
+    present();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  present();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

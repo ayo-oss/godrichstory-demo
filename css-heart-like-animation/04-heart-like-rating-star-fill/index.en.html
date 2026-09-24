@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star fill — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <fieldset class="rating is-demo">
+    <legend class="rating__legend">Rating</legend>
+    <div class="rating__stars">
+      <input type="radio" name="rating" id="r5" class="rating__input" style="--i:4"><label for="r5" class="rating__star" style="--i:4" aria-label="5 stars">★<span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span></label>
+      <input type="radio" name="rating" id="r4" class="rating__input" style="--i:3"><label for="r4" class="rating__star" style="--i:3" aria-label="4 stars">★<span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span></label>
+      <input type="radio" name="rating" id="r3" class="rating__input" style="--i:2"><label for="r3" class="rating__star" style="--i:2" aria-label="3 stars">★<span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span></label>
+      <input type="radio" name="rating" id="r2" class="rating__input" style="--i:1"><label for="r2" class="rating__star" style="--i:1" aria-label="2 stars">★<span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span></label>
+      <input type="radio" name="rating" id="r1" class="rating__input" style="--i:0"><label for="r1" class="rating__star" style="--i:0" aria-label="1 star">★<span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span><span class="rating__spark" aria-hidden="true"></span></label>
+    </div>
+  </fieldset>
+</main>
+<script>
+// 한 겹: 고른 별에서 질량-감쇠 물리 스파크 버스트 — 미니 별이 별 글자 위에서 흩어진다.
+// 각 파티클은 초기 속도(위쪽 부채꼴·크기 랜덤)와 개별 질량을 갖고, 매 프레임 준암시 오일러 적분으로
+// 감쇠(-k/m·v — 질량이 클수록 덜 감속)와 중력(질량 무관)을 받아 흩어졌다 멈춘다 (keyframes 아님).
+(function () {
+  var root = document.querySelector(".rating");
+  if (!root) return;
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var groups = [].slice.call(root.querySelectorAll(".rating__star"));
+  var sparks = [].slice.call(root.querySelectorAll(".rating__spark")); // 5그룹×4개 평면 목록 — 매 프레임 DOM 질의 없음
+  var alive = false, raf = 0, last = 0;
+
+  function fireGroup(label) {
+    if (reduce) return;
+    var own = [].slice.call(label.querySelectorAll(".rating__spark"));
+    if (!own.length) return;
+    var now = performance.now();
+    for (var i = 0; i < own.length; i++) {
+      var m = .6 + Math.random() * .8;                           // 개별 질량 0.6~1.4
+      var ang = -Math.PI / 2 + (Math.random() - .5) * 3;         // 위쪽 부채꼴 ±86°
+      var v0 = (120 + Math.random() * 80) * (1.15 - m * .2);     // 무거울수록 느게 출발
+      own[i]._p = { x: 0, y: 0, vx: Math.cos(ang) * v0, vy: Math.sin(ang) * v0,
+        m: m, k: 3.6, g: 300, rot: (Math.random() - .5) * 40, spin: (Math.random() - .5) * 840,
+        s: .4 + m * .3, born: now + i * 24, life: 650 + Math.random() * 300 };
+    }
+    if (!alive) { alive = true; last = now; raf = requestAnimationFrame(step); }
+  }
+
+  function step(t) {
+    var dt = Math.min((t - last) / 1000, .05); last = t;         // 탭 복귀 시 폭주 방지 클램프
+    var any = false;
+    for (var i = 0; i < sparks.length; i++) {
+      var el = sparks[i], p = el._p; if (!p) continue;
+      var age = t - p.born;
+      if (age < 0) { any = true; continue; }                      // 방출 전 지연(순차 분사)
+      if (age >= p.life) { el.style.opacity = '0'; el._p = null; continue; } // 수명 끝 → 정지
+      p.vx += (-p.k / p.m * p.vx) * dt;                           // 감쇠 가속도 = -k/m·v
+      p.vy += (p.g - p.k / p.m * p.vy) * dt;                      // 중력 가속도 = g (질량 무관)
+      p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt;
+      var o = age / p.life;                                       // 수명 후반 45%에서 페이드아웃
+      el.style.opacity = o < .55 ? '1' : (1 - (o - .55) / .45).toFixed(3);
+      el.style.transform = 'translate(' + p.x.toFixed(1) + 'px,' + p.y.toFixed(1) + 'px) rotate(' + p.rot.toFixed(1) + 'deg) scale(' + p.s.toFixed(3) + ')';
+      any = true;
+    }
+    if (any) raf = requestAnimationFrame(step); else alive = false; // 전부 정지하면 루프 종료
+  }
+
+  // 트리거 1: 실제 클릭 — 체크된 라디오 옆 라벨의 그룹만 발사
+  root.addEventListener("change", function (e) {
+    root.classList.remove("is-demo");
+    var inp = e.target;
+    if (inp && inp.type === "radio" && inp.checked) {
+      var label = root.querySelector('label[for="' + inp.id + '"]');
+      if (label) fireGroup(label);
+    }
+  });
+  // 기존: 데모 해제 포인터다운 보존
+  root.querySelectorAll(".rating__input").forEach(function (i) {
+    i.addEventListener("pointerdown", function () { root.classList.remove("is-demo"); });
+  });
+  // 트리거 2: 데모 루프 — star-wave(2s) 40% 정점 + --i*0.12s 지연에 맞춰 별마다 순서대로 발사.
+  // groups 는 DOM 순(r5→r1, --i:4→0)이라 뒤에서부터 — 파도가 --i:0 부터 차오르는 방향.
+  function wave() {
+    if (!root.classList.contains("is-demo")) return;
+    for (var i = 0; i < groups.length; i++) {
+      (function (idx) { setTimeout(function () { fireGroup(groups[idx]); }, 800 + i * 120); })(groups.length - 1 - i);
+    }
+  }
+  setInterval(wave, 2000);
+  wave();                                                         // 첫 사이클(t=0)부터 녹화 창 안에 잡힌다
+})();
+</script>
+</body>
+</html>

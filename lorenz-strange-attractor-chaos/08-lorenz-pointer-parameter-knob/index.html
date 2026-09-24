@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>파라미터 손잡이 — 로렌츠 어트랙터 카오스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lz is-demo" id="lzRoot">
+  <p class="lz__hint">
+    <span>세 계수를 포인터 위치에 묶으면 나비가 찌그러지고 뒤집히며 새로운 궤도로 태어납니다</span>
+  </p>
+  <div class="lz__field" role="application" aria-label="파라미터 손잡이 실험판" tabindex="0">
+    <canvas class="lz__cv" id="lzCv"></canvas>
+  </div>
+  <div class="lz__bar">
+    <span class="lz__meta">포인터 x 로 σ · y 로 ρ · 12분할 궤적</span>
+    <span class="lz__meta lz__meta--dim">canvas · 계수 반영 · 60ms 지연</span>
+  </div>
+</div>
+</main>
+<script>
+// 파라미터 손잡이(08) — 계수를 손으로 만지는 실험판.
+// 포인터 가로 위치를 σ(4~24), 세로 위치를 ρ(10~45)로 읽고, 현재 계수는 τ 0.06(=60ms)마다
+// 목표를 향해 다가간다. 계수가 바뀌면 12개 시드의 궤적을 매 프레임 다시 적분해 보여준다.
+// (σ, ρ) 평면을 훑으면 카오스 영역과 고정점으로 빠지는 영역의 경계가 손에 잡힌다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var ORBITS = 12;      // 동시 궤적 수 — 시드를 원주 12분할에 뿌린다
+  var STEPS  = 900;     // 궤적당 걸음 수
+  var DT     = 0.012;   // 오일러 걸음
+  var TAU    = 0.06;    // 계수 추종 시정수(초) — 설정 60ms 지연과 같다
+  // ────────────────────────────────────────────────────
+  var BETA = 8 / 3;
+
+  var root = document.getElementById('lzRoot');
+  var cvEl = document.getElementById('lzCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C0    = tokRGB('--lz-c0');    // 궤적 시작 — 얼음
+  var C1    = tokRGB('--lz-c1');    // 궤적 중간 — 라일락
+  var C2    = tokRGB('--lz-c2');    // 궤적 끝 — 복숭아
+  var HEAD  = tokRGB('--lz-head');  // 머리 — 크림(토큰)
+  var PANEL = tokRGB('--lz-panel');
+  function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+  function rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+  function orbitColor(k) {
+    var t = k / (ORBITS - 1);
+    return t < 0.5 ? mix(C0, C1, t * 2) : mix(C1, C2, (t - 0.5) * 2);
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0;
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.font = '600 10px -apple-system, "Segoe UI", sans-serif';
+  }
+
+  // 계수 상태 — 현재값이 목표를 τ 60ms 로 쫓는다
+  var sig = 10, rho = 28;
+  var sigT = 10, rhoT = 28;
+  var hasPtr = false;
+
+  // 시드 — 어트랙터 중심 두 날개 축을 원주 12분할로 감싼다
+  var seeds = [];
+  var k;
+  for (k = 0; k < ORBITS; k++) {
+    var ang = k / ORBITS * 6.2832;
+    seeds.push([8.5 + Math.cos(ang) * 6.5, 8.5 + Math.sin(ang) * 6.5, 26 + Math.cos(ang * 2) * 3]);
+  }
+
+  // 계수에 맞춰 12궤적을 다시 적분 — 계수가 살아 있으므로 매 프레임 재계산한다
+  var bufX = new Float32Array(STEPS), bufZ = new Float32Array(STEPS);
+  function traceOrbit(sx, sy, sz, sigv, rhov) {
+    var x = sx, y = sy, z = sz, i;
+    for (i = 0; i < 60; i++) {           // 과도기
+      var dx0 = sigv * (y - x), dy0 = x * (rhov - z) - y, dz0 = x * y - BETA * z;
+      x += dx0 * DT; y += dy0 * DT; z += dz0 * DT;
+    }
+    for (i = 0; i < STEPS; i++) {
+      bufX[i] = x; bufZ[i] = z;
+      var dx = sigv * (y - x), dy = x * (rhov - z) - y, dz = x * y - BETA * z;
+      x += dx * DT; y += dy * DT; z += dz * DT;
+      if (x > 900 || x < -900 || z > 900 || z < -900) {  // 발산 가드
+        for (var i2 = i + 1; i2 < STEPS; i2++) { bufX[i2] = x; bufZ[i2] = z; }
+        return i;
+      }
+    }
+    return STEPS;
+  }
+
+  var lastSig = -1, lastRho = -1, lastT = 0;
+  function draw(dt, tSec) {
+    // τ 추종 — 목표 계수에 60ms 시정수로 다가간다
+    var f = 1 - Math.exp(-dt / TAU);
+    sig += (sigT - sig) * f;
+    rho += (rhoT - rho) * f;
+
+    ctx.fillStyle = rgba(PANEL, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    // σ·ρ 변화가 임계를 넘을 때만 재적분 — 매 프레임 재계산 낭비를 막는다
+    var need = Math.abs(sig - lastSig) > 0.05 || Math.abs(rho - lastRho) > 0.1;
+
+    var s = Math.min(W / 48, H / 54);
+    var ox = W / 2, oy = H * 0.52;
+    var k2, i3, n, col, hx, hy;
+    for (k2 = 0; k2 < ORBITS; k2++) {
+      if (need || orbits[k2] === null) {
+        n = traceOrbit(seeds[k2][0], seeds[k2][1], seeds[k2][2], sig, rho);
+        orbits[k2] = [Array.prototype.slice.call(bufX, 0, n), Array.prototype.slice.call(bufZ, 0, n)];
+      }
+      var orbx = orbits[k2][0], orbz = orbits[k2][1];
+      var L = orbx.length;
+      if (L < 8) continue;
+      col = orbitColor(k2);
+      // 혜성 꼬리 — 궤도 위를 순회하는 밝은 꼬리가 항상 움직임을 만든다
+      var tip = Math.floor(((tSec * 0.45 + k2 / ORBITS) % 1) * (L - 1));
+      var from = Math.max(0, tip - 150);
+      // 뒤네루게 — 궤도 전체를 옅게 깔아 형태를 보여준다
+      ctx.strokeStyle = rgba(col, 0.10);
+      ctx.lineWidth = 3.0;
+      ctx.beginPath();
+      ctx.moveTo(ox + orbx[0] * s, oy - (orbz[0] - 25) * s);
+      for (i3 = 1; i3 < L; i3++) ctx.lineTo(ox + orbx[i3] * s, oy - (orbz[i3] - 25) * s);
+      ctx.stroke();
+      // 알맹이 꼬리 — 진행 방향으로 갈수록 밝아진다
+      ctx.lineWidth = 1.3;
+      var seg = 6;
+      for (var q = 0; q < seg; q++) {
+        var q0 = from + Math.floor((tip - from) * q / seg);
+        var q1 = from + Math.floor((tip - from) * (q + 1) / seg);
+        if (q1 <= q0) continue;
+        ctx.strokeStyle = rgba(col, 0.14 + 0.62 * (q + 1) / seg);
+        ctx.beginPath();
+        ctx.moveTo(ox + orbx[q0] * s, oy - (orbz[q0] - 25) * s);
+        for (i3 = q0 + 1; i3 <= q1; i3++) ctx.lineTo(ox + orbx[i3] * s, oy - (orbz[i3] - 25) * s);
+        ctx.stroke();
+      }
+      // 머리
+      hx = ox + orbx[tip] * s; hy = oy - (orbz[tip] - 25) * s;
+      ctx.fillStyle = rgba(HEAD, 0.20);
+      ctx.beginPath(); ctx.arc(hx, hy, 4.5, 0, 6.2832); ctx.fill();
+      ctx.fillStyle = rgba(HEAD, 0.9);
+      ctx.beginPath(); ctx.arc(hx, hy, 1.8, 0, 6.2832); ctx.fill();
+    }
+    lastSig = sig; lastRho = rho;
+
+    // 계수 읽기 — 현재 σ·ρ 표시
+    ctx.textAlign = 'left';
+    ctx.fillStyle = rgba(C0, 0.85);
+    ctx.fillText('σ ' + sig.toFixed(1), 8, H - 8);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = rgba(C2, 0.85);
+    ctx.fillText('ρ ' + rho.toFixed(1), W - 8, H - 8);
+    if (!hasPtr) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = rgba(HEAD, 0.5);
+      ctx.fillText('포인터를 올려 σ · ρ 를 움직여 보세요', W / 2, H - 8);
+    }
+  }
+
+  var orbits = [];
+  for (k = 0; k < ORBITS; k++) orbits.push(null);
+
+  // 포인터 입력 — field 좌표를 계수 목표로
+  function setTarget(ev) {
+    var r = fieldEl.getBoundingClientRect();
+    var px = (ev.clientX - r.left) / r.width;
+    var py = (ev.clientY - r.top) / r.height;
+    px = Math.max(0, Math.min(1, px));
+    py = Math.max(0, Math.min(1, py));
+    sigT = 4 + px * 20;                   // σ 4~24
+    rhoT = 45 - py * 35;                  // ρ 10~45 (위가 높은 ρ)
+    hasPtr = true;
+  }
+  fieldEl.addEventListener('pointermove', setTarget);
+  fieldEl.addEventListener('pointerdown', setTarget);
+  fieldEl.addEventListener('pointerleave', function () {
+    sigT = 10; rhoT = 28;                 // 손을 떼면 고전 계수로 돌아간다
+    hasPtr = false;
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = Math.min(0.05, (now - lastT) / 1000 || 0.016);
+    lastT = now;
+    draw(dt, (now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.016, 0.5);
+  });
+  fit();
+  if (reduce) {
+    // reduce — 고전 계수 한 장. 재적분 1회 + 안내 문구.
+    draw(0.016, 0.5);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

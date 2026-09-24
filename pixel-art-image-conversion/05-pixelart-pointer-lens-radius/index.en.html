@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Pixel Lens That Grows Only Inside the Pointer Radius — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">A Pixel Lens That Grows Only Inside the Pointer Radius</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function drawScene(pctx, w, h, seed) {
+    var rand = seedRand(seed);
+    var sky = pctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#8fc7ff');
+    sky.addColorStop(1, '#fff2d6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, w, h);
+    var sunX = w * 0.72, sunY = h * 0.28, sunR = h * 0.2;
+    var glow = pctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.4);
+    glow.addColorStop(0, 'rgba(255,247,230,.9)');
+    glow.addColorStop(1, 'rgba(255,247,230,0)');
+    pctx.fillStyle = glow;
+    pctx.fillRect(0, 0, w, h);
+    pctx.beginPath();
+    pctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    pctx.fillStyle = '#ffe27a';
+    pctx.fill();
+    var hillColors = ['#6ec8ff', '#2b9d74', '#17141a'];
+    for (var i = 0; i < 3; i += 1) {
+      var baseY = h * (0.48 + i * 0.16);
+      pctx.beginPath();
+      pctx.moveTo(0, h);
+      var step = Math.max(2, w / 24);
+      for (var x = 0; x <= w; x += step) {
+        var n = Math.sin(x * 0.06 + i * 2.4 + seed * 0.0003) * h * 0.05 + Math.sin(x * 0.17 + i) * h * 0.02;
+        pctx.lineTo(x, baseY + n);
+      }
+      pctx.lineTo(w, h);
+      pctx.closePath();
+      pctx.fillStyle = hillColors[i];
+      pctx.fill();
+    }
+    var accent = ['#ff5c8a', '#2fe6c6', '#ffb703', '#8a5cd6', '#3ddc97', '#ff7a5e'];
+    for (var m = 0; m < 8; m += 1) {
+      var ax = rand() * w, ay = h * (0.56 + rand() * 0.38), ar = h * (0.025 + rand() * 0.05);
+      pctx.beginPath();
+      pctx.arc(ax, ay, ar, 0, Math.PI * 2);
+      pctx.fillStyle = accent[m % accent.length];
+      pctx.fill();
+    }
+    for (var k = 0; k < 60; k += 1) {
+      var px = rand() * w, py = rand() * h * 0.5, r = rand() * 1.3 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.12 + rand() * 0.22) + ')';
+      pctx.fill();
+    }
+  }
+
+  function blockAverage(buf, w, h, blockPx, outBuf) {
+    for (var by = 0; by < h; by += blockPx) {
+      var bh = Math.min(blockPx, h - by);
+      for (var bx = 0; bx < w; bx += blockPx) {
+        var bw = Math.min(blockPx, w - bx);
+        var rs = 0, gs = 0, bs = 0, count = 0;
+        for (var y = 0; y < bh; y += 1) {
+          for (var x = 0; x < bw; x += 1) {
+            var idx = ((by + y) * w + (bx + x)) * 4;
+            rs += buf[idx]; gs += buf[idx + 1]; bs += buf[idx + 2]; count += 1;
+          }
+        }
+        var r = Math.round(rs / count), g = Math.round(gs / count), b = Math.round(bs / count);
+        for (var y2 = 0; y2 < bh; y2 += 1) {
+          for (var x2 = 0; x2 < bw; x2 += 1) {
+            var idx2 = ((by + y2) * w + (bx + x2)) * 4;
+            outBuf[idx2] = r; outBuf[idx2 + 1] = g; outBuf[idx2 + 2] = b; outBuf[idx2 + 3] = 255;
+          }
+        }
+      }
+    }
+  }
+
+  function lensCompose(bigBuf, smallBuf, w, h, px, py, radius, outBuf) {
+    var r2 = radius * radius;
+    for (var y = 0; y < h; y += 1) {
+      for (var x = 0; x < w; x += 1) {
+        var idx = (y * w + x) * 4;
+        var dx = x - px, dy = y - py;
+        var src = (dx * dx + dy * dy) < r2 ? bigBuf : smallBuf;
+        outBuf[idx] = src[idx]; outBuf[idx + 1] = src[idx + 1]; outBuf[idx + 2] = src[idx + 2]; outBuf[idx + 3] = 255;
+      }
+    }
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var BASE_BLOCK_PX = 4;
+  var LENS_BLOCK_PX = 20;
+  var PIXEL_LENS_RADIUS_PX = 40;
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  drawScene(octx, CALC_W, CALC_H, 415051);
+  var baseImg = octx.getImageData(0, 0, CALC_W, CALC_H);
+  var baseBuf = baseImg.data;
+
+  var bigBuf = new Uint8ClampedArray(baseBuf.length);
+  var smallBuf = new Uint8ClampedArray(baseBuf.length);
+  blockAverage(baseBuf, CALC_W, CALC_H, LENS_BLOCK_PX, bigBuf);
+  blockAverage(baseBuf, CALC_W, CALC_H, BASE_BLOCK_PX, smallBuf);
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  var pointerActive = false;
+  var pointerX = CALC_W * 0.5, pointerY = CALC_H * 0.5;
+
+  function toCalc(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var relX = (clientX - rect.left) / Math.max(1, rect.width);
+    var relY = (clientY - rect.top) / Math.max(1, rect.height);
+    return [relX * CALC_W, relY * CALC_H];
+  }
+
+  canvas.addEventListener('pointerenter', function () { pointerActive = true; });
+  canvas.addEventListener('pointerleave', function () { pointerActive = false; });
+  canvas.addEventListener('pointermove', function (ev) {
+    var p = toCalc(ev.clientX, ev.clientY);
+    pointerX = p[0]; pointerY = p[1];
+    if (reduce) draw(lastElapsed);
+  });
+
+  function renderFrame(t) {
+    var px, py;
+    if (pointerActive) {
+      px = pointerX; py = pointerY;
+    } else {
+      var a = t * Math.PI * 4 / LOOP_MS;
+      px = CALC_W * 0.5 + Math.cos(a) * CALC_W * 0.28;
+      py = CALC_H * 0.5 + Math.sin(a) * CALC_H * 0.3;
+    }
+    lensCompose(bigBuf, smallBuf, CALC_W, CALC_H, px, py, PIXEL_LENS_RADIUS_PX, outBuf);
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderFrame(elapsed);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

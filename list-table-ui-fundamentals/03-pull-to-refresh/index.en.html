@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pull-to-refresh that only sweeps changed rows — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ptr is-demo" id="ptr">
+  <div class="ptr__view" id="ptrView">
+    <div class="ptr__zone" id="ptrZone">
+      <div class="ptr__indicator" id="ptrIndicator" aria-hidden="true">
+        <span class="ptr__spinner" id="ptrSpinner"></span>
+      </div>
+      <ul class="ptr__list" id="ptrList">
+        <li class="ptr__row" data-row="0"><span class="ptr__label">Item A stock</span><span class="ptr__value" id="ptrVal0">128</span></li>
+        <li class="ptr__row" data-row="1"><span class="ptr__label">Item B stock</span><span class="ptr__value" id="ptrVal1">54</span></li>
+        <li class="ptr__row" data-row="2"><span class="ptr__label">Item C stock</span><span class="ptr__value" id="ptrVal2">302</span></li>
+        <li class="ptr__row" data-row="3"><span class="ptr__label">Item D stock</span><span class="ptr__value" id="ptrVal3">19</span></li>
+        <li class="ptr__row" data-row="4"><span class="ptr__label">Item E stock</span><span class="ptr__value" id="ptrVal4">77</span></li>
+      </ul>
+    </div>
+  </div>
+  <p class="ptr__hint" id="ptrHint" aria-live="polite">Pull down to refresh</p>
+</div>
+</main>
+<script>
+(function () {
+  var MAX_PULL_PX = 64; // 당김 표시량 상한
+  var DAMPING = 90; // 저항 곡선 상수 — 클수록 손가락 이동량이 그대로 반영된다
+  var RELEASE_THRESHOLD_PX = 46; // 이 표시량을 넘기고 놓으면 새로고침
+  var AUTO_TICK_MS = 40;
+  var AUTO_PULL_STEP = 6;
+  var AUTO_HOLD_MS = 160;
+  var AUTO_WAIT_MS = 900;
+  var SWEEP_STAGGER_MS = 90;
+
+  var SET_A = [128, 54, 302, 19, 77];
+  var SET_B = [128, 61, 302, 24, 77];
+
+  var root = document.getElementById('ptr');
+  var view = document.getElementById('ptrView');
+  var zone = document.getElementById('ptrZone');
+  var indicator = document.getElementById('ptrIndicator');
+  var spinner = document.getElementById('ptrSpinner');
+  var list = document.getElementById('ptrList');
+  var hint = document.getElementById('ptrHint');
+  var rows = Array.prototype.slice.call(list.querySelectorAll('.ptr__row'));
+
+  var values = SET_A.slice();
+  var currentIsA = true;
+  var lastDisplayed = 0;
+
+  function renderValues() {
+    values.forEach(function (v, i) {
+      document.getElementById('ptrVal' + i).textContent = String(v);
+    });
+  }
+  renderValues();
+
+  // 계산 겹: 원시 당김량(raw)을 지수 감쇠 저항 곡선으로 눌러 표시량을 만든다 —
+  // 처음엔 손가락을 따라오다가 당길수록 점점 덜 늘어난다.
+  function applyPull(raw) {
+    var displayed = MAX_PULL_PX * (1 - Math.exp(-raw / DAMPING));
+    zone.style.setProperty('--pull-px', displayed.toFixed(1) + 'px');
+    spinner.style.setProperty('--spin-deg', (displayed / MAX_PULL_PX * 320).toFixed(1) + 'deg');
+    indicator.style.opacity = Math.min(1, displayed / (RELEASE_THRESHOLD_PX * 0.7)).toFixed(2);
+    lastDisplayed = displayed;
+    return displayed;
+  }
+
+  function computeChanged(oldVals, newVals) {
+    var idx = [];
+    for (var i = 0; i < oldVals.length; i += 1) {
+      if (oldVals[i] !== newVals[i]) { idx.push(i); }
+    }
+    return idx;
+  }
+
+  function sweepRow(row, delayMs) {
+    row.classList.remove('is-swept');
+    void row.offsetWidth; // 리플로우 강제 — 클래스를 다시 붙여도 애니메이션이 처음부터 재생되게
+    row.style.animationDelay = delayMs + 'ms';
+    row.classList.add('is-swept');
+  }
+
+  function refresh() {
+    var next = currentIsA ? SET_B : SET_A;
+    var changed = computeChanged(values, next);
+    values = next.slice();
+    currentIsA = !currentIsA;
+    renderValues();
+    hint.textContent = changed.length ? 'Sweeping only the rows that changed' : 'No rows changed';
+    changed.forEach(function (idx, order) {
+      sweepRow(rows[idx], order * SWEEP_STAGGER_MS);
+    });
+  }
+
+  var dragging = false;
+  var startY = 0;
+
+  function human() {
+    if (root.classList.contains('is-demo')) {
+      root.classList.remove('is-demo');
+      if (timer) { window.clearInterval(timer); timer = null; }
+    }
+  }
+
+  view.addEventListener('pointerdown', function (e) {
+    human();
+    if (view.scrollTop > 0) { return; }
+    dragging = true;
+    startY = e.clientY;
+    zone.classList.add('is-dragging');
+  });
+  view.addEventListener('pointermove', function (e) {
+    if (!dragging) { return; }
+    var raw = Math.max(0, e.clientY - startY);
+    applyPull(raw);
+  });
+  window.addEventListener('pointerup', function () {
+    if (!dragging) { return; }
+    dragging = false;
+    zone.classList.remove('is-dragging');
+    var wasEnough = lastDisplayed >= RELEASE_THRESHOLD_PX;
+    applyPull(0);
+    if (wasEnough) { refresh(); }
+  });
+
+  var timer = null;
+  var raw = 0;
+  var phase = 'pull';
+
+  function autoTick() {
+    if (phase === 'pull') {
+      raw += AUTO_PULL_STEP;
+      var displayed = applyPull(raw);
+      if (displayed >= RELEASE_THRESHOLD_PX) {
+        phase = 'hold';
+        window.setTimeout(function () {
+          refresh();
+          applyPull(0);
+          phase = 'wait';
+          window.setTimeout(function () {
+            raw = 0;
+            phase = 'pull';
+          }, AUTO_WAIT_MS);
+        }, AUTO_HOLD_MS);
+      }
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    timer = window.setInterval(autoTick, AUTO_TICK_MS);
+  } else {
+    // reduce: 실사용 경로 적용 — 자동 당김 루프와 스침 애니메이션을 멈추고 최신 값만 보여준다
+    hint.textContent = 'Pull down to refresh';
+  }
+})();
+</script>
+</body>
+</html>

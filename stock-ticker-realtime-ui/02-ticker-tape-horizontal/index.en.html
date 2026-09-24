@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horizontal ticker tape — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tt is-demo" id="tt">
+  <div class="tt__panel">
+    <div class="tt__head">
+      <span class="tt__pulse" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 256 256"><g fill="currentColor"><path d="m96 40l33.52 88H56Zm104 88h-70.48L160 208Z" opacity=".2"/><path d="M240 128a8 8 0 0 1-8 8h-27.06l-37.78 75.58A8 8 0 0 1 160 216h-.4a8 8 0 0 1-7.08-5.14L95.35 60.76l-32.07 70.55A8 8 0 0 1 56 136H24a8 8 0 0 1 0-16h26.85l37.87-83.31a8 8 0 0 1 14.76.46l57.51 151l31.85-63.71A8 8 0 0 1 200 120h32a8 8 0 0 1 8 8"/></g></svg></span>
+      <p class="tt__title">Live prices</p>
+      <span class="tt__hint">Hover to pause</span>
+    </div>
+    <!-- 테이프 창(overflow:hidden)과 흐르는 트랙을 분리한다. transform 은 언제나 트랙에만 건다 -->
+    <div class="tt__tape" id="ttTape" tabindex="0" aria-label="Price tape">
+      <div class="tt__track" id="ttTrack">
+        <!-- 같은 줄을 두 벌 이어 붙였다. 두 벌의 폭이 픽셀 단위로 같아야 -50% 가 정확히 한 벌이라
+             한 바퀴가 이음매 없이 이어진다. 그래서 간격은 트랙의 flex gap 이 아니라 항목마다 margin-right 다 -->
+        <div class="tt__half" data-half="0">
+          <span class="tt__item" data-i="0"><span class="tt__sym">NOVA</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+          <span class="tt__item" data-i="1"><span class="tt__sym">ORBIT</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+          <span class="tt__item" data-i="2"><span class="tt__sym">LUMEN</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+        </div>
+        <div class="tt__half" data-half="1" aria-hidden="true">
+          <span class="tt__item" data-i="0"><span class="tt__sym">NOVA</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+          <span class="tt__item" data-i="1"><span class="tt__sym">ORBIT</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+          <span class="tt__item" data-i="2"><span class="tt__sym">LUMEN</span><span class="tt__price">0</span><span class="tt__chg">0</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 가짜 시세는 시드 PRNG(mulberry32)로 만든다 — 외부 API·키가 필요 없고, 같은 시드면 누가 열어도 같은 흐름이다.
+// 심볼도 실존 종목이 아니다.
+var SEED = 296;
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var rand = mulberry32(SEED);
+var START = [{ sym: 'NOVA', base: 64200 }, { sym: 'ORBIT', base: 18450 }, { sym: 'LUMEN', base: 7320 }];
+var LATER = [{ sym: 'KEEL', base: 132900 }, { sym: 'AXIOM', base: 38400 }, { sym: 'VERDE', base: 9160 }];
+var PX_PER_SEC = 45;    // 실사용 흐름 속도. 칸이 늘어도 이 속도를 지키려고 한 바퀴 시간을 다시 잡는다
+
+var tt = document.getElementById('tt');
+var track = document.getElementById('ttTrack');
+var halves = [].slice.call(track.querySelectorAll('.tt__half'));
+var items = START.map(function (s) {
+  // vs prev close 등락을 한 번 굴려 오늘 가격을 만든다 — 첫 화면부터 등락률이 0 이 아니다
+  var day = (rand() - 0.5) * 0.06;
+  return { sym: s.sym, base: s.base, price: Math.round(s.base * (1 + day)) };
+});
+
+// 숫자는 자리가 흔들리면 읽기 어렵다 — 천 단위 구분자까지 넣어 고정 폭으로 그린다
+function money(n) { return n.toLocaleString('en-US'); }
+function pct(v) { return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + '%'; }
+function arrow(v) { return v >= 0 ? '▲' : '▼'; }
+
+// 방향은 색만으로 전하지 않는다 — 화살표와 부호를 늘 같이 적는다.
+// 두 벌 모두 같은 값으로 칠해야 이음매에서 앞뒤 값이 갈리지 않는다
+function paint(k) {
+  var it = items[k], chg = (it.price - it.base) / it.base * 100;
+  halves.forEach(function (h) {
+    var cell = h.querySelector('[data-i="' + k + '"]');
+    if (!cell) { return; }
+    cell.querySelector('.tt__price').textContent = money(it.price);
+    var c = cell.querySelector('.tt__chg');
+    c.textContent = arrow(chg) + ' ' + pct(chg);
+    c.className = 'tt__chg ' + (chg >= 0 ? 'is-up' : 'is-down');
+  });
+}
+items.forEach(function (it, k) { paint(k); });
+
+// 격자 미리보기(.is-demo) 동안에는 CSS 키프레임만 돌고 JS 는 DOM 을 안 건드린다 — 24프레임이 같은 순간을
+// 재현해야 측정이 흔들리지 않는다. 포인터·터치·키보드 중 하나가 들어오면 그때부터 시드 시세가 실제로 갱신된다
+function live() { if (tt.classList.contains('is-demo')) { tt.classList.remove('is-demo'); } }
+['pointerdown', 'pointermove', 'focusin'].forEach(function (ev) { tt.addEventListener(ev, live); });
+
+var calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+var pending = [];
+var added = 0;
+
+// 새 종목이 상장하면 테이프 오른쪽 끝에 한 칸이 덧붙는다. 넣을 때는 반드시 두 벌에 같이 넣는다 —
+// 한쪽만 늘면 두 벌의 폭이 달라져 -50% 가 어긋나고 한 바퀴마다 테이프가 튄다
+function makeCell(k) {
+  var el = document.createElement('span');
+  el.className = 'tt__item';
+  el.setAttribute('data-i', String(k));
+  el.innerHTML = '<span class="tt__sym"></span><span class="tt__price"></span><span class="tt__chg"></span>';
+  el.querySelector('.tt__sym').textContent = items[k].sym;
+  return el;
+}
+function queueNew() {
+  if (added >= LATER.length) { return; }
+  var s = LATER[added];
+  added += 1;
+  items.push({ sym: s.sym, base: s.base, price: Math.round(s.base * (1 + (rand() - 0.5) * 0.06)) });
+  pending.push(items.length - 1);
+  // 움직임을 끈 화면에서는 이음매를 맞출 한 바퀴가 없다 — 그 자리에서 바로 넣는다
+  if (calm.matches) { flush(); }
+}
+// 칸을 붙이면 한 벌의 폭이 늘어 흐르는 위치가 그 자리에서 튄다. 그래서 붙이는 시점을 한 바퀴가 막 끝난
+// 순간(animationiteration)으로 미룬다 — 그 순간의 위치는 0 이라 폭이 바뀌어도 눈에 안 띈다.
+// 사람이 테이프를 세워 둔 동안에는 이 사건이 안 일어나니 읽는 중에 줄이 바뀌지도 않는다
+function flush() {
+  if (!pending.length) { return; }
+  pending.forEach(function (k) {
+    halves.forEach(function (h) { h.appendChild(makeCell(k)); });
+    paint(k);
+  });
+  pending = [];
+  // 거리가 늘었으니 시간도 그만큼 늘려 초당 흐름 속도를 지킨다. 위치가 0 인 이 순간에 다시 시작한다
+  var w = halves[0].getBoundingClientRect().width;
+  track.style.animationName = 'none';
+  void track.offsetWidth;
+  track.style.animationDuration = (w / PX_PER_SEC).toFixed(2) + 's';
+  track.style.animationName = '';
+}
+track.addEventListener('animationiteration', flush);
+
+// 한 번에 한 칸만 바꾼다. 700ms 간격이라 한 종목은 2초에 한 번꼴로 갱신된다
+var cursor = 0;
+var ticks = 0;
+var timer = setInterval(function () {
+  if (tt.classList.contains('is-demo')) { return; }
+  if (document.visibilityState === 'hidden') { return; }
+  var it = items[cursor];
+  var step = Math.round((rand() - 0.48) * it.price * 0.004);
+  if (step === 0) { step = rand() < 0.5 ? -1 : 1; }
+  it.price = it.price + step;
+  paint(cursor);
+  cursor = (cursor + 1) % items.length;
+  ticks += 1;
+  if (ticks % 8 === 0) { queueNew(); }
+}, 700);
+
+// 탭을 다시 보면 현재 상태를 그대로 다시 그린다 — 안 보이는 동안 쌓아 두지 않는다
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') { items.forEach(function (it, k) { paint(k); }); }
+});
+window.addEventListener('pagehide', function () { clearInterval(timer); });
+</script>
+</body>
+</html>

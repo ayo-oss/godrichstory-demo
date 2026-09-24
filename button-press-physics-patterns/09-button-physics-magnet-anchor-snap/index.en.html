@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snap-to-anchor bounce — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bma is-demo" id="bma">
+  <div class="bma__field" id="bmaField">
+    <span class="bma__anchor" style="left:30px"></span>
+    <span class="bma__anchor" style="left:110px"></span>
+    <span class="bma__anchor" style="left:190px"></span>
+    <button class="bma__btn" id="bmaBtn" type="button" aria-label="Position-snapping toggle button">●</button>
+  </div>
+  <p class="bma__hint">Release it and it snaps to the nearest anchor value with a bounce</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bma');
+  var field = document.getElementById('bmaField');
+  var btn = document.getElementById('bmaBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 놓인 위치 값(x)에서 가장 가까운 고정 지점 값(ANCHORS 중 하나)을 골라 target 으로
+  // 삼고, 스프링(K·C)이 목표를 살짝 넘겼다가 되돌아오는 튕김으로 그 지점에 맞춘다.
+  var ANCHORS = [30, 110, 190], K = 340, C = 10, BTN_R = 20;
+  var x = ANCHORS[0], vel = 0, target = ANCHORS[0], dragging = false, startX = 0, startBtnX = 0, raf = null, last = 0;
+
+  function nearestAnchor(px) {
+    var best = ANCHORS[0], bestD = Infinity;
+    for (var i = 0; i < ANCHORS.length; i++) {
+      var d = Math.abs(ANCHORS[i] - px);
+      if (d < bestD) { bestD = d; best = ANCHORS[i]; }
+    }
+    return best;
+  }
+  function paint() { btn.style.transform = 'translateX(' + x.toFixed(1) + 'px)'; }
+  function tick(now) {
+    var dt = Math.min((now - last) / 1000, 0.032);
+    last = now;
+    var accel = -K * (x - target) - C * vel;
+    vel += accel * dt;
+    x += vel * dt;
+    paint();
+    if (Math.abs(x - target) < 0.05 && Math.abs(vel) < 0.4) { x = target; vel = 0; paint(); raf = null; return; }
+    raf = requestAnimationFrame(tick);
+  }
+  function startSpring() { if (raf === null) { last = performance.now(); raf = requestAnimationFrame(tick); } }
+
+  function onDown(clientX) {
+    dragging = true; startX = clientX; startBtnX = x;
+    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+  }
+  function onMove(clientX) {
+    if (!dragging) { return; }
+    var dx = clientX - startX;
+    x = Math.max(BTN_R, Math.min(field.clientWidth - BTN_R, startBtnX + dx));
+    paint();
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    target = nearestAnchor(x);
+    if (reduce) { x = target; vel = 0; paint(); return; }
+    startSpring();
+  }
+
+  function wireReal() {
+    btn.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientX); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientX); });
+    window.addEventListener('pointerup', onUp);
+  }
+  wireReal();
+  paint();
+
+  // 자동 루프: 실제 드래그 대신 놓인 위치 값을 다음 고정 지점으로 옮겨 같은 스냅 경로를 반복한다.
+  var autoTimer = null, idx = 0;
+  function autoTick() {
+    idx = (idx + 1) % ANCHORS.length;
+    x = ANCHORS[idx] + (idx % 2 === 0 ? -18 : 18);
+    vel = 0;
+    target = nearestAnchor(x);
+    startSpring();
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 900); }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>손을 놓아도 관성 값만큼 더 미끄러지는 손잡이 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sb is-demo" id="sb">
+  <div class="sb__viewport" id="sbViewport">
+    <div class="sb__content" id="sbContent"></div>
+  </div>
+  <div class="sb__track" id="sbTrack">
+    <div class="sb__thumb" id="sbThumb" role="scrollbar" aria-orientation="vertical" aria-controls="sbViewport" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" tabindex="0"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var THUMB_MIN_PX = 26;
+  var KEY_STEP_PX = 32;
+  var SCROLLBAR_INERTIA_DECAY = 0.92;
+  var VEL_EPS = 0.4;
+  var SIM_KICK_PX = 30;
+
+  var root = document.getElementById('sb');
+  var viewport = document.getElementById('sbViewport');
+  var content = document.getElementById('sbContent');
+  var track = document.getElementById('sbTrack');
+  var thumb = document.getElementById('sbThumb');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  for (var i = 1; i <= 8; i++) {
+    var card = document.createElement('div');
+    card.className = 'sb__card';
+    var h = document.createElement('p');
+    h.className = 'sb__cardTitle';
+    h.textContent = '카드 ' + i;
+    var p = document.createElement('p');
+    p.className = 'sb__cardLine';
+    p.textContent = '놓는 순간의 속도 값이 감쇠 계수만큼 매 프레임 줄어듭니다.';
+    card.appendChild(h);
+    card.appendChild(p);
+    content.appendChild(card);
+  }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function maxScroll() { return Math.max(0, viewport.scrollHeight - viewport.clientHeight); }
+
+  function syncThumb() {
+    var trackLen = track.clientHeight;
+    var total = viewport.scrollHeight;
+    var visible = viewport.clientHeight;
+    var thumbLen = clamp(trackLen * (visible / total), THUMB_MIN_PX, trackLen);
+    var ms = maxScroll();
+    var ratio = ms > 0 ? viewport.scrollTop / ms : 0;
+    var thumbPos = (trackLen - thumbLen) * ratio;
+    thumb.style.height = thumbLen.toFixed(1) + 'px';
+    thumb.style.transform = 'translateY(' + thumbPos.toFixed(1) + 'px)';
+    thumb.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+  }
+
+  viewport.addEventListener('scroll', syncThumb);
+
+  var dragging = false;
+  var dragStartY = 0;
+  var dragStartScroll = 0;
+  var lastMoveY = 0;
+  var vel = 0;
+
+  thumb.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    vel = 0;
+    root.classList.remove('is-demo');
+    dragStartY = e.clientY;
+    lastMoveY = e.clientY;
+    dragStartScroll = viewport.scrollTop;
+    thumb.setPointerCapture(e.pointerId);
+  });
+  thumb.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var trackLen = track.clientHeight;
+    var thumbLen = thumb.clientHeight;
+    var moveRange = Math.max(1, trackLen - thumbLen);
+    var scale = maxScroll() / moveRange;
+    var frameDeltaPx = (e.clientY - lastMoveY) * scale;
+    vel = frameDeltaPx;
+    lastMoveY = e.clientY;
+    var totalDeltaPx = (e.clientY - dragStartY) * scale;
+    viewport.scrollTop = clamp(dragStartScroll + totalDeltaPx, 0, maxScroll());
+  });
+  function coastStep() {
+    if (Math.abs(vel) <= VEL_EPS) { vel = 0; return; }
+    vel = vel * SCROLLBAR_INERTIA_DECAY;
+    viewport.scrollTop = clamp(viewport.scrollTop + vel, 0, maxScroll());
+  }
+  thumb.addEventListener('pointerup', function () { dragging = false; });
+  thumb.addEventListener('pointercancel', function () { dragging = false; vel = 0; });
+
+  track.addEventListener('pointerdown', function (e) {
+    if (e.target !== track) return;
+    root.classList.remove('is-demo');
+    var rect = track.getBoundingClientRect();
+    var trackLen = track.clientHeight;
+    var thumbLen = thumb.clientHeight;
+    var clickPos = clamp(e.clientY - rect.top - thumbLen / 2, 0, trackLen - thumbLen);
+    var ratio = (trackLen - thumbLen) > 0 ? clickPos / (trackLen - thumbLen) : 0;
+    viewport.scrollTop = ratio * maxScroll();
+  });
+
+  thumb.addEventListener('keydown', function (e) {
+    var ms = maxScroll();
+    if (e.key === 'ArrowDown') { viewport.scrollTop = clamp(viewport.scrollTop + KEY_STEP_PX, 0, ms); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { viewport.scrollTop = clamp(viewport.scrollTop - KEY_STEP_PX, 0, ms); e.preventDefault(); }
+    else if (e.key === 'PageDown') { viewport.scrollTop = clamp(viewport.scrollTop + viewport.clientHeight, 0, ms); e.preventDefault(); }
+    else if (e.key === 'PageUp') { viewport.scrollTop = clamp(viewport.scrollTop - viewport.clientHeight, 0, ms); e.preventDefault(); }
+    else if (e.key === 'Home') { viewport.scrollTop = 0; e.preventDefault(); }
+    else if (e.key === 'End') { viewport.scrollTop = ms; e.preventDefault(); }
+    if (e.key.indexOf('Arrow') === 0 || e.key === 'PageDown' || e.key === 'PageUp' || e.key === 'Home' || e.key === 'End') {
+      root.classList.remove('is-demo');
+      vel = 0;
+    }
+  });
+
+  var startTime = null;
+  var nextKickAt = 0;
+  var kickSign = 1;
+  function demoTick(now) {
+    if (startTime === null) { startTime = now; }
+    var t = (now - startTime) / 1000;
+    if (root.classList.contains('is-demo') && !dragging) {
+      if (t >= nextKickAt) {
+        vel = SIM_KICK_PX * kickSign;
+        kickSign = -kickSign;
+        nextKickAt = t + 0.9;
+      }
+    }
+    if (!dragging && vel !== 0) { coastStep(); }
+    requestAnimationFrame(demoTick);
+  }
+
+  syncThumb();
+  if (!reduce) { requestAnimationFrame(demoTick); }
+})();
+</script>
+</body>
+</html>

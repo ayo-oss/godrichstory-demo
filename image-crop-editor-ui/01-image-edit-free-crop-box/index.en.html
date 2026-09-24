@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Free crop box — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cb is-demo" id="cb">
+  <div class="cb__work" id="work">
+    <canvas class="cb__photo" id="photo" width="300" height="200" role="img" aria-label="Sample photo"></canvas>
+    <div class="cb__shade" id="shade" aria-hidden="true"></div>
+    <div class="cb__box" id="box">
+      <span class="cb__grid" aria-hidden="true"></span>
+      <button type="button" class="cb__h cb__h--nw" data-h="nw" aria-label="Top-left handle"></button>
+      <button type="button" class="cb__h cb__h--n" data-h="n" aria-label="Top handle"></button>
+      <button type="button" class="cb__h cb__h--ne" data-h="ne" aria-label="Top-right handle"></button>
+      <button type="button" class="cb__h cb__h--w" data-h="w" aria-label="Left handle"></button>
+      <button type="button" class="cb__h cb__h--e" data-h="e" aria-label="Right handle"></button>
+      <button type="button" class="cb__h cb__h--sw" data-h="sw" aria-label="Bottom-left handle"></button>
+      <button type="button" class="cb__h cb__h--s" data-h="s" aria-label="Bottom handle"></button>
+      <button type="button" class="cb__h cb__h--se" data-h="se" aria-label="Bottom-right handle"></button>
+    </div>
+  </div>
+  <div class="cb__side">
+    <p class="cb__cap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" class="cb__ico" aria-hidden="true"><g fill="currentColor"><path d="M192 64v128H64V64Z" opacity=".2"/><path d="M240 192a8 8 0 0 1-8 8h-32v32a8 8 0 0 1-16 0v-32H64a8 8 0 0 1-8-8V72H24a8 8 0 0 1 0-16h32V24a8 8 0 0 1 16 0v160h160a8 8 0 0 1 8 8M96 72h88v88a8 8 0 0 0 16 0V64a8 8 0 0 0-8-8H96a8 8 0 0 0 0 16"/></g></svg><span>Result</span></p>
+    <div class="cb__frame">
+      <canvas class="cb__out" id="out" width="120" height="120" role="img" aria-label="Cropped result preview"></canvas>
+      <span class="cb__ghost" aria-hidden="true"></span>
+    </div>
+    <p class="cb__size" id="size">162 × 112</p>
+  </div>
+</div>
+</main>
+<script>
+var cb = document.getElementById('cb');
+var work = document.getElementById('work');
+var photo = document.getElementById('photo');
+var shade = document.getElementById('shade');
+var boxEl = document.getElementById('box');
+var out = document.getElementById('out');
+var sizeEl = document.getElementById('size');
+var ctx = photo.getContext('2d');
+var octx = out.getContext('2d');
+var box = { x: 18, y: 16, w: 54, h: 56 };
+var SIZE_LABEL = '%w × %h';
+var OUT_LABEL = 'Crop %w × %h pixels';
+
+// 가짜 사진 — 외부 파일 없이 그라디언트와 도형으로 합성한다. 필터·히스토그램이 보이도록 대비를 세게 준다
+function paintPhoto(c, w, h) {
+  var sky = c.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#2f6df6'); sky.addColorStop(0.55, '#ff9ebb'); sky.addColorStop(1, '#ffd23f');
+  c.fillStyle = sky; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#fff7e6';
+  c.beginPath(); c.arc(w * 0.74, h * 0.28, h * 0.13, 0, Math.PI * 2); c.fill();
+  // 곧은 수평선 하나 — 기울기 보정이 눈에 보이려면 비교할 직선이 있어야 한다
+  c.fillStyle = 'rgba(23, 20, 26, 0.5)'; c.fillRect(0, Math.round(h * 0.66), w, 2);
+  c.fillStyle = '#17141a';
+  c.beginPath(); c.moveTo(0, h); c.lineTo(w * 0.34, h * 0.36); c.lineTo(w * 0.62, h); c.closePath(); c.fill();
+  c.fillStyle = '#c2361a';
+  c.beginPath(); c.moveTo(w * 0.46, h); c.lineTo(w * 0.78, h * 0.52); c.lineTo(w, h); c.closePath(); c.fill();
+  for (var i = 0; i < 6; i++) { c.fillStyle = i % 2 ? '#fff7e6' : '#17141a'; c.fillRect(w * (0.08 + i * 0.07), h * (0.14 + (i % 3) * 0.06), 7, 7); }
+}
+
+function apply() {
+  var x = box.x, y = box.y, w = box.w, h = box.h;
+  boxEl.style.left = x + '%'; boxEl.style.top = y + '%';
+  boxEl.style.width = w + '%'; boxEl.style.height = h + '%';
+  // 바깥을 어둡게 덮는 그늘. 겉 사각형을 한 바퀴 돌고 안쪽 구멍을 거꾸로 도는 열 점짜리 다각형이다
+  shade.style.clipPath = 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ' +
+    x + '% ' + y + '%, ' + x + '% ' + (y + h) + '%, ' + (x + w) + '% ' + (y + h) + '%, ' +
+    (x + w) + '% ' + y + '%, ' + x + '% ' + y + '%)';
+  var sx = photo.width * x / 100, sy = photo.height * y / 100;
+  var sw = photo.width * w / 100, sh = photo.height * h / 100;
+  var pw = Math.round(sw), ph = Math.round(sh);
+  // 결과 칸은 잘린 크기 unchanged 만든다 — 고정 정사각에 그리면 비율이 눌린다
+  out.width = pw; out.height = ph;
+  // 아홉 인자 drawImage — 원본에서 오려낼 사각형과 그려 넣을 사각형을 따로 준다
+  octx.drawImage(photo, sx, sy, sw, sh, 0, 0, pw, ph);
+  sizeEl.textContent = SIZE_LABEL.replace('%w', pw).replace('%h', ph);
+  out.setAttribute('aria-label', OUT_LABEL.replace('%w', pw).replace('%h', ph));
+}
+
+function clampBox() {
+  box.w = Math.max(18, Math.min(100, box.w)); box.h = Math.max(18, Math.min(100, box.h));
+  box.x = Math.max(0, Math.min(100 - box.w, box.x)); box.y = Math.max(0, Math.min(100 - box.h, box.y));
+}
+
+function nudge(dir, dx, dy) {
+  if (dir.indexOf('w') > -1) { box.x += dx; box.w -= dx; }
+  if (dir.indexOf('e') > -1) { box.w += dx; }
+  if (dir.indexOf('n') > -1) { box.y += dy; box.h -= dy; }
+  if (dir.indexOf('s') > -1) { box.h += dy; }
+  clampBox(); apply();
+}
+
+function unit() { var r = work.getBoundingClientRect(); return { x: 100 / r.width, y: 100 / r.height }; }
+
+function startDrag(e, dir) {
+  cb.classList.remove('is-demo');
+  var u = unit(), px = e.clientX, py = e.clientY;
+  e.target.setPointerCapture(e.pointerId);
+  function move(ev) {
+    var dx = (ev.clientX - px) * u.x, dy = (ev.clientY - py) * u.y;
+    px = ev.clientX; py = ev.clientY;
+    if (dir) { nudge(dir, dx, dy); } else { box.x += dx; box.y += dy; clampBox(); apply(); }
+  }
+  function stop() { e.target.removeEventListener('pointermove', move); e.target.removeEventListener('pointerup', stop); }
+  e.target.addEventListener('pointermove', move);
+  e.target.addEventListener('pointerup', stop);
+}
+
+boxEl.addEventListener('pointerdown', function (e) { if (e.target === boxEl) { startDrag(e, ''); } });
+var handles = boxEl.querySelectorAll('.cb__h');
+for (var i = 0; i < handles.length; i++) {
+  (function (el) {
+    var dir = el.getAttribute('data-h');
+    el.addEventListener('pointerdown', function (e) { e.stopPropagation(); startDrag(e, dir); });
+    // 화살표 1px, Shift 와 함께면 10px — 손이 아니라 키보드로도 같은 조작이 된다
+    el.addEventListener('keydown', function (e) {
+      var step = e.shiftKey ? 10 : 1, u = unit(), dx = 0, dy = 0;
+      if (e.key === 'ArrowLeft') { dx = -step * u.x; } else if (e.key === 'ArrowRight') { dx = step * u.x; }
+      else if (e.key === 'ArrowUp') { dy = -step * u.y; } else if (e.key === 'ArrowDown') { dy = step * u.y; }
+      else { return; }
+      e.preventDefault(); cb.classList.remove('is-demo'); nudge(dir, dx, dy);
+    });
+  })(handles[i]);
+}
+
+paintPhoto(ctx, photo.width, photo.height);
+document.documentElement.style.setProperty('--photo', 'url(' + photo.toDataURL() + ')');
+apply();
+</script>
+</body>
+</html>

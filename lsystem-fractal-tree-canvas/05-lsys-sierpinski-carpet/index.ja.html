@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シェルピンスキーのカーペット — Lシステム フラクタルツリー 9種 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>塗りつぶし1マス(1)を3×3の九マスに書き換え、中央だけ穴(0)にする操作を毎世代繰り返すと、残る面積が8/9ずつ減るカーペットに穴が開きます — getImageData で残った面積を実際に数えます</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="シェルピンスキーのカーペットラボ" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">世代 <b id="lsGen">0</b> · 面積 <b id="lsArea">100%</b></span>
+    <span class="ls__meta ls__meta--dim">fillRect · getImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 셸핀스키 카펫(05) — 채움 칸 하나(1)를 3×3 아홉 칸으로 다시 쓰되 가운데만 구멍(0)으로
+// 남기는 문자 재쓰기(1→111101111)를 세대마다 8칸에 재귀 적용한다. 채워진 픽셀 수를
+// getImageData 로 직접 세어 "남은 넓이 %" 를 화면에 표시 — 트윈이 아니라 실측값이다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var MAXGEN = 4;
+  var CYCLE  = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var genEl = document.getElementById('lsGen');
+  var areaEl = document.getElementById('lsArea');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_FILL = tokRGB('--ls-bark2');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+  var lastAreaTick = -1;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  // 문자 재쓰기 규칙 — '1' 한 칸이 3x3 아홉 칸(가운데만 구멍)으로 다시 쓰인다.
+  var RULE = { '1': '111101111', '0': '000000000' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) out += RULE[s.charAt(i)];
+      s = out;
+    }
+    return s;
+  }
+
+  function rgb(c, a) {
+    return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')';
+  }
+
+  // gen 世代 문자열을 3^gen x 3^gen 격자로 해석해 채워진 칸만 fillRect
+  function drawCarpet(ctx, str, gen, ox, oy, side, thisF, bright) {
+    var n = Math.pow(3, gen);
+    var cell = side / n;
+    for (var idx = 0; idx < str.length; idx++) {
+      if (str.charAt(idx) === '0') continue;
+      var row = Math.floor(idx / n), col = idx % n;
+      var cx = ox + col * cell, cy = oy + row * cell;
+      var pad = cell * (1 - thisF) * 0.5;
+      ctx.fillRect(cx + pad, cy + pad, Math.max(0.4, cell - pad * 2), Math.max(0.4, cell - pad * 2));
+    }
+  }
+
+  function render(loop, now) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var side = Math.min(W, H) * 0.84;
+    var ox = (W - side) / 2, oy = (H - side) / 2;
+
+    // 0~0.6 : 世代 성장(0→MAXGEN). 0.6~1.0 : 완성 카펫 + 밝기 호흡(자기유사 강조)
+    var grPhase = Math.min(loop / 0.6, 1);
+    var genF = grPhase * MAXGEN;
+    var gA = Math.min(MAXGEN, Math.floor(genF));
+    var thisF = gA >= MAXGEN ? 1 : Math.min(1, genF - gA);
+    var str = expand('1', gA);
+
+    var breath = loop < 0.6 ? 1 : 0.72 + 0.28 * Math.sin((loop - 0.6) / 0.4 * Math.PI * 3);
+    ctx.fillStyle = rgb(C_FILL, breath);
+    drawCarpet(ctx, str, gA, ox, oy, side, thisF, breath);
+
+    if (genEl) genEl.textContent = String(gA);
+
+    // 남은 넓이 % — getImageData 로 실제 채워진(배경이 아닌) 픽셀 비율을 센다. 매 프레임 다시 셀 필요는
+    // 없으므로(값은 세대에만 의존) 세대가 바뀔 때만 재계산해 계산량을 아낀다.
+    if (areaEl && gA !== lastAreaTick) {
+      lastAreaTick = gA;
+      try {
+        var img = ctx.getImageData(Math.round(ox), Math.round(oy), Math.round(side), Math.round(side));
+        var data = img.data, filled = 0, total = data.length / 4;
+        for (var p = 0; p < data.length; p += 4) {
+          if (data[p] !== C_INK[0] || data[p + 1] !== C_INK[1] || data[p + 2] !== C_INK[2]) filled++;
+        }
+        areaEl.textContent = Math.round((filled / total) * 100) + '%';
+      } catch (e) { /* 캔버스 판독 실패해도 화면은 그대로 동작 */ }
+    }
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop, now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    lastAreaTick = -1;
+    render(0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.85);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

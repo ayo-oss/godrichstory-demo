@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>破れオフセット値が噛み合うフルスクリーンメニュー転換 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dt is-demo" id="dt">
+  <p class="dt__hint"><span>クリックまたはEnterキーを押すと、破れオフセット値が2つの断片をずらしてから0で噛み合わせます</span></p>
+  <div class="dt__panel" id="panel" tabindex="0" role="button" aria-label="破れオフセット値が噛み合うフルスクリーンメニュー転換をもう一度再生">
+    <canvas class="dt__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('dt');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BAR1 = tok('--scene-bar1', '#17141a');
+  var BAR2 = tok('--scene-bar2', '#2f6df6');
+  var BAR3 = tok('--scene-bar3', '#c9b8ff');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(풀스크린 메뉴 목록 자리) — 행·열 모두 색이 바뀌는 타일 결이라 가로 어긋남이 또렷이 드러난다.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    var barH = Math.max(10, h * 0.09);
+    var chunkW = Math.max(8, w * 0.07);
+    for (var y = 0; y < h; y += barH) {
+      for (var x = 0; x < w; x += chunkW) {
+        var v = rng();
+        bc.fillStyle = v < 0.34 ? BAR1 : (v < 0.67 ? BAR2 : BAR3);
+        bc.fillRect(x, y, chunkW + 1, barH + 1);
+      }
+    }
+  }
+
+  var SEED = 1027;
+  var TEAR_OFFSET_MAX = 52;
+  var data, outImg, iw, ih, tearY;
+
+  function PRECOMPUTE() {
+    iw = cv.width; ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+    var rng = makeLcg(SEED + 3);
+    tearY = Math.round(ih * (0.4 + rng() * 0.2));
+  }
+
+  function clampI(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function RENDER(p) {
+    var off = Math.round(TEAR_OFFSET_MAX * dpr * p);
+    var o = outImg.data;
+    for (var y = 0; y < ih; y++) {
+      var dx = y < tearY ? off : -off;
+      var base = y * iw;
+      for (var x = 0; x < iw; x++) {
+        var sx = clampI(x - dx, 0, iw - 1);
+        var k = (base + x) * 4;
+        var sk = (base + sx) * 4;
+        o[k] = data[sk]; o[k + 1] = data[sk + 1]; o[k + 2] = data[sk + 2]; o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    buf.width = cv.width; buf.height = cv.height;
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+  var PLAY_MS = 620;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

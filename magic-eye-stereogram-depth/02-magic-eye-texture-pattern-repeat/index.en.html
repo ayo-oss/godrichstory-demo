@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pattern tile — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>Pattern tile</span>
+    <span class="me__desc">Repeat a tile at a fixed width and you see exactly where the seams misalign</span>
+  </p>
+  <div class="me__field" role="application" aria-label="Tile precision board" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <span class="me__meta">Tile width 100px · 4 steps (4·8·12·16px) · pattern flow 28px/s</span>
+    <span class="me__meta me__meta--dim">Discrete disparity · stepped sweep</span>
+  </div>
+</div>
+</main>
+<script>
+// Pattern tile(02) — 반복 무늬 폭과 이산 시차의 관계.
+// 노이즈 대신 폭 TILE=100px 짜리 타일 무늬(사다리꼴 스트라이프)를 깐다.
+// 무늬가 주기적이면 시프트가 주기의 배수일 때 이음매가 딱 맞고, 그렇지 않으면 어긋나 도드라진다 —
+// 깊이를 4단 계단으로 두면 단마다 어긋남의 크기가 달라 "몇 픽셀 밀었는지"가 무늬로 읽힌다.
+// 계단이 좌우로 주사하며 한 단씩 올라오므로 어긋남의 띠가 화면을 흐른다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var TILE  = 100;  // 타일 폭(px) — 140으로 넓히면 눈을 더 멀리 늦춰야 한다(변형 2)
+  var STEPS = [4, 8, 12, 16];  // 계단 깊이(px)
+  var CYCLE = 2.0;  // 주사 주기(초)
+  // ─────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C0 = tokRGB('--me-c0');
+  var C1 = tokRGB('--me-c1');
+  var C2 = tokRGB('--me-c2');
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null;
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    img = ctx.createImageData(W, H);
+  }
+
+  // 타일 무늬 — 캔버스 좌표(반복 주기 좌표)를 받아 색을 결정한다.
+  // 사선 스트라이프 + 링: 같은 타일이 반복되는지 바로 보이는 무늬.
+  function tileColor(px, py) {
+    var tx = ((px % TILE) + TILE) % TILE, ty = ((py % TILE) + TILE) % TILE;
+    var diag = (tx + ty) % TILE;                       // 사선 좌표
+    if (diag < 14 || diag > TILE - 14) return C2;      // 굵은 사선 띠
+    var dx = tx - TILE * 0.5, dy = ty - TILE * 0.5;
+    var rr = Math.sqrt(dx * dx + dy * dy);
+    if (rr < 9) return C2;                             // 중앙 점
+    if (rr < 15) return C0;                            // 점 테두리
+    return (diag % 50 < 4) ? C1 : C0;                  // 바탕 + 가는 보조선
+  }
+
+  // 깊이 — 가로 4단 계단. 주사相位에 따라 어떤 단이 화면에 들어와 있는지 달라진다.
+  function depthAt(x, y, t) {
+    var band = (y * 4 + Math.floor(x / (W / 4)));      // 대각 계단 인덱스
+    var scan = (t / CYCLE) % 1;                        // 0..1 주사 위상
+    var appear = ((band % 8) + 8) % 8 / 8;             // 단마다 등장 시각을 엇갈리게
+    var lift = Math.max(0, Math.sin((scan - appear) * Math.PI * 2 - Math.PI / 2) * .5 + .5);
+    return lift * lift;
+  }
+
+  function shiftFor(x, y, t) {
+    var band = Math.floor(x / (W / 4)) % 4;
+    var d = depthAt(x, y, t);
+    return Math.round(STEPS[band] * d);
+  }
+
+  function draw(t) {
+    var d = img.data, x, y, di;
+    var flowY = Math.floor(t * 28);   // 패턴 순환 — 타일이 천천히 아래로 흐른다(정수 픽셀)
+    for (y = 0; y < H; y++) {
+      var rowY = y + flowY;
+      for (x = 0; x < W; x++) {
+        var s = shiftFor(x, rowY, t);
+        var src = x - s;
+        // 타일 좌표계는 무한히 반복되므로 음수도 그냥 넘겨면 tileColor 가 되감는다
+        var c = tileColor(src, rowY);
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.25);
+  });
+  fit();
+  if (reduce) {
+    draw(0.25);   // reduce — 한 단이 뜬 계단 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

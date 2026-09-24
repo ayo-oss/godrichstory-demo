@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마이크 입력 시각화 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-microphone" viewBox="0 0 256 256" fill="currentColor"><path d="M168 64v64a40 40 0 0 1-40 40a40 40 0 0 1-40-40V64a40 40 0 0 1 40-40a40 40 0 0 1 40 40" opacity=".2"/><path d="M128 176a48.05 48.05 0 0 0 48-48V64a48 48 0 0 0-96 0v64a48.05 48.05 0 0 0 48 48M96 64a32 32 0 0 1 64 0v64a32 32 0 0 1-64 0Zm40 143.6V240a8 8 0 0 1-16 0v-32.4A80.11 80.11 0 0 1 48 128a8 8 0 0 1 16 0a64 64 0 0 0 128 0a8 8 0 0 1 16 0a80.11 80.11 0 0 1-72 79.6"/></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="mi is-demo" id="mi">
+  <p class="mi__hint"><svg class="mi__ico" aria-hidden="true"><use href="#ico-microphone"/></svg><span>마이크는 물어보고 씁니다 — 거절해도 화면은 삽니다</span></p>
+  <div class="mi__dial" aria-hidden="true"><div class="mi__bars" id="bars"></div></div>
+  <button class="mi__btn" id="micBtn" type="button" aria-pressed="false">
+    <svg class="mi__btnIco" aria-hidden="true"><use href="#ico-microphone"/></svg>
+    <span id="micLabel">마이크 켜기</span>
+  </button>
+  <p class="mi__status" aria-live="polite"><span id="status">버튼을 누르면 마이크 권한을 물어봅니다</span><span class="mi__statusLoop" aria-hidden="true"><i>마이크 권한을 기다립니다</i><i>마이크 입력 중 — 말해 보세요</i><i>권한 거부 — 합성음으로 대체했습니다</i></span></p>
+</div>
+</main>
+<script>
+var root = document.getElementById('mi');
+var barBox = document.getElementById('bars');
+var micBtn = document.getElementById('micBtn');
+var micLabel = document.getElementById('micLabel');
+var statusEl = document.getElementById('status');
+var BAR_COUNT = 24;
+var bars = [];
+// 고리 막대 24개 — 마이크가 허락되면 목소리가, 거절되면 합성음이 **같은 막대**를 움직인다.
+// 두 경로가 같은 그림을 공유해야 "거절 = 실패 화면"이 아니라 "거절 = 다른 음원" 이 된다.
+for (var i = 0; i < BAR_COUNT; i++) {
+  var bar = document.createElement('span');
+  bar.className = 'mi__bar';
+  bar.style.setProperty('--i', String(i));
+  bar.setAttribute('data-band', String(Math.abs((i % 16) - 8)));
+  barBox.appendChild(bar);
+  bars.push(bar);
+}
+var ctx = null, analyser = null, freq = null, timer = 0, running = false, micOn = false;
+function ensureCtx() {
+  if (ctx) { return; }
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 256; // 256 → 빈 간격 187.5Hz — 폴백 사인파(220Hz)와 목소리 기본주파수가 맵핑된 빈에 들어온다
+  analyser.smoothingTimeConstant = 0.7;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  analyser.connect(ctx.destination);
+}
+function fallbackTone() {
+  // 거절 폴백 — 낮은 사인파 하나. 목소리보다 조용하고 규칙적이라 "합성음으로 돌아갔다"가 한눈에 보인다.
+  var osc = ctx.createOscillator();
+  var amp = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = 220;
+  amp.gain.value = 0;
+  for (var beat = 0; beat < 128; beat++) {
+    var at = ctx.currentTime + beat * 0.5;
+    amp.gain.setValueAtTime(0.5, at);
+    amp.gain.exponentialRampToValueAtTime(0.02, at + 0.4);
+  }
+  osc.connect(amp); amp.connect(analyser); osc.start();
+}
+function draw() {
+  analyser.getByteFrequencyData(freq);
+  for (var i = 0; i < bars.length; i++) {
+    var band = Number(bars[i].getAttribute('data-band'));
+    var v = freq[band + 1] / 255;
+    bars[i].style.setProperty('--h', (0.1 + v * 0.9).toFixed(3));
+  }
+  timer = requestAnimationFrame(draw);
+}
+micBtn.addEventListener('click', function () {
+  root.classList.remove('is-demo');
+  if (running) { stopAll(); return; }
+  ensureCtx();
+  // 자동재생 정책: AudioContext 는 사용자 제스처 안에서 resume() 해야 한다.
+  ctx.resume();
+  micBtn.setAttribute('aria-pressed', 'true');
+  micLabel.textContent = '끄기';
+  statusEl.textContent = '마이크 권한을 기다립니다';
+  micOn = false;
+  var p = (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+    ? navigator.mediaDevices.getUserMedia({ audio: true })
+    : Promise.reject(new Error('no mediaDevices'));
+  p.then(function (stream) {
+    micOn = true;
+    var src = ctx.createMediaStreamSource(stream);
+    src.connect(analyser); // 스피커로 돌려주지 않는다 — 하울링이 일어난다
+    statusEl.textContent = '마이크 입력 중 — 말해 보세요';
+    running = true;
+    timer = requestAnimationFrame(draw);
+  }).catch(function () {
+    // 거절은 정상 경로다 — 화면이 비지 않게 합성음이 같은 고리를 잇는다.
+    micOn = false;
+    fallbackTone();
+    statusEl.textContent = '권한 거부 — 합성음으로 대체했습니다';
+    running = true;
+    timer = requestAnimationFrame(draw);
+  });
+});
+function stopAll() {
+  cancelAnimationFrame(timer);
+  if (ctx) { ctx.suspend(); }
+  running = false;
+  micBtn.setAttribute('aria-pressed', 'false');
+  micLabel.textContent = '마이크 켜기';
+  statusEl.textContent = micOn ? '마이크를 멈췄습니다' : '합성음을 멈췄습니다';
+}
+</script>
+</body>
+</html>

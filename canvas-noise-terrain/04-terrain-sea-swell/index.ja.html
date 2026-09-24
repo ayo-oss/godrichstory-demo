@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海のうねりデモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ssw" id="ssw">
+  <p class="ssw__hint">
+    <svg class="ssw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a56.06 56.06 0 0 1-56 56c-25.94 0-46.89-16.61-53.81-40h-.38C114.89 167.39 94 184 68 184a56 56 0 0 1 0-112c25.94 0 46.89 16.61 53.81 40h.38C129.11 88.61 150 72 176 72a56.06 56.06 0 0 1 56 56" opacity=".2"/><path d="M176 64c-24.68 0-45.6 13.7-56 34.71C109.6 77.7 88.68 64 64 64a64 64 0 0 0 0 128c24.68 0 45.6-13.7 56-34.71c10.4 21 31.32 34.71 56 34.71a64 64 0 0 0 0-128m-71.16 96.4a8 8 0 0 1-9.24-6.53a47.65 47.65 0 0 0-1.6-6.66a8 8 0 1 1 15.24-4.9a63.6 63.6 0 0 1 2.14 8.86a8 8 0 0 1-6.54 9.23M64 176a48 48 0 0 1 0-96a47.75 47.75 0 0 1 44.53 30.63a8 8 0 0 1-14.93 5.75A31.75 31.75 0 0 0 64 96a32 32 0 0 0 0 64a31.75 31.75 0 0 0 29.6-19.38a8 8 0 1 1 14.93 5.75A47.75 47.75 0 0 1 64 176m112 0a47.75 47.75 0 0 1-44.53-30.63a8 8 0 0 1 14.93-5.75A31.75 31.75 0 0 0 176 160a32 32 0 0 0 0-64a31.75 31.75 0 0 0-29.6 19.38a8 8 0 1 1-14.93-5.75A47.75 47.75 0 0 1 176 80a48 48 0 0 1 0 96"/></g></svg>
+    <span>シードを変えると波が最初から生まれ直されます</span>
+  </p>
+  <div class="ssw__field" id="field">
+    <canvas class="ssw__cv" id="cv"></canvas>
+    <b class="ssw__badge" aria-hidden="true">fbm &middot; quadraticCurveTo</b>
+  </div>
+  <div class="ssw__bar">
+    <label class="ssw__dial">シード
+      <input type="number" id="seed" min="1" max="9999" step="1" value="7" aria-label="波高シード">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 바다 파고 — 1차원 값 노이즈를 옥타브(fbm)로 겹쳐 가로 위치마다 파고(높이)를 읽고,
+// 그 높이 점들을 quadraticCurveTo(각 점 사이 중점을 앵커로) 로 이어 부드러운 파도 단면 곡선을 그린다.
+// 라인 기반 항목이라 매 프레임 fbm 을 새 노이즈로 다시 뽑지 않는다 — 옥타브마다 자기 위상(phase)을
+// 시간에 흘려 "노이즈 샘플링 창"을 옆으로 팬(pan)한다. 겹마다 스케일·흐름 속도를 달리해
+// 수평선 쪽(원경)은 느리고 잔잔하게, 앞쪽(근경)은 빠르고 거칠게 출렁이도록 만든다.
+var root = document.getElementById('ssw');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var seedIn = document.getElementById('seed');
+
+// 결정적 난수 — mulberry32. 같은 시드면 같은 수열을 돌려준다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var PERM = new Uint8Array(512);
+var VAL = new Float32Array(256);
+
+// シード → PERM(순서표)·VAL(격자점 난수값) 재생성 — シード UI 가 이걸 다시 부른다
+function buildTables(seed) {
+  var rng = mulberry32(seed >>> 0);
+  var p = [], i, j, t;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) { j = (rng() * (i + 1)) | 0; t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  for (i = 0; i < 256; i++) VAL[i] = rng();
+}
+
+function fade(t) { return t * t * (3 - 2 * t); }   // 스무스스텝 — 격자 경계에서 각이 안 지게
+
+// 1차원 값 노이즈 — 격자점마다 난수를 하나 두고 그 사이를 fade 로 부드럽게 잇는다
+function vnoise1(x) {
+  var xi = Math.floor(x);
+  var xf = x - xi;
+  var a = VAL[PERM[xi & 255]], b = VAL[PERM[(xi + 1) & 255]];
+  return a + (b - a) * fade(xf);
+}
+
+// fbm — 옥타브마다 주파수 2배·진폭 절반. 옥타브마다 위상을 따로 흘려보내
+// (i+1) 배로 밀기 때문에 고주파 옥타브일수록 더 빨리 밀린다 — 파도 결이 부위별로 다시 인다
+function fbm1(x, sec, flow, oct) {
+  var sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (var i = 0; i < oct; i++) {
+    var phase = sec * flow * (i + 1);
+    sum += vnoise1(x * f + phase) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+// 파고 세 겹 — 수평선(far)·중경(mid)·근경(near). 스케일이 클수록 잔물결이 잘고, flow 가 클수록 빨리 출렁인다
+var FAR  = { scale: 0.006, flow: 2.6, offset: 5.3,   oct: 3, baseR: 0.38, ampR: 0.12 };
+var MID  = { scale: 0.015, flow: 5.2, offset: 97.1,  oct: 4, baseR: 0.60, ampR: 0.22 };
+var NEAR = { scale: 0.033, flow: 8.4, offset: 241.7, oct: 5, baseR: 0.86, ampR: 0.42 };
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var raf = 0;
+
+var css = getComputedStyle(root);
+function tok(name) { return css.getPropertyValue(name).trim(); }
+var C_SKY_TOP = tok('--sky-top'), C_SKY_BOTTOM = tok('--sky-bottom');
+var C_FAR_TOP = tok('--far-top'), C_FAR_BOTTOM = tok('--far-bottom');
+var C_MID_TOP = tok('--mid-top'), C_MID_BOTTOM = tok('--mid-bottom');
+var C_NEAR_TOP = tok('--near-top'), C_NEAR_BOTTOM = tok('--near-bottom');
+var C_FOAM = tok('--foam');
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 겹 하나의 파고 y 좌표 — fbm 값(0~1 로 대략 몰림)을 대비를 편 뒤 base 위아래로 흔든다
+function swellY(x, sec, cfg) {
+  var n = fbm1(x * cfg.scale + cfg.offset, sec, cfg.flow, cfg.oct);
+  n = n * 2 - 0.5;                    // 값 노이즈는 가운데로 몰린다 — 대비를 한 번 펴 준다
+  return cfg.base - n * cfg.amp;
+}
+
+// 점들을 노이즈 샘플링 창을 팬(pan)해 가며 뽑고 quadraticCurveTo(중점을 앵커로) 로 이어
+// 부드러운 파도 단면을 그린 뒤 캔버스 바닥까지 채운다. 근경 위에는 옅은 포말 하이라이트를 덧긋는다.
+function drawSwell(sec, cfg, topColor, bottomColor, foam) {
+  var step = 6;
+  var pts = [];
+  for (var x = 0; x <= W; x += step) pts.push([x, swellY(x, sec, cfg)]);
+  var lastX = pts[pts.length - 1][0];
+  if (lastX < W) pts.push([W, swellY(W, sec, cfg)]);
+
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(pts[0][0], pts[0][1]);
+  var i;
+  for (i = 0; i < pts.length - 1; i++) {
+    var xc = (pts[i][0] + pts[i + 1][0]) / 2;
+    var yc = (pts[i][1] + pts[i + 1][1]) / 2;
+    ctx.quadraticCurveTo(pts[i][0], pts[i][1], xc, yc);
+  }
+  var last = pts[pts.length - 1];
+  ctx.quadraticCurveTo(last[0], last[1], last[0], last[1]);
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  var g = ctx.createLinearGradient(0, cfg.base - cfg.amp, 0, H);
+  g.addColorStop(0, topColor);
+  g.addColorStop(1, bottomColor);
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  if (foam) {
+    // 마루가 빛을 받는 자리 — 같은 곡선을 다시 그려 얇게 밝히는데, 골(n 이 낮은 자리)은 옅어지게 한다
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (i = 0; i < pts.length - 1; i++) {
+      var fxc = (pts[i][0] + pts[i + 1][0]) / 2;
+      var fyc = (pts[i][1] + pts[i + 1][1]) / 2;
+      ctx.quadraticCurveTo(pts[i][0], pts[i][1], fxc, fyc);
+    }
+    ctx.quadraticCurveTo(last[0], last[1], last[0], last[1]);
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = foam;
+    ctx.globalAlpha = 0.55;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function paint(sec) {
+  ctx.clearRect(0, 0, W, H);
+  var sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, C_SKY_TOP);
+  sky.addColorStop(1, C_SKY_BOTTOM);
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  FAR.base = H * FAR.baseR; FAR.amp = H * FAR.ampR;
+  MID.base = H * MID.baseR; MID.amp = H * MID.ampR;
+  NEAR.base = H * NEAR.baseR; NEAR.amp = H * NEAR.ampR;
+
+  drawSwell(sec, FAR, C_FAR_TOP, C_FAR_BOTTOM, null);
+  drawSwell(sec, MID, C_MID_TOP, C_MID_BOTTOM, null);
+  drawSwell(sec, NEAR, C_NEAR_TOP, C_NEAR_BOTTOM, C_FOAM);
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function onSeed() {
+  var v = Math.max(1, Math.min(9999, Math.floor(Number(seedIn.value)) || 1));
+  buildTables(v);
+  if (reduce) paint(0);
+}
+
+seedIn.addEventListener('input', onSeed);
+seedIn.addEventListener('change', onSeed);
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+buildTables(Number(seedIn.value) || 7);
+fit();
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 시드가 정한 파도 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

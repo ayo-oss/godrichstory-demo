@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>銀河の渦のデモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gs" id="gs">
+  <p class="gs__hint">
+    <svg class="gs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 128a88 88 0 1 1-88-88a88 88 0 0 1 88 88" opacity=".2"/><path d="M245.11 60.68c-7.65-13.19-27.84-16.16-58.5-8.66A95.93 95.93 0 0 0 32 128a98 98 0 0 0 .78 12.31C5.09 169 5.49 186 10.9 195.32C16 204.16 26.64 208 40.64 208a124 124 0 0 0 28.79-4A95.93 95.93 0 0 0 224 128a97 97 0 0 0-.77-12.25c12.5-13 20.82-25.35 23.65-35.92c1.95-7.32 1.36-13.76-1.77-19.15M128 48a80.11 80.11 0 0 1 78 62.2c-17.06 16.06-40.15 32.53-62.07 45.13c-27.55 15.81-51.45 25.67-70.51 31.07A79.94 79.94 0 0 1 128 48M24.74 187.29c-1.46-2.51-.65-7.24 2.22-13a79 79 0 0 1 10.29-15.05a96 96 0 0 0 18 31.32c-17.25 2.9-28.01 1.05-30.51-3.27M128 208a79.45 79.45 0 0 1-38.56-9.94a370 370 0 0 0 62.43-28.86c21.58-12.39 40.68-25.82 56.07-39.08A80.07 80.07 0 0 1 128 208M231.42 75.69c-1.7 6.31-6.19 13.53-12.63 21.13a95.7 95.7 0 0 0-18-31.35c14.21-2.35 27.37-2.17 30.5 3.24c.9 1.57.95 3.92.13 6.98"/></g></svg>
+    <span>ポインタを乗せるとその場所がひととき密度の中心になります</span>
+  </p>
+  <div class="gs__field" id="field" role="application" aria-label="銀河の実験台" tabindex="0">
+    <canvas class="gs__cv" id="cv"></canvas>
+    <b class="gs__badge" aria-hidden="true"><span class="gs__badgeNum">600</span><span class="gs__badgeUnit">星</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 은하 회오리 — 星 육백 개의 반지름 r 과 시작각 a0 은 초기화 때 한 번만 정한다.
+// 매 프레임 위치는 식으로 계산한다: a = a0 + t * K / (r^0.8 + 20).
+// 안쪽일수록 분모가 작아 각속도가 커진다(시더) — 속도나 수명을 저장하는 배열이 없어도
+// 같은 시각 t 에서는 언제나 같은 그림이 나오고, 차등 회전이 쌓여 나선팔이 저절로 생긴다.
+// 꼬리는 프레임을 완전히 지우지 않아서 생긴다 — destination-out 합성으로 낮은 알파를 발라
+// 옛별이 서서히 지워지게 하면 별이 지나온 궤적이 남는다.
+var root = document.getElementById('gs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var HUB0 = v('--hub-0'), HUB1 = v('--hub-1');   // 허브 빛(중심의 따뜻한 코어)
+var EDGE = [v('--tone-hub'), v('--tone-warm'), v('--tone-mid'), v('--tone-cool'), v('--tone-edge')];
+
+var COUNT = 600;
+var K = 13;              // 각속도 계수 — r 이 0 에 가까우면 약 0.65rad/s, 바깥은 약 0.17rad/s
+var FLAT = 0.58;         // 세로 눌림 — 납작한 회전 은하로 읽히는 값
+var TILT = -0.35;        // 전체 기울기(라디안)
+var cosT = Math.cos(TILT), sinT = Math.sin(TILT);
+var FADE = 0.16;         // 꼬리 길이 — 지우는 알파가 낮을수록 궤적이 길게 남는다
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var cx = 0, cy = 0, rmax = 0;
+var px = 0, py = 0, inf = 0, aimInf = 0;   // 포인터 항 — (px, py) 를 향해 전체가 살짝 기운다
+
+// 星 — 반지름·시작각·크기·빛깔만 받는다. 속도·수명 배열은 없다(식이 전부 계산한다)
+var stars = [];
+for (var i = 0; i < COUNT; i++) {
+  var rr = Math.pow(Math.random(), 1.25);   // 안쪽 밀도를 살짝 높인다(지수 1 이상이 중심으로 몬다)
+  stars.push({
+    r: rr,
+    a0: Math.random() * Math.PI * 2,
+    s: 0.7 + Math.random() * 1.5 + (Math.random() < 0.03 ? 0.9 : 0),
+    tone: EDGE[Math.min(EDGE.length - 1, Math.round(rr * (EDGE.length - 1)))],
+    tw: i % 9 === 0 ? Math.random() * Math.PI * 2 : -1   // 아홉 개 중 하나는 반짝인다
+  });
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx = W * 0.5; cy = H * 0.52;
+  rmax = Math.min(W * 0.47, H * 0.82);
+  if (reduce) draw(42);
+}
+
+function draw(t) {
+  // 꼬리 — 완전히 지우지 않고 낮은 알파로 바른다
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = 'rgba(0, 0, 0, ' + FADE + ')';
+  ctx.fillRect(0, 0, W, H);
+  // 별과 허브 빛은 겹치면 밝아지는 lighter 로 얹는다
+  ctx.globalCompositeOperation = 'lighter';
+  var hub = ctx.createRadialGradient(cx, cy, 0, cx, cy, rmax * 0.34);
+  hub.addColorStop(0, HUB0);
+  hub.addColorStop(1, HUB1);
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = hub;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rmax * 0.34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  for (var i = 0; i < COUNT; i++) {
+    var st = stars[i];
+    var R = st.r * rmax + 8;                       // 아주 중심으로 모두 몰리지 않게 바닥 반지름 8
+    var a = st.a0 + t * K / (Math.pow(R, 0.8) + 20);
+    var ex = Math.cos(a) * R;
+    var ey = Math.sin(a) * R * FLAT;
+    // 계산식의 포인터 항 — (px, py) 쪽으로 좌표 전체가 inf 만큼 기운다(밀도 중심이 잠깐 그 자리로)
+    var x = cx + ex * cosT - ey * sinT + (px - cx) * inf;
+    var y = cy + ex * sinT + ey * cosT + (py - cy) * inf;
+    ctx.globalAlpha = st.tw >= 0 ? 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(t * 2.2 + st.tw)) : 0.9;
+    ctx.fillStyle = st.tone;
+    ctx.beginPath();
+    ctx.arc(x, y, st.s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function frame(now) {
+  inf += (aimInf - inf) * 0.08;
+  draw(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  px = Math.max(0, Math.min(W, e.clientX - r.left));
+  py = Math.max(0, Math.min(H, e.clientY - r.top));
+  aimInf = 0.32;
+  if (reduce) { inf = aimInf; draw(42); }
+});
+field.addEventListener('pointerleave', function () { aimInf = 0; });
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-16, 0], ArrowRight: [16, 0], ArrowUp: [0, -16], ArrowDown: [0, 16] }[e.key];
+  if (!d) { if (e.key === 'Escape') aimInf = 0; return; }
+  e.preventDefault();
+  aimInf = 0.32;
+  px = Math.max(0, Math.min(W, px + d[0]));
+  py = Math.max(0, Math.min(H, py + d[1]));
+  if (reduce) { inf = aimInf; draw(42); }
+});
+window.addEventListener('resize', function () { fit(); });
+
+fit();
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 나선이 감긴 한 장(t = 42 초)만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  draw(42);
+} else {
+  px = W * 0.62; py = H * 0.4;
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

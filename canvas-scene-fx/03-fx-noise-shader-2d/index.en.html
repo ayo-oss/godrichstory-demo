@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noise shader demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ns" id="ns">
+  <p class="ns__hint">
+    <svg class="ns__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M120 96a24 24 0 1 1 24-24a24 24 0 0 1-24 24m88-16a24 24 0 1 0 24 24a24 24 0 0 0-24-24m-56 80a24 24 0 1 0 24 24a24 24 0 0 0-24-24" opacity=".2"/><path d="M184 184a32 32 0 0 1-32 32c-13.7 0-26.95-8.93-31.5-21.22a8 8 0 0 1 15-5.56C137.74 195.27 145 200 152 200a16 16 0 0 0 0-32H40a8 8 0 0 1 0-16h112a32 32 0 0 1 32 32m-64-80a32 32 0 0 0 0-64c-13.7 0-26.95 8.93-31.5 21.22a8 8 0 0 0 15 5.56C105.74 60.73 113 56 120 56a16 16 0 0 1 0 32H24a8 8 0 0 0 0 16Zm88-32c-13.7 0-26.95 8.93-31.5 21.22a8 8 0 0 0 15 5.56C193.74 92.73 201 88 208 88a16 16 0 0 1 0 32H32a8 8 0 0 0 0 16h176a32 32 0 0 0 0-64"/></g></svg>
+    <span>Drag to push the clouds; fewer layers coarsen the grain</span>
+  </p>
+  <div class="ns__field" id="field" role="application" aria-label="Noise test board" tabindex="0">
+    <canvas class="ns__cv" id="cv"></canvas>
+    <b class="ns__badge" aria-hidden="true">160 &times; 100</b>
+  </div>
+  <div class="ns__bar">
+    <label class="ns__dial">Octaves
+      <input type="range" id="oct" min="2" max="5" step="1" value="4" aria-label="Octaves">
+      <b class="ns__val" id="octVal">4</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 노이즈 쉐이더 재현 — 셰이더가 아니라 160x100 짜리 ImageData 에 값 노이즈를 픽셀 단위로 써 넣고,
+// 그 작은 버퍼를 imageSmoothingEnabled 로 늘려 480x300 을 채운다.
+// 셰이더처럼 보이는 까닭은 계산이 대단해서가 아니라 **해상도를 일부러 낮췄기** 때문이다 —
+// 16,000 픽셀만 계산하고 나머지는 브라우저의 확대 보간이 메운다.
+var root = document.getElementById('ns');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var octIn = document.getElementById('oct');
+var octOut = document.getElementById('octVal');
+
+var NW = 160, NH = 100;                 // 노이즈 버퍼 해상도 — 화면이 커져도 이 값은 그대로다
+var small = document.createElement('canvas');
+small.width = NW; small.height = NH;
+var sctx = small.getContext('2d');
+var buf = sctx.createImageData(NW, NH); // 한 번만 만들어 두고 프레임마다 같은 배열을 덮어쓴다
+var px = buf.data;
+
+// ── 값 노이즈 — 격자 꼭짓점마다 난수를 하나 두고 그 사이를 부드럽게 잇는다 ───────────
+// 그라디언트 노이즈(펄린)보다 단순하고, 네 겹만 쌓아도 구름으로 읽힌다.
+var PERM = new Uint8Array(512);
+var VAL = new Float32Array(256);
+(function seed() {
+  var p = [], i, j, t;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) { j = (Math.random() * (i + 1)) | 0; t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  for (i = 0; i < 256; i++) VAL[i] = Math.random();
+})();
+
+function fade(t) { return t * t * (3 - 2 * t); }   // 스무스스텝 — 격자 경계에서 각이 안 지게
+
+function vnoise(x, y, z) {
+  var xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  var xf = x - xi, yf = y - yi, zf = z - zi;
+  xi &= 255; yi &= 255; zi &= 255;
+  var u = fade(xf), v = fade(yf), w = fade(zf);
+  var a = PERM[xi] + yi, b = PERM[xi + 1] + yi;
+  var aa = PERM[a] + zi, ab = PERM[a + 1] + zi;
+  var ba = PERM[b] + zi, bb = PERM[b + 1] + zi;
+  var c000 = VAL[PERM[aa]], c100 = VAL[PERM[ba]];
+  var c010 = VAL[PERM[ab]], c110 = VAL[PERM[bb]];
+  var c001 = VAL[PERM[aa + 1]], c101 = VAL[PERM[ba + 1]];
+  var c011 = VAL[PERM[ab + 1]], c111 = VAL[PERM[bb + 1]];
+  var x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+  var x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+  var y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  return y0 + (y1 - y0) * w;
+}
+
+// fbm — 같은 노이즈를 주파수 2배·진폭 절반으로 겹쳐 쌓는다. 겹 수가 곧 결의 고움이다
+function fbm(x, y, z, oct) {
+  var sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (var i = 0; i < oct; i++) {
+    sum += vnoise(x * f, y * f, z * f) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+// ── 색 — 토큰 네 단계를 256칸 표로 펴 두고 노이즈 값으로 찾아 쓴다 ─────────────────
+var css = getComputedStyle(root);
+function rgbOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+var STOPS = [rgbOf('--n0'), rgbOf('--n1'), rgbOf('--n2'), rgbOf('--n3')];
+var LUT = new Uint8Array(256 * 3);
+for (var q = 0; q < 256; q++) {
+  var t = q / 255 * (STOPS.length - 1);
+  var k = Math.min(STOPS.length - 2, Math.floor(t));
+  var f2 = t - k;
+  for (var c = 0; c < 3; c++) LUT[q * 3 + c] = STOPS[k][c] + (STOPS[k + 1][c] - STOPS[k][c]) * f2;
+}
+
+var SCALE = 0.034;          // 격자 간격 — 작을수록 구름 덩어리가 커진다. 0.05 에서는 결이
+                            // 스틸컷에서 거칠게 보였다(실측) — 낮춰 덩어리를 키운다
+var FLOW = 0.24;            // 시간축이 흐르는 속도. 시간은 노이즈의 셋째 차원이다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var octaves = 4;
+var panX = 0, panY = 0, aimX = 0, aimY = 0;
+var raf = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function paint(sec) {
+  panX += (aimX - panX) * 0.14;
+  panY += (aimY - panY) * 0.14;
+  var z = sec * FLOW;
+  var i = 0;
+  for (var y = 0; y < NH; y++) {
+    var ny = (y + panY) * SCALE;
+    for (var x = 0; x < NW; x++) {
+      var n = fbm((x + panX) * SCALE, ny, z, octaves);
+      n = n * 1.5 - 0.25;                       // 값 노이즈는 가운데로 몰린다 — 대비를 한 번 펴 준다
+      if (n < 0) n = 0; else if (n > 1) n = 1;
+      var q2 = (n * 255) | 0;
+      px[i] = LUT[q2 * 3];
+      px[i + 1] = LUT[q2 * 3 + 1];
+      px[i + 2] = LUT[q2 * 3 + 2];
+      px[i + 3] = 255;
+      i += 4;
+    }
+  }
+  sctx.putImageData(buf, 0, 0);
+  // 확대 보간을 켜 둔 채로 늘린다 — 이 한 줄이 픽셀 덩어리를 구름으로 바꾼다
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, NW, NH, 0, 0, W, H);
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function setOct(v) {
+  octaves = Number(v);
+  octOut.textContent = String(octaves);
+  if (reduce) paint(0);
+}
+
+octIn.addEventListener('input', function () { setOct(octIn.value); });
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  aimX = ((e.clientX - r.left) / r.width - 0.5) * 190;
+  aimY = ((e.clientY - r.top) / r.height - 0.5) * 120;
+  if (reduce) paint(0);
+});
+field.addEventListener('pointerleave', function () { aimX = 0; aimY = 0; });
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24] }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  aimX = Math.max(-190, Math.min(190, aimX + d[0]));
+  aimY = Math.max(-120, Math.min(120, aimY + d[1]));
+  if (reduce) paint(0);
+});
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+fit();
+setOct(octIn.value);
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 구름이 멈춰 선 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  panX = 0; panY = 0;
+  paint(0);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

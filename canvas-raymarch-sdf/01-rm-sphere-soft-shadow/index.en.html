@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>구 하나 — 최소 레이 마처 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sm is-demo" id="smRoot">
+  <p class="sm__hint">
+    <svg class="sm__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>Every pixel walks a ray through the distance field to the sphere — the pointer orbits the view</span>
+  </p>
+  <div class="sm__field" id="smField" role="application" aria-label="Sphere ray marching board" tabindex="0">
+    <canvas class="sm__cv" id="smCv"></canvas>
+  </div>
+  <div class="sm__bar">
+    <span class="sm__meta"><b class="sm__val" id="smRes">64×27</b> render target · 64 steps</span>
+    <span class="sm__meta sm__meta--dim">shadow ray · Lambert shading</span>
+  </div>
+</div>
+</main>
+<script>
+// 구 하나 — 최소 레이 마처(01). 이 march 루프가 아홉 항목의 원형이다.
+// 화면 픽셀마다 눈에서 레이를 쏘고, 구의 부호 거리 함수(sdSphere) 가 알려주는
+// "그 방향으로 그만큼은 절대 안 부딪힌다" 만큼씩 전진한다. 닿으면 법선으로 조명을 계산.
+// WebGL 없이 ImageData 픽셀 계산만으로 3D 가 나온다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var RT_W = 64;          // render target 폭(버퍼 픽셀). 구 씬은 가벼워 64px 도 60fps 가 나온다
+  var STEPS = 64;         // 최대 전진 스텝 수 — 변형 "스텝 수" 축(48 → 96)
+  var HIT_EPS = 0.005;    // 표면 도달 판정 거리(월드 단위)
+  var LOOP_MS = 2000;     // 미리보기 가상 포인터 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('smRoot');
+  var field = document.getElementById('smField');
+  var cv = document.getElementById('smCv');
+  var ctx = cv.getContext('2d');
+  var resOut = document.getElementById('smRes');
+
+  // 색은 CSS 커스텀 프로퍼티(--rm-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    if (s.charAt(0) === '#') {
+      var hx = s.length === 4
+        ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+        : s.slice(1);
+      return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+    }
+    var p = s.replace(/[^\d,.]/g, '').split(',');
+    return [Number(p[0]) || 0, Number(p[1]) || 0, Number(p[2]) || 0];
+  }
+  var C_SPHERE = tokRGB('--rm-sphere');
+  var C_HILITE = tokRGB('--rm-hilite');
+  var C_FLOOR  = tokRGB('--rm-floor');
+  var C_SHADE  = tokRGB('--rm-shade');
+  var C_SKY    = tokRGB('--rm-sky');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var buf, bctx, img;             // 저해상 render target 버퍼(캔버스와 별개)
+  var heading = 0.55;             // 편요(라디안) — 포인터 좌우
+  var pitch = 0.27;               // 상하각(라디안) — 포인터 상하
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var raf = 0, t0 = -1;
+
+  // 구 하나의 부호 거리 — p 에서 구 표면까지, 안이면 음수
+  // 중심 (0,1,0) · 반지름 1
+  function sdSphere(px, py, pz) {
+    var dx = px, dy = py - 1.0, dz = pz;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) - 1.0;
+  }
+  // 바닥 평면 y=0 의 거리
+  function sdFloor(py) { return py; }
+
+  // 장면 거리 = 두 물체 거리의 최소(합집합)
+  function map(px, py, pz) {
+    var dS = sdSphere(px, py, pz);
+    var dF = sdFloor(py);
+    return dS < dF ? dS : dF;
+  }
+
+  // 거리장의 기울기(전방 차분) = 표면 법선
+  function normalAt(px, py, pz) {
+    var e = 0.001;
+    var nx = map(px + e, py, pz) - map(px - e, py, pz);
+    var ny = map(px, py + e, pz) - map(px, py - e, pz);
+    var nz = map(px, py, pz + e) - map(px, py, pz - e);
+    var l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    return [nx / l, ny / l, nz / l];
+  }
+
+  // 부드러운 그림자 — 바닥 점에서 광원 방향으로 다시 마칭한다.
+  // 경로가 구 안을 지나면 0, 스치듯 가까우면 클램프 완화로 반그림자가 된다
+  function softShadow(px, py, pz) {
+    var lx = -0.5, ly = 0.78, lz = 0.38;   // 광원 방향(정규화 상수) — 왼쪽 위
+    var t = 0.02, res = 1.0;
+    for (var i = 0; i < 24; i++) {
+      var d = sdSphere(px + lx * t, py + ly * t, pz + lz * t);
+      if (d < -0.001) return 0.0;
+      res = Math.min(res, 10.0 * d / t);   // 가장자리가 어금니 곡선처럼 부드럽게 — 계수 10 이 완화 폭
+      if (res < 0.005 || t > 7.0) break;
+      t += Math.max(d, 0.02);
+    }
+    return res < 0 ? 0 : (res > 1 ? 1 : res);
+  }
+
+  function mix3(c1, c2, t) {
+    return [c1[0] + (c2[0] - c1[0]) * t, c1[1] + (c2[1] - c1[1]) * t, c1[2] + (c2[2] - c1[2]) * t];
+  }
+  function clamp255(v) { return v > 255 ? 255 : (v < 0 ? 0 : v); }
+
+  function draw(tSec) {
+    if (!img) return;
+    var data = img.data;
+    var bw = buf.width, bh = buf.height;
+
+    // 카메라 — 구 중심(0,1,0) 을 도는 궤도. heading/pitch 를 눈 위치로
+    var ch = Math.cos(heading), sh = Math.sin(heading);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var D = 4.2;                                   // 눈-구 거리
+    var ex = sh * cp * D, ey = 1.0 + sp * D, ez = ch * cp * D;
+    // 전방(눈→구 중심) · 오른쪽 · 위 — 오른손 기저
+    var fx = -sh * cp, fy = -sp, fz = -ch * cp;
+    var rx = -fz, rz = fx;                          // right = normalize(f × worldUp)
+    var rl = Math.sqrt(rx * rx + rz * rz) || 1;
+    rx /= rl; rz /= rl;
+    var ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;   // up = right × forward
+    var lx = -0.5, ly = 0.78, lz = 0.38;            // 광원 방향
+
+    var i = 0;
+    for (var y = 0; y < bh; y++) {
+      var vy = (1 - 2 * (y + 0.5) / bh) * 0.5;      // -0.5..+0.5 (화면 위가 +)
+      for (var x = 0; x < bw; x++) {
+        var vx = (2 * (x + 0.5) / bw - 1) * 0.8;    // -0.8..+0.8
+        // 레이 방향 = 전방 + 화면 오프셋, 정규화
+        var dx = fx + rx * vx + ux * vy;
+        var dy = fy + uy * vy;
+        var dz = fz + rz * vx + uz * vy;
+        var dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        dx /= dl; dy /= dl; dz /= dl;
+
+        // ── march 루프 — 아홉 항목의 원형. 거리만큼 안전하게 전진 ──
+        var t = 0.0, hit = 0, px = ex, py = ey, pz = ez;
+        for (var s = 0; s < STEPS; s++) {
+          var d = map(px, py, pz);
+          if (d < HIT_EPS) { hit = 1; break; }      // 표면 도달
+          if (t > 12.0) break;                      // 멀어지면 하늘로 놓아준다
+          t += d;
+          px = ex + dx * t; py = ey + dy * t; pz = ez + dz * t;
+        }
+
+        var r, g, b;
+        if (hit) {
+          var isFloor = py < 0.5;                   // 낮게 맞았으면 바닥
+          var n = normalAt(px, py, pz);
+          var lam = Math.max(0, n[0] * lx + n[1] * ly + n[2] * lz);
+          if (isFloor) {
+            // 바닥 — 그림자 레이로 접시 모양 부드러운 음영
+            var shd = softShadow(px, py, pz);
+            var lit = (0.4 + 0.6 * lam) * (0.25 + 0.75 * shd);
+            r = C_FLOOR[0] * lit + C_SHADE[0] * (1 - lit);
+            g = C_FLOOR[1] * lit + C_SHADE[1] * (1 - lit);
+            b = C_FLOOR[2] * lit + C_SHADE[2] * (1 - lit);
+          } else {
+            // 구 — 램버트 + 시선-법선 각 하이라이트 근사(가장자리가 살짝 어둡다)
+            var dif = 0.26 + 0.74 * lam;
+            var rim = Math.max(0, n[0] * -dx + n[1] * -dy + n[2] * -dz);
+            var spec = Math.pow(rim, 16) * 0.45;
+            r = C_SPHERE[0] * dif + C_HILITE[0] * spec;
+            g = C_SPHERE[1] * dif + C_HILITE[1] * spec;
+            b = C_SPHERE[2] * dif + C_HILITE[2] * spec;
+          }
+        } else {
+          // 하늘 — 위로 갈수록 살짝 밝아지는 크림
+          var sky = dy > 0 ? dy : 0;
+          r = C_SKY[0] + (C_HILITE[0] - C_SKY[0]) * sky * 0.3;
+          g = C_SKY[1] + (C_HILITE[1] - C_SKY[1]) * sky * 0.3;
+          b = C_SKY[2] + (C_HILITE[2] - C_SKY[2]) * sky * 0.3;
+        }
+        data[i] = clamp255(r);
+        data[i + 1] = clamp255(g);
+        data[i + 2] = clamp255(b);
+        data[i + 3] = 255;
+        i += 4;
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+    // 저해상 버퍼를 캔버스 CSS 크기로 부드럽게 확대 — dpr 을 곱하지 않는다(버퍼가 저해상)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(buf, 0, 0, W, H);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    var bh = Math.max(12, Math.round(RT_W * H / W));
+    buf = document.createElement('canvas');
+    buf.width = RT_W; buf.height = bh;
+    bctx = buf.getContext('2d');
+    img = bctx.createImageData(RT_W, bh);
+    resOut.textContent = RT_W + '×' + bh;
+  }
+
+  function aim() {
+    // 포인터/키 입력 → 목표 각도. heading ±0.95 · pitch 0.13..0.47
+    return [(px01 - 0.5) * 1.9, 0.3 + (py01 - 0.5) * 0.34];
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous(표 밖 자연 경로)
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.4 * Math.sin(ph);
+      py01 = 0.5 + 0.34 * Math.sin(2 * ph + 0.7);
+    }
+    var a = aim();
+    heading += (a[0] - heading) * 0.1;
+    pitch += (a[1] - pitch) * 0.1;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { var a1 = aim(); heading = a1[0]; pitch = a1[1]; draw(0.6); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { var a2 = aim(); heading = a2[0]; pitch = a2[1]; draw(0.6); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(0.6); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 그림자가 읽히는 각도의 한 장만 그린다
+    heading = 0.55; pitch = 0.3;
+    draw(0.6);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

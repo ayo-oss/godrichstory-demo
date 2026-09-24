@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>롤러코스터 트랙 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ct is-demo" id="ctRoot">
+  <p class="ct__hint">
+    <svg class="ct__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round"><path opacity=".2" stroke-width="44" d="M22 200 C 80 64, 126 218, 176 120 S 240 76, 242 120"/><path stroke-width="18" d="M22 200 C 80 64, 126 218, 176 120 S 240 76, 242 120"/></g><circle cx="128" cy="128" r="20" fill="currentColor"/></svg>
+    <span>The bead speeds up downhill and slows uphill — the pointer turns the view and the gravity dial changes its speed</span>
+  </p>
+  <div class="ct__field" id="ctField" role="application" aria-label="Coaster track perspective board" tabindex="0">
+    <canvas class="ct__cv" id="ctCv"></canvas>
+  </div>
+  <div class="ct__bar">
+    <label class="ct__dial">gravity
+      <input type="range" id="ctGrav" min="40" max="160" step="5" value="100" aria-label="gravity">
+      <b class="ct__val" id="ctGravVal">100%</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 롤러코스터 트랙 — 닫힌 궤적을 매개변수 a(=t) 로 표본 200개에 새워 누적 거리표를 만든다.
+// 구슬은 매 프레임 궤적 접선의 기울기(sin θ 근사)로 gravity 가속도를 속도에 적분한다 —
+// 내리막에서 얻은 속도로 오르막을 오르는 에너지 보존의 1차 근사. 레일은 표본 사이를
+// 이차 곡선(quadraticCurveTo)로 잇고, 레일 조각·침목·기둥·구슬을 한 바구니에 모아
+// z 내림차순(화가 알고리즘)으로 그린다. 라이브러리·WebGL 없이 sin/cos 곱셈뿐이다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var SAMPLES = 200;        // 궤적 표본 수
+  var RX = 148, RZ = 88;    // 궤적 평면 반경(타원)
+  var H1 = 30, H2 = 10;     // 언덕 높이(큰 것·잔물결)
+  var GAUGE = 11;           // 레일 간격(반)
+  var CHUNK = 5;            // 한 번에 그리는 표본 수 — 레일 조각의 길이
+  var GROUND = -84;         // 지면 높이(기둥이 닿는 곳)
+  var VMIN = 60;            // 최저 속도(px/s) — 마찰로 다 잃으면 이 값으로 다시 미끄러진다
+  var LOOP_MS = 2600;       // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('ctRoot');
+  var field = document.getElementById('ctField');
+  var cv = document.getElementById('ctCv');
+  var ctx = cv.getContext('2d');
+  var gravIn = document.getElementById('ctGrav');
+  var gravOut = document.getElementById('ctGravVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var CREAM = tok('--ct-cream');
+  var PINK = tok('--ct-pink');
+  var RAIL = tok('--ct-rail');
+  var TIE = tok('--ct-tie');
+  var POST = tok('--ct-post');
+  var SHADOW = tok('--ct-shadow');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var FOCAL = 300, BACK = 60;
+  var yaw = 0.4, pitch = 0.18;
+  var px01 = 0.5, py01 = 0.5;         // 포인터 위치 비율(0~1) — 자동재생 중엔 가상 경로가 채운다
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  var track = [];    // 궤적 중심점 { x, y, z } — 매개변수 a 로 계산된 결과
+  var rails = [];    // 좌우 레일 점 { lx, y, lz, rx, rz }
+  var cum = [0];     // 누적 거리표 — 거리 s 로 표본 구간을 찾는다
+  var segIdx = 0;    // 구슬이 속한 표본 구간
+  var beadS = 0, beadV = 105;         // 구슬의 거리·속도 — 가속도가 속도에 쌓인다
+  var trail = [];    // 구슬 잔상(월드 좌표)
+
+  (function buildTrack() {
+    for (var i = 0; i < SAMPLES; i++) {
+      var a = i / SAMPLES * TAU;
+      track.push({
+        x: Math.cos(a) * RX,
+        y: H1 * Math.sin(2 * a + 1.2) + H2 * Math.sin(3 * a - 0.6),
+        z: Math.sin(a) * RZ
+      });
+    }
+    for (var j = 0; j < SAMPLES; j++) {
+      var pn = track[(j + 1) % SAMPLES], pp = track[(j - 1 + SAMPLES) % SAMPLES];
+      var dx = pn.x - pp.x, dz = pn.z - pp.z;
+      var dl = Math.sqrt(dx * dx + dz * dz) || 1;
+      rails.push({
+        lx: track[j].x - dz / dl * GAUGE, lz: track[j].z + dx / dl * GAUGE,
+        rx: track[j].x + dz / dl * GAUGE, rz: track[j].z - dx / dl * GAUGE,
+        y: track[j].y
+      });
+    }
+    for (var k = 1; k <= SAMPLES; k++) {
+      var a2 = track[k % SAMPLES], b2 = track[k - 1];
+      cum.push(cum[k - 1] + Math.sqrt(
+        (a2.x - b2.x) * (a2.x - b2.x) + (a2.y - b2.y) * (a2.y - b2.y) + (a2.z - b2.z) * (a2.z - b2.z)));
+    }
+  })();
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 카메라 — yaw(y축) 뒤 pitch(x축)
+  function camRot(p) {
+    var ca = Math.cos(yaw), sa = Math.sin(yaw);
+    var x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca;
+    var cb = Math.cos(pitch), sb = Math.sin(pitch);
+    return { x: x1, y: p.y * cb - z1 * sb, z: p.y * sb + z1 * cb };
+  }
+
+  function project(p) { var s = FOCAL / (FOCAL + p.z + BACK); return { sx: W * 0.5 + p.x * s, sy: H * 0.54 - p.y * s, s: s }; }
+
+  // 구슬의 월드 좌표 — 누적 거리 s 를 표본 구간에서 선형 보간
+  function beadWorld() {
+    var i0 = segIdx, i1 = (i0 + 1) % SAMPLES;
+    var f = (beadS - cum[i0]) / (cum[i0 + 1] - cum[i0]);
+    return {
+      x: track[i0].x + (track[i1].x - track[i0].x) * f,
+      y: track[i0].y + (track[i1].y - track[i0].y) * f,
+      z: track[i0].z + (track[i1].z - track[i0].z) * f
+    };
+  }
+
+  function step(dt) {
+    // 물리 — 접선 기울기로 중력을 속도에 적분(사선 운동 1차 근사) + 마찰
+    var p0 = track[segIdx], p1 = track[(segIdx + 1) % SAMPLES];
+    var segLen = cum[segIdx + 1] - cum[segIdx];
+    var slope = (p1.y - p0.y) / segLen;              // 내리막(−)에서 가속
+    var g = Number(gravIn.value) * 2;                // 다이얼 % → px/s²
+    beadV += -g * slope * dt;
+    beadV *= 1 - 0.05 * dt;
+    if (beadV < VMIN) beadV = VMIN;
+    beadS += beadV * dt;
+    var L = cum[SAMPLES];
+    while (beadS >= L) { beadS -= L; segIdx = 0; }
+    while (cum[segIdx + 1] <= beadS) segIdx = (segIdx + 1) % SAMPLES;
+    if (trail.length > 26) trail.shift();
+    trail.push(beadWorld());
+    // 카메라 — 포인터 좌우로 궤적을 돌리고 상하로 시점 높이를 바꾼다
+    yaw += (0.07 + (px01 - 0.5) * 0.9) * dt;
+    pitch += (0.18 + (py01 - 0.5) * 0.4 - pitch) * 0.09;
+  }
+
+  // 표본 투영점 사이를 이차 곡선으로 잇는다 — 부드러운 레일
+  function railPath(pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].sx, pts[0].sy);
+    for (var q = 1; q < pts.length - 1; q++) {
+      var mx = (pts[q].sx + pts[q + 1].sx) / 2, my = (pts[q].sy + pts[q + 1].sy) / 2;
+      ctx.quadraticCurveTo(pts[q].sx, pts[q].sy, mx, my);
+    }
+    ctx.lineTo(pts[pts.length - 1].sx, pts[pts.length - 1].sy);
+    ctx.stroke();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    var scale = Math.min(W / 480, H / 300);
+
+    // 지면 — 궤적 아래 타원 받침(그림자)
+    var ground = [];
+    for (var g = 0; g <= 40; g++) {
+      var ga = g / 40 * TAU;
+      ground.push(project(camRot({ x: Math.cos(ga) * (RX + 52) * scale, y: GROUND, z: Math.sin(ga) * (RZ + 52) * scale })));
+    }
+    ctx.beginPath();
+    ctx.moveTo(ground[0].sx, ground[0].sy);
+    for (var gi = 1; gi < ground.length; gi++) ctx.lineTo(ground[gi].sx, ground[gi].sy);
+    ctx.closePath();
+    ctx.fillStyle = SHADOW;
+    ctx.fill();
+
+    // ── 그릴 아이템을 모아 z 내림차순(먼 것 먼저) — 화가 알고리즘 ──
+    var items = [];
+
+    // 레일 조각 + 침목 — CHUNK 표본마다 한 조각, z 는 조각 가운데 표본
+    for (var c = 0; c < SAMPLES; c += CHUNK) {
+      (function (i0) {
+        var mid = track[(i0 + (CHUNK >> 1)) % SAMPLES];
+        items.push({ z: camRot(mid).z, fn: function () {
+          var L = [], R = [];
+          for (var k = 0; k <= CHUNK; k++) {
+            var r2 = rails[(i0 + k) % SAMPLES];
+            L.push(project(camRot({ x: r2.lx, y: r2.y, z: r2.lz })));
+            R.push(project(camRot({ x: r2.rx, y: r2.y, z: r2.rz })));
+          }
+          ctx.strokeStyle = RAIL;
+          ctx.lineWidth = 2;
+          railPath(L); railPath(R);
+          // 침목 — 조각 시작점에서 좌우 레일을 잇는 짧은 침
+          ctx.strokeStyle = TIE;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(L[0].sx, L[0].sy);
+          ctx.lineTo(R[0].sx, R[0].sy);
+          ctx.stroke();
+        }});
+      })(c);
+    }
+
+    // 지지 기둥 — 여섯 곳에서 좌우 레일을 지면까지 내린다
+    [14, 47, 80, 113, 146, 179].forEach(function (i) {
+      var r3 = rails[i];
+      items.push({ z: camRot({ x: r3.lx, y: r3.y, z: r3.lz }).z, fn: function () {
+        var a = project(camRot({ x: r3.lx, y: r3.y, z: r3.lz }));
+        var b = project(camRot({ x: r3.lx, y: GROUND, z: r3.lz }));
+        var a2 = project(camRot({ x: r3.rx, y: r3.y, z: r3.rz }));
+        var b2 = project(camRot({ x: r3.rx, y: GROUND, z: r3.rz }));
+        ctx.strokeStyle = POST;
+        ctx.lineWidth = Math.max(1.2, 3 * a.s);
+        ctx.beginPath();
+        ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy);
+        ctx.moveTo(a2.sx, a2.sy); ctx.lineTo(b2.sx, b2.sy);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.ellipse((b.sx + b2.sx) / 2, (b.sy + b2.sy) / 2, 9 * b.s, 2.4 * b.s, 0, 0, TAU);
+        ctx.fillStyle = SHADOW;
+        ctx.fill();
+      }});
+    });
+
+    // 잔상 — 구슬이 방금 지나온 자리(오래될수록 작고 연하다)
+    for (var t2 = 0; t2 < trail.length; t2++) {
+      (function (idx) {
+        var pw = camRot(trail[idx]);
+        items.push({ z: pw.z - 0.2, fn: function () {
+          var pr = project(pw);
+          var fade = idx / trail.length;
+          ctx.beginPath();
+          ctx.arc(pr.sx, pr.sy, 2.2 + 2.6 * fade * pr.s, 0, TAU);
+          ctx.fillStyle = 'rgba(255,158,187,' + (0.10 + 0.34 * fade).toFixed(3) + ')';
+          ctx.fill();
+        }});
+      })(t2);
+    }
+
+    // 구슬 — 궤적 위 빛나는 점(arc). 속도가 붙으면 잔광이 길어진다
+    var pb = camRot(beadWorld());
+    items.push({ z: pb.z - 2, fn: function () {
+      var pr = project(pb);
+      var rr = 7 * pr.s;
+      var glow = ctx.createRadialGradient(pr.sx, pr.sy, 0, pr.sx, pr.sy, rr * 3.2);
+      glow.addColorStop(0, 'rgba(255,158,187,0.5)');
+      glow.addColorStop(1, 'rgba(255,158,187,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(pr.sx, pr.sy, rr * 3.2, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(pr.sx, pr.sy, rr, 0, TAU);
+      ctx.fillStyle = CREAM; ctx.fill();
+      ctx.beginPath(); ctx.arc(pr.sx - rr * 0.3, pr.sy - rr * 0.3, rr * 0.32, 0, TAU);
+      ctx.fillStyle = PINK; ctx.fill();
+    }});
+
+    items.sort(function (a, b2) { return b2.z - a.z; });
+    for (var q2 = 0; q2 < items.length; q2++) items[q2].fn();
+
+    // 속도 계기 — 적분 결과를 그대로 읽는다
+    ctx.fillStyle = 'rgba(255,247,230,0.14)';
+    roundRect(8, H - 24, 88, 16, 4);
+    ctx.fill();
+    ctx.fillStyle = CREAM;
+    ctx.font = '700 10px -apple-system, "Segoe UI", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('v ' + Math.round(beadV) + ' px/s', 16, H - 15.5);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. 표 영역을 벗어난 자연스러운 경로
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setGrav(v) { gravOut.textContent = v + '%'; if (reduce) draw(last); }
+
+  gravIn.addEventListener('input', function () { setGrav(gravIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { step(0); draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { step(0); draw(last); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 구슬이 언덕에 걸친 한 장만 남는다(빈 화면이 아니다)
+    px01 = 0.55; py01 = 0.4;
+    step(0);
+    draw(0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

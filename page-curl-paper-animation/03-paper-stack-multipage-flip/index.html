@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>여러 장이 차례로 넘어가는 책 스택 플립 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">여러 장이 차례로 넘어가는 책 스택 플립</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var BOOK_L = 96, BOOK_T = 24, BOOK_R = 250, BOOK_B = 176;
+  var FOLD_X = BOOK_L;
+  var STACK_TOTAL = 5;
+  var SCENE_BG = '#17141a';
+  var PAGE_COLORS = ['#fff7e6', '#f6eede', '#efe4cd', '#e7dcc2'];
+  var PAGE_BACK = '#caa96b';
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(41303);
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  var remaining = STACK_TOTAL;                          // 아직 안 넘긴 페이지 수
+  var flipping = false;
+  var angle = 0;
+  var FLIP_MS = 460;
+  var flipT = 0;
+
+  function stackThickness(n) { return clamp(n, 0, STACK_TOTAL) * 2.2; }
+
+  function startFlip() {
+    if (flipping || remaining <= 0) return;
+    flipping = true; flipT = 0;
+  }
+  function nextPage() {
+    if (flipping || remaining <= 0) { remaining = STACK_TOTAL; return; }
+    startFlip();
+  }
+
+  function stepFlip(dt) {
+    if (!flipping) return;
+    flipT += dt * 1000;
+    var p = clamp(flipT / FLIP_MS, 0, 1);
+    angle = p * Math.PI;
+    if (p >= 1) {
+      flipping = false; angle = 0;
+      remaining -= 1;
+      if (remaining <= 0) remaining = STACK_TOTAL;      // 다 넘기면 처음부터
+    }
+  }
+
+  var AUTO_PERIOD = 620;
+  var autoTimer = 0;
+  function autoplay(dt) {
+    if (pointerActive || reduce) return;
+    autoTimer += dt * 1000;
+    if (autoTimer >= AUTO_PERIOD) { autoTimer = 0; nextPage(); }
+  }
+
+  function drawStackShadow() {
+    var th = stackThickness(remaining - (flipping ? 1 : 0));
+    ctx.fillStyle = 'rgba(23,20,26,.5)';
+    ctx.fillRect(BOOK_L + th, BOOK_T + th, BOOK_R - BOOK_L, BOOK_B - BOOK_T);
+  }
+
+  function drawLines(x, y, w, h) {
+    ctx.strokeStyle = 'rgba(23,20,26,.24)';
+    ctx.lineWidth = 1.4;
+    for (var i = 0; i < 4; i += 1) {
+      var ly = y + h * (0.2 + i * 0.18);
+      ctx.beginPath(); ctx.moveTo(x + w * 0.1, ly); ctx.lineTo(x + w * 0.9, ly); ctx.stroke();
+    }
+  }
+
+  function pageAt(color) {
+    var w = BOOK_R - BOOK_L, h = BOOK_B - BOOK_T;
+    ctx.fillStyle = color;
+    ctx.fillRect(BOOK_L, BOOK_T, w, h);
+    drawLines(BOOK_L, BOOK_T, w, h);
+  }
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+    drawStackShadow();
+    var w = BOOK_R - BOOK_L, h = BOOK_B - BOOK_T;
+    var belowIdx = Math.max(0, STACK_TOTAL - remaining) % PAGE_COLORS.length;
+    pageAt(PAGE_COLORS[(belowIdx + 1) % PAGE_COLORS.length]);
+
+    if (flipping) {
+      var c = Math.cos(angle);
+      var frontFacing = c >= 0;
+      ctx.save();
+      ctx.translate(FOLD_X, 0);
+      ctx.scale(c === 0 ? 0.001 : c, 1);
+      ctx.fillStyle = frontFacing ? PAGE_COLORS[belowIdx] : PAGE_BACK;
+      ctx.fillRect(0, BOOK_T, w, h);
+      if (frontFacing) drawLines(6, BOOK_T, w - 12, h);
+      ctx.restore();
+      var shadowA = 0.06 + Math.abs(Math.sin(angle)) * 0.3;
+      ctx.fillStyle = 'rgba(0,0,0,' + shadowA + ')';
+      ctx.fillRect(FOLD_X, BOOK_T, 36, h);
+    } else if (remaining > 0) {
+      pageAt(PAGE_COLORS[belowIdx]);
+    }
+
+    ctx.fillStyle = 'rgba(255,247,230,.9)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(String(remaining) + ' / ' + String(STACK_TOTAL), BOOK_R - 34, BOOK_T - 8);
+  }
+
+  var pointerActive = false;
+  var pointerCooldown = 0;
+  function update(dt, tMs) {
+    stepFlip(dt);
+    if (pointerCooldown > 0) { pointerCooldown -= dt * 1000; if (pointerCooldown <= 0) pointerActive = false; }
+    autoplay(dt);
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) { root.classList.remove('is-demo'); remaining = 3; }
+
+  function onClick() {
+    pointerActive = true; pointerCooldown = 1400;
+    nextPage();
+    if (reduce) render();
+  }
+  wrap.addEventListener('click', onClick);
+  wrap.setAttribute('tabindex', '0');
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); onClick(); }
+  });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

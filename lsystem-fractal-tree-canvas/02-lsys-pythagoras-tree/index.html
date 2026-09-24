@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>피타고라스 나무 — L시스템 프랙탈 나무 9종 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>정사각형 위에 빗변을 밑변으로 삼는 정사각형 둘을 얹는 규칙을 0 → 1 → 2 세대로 되짚으면 관 모양 숲이 자라는데, 세대가 늘수록 면은 줄고 변은 늘어나 프랙탈 차원이 2 에 다가갑니다</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="피타고라스 나무 실험판" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">한 변 s · 축소 0.707 · 세대 0 → 8</span>
+    <span class="ls__meta ls__meta--dim">canvas · fillRect · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 피타고라스 나무(02) — 정사각형 위에 직각삼각형(빗변을 아래 변으로)을 얹고
+// 그 빗변에 다시 정사각형 둘을 붙이는 재귀. L-시스템 문자열로도 쓸 수 있지만(0 → 1[1]1)
+// 여기선 재귀 함수가 문자열 전개와 같은 나무를 만든다는 대응을 보여준다.
+// 움직임 = 세대 성장(0→8) + 자란 뒤 계절 색 순환(초록 여름 → 호박 가을 → 다시 봄).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var SIDE0  = 0.21;  // 첫 정사각형 한 변(무대 세로 배율) — 피사체를 키워 누적면적을 확보
+  var CYCLE  = 2.0;   // 성장+계절 주기(초)
+  var MAXGEN = 8;     // 최대 세대 — 8 이면 사각형 약 250개(2^8 근사, 캔버스 서브픽셀 컬링됨)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_TRUNK = tokRGB('--ls-bark');    // 몸통 — 베이지
+  var C_LEAFA = tokRGB('--ls-leaf');    // 여름 잎 — 파스텔 민트
+  var C_LEAFB = tokRGB('--ls-leaf2');   // 가을 잎 — 파스텔 앰버
+  var C_INK   = tokRGB('--ls-ink');
+  var C_LINE  = tokRGB('--ls-bark2');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  // 계절 보간 — t: 0(민트 여름) → 1(앰버 가을). 프랙탈 캔버스 색 혼합
+  function mix(a, b, t) {
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  }
+  function rgb(c) { return 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')'; }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    // 성장 스케줄: 0~0.55 세대 0→8 성장, 0.55~1.0 완전 숲 + 계절 색 순환
+    var grPhase = Math.min(loop / 0.55, 1);
+    var genF = grPhase * MAXGEN;
+    var seasonT = 0.5 - 0.5 * Math.cos((loop - 0.55) / 0.45 * Math.PI * 2);  // 가을→봄→가을 왕복
+    if (loop < 0.55) seasonT = 0;
+
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+
+    var s0 = H * SIDE0;
+    var cx = W * 0.5, cy = H * 0.94;
+    // 완성 뒤 아주 약한 바람 흔들림 — 밑동 고정, 숲 전체 가장자리 픽셀을 계속 갱신해
+    // 계절 색 전환 구간이 아닐 때도 화면이 죽지 않게 한다(08 의 큰 진폭 흔들림과는 다른 미세 진동)
+    var sway = loop >= 0.55 ? Math.sin(loop * Math.PI * 5) * 0.028 : 0;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(sway);
+    ctx.translate(-cx, -cy);
+    drawTree(ctx, cx - s0 / 2, cy - s0, s0, 0, genF, seasonT);
+    ctx.restore();
+  }
+
+  // (x, y) = 정사각형 왼쪽 위, s = 한 변, gen = 남은 세대
+  function drawTree(ctx, x, y, s, gen, genF, seasonT) {
+    if (s < 0.9 || gen > genF) return;
+    var thisF = Math.min(1, genF - gen);           // 현재 세대 안 진행률 — 부분 크기로 스르륵
+    var drawS = s * thisF;
+    if (drawS < 0.5) return;
+    // 색: 몸통(베이지) → 잎(계절 보간). 깊이 비율로 혼합
+    var depthT = Math.min(1, gen / MAXGEN);
+    var leaf = mix(C_LEAFA, C_LEAFB, seasonT);
+    var col = mix(C_TRUNK, leaf, depthT);
+    ctx.fillStyle = rgb(col);
+    // ctx.translate+rotate 대신 꼭짓점 직접 계산 — 정사각형이 기울어져도 fillRect 회전 근사가 아닌 정확 좌표
+    ctx.beginPath();
+    ctx.moveTo(x, y + s);
+    ctx.lineTo(x + s, y + s);
+    ctx.lineTo(x + s, y);
+    ctx.lineTo(x, y);
+    ctx.closePath();
+    // 성장 중 부분 크기: 아래 변 고정, 위로 줄어든 높이만큼만
+    if (thisF < 1) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y + s * (1 - thisF), s, s * thisF);
+      ctx.clip();
+    }
+    ctx.fill();
+    // 변 강조선 — 셸핀스키 카페트(05) 와 구별되는 정사각형 테두리
+    ctx.strokeStyle = 'rgba(' + C_LINE[0] + ',' + C_LINE[1] + ',' + C_LINE[2] + ',0.28)';
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+    if (thisF < 1) ctx.restore();
+
+    if (gen + 1 > genF) return;
+    // 위에 직각삼각형(45-45-90) — 빗변이 이 변. 두 정사각형을 빗변에 얹는다.
+    // 빗변 양끝 (x, y) (x+s, y). 45도 삼각형의 꼭대기는 중점 위 s/2.
+    var mx = x + s / 2, my = y - s / 2;
+    var NS = s / Math.SQRT2;
+    // 왼쪽 사각형: 빗변 (x,y)-(mx,my). 변 NS.
+    var angL = -Math.PI / 4;    // -45도
+    var lx = x, ly = y;
+    // 왼쪽 사각형의 왼쪽 위 꼭짓점 = 빗변 시작점에서 밖으로 NS 만큼
+    var lcx = lx + Math.cos(-Math.PI * 3 / 4) * NS;   // 225도 방향
+    var lcy = ly + Math.sin(-Math.PI * 3 / 4) * NS;
+    drawTree(ctx, lcx, lcy, NS, gen + 1, genF, seasonT);
+    // 오른쪽 사각형: 빗변 (mx,my)-(x+s,y).
+    var angR = Math.PI / 4;
+    var rx = mx, ry = my;
+    var rcx = rx + Math.cos(Math.PI * 3 / 4) * NS;    // 135도 방향
+    var rcy = ry + Math.sin(Math.PI * 3 / 4) * NS;
+    drawTree(ctx, rcx, rcy, NS, gen + 1, genF, seasonT);
+    // 미세 진동 — 숲이 다 자란 뒤 미세하게 숨쉰다(눈에 거스리지 않는 0.3px)
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(reduce ? 0.6 : 0.8);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.6);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

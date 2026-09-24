@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bonfire — a flame column rolling on curl noise — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bf is-demo" id="bfRoot">
+  <p class="bf__hint">
+    <svg class="bf__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 1 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>Each log's flame column is pushed tangentially by the curl-noise wind of a potential field, rolling together into one mass — drag the pointer to move the logs</span>
+  </p>
+  <div class="bf__field" id="bfField" role="application" aria-label="Bonfire curl noise board" tabindex="0">
+    <canvas class="bf__cv" id="bfCv"></canvas>
+  </div>
+  <div class="bf__bar">
+    <span class="bf__meta"><b class="bf__val" id="bfB">0.35</b> buoyancy coeff. · <b class="bf__val">3</b>flame columns</span>
+    <span class="bf__meta bf__meta--dim">curl noise · lighter blend</span>
+  </div>
+</div>
+</main>
+<script>
+// 모닥불(02). 불기둥 3개가 각자 장작 위에서 솟지만, 바람은 하나의 포텐셜 필드에서 나온다.
+// 필드 ψ 를 시드 고정 값노이즈 격자로 만들고 컬(curl) 을 해석적으로 계산한다:
+//   v = (∂ψ/∂y, −∂ψ/∂x)
+// 컬은 발산이 0 이라 입자가 쥐어짜이지 않고 회전만 한다 — 여러 불기둥이 서로의 소용돌이에
+// 말려 들어 한 덩어리로 넘실대는 이유. 입자는 연료 k 로 gold→amber→ember 냉각 사다리를 타고
+// 부력 계수 BUOY(0.35) 로 오른다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var BUOY = 0.35;       // 부력 계수 — 변형 "부력" 축(0.35 → 0.7)
+  var N_COL = 3;         // 불기둥(장작) 수 — 밀도 축(2 → 5)
+  var TONE = 0;          // 코어 색 변형 — 0: amber(#f0a868), 1: rose(#eca0a8)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('bfRoot');
+  var field = document.getElementById('bfField');
+  var cv = document.getElementById('bfCv');
+  var ctx = cv.getContext('2d');
+  var bOut = document.getElementById('bfB');
+
+  // 시드 고정 PRNG — mulberry32. 필드 격자값·입자 초기값 전부 여기서 나온다
+  var SEED = 0x5eed02;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+  var C_CORE  = TONE ? C_ROSE : C_AMBER;   // 색 변형 — 코어 톤 교체
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;   // 가상 장작/화력 포인터(0..1)
+  var manual = false;
+
+  // ── 컬 노이즈 포텐셜 필드 ──
+  // ψ(x, y, t) = Σ A_i * sin(kx_i·x + ky_i·y + w_i·t + φ_i)  — 시드 고정 파수 6개
+  // 컬: v = (∂ψ/∂y, −∂ψ/∂x) = Σ A_i * (ky_i, −kx_i) * cos(·)
+  // 발산 0 — 회전만 있는 다이버전스프리 장. 파수·위상이 시드에서 나왔으니 매번 같은 wind.
+  var NW = 6;
+  var nkx = [], nky = [], nw = [], nph = [], namp = [];
+  for (var w0 = 0; w0 < NW; w0++) {
+    var ang = rand() * TAU;
+    var len = 0.9 + rand() * 2.3;
+    nkx.push(Math.cos(ang) * len);
+    nky.push(Math.sin(ang) * len);
+    nw.push(0.4 + rand() * 1.1);
+    nph.push(rand() * TAU);
+    namp.push(26 + rand() * 34);
+  }
+  function curl(x, y, t) {
+    // 좌표는 필드 단위(초당 px)로 정규화 — 캔버스 크기와 무관한 소용돌이 결
+    var u = 0, v = 0;
+    var fx = x / 180, fy = y / 180;
+    for (var i = 0; i < NW; i++) {
+      var c = Math.cos(nkx[i] * fx + nky[i] * fy + nw[i] * t + nph[i]);
+      u += namp[i] * nky[i] * c;
+      v -= namp[i] * nkx[i] * c;
+    }
+    return [u, v];   // 접선 방향 wind (px/s)
+  }
+
+  // ── 연료 입자 — 장작 위에서 태어나 컬 wind + 부력으로 오르며 식는다 ──
+  var N_EACH = 150;              // 불기둥 하나당 입자 수
+  var N_PART = N_EACH * N_COL;
+  var parts = [];
+  function spawn(p) {
+    // 어느 장작(불기둥)에서 태어날지 — 입자는 장작에 묶여 있고 장작은 포인터로 이동
+    p.col = (rand() * N_COL) | 0;
+    p.x = 0;                      // 장작 기준 상대 좌표 (px)
+    p.y = 0;
+    p.vx = (rand() - 0.5) * 9;
+    p.vy = -24 - rand() * 30;
+    p.k = 1;
+    p.ph = rand() * TAU;
+  }
+  for (var i = 0; i < N_PART; i++) {
+    var p = {}; spawn(p); p.y = -rand() * 60; p.k = rand();  // 첫 프레임부터 장작이 타 있는 상태로
+    parts.push(p);
+  }
+
+  // 장작(불기둥 밑동) 위치 — 포인터 x 로 뭉치 중심, y 로 화력
+  function logX(ci, cx, W) {
+    var spread = Math.min(W * 0.30, 92);
+    var slot = N_COL === 1 ? 0 : (ci / (N_COL - 1) - 0.5);
+    return cx + slot * spread;
+  }
+
+  var K_BURN = 2.0;      // 연료 소모율 (1/s)
+  var STILL_T = 1.7;     // reduce 에서 그리는 시각
+
+  function draw(tSec, dt) {
+    // 1) 무대 — 어두운 야외 바닥
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    var cx = W * 0.5;
+    var ground = H * 0.84;
+    var power = 0.6 + py01 * 0.8;
+
+    // ── 2) 앙비언트 글로우 — 모닥불은 밤 야영지 전체를 데운다 ──
+    // 반경별 감쇠 빛 겹 LAYERS 장을 lighter 로 쌓는다. 반경은 R0→RMAX(대각선 끝까지),
+    // 앞은 촘촘히(밝은 코어)·뒤는 성기게(넓은 은은함). 알파 바닥 0.05 — 가장 바깥 겹도 산다.
+    // A0 는 살아있는 연료 총합 flick(컬 바람에 출렁이는 값)과 느린 sin 펄스로 매 프레임 재계산.
+    var flick = 0;
+    for (var f = 0; f < N_PART; f++) flick += parts[f].k;
+    flick = (flick / N_PART) * power;
+    // 반경 자체가 느리게 부풀었다 줄어든다(breathe) — 겹마다 지름이 진동해 그라디언트 정지점이
+    // 프레임마다 재배치되므로, 화면 넓은 영역이(중심에서 멀어도) 실제로 값이 바뀐다.
+    var breathe = (0.5 + 0.5 * flick) * (0.72 + 0.28 * Math.sin(tSec * 1.9));
+    var hx = cx + Math.sin(tSec * 0.9) * 14;
+    var hy = ground - 42 + Math.cos(tSec * 1.3) * 8;
+    var R0 = Math.min(W, H) * 0.17 * breathe;
+    var A0 = 0.85 * (0.55 + 0.45 * flick) * (0.62 + 0.38 * Math.sin(tSec * 2.1 + 1.4));
+    var RMAX = Math.hypot(W, H) * 0.99;
+    var LAYERS = 15;
+    var FALLOFF = 0.9;
+    ctx.globalCompositeOperation = 'lighter';
+    for (var L = 0; L < LAYERS; L++) {
+      var Lt = L / (LAYERS - 1);                     // 0..1
+      var R = R0 + (RMAX - R0) * Math.pow(Lt, 0.72); // 앞은 촘촘, 뒤는 성기게
+      var a = Math.max(0.06, A0 * Math.pow(R0 / R, FALLOFF));
+      var m1 = Lt;                                   // 안쪽 gold → 바깥 코어 톤으로 식는다
+      var lr = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m1;
+      var lg = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m1;
+      var lb = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m1;
+      var rg = ctx.createRadialGradient(hx, hy, R * 0.04, hx, hy, R);
+      rg.addColorStop(0, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + a.toFixed(3) + ')');
+      rg.addColorStop(0.72, 'rgba(' + (lr | 0) + ',' + (lg | 0) + ',' + (lb | 0) + ',' + (a * 0.6).toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(hx - R, hy - R, R * 2, R * 2);
+    }
+
+    // ── 잔열 바닥 띠 — 캔버스 전체 폭이 순수 검정으로 죽지 않게, 야영지 바닥 전체가
+    // 은은한 잔열로 미세하게 맥동한다(중심이 좌우로 느리게 흘러 폭 전체가 실제로 변한다).
+    var hb = ground + 8;
+    var hbW = W * 0.78;
+    var hbX = cx + Math.sin(tSec * 0.5) * W * 0.3;
+    var hbA = 0.12 * (0.6 + 0.4 * flick) * (0.7 + 0.3 * Math.sin(tSec * 1.2 + 2.0));
+    var hbg = ctx.createRadialGradient(hbX, hb, 2, hbX, hb, hbW);
+    hbg.addColorStop(0, 'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',' + hbA.toFixed(3) + ')');
+    hbg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg;
+    ctx.fillRect(0, hb - hbW, W, hbW * 2);
+    var hb2X = cx - Math.sin(tSec * 0.5) * W * 0.3;
+    var hbg2 = ctx.createRadialGradient(hb2X, hb, 2, hb2X, hb, hbW * 0.7);
+    hbg2.addColorStop(0, 'rgba(' + C_ROSE[0] + ',' + C_ROSE[1] + ',' + C_ROSE[2] + ',' + (hbA * 0.7).toFixed(3) + ')');
+    hbg2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hbg2;
+    ctx.fillRect(0, hb - hbW * 0.7, W, hbW * 1.4);
+
+    // ── 3) 연료 입자 — 컬 바람을 받아 접선으로 흘러간다 ──
+    // 상태 갱신: vx,vy 를 컬 장으로 'lerp' — 입자가 관성을 가진 채 소용돌이에 말려든다
+    for (var j = 0; j < N_PART; j++) {
+      var q = parts[j];
+      q.k -= K_BURN * dt;
+      if (q.k <= 0) { spawn(q); continue; }
+      var baseX = logX(q.col, cx, W);
+      var wx = baseX + q.x;       // 세계 좌표 — 컬 필드는 여기를 샘플링
+      var wy = ground + q.y;
+      var cw = curl(wx, wy, tSec);
+      q.vx += (cw[0] - q.vx) * Math.min(1, dt * 3.2);
+      q.vy += (cw[1] - q.vy) * Math.min(1, dt * 3.2) - BUOY * 190 * dt;   // 부력 계수 — 위로
+      q.x += q.vx * dt; q.y += q.vy * dt;
+      // 불꽃 안쪽일수록 중심으로 끌려들어가 뭉친다(불기둥 형태 유지)
+      var dxa = q.x / 26;
+      var pull = Math.exp(-dxa * dxa) * 34 * dt;
+      q.x -= q.x * pull * 0.06;
+      // 그리기 — 색온도 사다리(gold→core→ember)
+      var fx = baseX + q.x;
+      var fy = ground + q.y;
+      var rC, gC, bC, rad;
+      if (q.k > 0.66) {
+        rC = C_GOLD[0]; gC = C_GOLD[1]; bC = C_GOLD[2];
+        rad = 2.2 + 1.5 * (q.k - 0.66) / 0.34;
+      } else if (q.k > 0.33) {
+        var m2 = (q.k - 0.33) / 0.33;
+        rC = C_GOLD[0] + (C_CORE[0] - C_GOLD[0]) * m2;
+        gC = C_GOLD[1] + (C_CORE[1] - C_GOLD[1]) * m2;
+        bC = C_GOLD[2] + (C_CORE[2] - C_GOLD[2]) * m2;
+        rad = 1.7 + 0.5 * m2;
+      } else {
+        var m3 = q.k / 0.33;
+        rC = C_CORE[0] + (C_EMBER[0] - C_CORE[0]) * (1 - m3);
+        gC = C_CORE[1] + (C_EMBER[1] - C_CORE[1]) * (1 - m3);
+        bC = C_CORE[2] + (C_EMBER[2] - C_CORE[2]) * (1 - m3);
+        rad = 1.0 + 0.7 * m3;
+      }
+      ctx.fillStyle = 'rgba(' + (rC | 0) + ',' + (gC | 0) + ',' + (bC | 0) + ',' + (0.16 + 0.5 * q.k).toFixed(3) + ')';
+      ctx.fillRect(fx - rad, fy - rad, rad * 2, rad * 2);
+    }
+
+    // ── 4) 장작·불씨 받침 — 면 계산(source-over) 마감 ──
+    ctx.globalCompositeOperation = 'source-over';
+    for (var lg2 = 0; lg2 < N_COL; lg2++) {
+      var lx = logX(lg2, cx, W);
+      var log = [
+        C_INK[0] + (C_EMBER[0] - C_INK[0]) * 0.26,
+        C_INK[1] + (C_EMBER[1] - C_INK[1]) * 0.26,
+        C_INK[2] + (C_EMBER[2] - C_INK[2]) * 0.26
+      ];
+      ctx.fillStyle = 'rgb(' + (log[0] | 0) + ',' + (log[1] | 0) + ',' + (log[2] | 0) + ')';
+      ctx.save();
+      ctx.translate(lx, ground + 4);
+      ctx.rotate((lg2 - (N_COL - 1) / 2) * 0.3);
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(-22, -5, 44, 9, 4) : ctx.rect(-22, -5, 44, 9);
+      ctx.fill();
+      ctx.restore();
+      // 불씨 — 장작 밑동 잔불
+      ctx.fillStyle = 'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',0.5)';
+      ctx.fillRect(lx - 12, ground - 2, 24, 3);
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    bOut.textContent = BUOY.toFixed(2);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous. x 가 장작 뭉치 중심, y 가 화력
+      var ph = t * TAU / 3.2;
+      px01 = 0.5 + 0.20 * Math.sin(ph + 0.4);
+      py01 = 0.5 + 0.30 * Math.sin(2 * ph + 0.7);
+    }
+    draw(t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T, 0.016); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 불기둥이 가장 읽히는 한 장만 그린다
+    draw(STILL_T, 0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

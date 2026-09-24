@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>물에 뜨는 浮力 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="by" id="by">
+  <p class="by__hint">
+    <svg class="by__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>物体を投げ入れると沈んだ面積ぶん浮力が大きくなり、重力と釣り合う深さで浮かびます</span>
+  </p>
+  <div class="by__field" id="field" role="application" aria-label="浮力実験盤" tabindex="0">
+    <canvas class="by__cv" id="cv"></canvas>
+    <b class="by__badge" aria-hidden="true"><span class="by__badgeNum" id="sinkVal">0</span><span class="by__badgeUnit">平均浸水%</span></b>
+  </div>
+  <div class="by__bar">
+    <label class="by__dial">浮力
+      <input type="range" id="dens" min="0.4" max="1.8" step="0.05" value="1" aria-label="浮力の強さ">
+    </label>
+    <button class="by__reset" id="reset" type="button">最初から</button>
+  </div>
+</div>
+</main>
+<script>
+// 浮力 — 위치 기반 Verlet 적분(속도 변수 없음) 위에 "잠긴 면적 → 위로 밀리는 힘" 한 겹을 얹는다.
+//   浮力 가속도 = g × (ρ물 × 부력계수 × 잠긴 면적) / (물체 밀도 × 전체 면적)
+// 잠긴 면적이 커질수록 위로 밀리는 힘이 커져, 밀도 비율(=평형 침수 비율)에서 힘의 합이 0이 되어 뜬다.
+// 수면은 정적 직선이 아니라 사인파 3개를 겹한 곡선 — 물체 위치 x 의 수면 높이를 곡선에서 읽고,
+// 파도 기울기는 수평 방향 밀림으로, 수면 위/아래는 공기 저항(작은 damp)/유체 저항(큰 damp)으로 나뉜다.
+var root = document.getElementById('by');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var densIn = document.getElementById('dens');
+var sinkVal = document.getElementById('sinkVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var BG = css.getPropertyValue('--bg').trim();
+var SKY = css.getPropertyValue('--sky').trim();
+var CREAM = css.getPropertyValue('--cream').trim();
+var INK = css.getPropertyValue('--ink').trim();
+var P1 = css.getPropertyValue('--p1').trim();
+var P2 = css.getPropertyValue('--p2').trim();
+var P3 = css.getPropertyValue('--p3').trim();
+
+var G = 1500;            // 중력 가속도(px/s^2)
+var AIR = 0.997;         // 수면 위 공기 저항(속도 보존률)
+var FLUID = 0.90;        // 물속 유체 저항 — 공기보다 훨씬 세게 깎는다
+var RHO = 1.0;           // 물 밀도(기준 1)
+var LOOP = 2600;         // 자동 시연이 한 물체를 잡았다 놓는 주기(ms)
+
+var strength = 1.0;      // 浮力の強さ(슬라이더)
+var bodies = [];         // { shape:'c'|'r', r|w·h, dens, col, x, y, px, py, wasIn }
+var ripples = [];        // 수면을 가르는 순간의 파문 { x, y, t }
+var WL = 0, W = 0, H = 0, dpr = 1;
+var dragging = -1, dragX = 0, dragY = 0, manual = false;
+var t0 = performance.now();
+
+// #rrggbb → rgba() 문자열. 토큰 색에서 반투명 변형을 만들 때만 쓴다.
+function rgba(hex, a) {
+  var n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+// 수면 곡선 — 사인파 3개 중첩. 시간 t 로 흐른다
+function surfaceY(x, t) {
+  return WL + 3.2 * Math.sin(x * 0.045 + t * 1.25) + 2.1 * Math.sin(x * 0.021 - t * 0.85) + 1.3 * Math.sin(x * 0.089 + t * 2.05);
+}
+// 원의 침수 깊이 d → 수면 아래 절단 면적(호와 현으로 닫힌 넓이)
+function capArea(r, d) {
+  if (d <= 0) return 0;
+  if (d >= 2 * r) return Math.PI * r * r;
+  return r * r * Math.acos((r - d) / r) - (r - d) * Math.sqrt(Math.max(0, 2 * r * d - d * d));
+}
+function half(b) { return b.shape === 'c' ? b.r : b.h / 2; }
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  WL = H * 0.52;
+  // 밀도 = 평형 침수 비율. 0.45 는 절반쯤 뜨고 0.96 은 수면에 거의 잠긴다
+  bodies = [
+    { shape: 'c', r: 22, w: 0, h: 0, dens: 0.45, col: P1, x: W * 0.30, y: WL - 9,  px: 0, py: 0, wasIn: true },
+    { shape: 'r', r: 0,  w: 42, h: 26, dens: 0.78, col: P2, x: W * 0.52, y: WL + 4,  px: 0, py: 0, wasIn: true },
+    { shape: 'c', r: 15, w: 0, h: 0, dens: 0.96, col: P3, x: W * 0.72, y: WL + 13, px: 0, py: 0, wasIn: true }
+  ];
+  for (var i = 0; i < bodies.length; i++) { bodies[i].px = bodies[i].x; bodies[i].py = bodies[i].y; }
+  ripples = [];
+  dragging = -1;
+}
+
+// 한 프레임 — 잠김 면적 浮力 적분
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var t = now / 1000;
+  var sinkSum = 0;
+  for (var i = 0; i < bodies.length; i++) {
+    var b = bodies[i];
+    if (i === dragging) { b.x = dragX; b.y = dragY; continue; } // 잡은 물체는 손이 든다(px 그대로 → 놓는 순간 관성)
+    var bh = b.shape === 'c' ? b.r * 2 : b.h;
+    var wl = surfaceY(b.x, t);
+    var d = Math.max(0, Math.min(bh, b.y + half(b) - wl)); // 침수 깊이
+    var full = b.shape === 'c' ? Math.PI * b.r * b.r : b.w * b.h;
+    var sub = b.shape === 'c' ? capArea(b.r, d) : b.w * d;
+    var ratio = strength * RHO * sub / (b.dens * full);     // 浮力/중력 비 — 1 이면 평형
+    var inW = d > 0.5;
+    var damp = inW ? FLUID : AIR;
+    var slope = (surfaceY(b.x + 3, t) - surfaceY(b.x - 3, t)) / 6; // 파도 기울기 → 수평 밀림
+    var vx = (b.x - b.px) * damp, vy = (b.y - b.py) * damp;
+    b.px = b.x; b.py = b.y;
+    b.x += vx + G * Math.min(ratio, 1.4) * slope * 0.16 * dt * dt;
+    b.y += vy + G * (1 - ratio) * dt * dt;
+    // 벽·바닥 — 반사(다음 프레임 속도를 뒤집는다)
+    var m = half(b) + 2;
+    if (b.x < m) { b.x = m; b.px = b.x + vx * 0.4; }
+    if (b.x > W - m) { b.x = W - m; b.px = b.x + vx * 0.4; }
+    if (b.y > H - m) { b.y = H - m; b.py = b.y + vy * 0.35; }
+    // 수면을 가르는 순간 파문
+    if (b.wasIn !== inW && Math.abs(vy) > 2.2 && d > 0 && d < bh) ripples.push({ x: b.x, y: wl, t: now });
+    b.wasIn = inW;
+    sinkSum += d / bh;
+  }
+  for (var k = ripples.length - 1; k >= 0; k--) if (now - ripples[k].t > 900) ripples.splice(k, 1);
+  sinkVal.textContent = String(Math.round(sinkSum / bodies.length * 100));
+}
+
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function draw(now) {
+  var t = now / 1000;
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, W, H);
+  // 별 — 황금각 공식으로 좌표를 정한다(난수 없음), 반짝임도 사인파
+  ctx.fillStyle = CREAM;
+  for (var s = 0; s < 26; s++) {
+    var sx = ((s * 137.508) % 360) / 360 * W;
+    var sy = (s * 61.8) % (WL - 30) + 8;
+    ctx.globalAlpha = 0.16 + 0.4 * Math.abs(Math.sin(s * 2.7 + t * 0.9));
+    ctx.beginPath(); ctx.arc(sx, sy, s % 3 ? 1 : 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // 달 — 만월 하나
+  ctx.fillStyle = rgba(CREAM, 0.95);
+  ctx.beginPath(); ctx.arc(W * 0.85, H * 0.15, 11, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = BG;
+  ctx.beginPath(); ctx.arc(W * 0.85 + 4, H * 0.15 - 3, 9.5, 0, Math.PI * 2); ctx.fill();
+  // 물 — 수면 곡선 아래를 두 겹으로 채운다
+  ctx.beginPath();
+  ctx.moveTo(0, surfaceY(0, t));
+  for (var x = 6; x <= W; x += 6) ctx.lineTo(x, surfaceY(x, t));
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+  ctx.fillStyle = rgba(SKY, 0.30); ctx.fill();
+  ctx.fillStyle = rgba(INK, 0.30);
+  ctx.fillRect(0, WL + 34, W, H - WL - 34);
+  ctx.strokeStyle = SKY; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, surfaceY(0, t));
+  for (var x2 = 6; x2 <= W; x2 += 6) ctx.lineTo(x2, surfaceY(x2, t));
+  ctx.stroke();
+  // 달 무늬 — 물 위 두 획
+  ctx.strokeStyle = rgba(CREAM, 0.20); ctx.lineWidth = 2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(W * 0.78, WL + 16); ctx.lineTo(W * 0.92, WL + 16); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W * 0.81, WL + 26); ctx.lineTo(W * 0.90, WL + 26); ctx.stroke();
+  // 파문
+  for (var r0 = 0; r0 < ripples.length; r0++) {
+    var age = (now - ripples[r0].t) / 1000;
+    ctx.strokeStyle = rgba(SKY, Math.max(0, 0.55 - age * 0.6));
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(ripples[r0].x, ripples[r0].y, 6 + age * 46, 2 + age * 7, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  // 물체 — 잠긴 부분은 하늘색 물감을 덧입힌다
+  for (var i = 0; i < bodies.length; i++) {
+    var b = bodies[i];
+    var ys = surfaceY(b.x, t);
+    ctx.fillStyle = b.col;
+    if (b.shape === 'c') { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill(); }
+    else rr(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, 6);
+    if (b.shape === 'r') ctx.fill();
+    ctx.strokeStyle = rgba(INK, 0.35); ctx.lineWidth = 1.5;
+    if (b.shape === 'c') { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.stroke(); }
+    else { rr(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, 6); ctx.stroke(); }
+    ctx.save();
+    ctx.beginPath();
+    if (b.shape === 'c') ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    else rr(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, 6);
+    ctx.clip();
+    ctx.fillStyle = rgba(SKY, 0.38);
+    ctx.fillRect(b.x - 80, ys, 160, 160);
+    ctx.restore();
+    if (i === dragging) {
+      ctx.strokeStyle = rgba(CREAM, 0.9); ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.arc(b.x, b.y, half(b) + 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+// 자동 시연 — 2.6초마다 물체 하나를 골라 공중에서 흔들다 놓는다(시드 고정, 난수 없음).
+// pointerdown 이 오면 manual=true 로 넘어가고 이 루프는 끝난다.
+function demoHold(now) {
+  var idx = Math.floor(now / LOOP) % bodies.length;
+  var ph = (now % LOOP) / 1000;
+  if (ph >= 0.9) return; // 0.9초 잡고 1.7초 자유낙하+안착
+  var b = bodies[idx];
+  b.x = Math.max(30, Math.min(W - 30, W * (0.30 + 0.20 * idx) + Math.sin(ph * 7.5) * 16));
+  b.y = H * 0.20 + Math.sin(ph * 3.2) * 8;
+}
+function frame(now) {
+  if (!manual && !reduce.matches) demoHold(now);
+  step(now);
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+// 조작 — 물체를 집어 물에 던진다. 잡은 동안 px 를 묵혀 두었다 놓으면 그 차이가 던지는 속도가 된다
+function pick(x, y) {
+  for (var i = 0; i < bodies.length; i++) {
+    var b = bodies[i];
+    var dx = x - b.x, dy = y - b.y;
+    if (b.shape === 'c' && Math.hypot(dx, dy) < b.r + 14) return i;
+    if (b.shape === 'r' && Math.abs(dx) < b.w / 2 + 12 && Math.abs(dy) < b.h / 2 + 12) return i;
+  }
+  return -1;
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var x = e.clientX - r.left, y = e.clientY - r.top;
+  dragging = pick(x, y);
+  if (dragging < 0) return;
+  manual = true;
+  dragX = x; dragY = y;
+  field.setPointerCapture(e.pointerId);
+});
+field.addEventListener('pointermove', function (e) {
+  if (dragging < 0) return;
+  var r = field.getBoundingClientRect();
+  dragX = Math.max(6, Math.min(W - 6, e.clientX - r.left));
+  dragY = Math.max(6, Math.min(H - 6, e.clientY - r.top));
+  if (reduce.matches) { bodies[dragging].px = dragX; bodies[dragging].py = dragY; }
+});
+window.addEventListener('pointerup', function () {
+  if (dragging < 0) return;
+  var b = bodies[dragging];
+  var vx = b.x - b.px, vy = b.y - b.py;
+  var v = Math.hypot(vx, vy);
+  if (v > 26) { b.px = b.x - vx / v * 26; b.py = b.y - vy / v * 26; } // 던지기 속도 상한
+  dragging = -1;
+});
+document.getElementById('reset').addEventListener('click', function () { manual = false; build(); });
+densIn.addEventListener('input', function () { strength = Number(densIn.value); });
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

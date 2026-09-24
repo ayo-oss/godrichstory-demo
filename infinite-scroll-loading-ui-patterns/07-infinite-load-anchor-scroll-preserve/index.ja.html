@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクロール位置の保持 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="asp is-demo" id="asp">
+  <div class="asp__head" id="aspHead">
+    <span class="asp__head-label">上の会話を読み込む</span>
+    <span class="asp__head-value" id="aspValue">補正 0px</span>
+  </div>
+  <div class="asp__view" id="aspView">
+    <ul class="asp__track" id="aspTrack">
+      <li class="asp__anchor" id="aspAnchor" aria-hidden="true"></li>
+    </ul>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var view = document.getElementById('aspView');
+  var track = document.getElementById('aspTrack');
+  var anchor = document.getElementById('aspAnchor');
+  var valueEl = document.getElementById('aspValue');
+  var root = document.getElementById('asp');
+
+  var OLDER_BATCH = 4;
+  var LOAD_DELAY_MS = 560;
+  var MAX_BATCHES = 3;
+  var seq = 30;
+
+  var batches = 0;
+  var loading = false;
+  var dir = 1;
+  var autoplayTimer = null;
+
+  function bubble(n, mine) {
+    var li = document.createElement('li');
+    li.className = 'asp__row' + (mine ? ' asp__row--mine' : '');
+    li.textContent = 'メッセージ ' + String(n).padStart(2, '0');
+    return li;
+  }
+  for (var i = 0; i < 6; i += 1) { seq += 1; track.appendChild(bubble(seq, seq % 3 === 0)); }
+
+  // 계산 겹: 위쪽 묶음이 도착하면 늘어나기 직전 높이 값을 저장해 두고, 늘어난 뒤의 높이 값과의
+  // 차(=위에 추가된 높이)를 scrollTop 에 그대로 더한다 — 앵커 행이 화면에서 한 픽셀도 안 밀린다.
+  function loadOlder() {
+    if (loading || batches >= MAX_BATCHES) { return; }
+    loading = true;
+    var before = view.scrollHeight;
+    anchor.classList.add('asp__anchor--loading');
+    setTimeout(function () {
+      var frag = document.createDocumentFragment();
+      for (var n = 0; n < OLDER_BATCH; n += 1) {
+        seq += 1;
+        frag.appendChild(bubble(seq, seq % 3 === 0));
+      }
+      track.insertBefore(frag, anchor);
+      var added = view.scrollHeight - before;
+      view.scrollTop += added;   // 위에 붙은 높이 값만큼 補正
+      valueEl.textContent = '補正 ' + added + 'px';
+      batches += 1;
+      loading = false;
+      anchor.classList.remove('asp__anchor--loading');
+    }, LOAD_DELAY_MS);
+  }
+
+  function recompute() {
+    if (view.scrollTop <= 4 && !loading) { loadOlder(); }
+  }
+
+  view.addEventListener('scroll', recompute);
+
+  function userTakesOver() {
+    if (!root.classList.contains('is-demo')) { return; }
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  view.addEventListener('wheel', userTakesOver, { passive: true });
+  view.addEventListener('touchstart', userTakesOver, { passive: true });
+
+  function autoplayTick() {
+    if (batches >= MAX_BATCHES && dir !== 0) {
+      dir = 0;
+      setTimeout(function () {
+        while (track.firstChild !== anchor) { track.removeChild(track.firstChild); }
+        batches = 0;
+        view.scrollTop = 0;
+        dir = 1;
+        valueEl.textContent = '補正 0px';
+      }, 700);
+      return;
+    }
+    if (dir === 0 || loading) { return; }
+    view.scrollTop = Math.max(view.scrollTop - 5, 0);   // 위로 올려 과거 かたまり 유발
+    recompute();
+  }
+
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  view.scrollTop = view.scrollHeight;   // 최신 대화가 보이는 상태로 시작
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    autoplayTimer = setInterval(autoplayTick, 60);
+  }
+})();
+</script>
+</body>
+</html>

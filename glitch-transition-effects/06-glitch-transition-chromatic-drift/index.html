@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>색수차 진폭 값이 감쇠하며 안정되는 배경 전환 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cd">
+  <p class="cd__hint"><span>클릭하거나 Enter 를 누르면 색수차 진폭 값이 흔들리다가 감쇠하며 한 겹으로 합쳐집니다</span></p>
+  <div class="cd__panel" id="panel" tabindex="0" role="button" aria-label="색수차 진폭 값이 감쇠하며 안정되는 배경 전환 다시 재생">
+    <canvas class="cd__cv" id="cv" aria-hidden="true"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('cd');
+  var panel = document.getElementById('panel');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  // 결정론 난수 — Math.random 을 쓰지 않는다. LCG(선형합동생성기) 하나로 장면을 만든다.
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var css = getComputedStyle(root);
+  function tok(name, fb) { var v = css.getPropertyValue(name); return v ? (v.trim() || fb) : fb; }
+  var BG1 = tok('--scene-bg1', '#2f6df6');
+  var BG2 = tok('--scene-bg2', '#9fc3ff');
+  var DOT1 = tok('--scene-dot1', '#ff9ebb');
+  var DOT2 = tok('--scene-dot2', '#fff7e6');
+
+  var W = 0, H = 0, dpr = 1;
+  var buf = document.createElement('canvas');
+  var bctx = buf.getContext('2d');
+
+  // 장면(라이브 스트림 히어로 배경 자리) — 세로 줄무늬 결로 채널 흔들림이 또렷이 드러나게 한다.
+  function paintScene(bc, w, h, seed) {
+    var rng = makeLcg(seed);
+    var stripeW = Math.max(5, w * 0.04);
+    for (var x = 0; x < w; x += stripeW) {
+      bc.fillStyle = (Math.floor(x / stripeW) % 2) ? BG1 : BG2;
+      bc.fillRect(x, 0, stripeW, h);
+    }
+    for (var i = 0; i < 6; i++) {
+      bc.fillStyle = i % 2 ? DOT1 : DOT2;
+      bc.beginPath();
+      bc.arc(rng() * w, rng() * h, w * (0.05 + rng() * 0.08), 0, Math.PI * 2);
+      bc.fill();
+    }
+  }
+
+  var SEED = 812;
+  var CHROMATIC_DRIFT_AMPLITUDE = 20;
+  var data, outImg, iw, ih;
+
+  function PRECOMPUTE() {
+    iw = cv.width; ih = cv.height;
+    data = bctx.getImageData(0, 0, iw, ih).data;
+    outImg = ctx.createImageData(iw, ih);
+  }
+
+  function clampI(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  var PLAY_MS = 720;
+  var phase = 0;
+
+  function RENDER(p) {
+    phase += 0.42;
+    var amp = CHROMATIC_DRIFT_AMPLITUDE * dpr * p;
+    var dxR = Math.round(amp * Math.sin(phase));
+    var dxB = Math.round(amp * Math.sin(phase + Math.PI));
+    var dyG = Math.round(amp * 0.4 * Math.sin(phase * 1.3 + 1.1));
+    var o = outImg.data;
+    for (var y = 0; y < ih; y++) {
+      var base = y * iw;
+      var gy = clampI(y + dyG, 0, ih - 1);
+      var gBase = gy * iw;
+      for (var x = 0; x < iw; x++) {
+        var rx = clampI(x - dxR, 0, iw - 1);
+        var gx = clampI(x, 0, iw - 1);
+        var bx = clampI(x - dxB, 0, iw - 1);
+        var k = (base + x) * 4;
+        var kr = (base + rx) * 4;
+        var kg = (gBase + gx) * 4;
+        var kb = (base + bx) * 4;
+        o[k] = data[kr];
+        o[k + 1] = data[kg + 1];
+        o[k + 2] = data[kb + 2];
+        o[k + 3] = 255;
+      }
+    }
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function fit() {
+    var r = panel.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    buf.width = cv.width; buf.height = cv.height;
+    paintScene(bctx, buf.width, buf.height, SEED);
+    PRECOMPUTE();
+  }
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var progress = 0, target = 0, playT0 = 0, playFrom = 0, playing = false;
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function play() {
+    human();
+    playFrom = progress; target = progress < 0.5 ? 1 : 0;
+    playT0 = 0; playing = true;
+  }
+
+  function stepPlay(now) {
+    if (!playing) return;
+    if (!playT0) playT0 = now;
+    var t = Math.min(1, (now - playT0) / PLAY_MS);
+    progress = playFrom + (target - playFrom) * easeInOut(t);
+    if (t >= 1) { playing = false; progress = target; }
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function triangle(frac) { return frac < 0.5 ? frac * 2 : 2 - frac * 2; }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      progress = triangle(frac);
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame(now) {
+    stepPlay(now);
+    RENDER(progress);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    progress = 0; RENDER(progress);
+    panel.addEventListener('click', function () { human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); });
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); progress = progress < 0.5 ? 1 : 0; RENDER(progress); }
+    });
+  } else {
+    panel.addEventListener('click', play);
+    panel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    });
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

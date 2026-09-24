@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>썸네일 자리에서 확장하는 라이트박스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--a"></span><span class="thumbLabel">사진 1</span></button></li>
+    <li><button class="thumb" id="thumb1" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--b"></span><span class="thumbLabel">사진 2</span></button></li>
+    <li><button class="thumb" id="thumb2" type="button" aria-haspopup="dialog"><span class="thumbImg thumbImg--c"></span><span class="thumbLabel">사진 3</span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="사진 확대 보기">
+    <span class="fullImg" id="fullImg"></span>
+    <button class="closeBtn" id="closeBtn" type="button">닫기</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var LIGHTBOX_MORPH_SCALE_FROM = 0.3; // 썸네일 폭 = 장면 폭 × 이 비율 — 실제 레이아웃 크기로 FLIP 델타를 잰다
+  var OPEN_MS = 650;
+  var CLOSE_MS = 480;
+  var LOOP_MS = 2000;
+  var HOLD_OPEN_MS = 600;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var fullImg = document.getElementById('fullImg');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumbs = [].slice.call(document.querySelectorAll('.thumb'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var imgClassByIdx = ['thumbImg--a', 'thumbImg--b', 'thumbImg--c'];
+
+  var sceneW = scene.getBoundingClientRect().width || 320;
+  var thumbW = Math.round(sceneW * LIGHTBOX_MORPH_SCALE_FROM);
+  thumbs.forEach(function (t) {
+    var img = t.querySelector('.thumbImg');
+    img.style.width = thumbW + 'px';
+    img.style.height = Math.round(thumbW * 0.62) + 'px';
+  });
+
+  var open = false;
+  var activeIdx = 1;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  // reduce: 실사용 경로 적용 — 트윈 없이 최종 상태로 즉시 전환한다(자동 루프는 아래에서 아예 안 돈다)
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function openFrom(idx) {
+    if (open) return;
+    open = true;
+    var thumbImg = thumbs[idx].querySelector('.thumbImg');
+    var fromRect = thumbImg.getBoundingClientRect();
+    fullImg.className = 'fullImg ' + imgClassByIdx[idx];
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    var toRect = fullImg.getBoundingClientRect();
+    var dx = (fromRect.left + fromRect.width / 2) - (toRect.left + toRect.width / 2);
+    var dy = (fromRect.top + fromRect.height / 2) - (toRect.top + toRect.height / 2);
+    var scaleFrom = fromRect.width / toRect.width;
+    animate(OPEN_MS, function (e) {
+      var s = scaleFrom + (1 - scaleFrom) * e;
+      var tx = dx * (1 - e);
+      var ty = dy * (1 - e);
+      fullImg.style.transform = 'translate(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) + 'px) scale(' + s.toFixed(4) + ')';
+      backdrop.style.opacity = (e * 0.72).toFixed(3);
+    }, function () {
+      closeBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox(idx) {
+    if (!open) return;
+    var thumbImg = thumbs[idx].querySelector('.thumbImg');
+    var fromRect = thumbImg.getBoundingClientRect();
+    var toRect = fullImg.getBoundingClientRect();
+    var dx = (fromRect.left + fromRect.width / 2) - (toRect.left + toRect.width / 2);
+    var dy = (fromRect.top + fromRect.height / 2) - (toRect.top + toRect.height / 2);
+    var scaleTo = fromRect.width / toRect.width;
+    animate(CLOSE_MS, function (e) {
+      var s = 1 + (scaleTo - 1) * e;
+      var tx = dx * e;
+      var ty = dy * e;
+      fullImg.style.transform = 'translate(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) + 'px) scale(' + s.toFixed(4) + ')';
+      backdrop.style.opacity = (0.72 * (1 - e)).toFixed(3);
+    }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumbs[idx].focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  thumbs.forEach(function (t, i) {
+    t.addEventListener('click', function () {
+      human();
+      activeIdx = i;
+      openFrom(i);
+    });
+  });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(activeIdx); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(activeIdx); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && open) { human(); closeLightbox(activeIdx); }
+  });
+
+  function cycle() {
+    activeIdx = 1;
+    openFrom(1);
+    timers.push(setTimeout(function () { closeLightbox(1); }, OPEN_MS + HOLD_OPEN_MS));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

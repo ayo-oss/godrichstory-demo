@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>火種の拡散 — 燃料セルが燃えて広がる格子 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sg is-demo" id="sgRoot">
+  <p class="sg__hint">
+    <svg class="sg__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 144a80 80 0 0 1-160 0c0-30.57 14.42-58.26 31-80l33 32l26.27-72C159.86 41.92 208 88.15 208 144" opacity=".2"/><path d="M183.89 153.34a57.6 57.6 0 0 1-46.56 46.55a9 9 0 0 1-1.33.11a8 8 0 0 1-1.32-15.89c16.57-2.79 30.63-16.85 33.44-33.45a8 8 0 0 1 15.78 2.68ZM216 144a88 88 0 0 1-176 0c0-27.92 11-56.47 32.66-84.85a8 8 0 0 1 11.93-.89l24.12 23.41l22-60.41a8 8 0 0 1 12.63-3.41C165.21 36 216 84.55 216 144m-16 0c0-46.09-35.79-85.92-58.21-106.33l-22.27 61.07a8 8 0 0 1-13.09 3L80.06 76.16C64.09 99.21 56 122 56 144a72 72 0 0 0 144 0"/></g></svg>
+    <span>各マスが燃料を持ち、燃えているマスが隣に熱を渡して燃料が減ります — 燃え尽きた場所は消えます</span>
+  </p>
+  <div class="sg__field" id="sgField" role="application" aria-label="火種の拡散実験盤" tabindex="0">
+    <canvas class="sg__cv" id="sgCv"></canvas>
+    <b class="sg__badge" aria-hidden="true"><span class="sg__badgeNum" id="sgGrid">120×52</span><span class="sg__badgeUnit">燃料格子</span></b>
+  </div>
+  <div class="sg__bar">
+    <span class="sg__meta"><b class="sg__val" id="sgFires">0</b>件の火元・燃料合計100%</span>
+    <span class="sg__meta sg__meta--dim">ImageData · putImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 불씨 확산(09). 셀 격자마다 연료(fuel) 를 저장한다. 상태 규칙은 프레임마다 전 칸에 대해:
+//   burning = heat > 점화 문턱
+//   타는 칸은 매 프레임 fuel -= 소모율, 그리고 이웃 8칸에 heat += 전달량(연료가 많은 만큼 잘 탄다)
+//   heat 는 확산마다 감쇠, fuel 이 0 이 된 칸은 다신 안 탄다(다 소진)
+// 렌더는 ImageData 픽셀을 셀 단위로 직접 쓰고 putImageData 로 올린다 — fillRect 하나 없이
+// 화재가 지도를 먹어 들어가는 모습이 프레임마다 다시 그려진다. 자동 재생만 — 실측 입력 없음.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var COLS = 120;       // 격자 가로 칸 수 — 변형 "격자 촘촘함" 축(72 → 168)
+  var SPREAD = 0.115;   // 이웃 열 전달률 — 변형 "번짐 속도" 축(0.06 느리게 → 0.19 빠르게)
+  var BURN_RATE = 0.0032; // 프레임당 연료 소모율 — 변형 "지속력" 축(연료가 오래가면 천천히 다 탄다)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('sgRoot');
+  var field = document.getElementById('sgField');
+  var cv = document.getElementById('sgCv');
+  var ctx = cv.getContext('2d');
+  var gridOut = document.getElementById('sgGrid');
+  var firesOut = document.getElementById('sgFires');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 지형·같은 번짐으로 재생된다
+  var SEED = 0x5eed09;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var ROWS = 0;
+  var fuel = null, heat = null, nheat = null;   // 격자 상태(연료·열·다음 열)
+  var buf = null, bctx = null, img = null;      // 셀당 1픽셀 렌더 버퍼 → 캔버스로 확대
+  var raf = 0;
+  var frameNo = 0;
+  var sparkEvery = 30;                          // 자동 점화 간격(프레임) — 시드 고정 순서로 옮겨 다닌다
+  var sparkAt = 0;
+
+  // ── 지형 생성 — 연료 지도. 값 0~1. 맨 아래 구석진 지형(숲 가장자리)에 이어지는 패치 ──
+  // 단순 난수가 아니라 2옥타브 값 노이즈로 "연료가 많은 숲 / 적은 초원"의 덩어리를 만든다
+  function valueNoiseGrid() {
+    var coarse = new Float32Array(9 * 5);       // 굵은 노이즈 9×5
+    for (var c = 0; c < coarse.length; c++) coarse[c] = rand();
+    var fine = new Float32Array(17 * 9);        // 가는 노이즈 17×9
+    for (var f = 0; f < fine.length; f++) fine[f] = rand();
+    var n = COLS * ROWS;
+    fuel = new Float32Array(n);
+    heat = new Float32Array(n);
+    nheat = new Float32Array(n);
+    for (var y = 0; y < ROWS; y++) {
+      for (var x = 0; x < COLS; x++) {
+        // 굵은 노이즈 쌍선형 보간
+        var gx = x / COLS * 8, gy = y / ROWS * 4;
+        var x0 = Math.min(7, gx | 0), y0 = Math.min(3, gy | 0);
+        var fx = gx - x0, fy = gy - y0;
+        var c00 = coarse[y0 * 9 + x0], c10 = coarse[y0 * 9 + x0 + 1];
+        var c01 = coarse[(y0 + 1) * 9 + x0], c11 = coarse[(y0 + 1) * 9 + x0 + 1];
+        var v1 = c00 + (c10 - c00) * fx;
+        var v2 = c01 + (c11 - c01) * fx;
+        var coarseV = v1 + (v2 - v1) * fy;
+        // 가는 노이즈(16×8)
+        var gx2 = x / COLS * 16, gy2 = y / ROWS * 8;
+        var x02 = Math.min(15, gx2 | 0), y02 = Math.min(7, gy2 | 0);
+        var fx2 = gx2 - x02, fy2 = gy2 - y02;
+        var f00 = fine[y02 * 17 + x02], f10 = fine[y02 * 17 + x02 + 1];
+        var f01 = fine[(y02 + 1) * 17 + x02], f11 = fine[(y02 + 1) * 17 + x02 + 1];
+        var w1 = f00 + (f10 - f00) * fx2;
+        var w2 = f01 + (f11 - f01) * fx2;
+        var fineV = w1 + (w2 - w1) * fy2;
+        // 2옥타브 합성 + 하단 가중(아래쪽이 연료 진한 숲)
+        var v = coarseV * 0.7 + fineV * 0.3 + (y / ROWS) * 0.28 + 0.12;
+        fuel[y * COLS + x] = Math.max(0.08, Math.min(1, v));
+      }
+    }
+  }
+
+  // 점화 — 시드 고정 순서로 옮겨 다니는 불씨(리사주)
+  function spark(k) {
+    var th = (k * sparkEvery / 8.1 % 1) * Math.PI * 2;
+    var gx = Math.round((0.5 + Math.sin(th) * 0.36) * (COLS - 1));
+    var gy = Math.round((0.72 + Math.sin(th * 2 + 1.2) * 0.2) * (ROWS - 1));
+    for (var dy = -1; dy <= 1; dy++) {
+      for (var dx = -1; dx <= 1; dx++) {
+        var x = gx + dx, y = gy + dy;
+        if (x < 0 || y < 0 || x >= COLS || y >= ROWS) continue;
+        heat[y * COLS + x] = 1.0;
+      }
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    ROWS = Math.max(24, Math.round(COLS * H / W));
+    prngState = SEED >>> 0;                // 지형이 창 크기와 무관하게 같은 시드에서
+    valueNoiseGrid();
+    frameNo = 0; sparkAt = 0;
+    // 셀당 1픽셀 버퍼 — putImageData 로 올린 뒤 캔버스 크기로 확대
+    buf = document.createElement('canvas');
+    buf.width = COLS; buf.height = ROWS;
+    bctx = buf.getContext('2d');
+    img = bctx.createImageData(COLS, ROWS);
+    gridOut.textContent = COLS + '×' + ROWS;
+  }
+
+  // ── 시뮬 한 프레임 ──
+  // 타는 칸(heat > IGNITE)의 연료가 닳고, 이웃 8칸으로 열을 넘긴다. 열은 프레임마다 식는다.
+  var IGNITE = 0.34;
+  function sim() {
+    var i, x, y, dx, dy, nx, ny, ni;
+    var sum = 0;
+    for (i = 0; i < heat.length; i++) {
+      var f = fuel[i];
+      sum += f;
+      if (heat[i] > IGNITE) {
+        if (f > 0) {
+          // 연료 소모 — 남은 연료에 비례해 잘 탄다(연료가 많으면 열도 세다)
+          var burn = Math.min(f, BURN_RATE * (0.4 + f));
+          fuel[i] = f - burn;
+          var give = SPREAD * (0.3 + f * 0.7);
+          for (dy = -1; dy <= 1; dy++) {
+            for (dx = -1; dx <= 1; dx++) {
+              if (!dx && !dy) continue;
+              nx = (i % COLS) + dx; ny = ((i / COLS) | 0) + dy;
+              if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+              ni = ny * COLS + nx;
+              // 대각선은 거리 1.41 배 — 열이 멀리는 덜 간다
+              nheat[ni] += give / (dx && dy ? 1.41 : 1);
+            }
+          }
+          // 타는 동안 자기 열도 유지된다
+          nheat[i] += give * 0.8;
+        }
+      }
+      // 냉각 — 열은 매 프레임 식는다
+      nheat[i] += heat[i] * 0.72;
+    }
+    var t = heat; heat = nheat; nheat = t;
+    nheat.fill(0);
+    return sum / heat.length;
+  }
+
+  // ── 렌더 — 셀당 픽셀 하나를 ImageData 에 직접 쓴다 ──
+  // 상태 → 색: 타는 칸은 heat 강도로 gold↔amber, 다 탄 칸은 ember 잔불에서 식어 잉크로,
+  // 미연 칸은 연료량으로 smoke 색 지형이 드러난다. 로즈는 점화 직후 가장 뜨거운 칸에 섞인다.
+  function render() {
+    var d = img.data;
+    for (var i = 0, j = 0; i < heat.length; i++, j += 4) {
+      var f = fuel[i], h = heat[i];
+      var r, g, b;
+      if (h > IGNITE && f > 0) {
+        // 활성 화염 — heat 정규화 색온도
+        var hh = Math.min(1, (h - IGNITE) / 0.9);
+        if (hh > 0.72 && ((i * 7 + frameNo) & 15) === 0) {
+          r = C_ROSE[0]; g = C_ROSE[1]; b = C_ROSE[2];       // 최고온 도트에 로즈
+        } else {
+          r = C_EMBER[0] + (C_GOLD[0] - C_EMBER[0]) * hh;
+          g = C_EMBER[1] + (C_GOLD[1] - C_EMBER[1]) * hh;
+          b = C_EMBER[2] + (C_GOLD[2] - C_EMBER[2]) * hh;
+        }
+      } else if (f <= 0) {
+        // 소진된 칸 — 잉크보다 살짝 밝은 검댓. 프레임이 지나며 서서히 식는다
+        var cool = Math.max(0, h);
+        r = C_INK[0] + (C_EMBER[0] - C_INK[0]) * cool * 0.5;
+        g = C_INK[1] + (C_EMBER[1] - C_INK[1]) * cool * 0.5;
+        b = C_INK[2] + (C_EMBER[2] - C_INK[2]) * cool * 0.5;
+      } else {
+        // 미연 연료 지형 — 연료량이 smoke 톤 명암
+        var shade = 0.06 + f * 0.16;
+        r = C_INK[0] + (C_SMOKE[0] - C_INK[0]) * shade;
+        g = C_INK[1] + (C_SMOKE[1] - C_INK[1]) * shade;
+        b = C_INK[2] + (C_SMOKE[2] - C_INK[2]) * shade;
+      }
+      d[j] = r | 0; d[j + 1] = g | 0; d[j + 2] = b | 0; d[j + 3] = 255;
+    }
+    bctx.putImageData(img, 0, 0);
+    // 셀 1픽셀 버퍼를 캔버스 CSS 크기로 확대 — 매끈한 셀 블록
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(buf, 0, 0, W, H);
+  }
+
+  // 다 탄 칸 수(소화전) — 진행률 라벨
+  function burntCount() {
+    var n = 0;
+    for (var i = 0; i < fuel.length; i++) if (fuel[i] <= 0) n++;
+    return n;
+  }
+
+  function frame() {
+    frameNo++;
+    if (frameNo % sparkEvery === 1 && frameNo < sparkEvery * 14) {
+      spark(sparkAt++);
+    }
+    sim();
+    render();
+    firesOut.textContent = String(burntCount());
+    raf = requestAnimationFrame(frame);
+  }
+
+  // 키보드 보조 — 엔터로 불씨 하나 추가(자동 점화와 같은 규칙, 무작위 셀)
+  field.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    var gx = 1 + Math.floor(rand() * (COLS - 2));
+    var gy = 1 + Math.floor(rand() * (ROWS - 2));
+    heat[gy * COLS + gx] = 1.0;
+    if (reduce) { sim(); render(); firesOut.textContent = String(burntCount()); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+  // 정지판 — 시뮬을 몰아 전진해 화재가 한창 번진 한 장을 담는다
+  function still() {
+    spark(0); spark(1);
+    for (var s = 0; s < 40; s++) sim();
+    render();
+    firesOut.textContent = String(burntCount());
+  }
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 번진 한 장
+    root.classList.remove('is-demo');
+    root.classList.add('is-still');
+    still();
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

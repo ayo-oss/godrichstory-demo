@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charge Hold Release Transition — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gb">
+  <div class="gb__head">
+    <span class="gb__label">Charge Attack</span>
+    <span class="gb__value" id="gbValue">0%</span>
+  </div>
+  <div class="gb__track" role="progressbar" aria-label="Charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="gbTrack">
+    <div class="gb__fill" id="gbFill"></div>
+    <div class="gb__burst" id="gbBurst"></div>
+  </div>
+  <button type="button" class="gb__hit" id="gbCharge">Hold to Charge</button>
+</div>
+<script>
+(function () {
+  var CHARGE_MAX = 100;
+  var CHARGE_RATE = 0.062; // 계산 겹 상수: ms 당 Charge
+  var HOLD_DUR = 1550; // ms, 자동 루프가 누르고 있는 시간
+  var RELEASE_DUR = 700; // ms, 방출 스프링 지속
+  var RELEASE_FREQ = 2 * Math.PI * 2.1 / RELEASE_DUR; // 계산 겹: 스프링 각속도
+  var RELEASE_ZETA = 3.6; // 계산 겹: 스프링 감쇠 상수
+  var PAUSE = 700;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gb = document.getElementById('gb');
+  var track = document.getElementById('gbTrack');
+  var fill = document.getElementById('gbFill');
+  var burst = document.getElementById('gbBurst');
+  var valueEl = document.getElementById('gbValue');
+  var chargeBtn = document.getElementById('gbCharge');
+
+  var isDemo = true;
+  var value = 0;
+  var holding = false;
+  var holdStart = 0;
+  var releaseStart = -9999;
+  var releaseFromPct = 0;
+  var cycleStart = 0;
+  var demoPhase = 'charging'; // charging → released → pause
+
+  function burstAt(t) {
+    // 계산 겹: 방출 스프링 — 감쇠 코사인 진동으로 목표를 넘어섰다 되돌아오는 위치를 계산
+    if (t < 0 || t > RELEASE_DUR) return { scale: 0, alpha: 0 };
+    var x = t / RELEASE_DUR;
+    var amp = Math.exp(-RELEASE_ZETA * x);
+    var pos = 1 - amp * Math.cos(RELEASE_FREQ * t);
+    return { scale: 1 + pos * 1.1, alpha: Math.max(0, amp * 1.15) };
+  }
+
+  function render(ts) {
+    fill.style.width = value.toFixed(2) + '%';
+    valueEl.textContent = Math.round(value) + '%';
+    track.setAttribute('aria-valuenow', String(Math.round(value)));
+    var b = burstAt(ts - releaseStart);
+    burst.style.left = releaseFromPct.toFixed(2) + '%';
+    burst.style.opacity = b.alpha < 0.02 ? '0' : b.alpha.toFixed(3);
+    burst.style.transform = 'translate(-50%, -50%) scale(' + b.scale.toFixed(3) + ')';
+  }
+
+  function startCharge(ts) {
+    holding = true;
+    holdStart = ts;
+  }
+  function releaseCharge(ts) {
+    holding = false;
+    releaseFromPct = value;
+    releaseStart = ts;
+    value = 0;
+  }
+
+  function human() {
+    if (isDemo) { gb.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  chargeBtn.addEventListener('pointerdown', function (ev) {
+    human();
+    startCharge(performance.now());
+  });
+  chargeBtn.addEventListener('pointerup', function () { if (holding) releaseCharge(performance.now()); });
+  chargeBtn.addEventListener('pointerleave', function () { if (holding) releaseCharge(performance.now()); });
+  chargeBtn.addEventListener('pointercancel', function () { if (holding) releaseCharge(performance.now()); });
+  chargeBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    if (!holding) { human(); startCharge(performance.now()); }
+  });
+  chargeBtn.addEventListener('keyup', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    if (holding) releaseCharge(performance.now());
+  });
+
+  function loop(ts) {
+    if (!cycleStart) cycleStart = ts;
+
+    if (isDemo) {
+      var elapsed = ts - cycleStart;
+      if (demoPhase === 'charging' && elapsed >= HOLD_DUR) {
+        releaseFromPct = value;
+        releaseStart = ts;
+        value = 0;
+        demoPhase = 'released';
+      } else if (demoPhase === 'released' && ts - releaseStart >= RELEASE_DUR + PAUSE) {
+        cycleStart = ts;
+        demoPhase = 'charging';
+        value = 0;
+      } else if (demoPhase === 'charging') {
+        value = Math.min(CHARGE_MAX, elapsed * CHARGE_RATE);
+      }
+    } else if (holding) {
+      value = Math.min(CHARGE_MAX, (ts - holdStart) * CHARGE_RATE);
+    }
+
+    render(ts);
+    requestAnimationFrame(loop);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  } else {
+    render(0);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

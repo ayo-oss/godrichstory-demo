@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>区間スナップスプリング — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sss is-demo" id="sss">
+  <div class="sss__viewport" id="sssViewport" role="application" aria-label="区間スナップスクロールパネル">
+    <div class="sss__track" id="sssTrack">
+      <section class="sss__panel sss__panel--1">区間1</section>
+      <section class="sss__panel sss__panel--2">区間2</section>
+      <section class="sss__panel sss__panel--3">区間3</section>
+    </div>
+  </div>
+  <p class="sss__hint">ドラッグしてスクロールし離すと、最も近い区間にスプリングで定着します</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sss');
+  var viewport = document.getElementById('sssViewport');
+  var track = document.getElementById('sssTrack');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 놓인 위치 값(pos)이 가장 가까운 구간 값(target = round(pos/SECTION_H)*SECTION_H)을
+  // 향해 스프링 방정식(SPRING_K·SPRING_C)으로 매 프레임 가속도를 쌓아 다가간다 — 목표를 살짝
+  // 지나쳤다 되돌아오길 반복하며 잦아든다(과소감쇠 스프링).
+  var SECTION_H = 150;
+  var SECTION_COUNT = 3;
+  var SPRING_K = 150;
+  var SPRING_C = 7.5;
+
+  var pos = 0, vel = 0, raf = null, maxScroll = SECTION_H * (SECTION_COUNT - 1);
+
+  function clampFree(v) { return Math.max(-maxScroll, Math.min(0, v)); }
+  function paint() { track.style.transform = 'translateY(' + pos.toFixed(1) + 'px)'; }
+  function stopSpring() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } }
+  function nearestTarget() { return clampFree(Math.round(pos / SECTION_H) * SECTION_H); }
+
+  function springTick(target) {
+    var force = -SPRING_K * (pos - target) - SPRING_C * vel;
+    vel += force * (1 / 60) * 0.06;
+    pos += vel;
+    paint();
+    if (Math.abs(pos - target) < 0.4 && Math.abs(vel) < 0.4) {
+      pos = target; vel = 0; paint(); raf = null; return;
+    }
+    raf = requestAnimationFrame(function () { springTick(target); });
+  }
+  function snap() {
+    var target = nearestTarget();
+    if (reduce) { pos = target; vel = 0; paint(); return; }
+    stopSpring();
+    raf = requestAnimationFrame(function () { springTick(target); });
+  }
+
+  var wheelTimer = null;
+  function wireReal() {
+    var dragging = false, startY = 0, startPos = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay(); stopSpring();
+      dragging = true; startY = e.clientY; startPos = pos; vel = 0;
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      pos = clampFree(startPos + (e.clientY - startY));
+      paint();
+    });
+    viewport.addEventListener('pointerup', function () {
+      if (!dragging) { return; }
+      dragging = false;
+      snap();
+    });
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay(); stopSpring();
+      pos = clampFree(pos - e.deltaY * 0.5);
+      paint();
+      if (wheelTimer) { clearTimeout(wheelTimer); }
+      wheelTimer = setTimeout(snap, 140);
+    }, { passive: false });
+  }
+  wireReal();
+  paint();
+
+  // 자동 루프: 다음 구간으로 자유 이동 값을 옮긴 뒤 스프링 정착을 반복 재현한다.
+  var autoTimer = null, section = 0;
+  function autoTick() {
+    section = (section + 1) % SECTION_COUNT;
+    pos = clampFree(-section * SECTION_H + 26);
+    paint();
+    snap();
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 1300); autoTick(); }
+})();
+</script>
+</body>
+</html>

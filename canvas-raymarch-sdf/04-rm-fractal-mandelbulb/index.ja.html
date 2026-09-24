@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>만델벌브 — 거리 추정이 여는 프랙탈 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb is-demo" id="mbRoot">
+  <p class="mb__hint">
+    <svg class="mb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 24a16 16 0 0 1 16 16v8a80.06 80.06 0 0 1 63.94 63.94h8a16 16 0 0 1 0 32h-8A80.06 80.06 0 0 1 144 207.94v8a16 16 0 0 1-32 0v-8A80.06 80.06 0 0 1 48.06 144h-8a16 16 0 0 1 0-32h8A80.06 80.06 0 0 1 112 48.06v-8A16 16 0 0 1 128 24m-16 57.35V96a16 16 0 0 0 32 0V81.35A48.09 48.09 0 0 0 81.35 112H96a16 16 0 0 0 0-32h14.65M174.65 144H160a16 16 0 0 0 0 32h14.65A48.09 48.09 0 0 0 144 174.65V160a16 16 0 0 0-32 0v14.65A48.09 48.09 0 0 0 81.35 144" opacity=".2"/><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104m-32 0a8 8 0 0 0-8-8h-9.34A56.1 56.1 0 0 0 136 77.34V68a8 8 0 0 0-16 0v9.34A56.1 56.1 0 0 0 77.34 120H68a8 8 0 0 0 0 16h9.34A56.1 56.1 0 0 0 120 179.66V188a8 8 0 0 0 16 0v-8.34A56.1 56.1 0 0 0 178.66 136H192a8 8 0 0 0 8-8m-40 0a32 32 0 1 1-32-32a32 32 0 0 1 32 32m-16 0a16 16 0 1 0-16 16a16 16 0 0 0 16-16"/></g></svg>
+    <span>各ピクセルがフラクタルの距離を推定して進みます — ポインターで視点が回ります</span>
+  </p>
+  <div class="mb__field" id="mbField" role="application" aria-label="マンデルバルブのレイマーチング実験盤" tabindex="0">
+    <canvas class="mb__cv" id="mbCv"></canvas>
+  </div>
+  <div class="mb__bar">
+    <span class="mb__meta"><b class="mb__val" id="mbRes">48×30</b> レンダーターゲット・80ステップ</span>
+    <span class="mb__meta mb__meta--dim">距離推定DE・8乗反復</span>
+  </div>
+</div>
+</main>
+<script>
+// 만델벌브(04) — 만델브로 반복을 3차원으로 올리고 거리 추정식을 붙인 프랙탈.
+// 부호 거리 함수를 닫힌 식으로 쓸 수 없는 형태는 "거리 추정치(DE)" 로 대신한다:
+//   z = z^8 + c 반복을 구면 좌표(pow) 로 돌리고, DE = 0.5·r·log(r)/|dr| 를 돌려받는다.
+// 추정치는 실제 거리를 가끔 과대 평가하므로(Lipschitz 위반) 스텝에 0.9 안전 계수가 필수다.
+// WebGL 없이 ImageData 픽셀 계산만으로 나온다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var RT_W = 48;          // レンダーターゲット 폭(버퍼 픽셀). 프랙탈은 반복이 무거워 48px 로 예산
+  var STEPS = 80;         // 최대 전진 스텝 수 — 변형 "스텝 수" 축(56 → 96)
+  var HIT_EPS = 0.004;    // 표면 도달 판정 거리(월드 단위)
+  var LOOP_MS = 2000;     // 미리보기 가상 포인터 주기
+  var POWER = 8;          // 만델벌브 거듭제곱(8 이 표준) — 변형 "지수" 축(3·4·8)
+  var ITER = 6;           // 프랙탈 내부 반복 수 — 늘리면 주름이 더 잘다
+  var SAFETY = 0.9;       // DE 안전 계수 — 과대 평가를 눌러 터널링을 막는다
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mbRoot');
+  var field = document.getElementById('mbField');
+  var cv = document.getElementById('mbCv');
+  var ctx = cv.getContext('2d');
+  var resOut = document.getElementById('mbRes');
+
+  // 색은 CSS 커스텀 프로퍼티(--rm-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    if (s.charAt(0) === '#') {
+      var hx = s.length === 4
+        ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+        : s.slice(1);
+      return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+    }
+    var p = s.replace(/[^\d,.]/g, '').split(',');
+    return [Number(p[0]) || 0, Number(p[1]) || 0, Number(p[2]) || 0];
+  }
+  var C_BULK_A = tokRGB('--rm-bulk-a');
+  var C_BULK_B = tokRGB('--rm-bulk-b');
+  var C_HILITE = tokRGB('--rm-hilite');
+  var C_SHADE  = tokRGB('--rm-shade');
+  var C_SKY    = tokRGB('--rm-sky');
+  var C_SKY2   = tokRGB('--rm-sky2');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var buf, bctx, img;             // 저해상 レンダーターゲット 버퍼(캔버스와 별개)
+  var heading = 0.55;             // 편요(라디안) — 포인터 좌우
+  var pitch = 0.27;               // 상하각(라디안) — 포인터 상하
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var raf = 0, t0 = -1;
+
+  // 만델벌브 거리 추정 — p 에서 프랙탈 표면까지의 근사 거리.
+  // 바운딩 구 밖은 싼 구 거리로 대신한다(프랙탈 전체가 반경 ~1.2 안에 든다).
+  var lastTrap = 0.5;             // 직전 map 호출의 orbit trap(최소 r) — 색 변조용
+  function map(px, py, pz) {
+    var dx = px, dy = py - 1.15, dz = pz;          // 벌브 중심 (0,1.15,0)
+    var bc = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (bc > 1.5) return bc - 1.25;                // 바운딩 — 안쪽은 절대 건드리지 않는다
+
+    var zx = dx, zy = dy, zz = dz;                 // z = c 에서 출발
+    var dr = 1.0, r = bc, trap = 2.0;
+    for (var i = 0; i < ITER; i++) {
+      r = Math.sqrt(zx * zx + zy * zy + zz * zz);
+      if (r < trap) trap = r;
+      if (r > 1.6) break;                          // 탈출 — 이 시점의 추정치를 쓴다
+      // 구면 좌표로 8제곱 — 세 축이 함께 비틀린다
+      var theta = Math.acos(zy / r);
+      var phi = Math.atan2(zx, zz);
+      var zr = Math.pow(r, POWER);
+      var drn = Math.pow(r, POWER - 1) * POWER * dr + 1.0;
+      var t8 = theta * POWER, p8 = phi * POWER;
+      var st = Math.sin(t8);
+      zx = zr * st * Math.sin(p8) + dx;
+      zy = zr * Math.cos(t8) + dy;
+      zz = zr * st * Math.cos(p8) + dz;
+      dr = drn;
+      if (r < 0.01) break;                         // 원점 근처 수렴 — 이론상 무한 깊이
+    }
+    lastTrap = trap;
+    return 0.5 * Math.log(Math.max(r, 1.0001)) * r / dr;   // DE = 0.5·r·log(r)/|dr|
+  }
+
+  // 거리장의 기울기(전방 차분) = 표면 법선
+  function normalAt(px, py, pz) {
+    var e = 0.002;
+    var nx = map(px + e, py, pz) - map(px - e, py, pz);
+    var ny = map(px, py + e, pz) - map(px, py - e, pz);
+    var nz = map(px, py, pz + e) - map(px, py, pz - e);
+    var l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    return [nx / l, ny / l, nz / l];
+  }
+
+  function mix3(c1, c2, t) {
+    return [c1[0] + (c2[0] - c1[0]) * t, c1[1] + (c2[1] - c1[1]) * t, c1[2] + (c2[2] - c1[2]) * t];
+  }
+  function clamp255(v) { return v > 255 ? 255 : (v < 0 ? 0 : v); }
+
+  function draw(tSec) {
+    if (!img) return;
+    var data = img.data;
+    var bw = buf.width, bh = buf.height;
+
+    // 카메라 — 벌브 중심(0,1.15,0) 을 도는 궤도. heading/pitch 를 눈 위치로
+    var ch = Math.cos(heading), sh = Math.sin(heading);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var D = 2.95;                                   // 눈-벌브 거리 — 벌브가 화면을 가득 채운다
+    var ex = sh * cp * D, ey = 1.15 + sp * D, ez = ch * cp * D;
+    // 전방(눈→벌브 중심) · 오른쪽 · 위 — 오른손 기저
+    var fx = -sh * cp, fy = -sp, fz = -ch * cp;
+    var rx = -fz, rz = fx;                          // right = normalize(f × worldUp)
+    var rl = Math.sqrt(rx * rx + rz * rz) || 1;
+    rx /= rl; rz /= rl;
+    var ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;   // up = right × forward
+    // 광원 궤도 — 왼쪽 위를 도는 파스텔 키 라이트. 표면 조명이 프레임마다 흘러간다
+    var lph = tSec * 0.9 + 2.1;
+    var lx = -0.44 + 0.3 * Math.cos(lph), ly = 0.72, lz = 0.42 + 0.3 * Math.sin(lph);
+    var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    lx /= ll; ly /= ll; lz /= ll;
+
+    var i = 0;
+    for (var y = 0; y < bh; y++) {
+      var vy = (1 - 2 * (y + 0.5) / bh) * 0.5;      // -0.5..+0.5 (화면 위가 +)
+      for (var x = 0; x < bw; x++) {
+        var vx = (2 * (x + 0.5) / bw - 1) * 0.92;   // -0.92..+0.92 — 넓은 화각, 벌브가 프레임을 채운다
+        // 레이 방향 = 전방 + 화면 오프셋, 정규화
+        var dx = fx + rx * vx + ux * vy;
+        var dy = fy + uy * vy;
+        var dz = fz + rz * vx + uz * vy;
+        var dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        dx /= dl; dy /= dl; dz /= dl;
+
+        // ── march 루프 — 거리 "추정"이므로 SAFETY 를 곱해 전진한다 ──
+        var t = 0.0, hit = 0, px = ex, py = ey, pz = ez, steps = 0;
+        for (var s = 0; s < STEPS; s++) {
+          var d = map(px, py, pz);
+          if (d < HIT_EPS) { hit = 1; break; }      // 표면 도달
+          if (t > 8.0) break;                       // 멀어지면 하늘로 놓아준다
+          t += d * SAFETY;                          // 과대 평정분을 깎는 안전 전진
+          steps = s;
+          px = ex + dx * t; py = ey + dy * t; pz = ez + dz * t;
+        }
+
+        var r, g, b;
+        if (hit) {
+          // orbit trap — 주름 깊이마다 색이 민트↔라일락 로 나뉜다. trap 위상이 천천히 돈다
+          var trap01 = Math.min(1, Math.max(0, (lastTrap - 0.18 + 0.12 * Math.sin(tSec * 0.6 + px * 2 + pz)) / 1.1));
+          var base = mix3(C_BULK_A, C_BULK_B, trap01);
+          var n = normalAt(px, py, pz);
+          var lam = Math.max(0, n[0] * lx + n[1] * ly + n[2] * lz);
+          // AO 근사 — 스텝을 많이 쓴 픽셀은 크레바스 안쪽이다
+          var ao = 1 - (steps / STEPS) * 0.55;
+          var dif = (0.22 + 0.78 * lam) * ao;
+          var rim = Math.max(0, n[0] * -dx + n[1] * -dy + n[2] * -dz);
+          var spec = Math.pow(rim, 14) * 0.4;
+          r = base[0] * dif + C_HILITE[0] * spec;
+          g = base[1] * dif + C_HILITE[1] * spec;
+          b = base[2] * dif + C_HILITE[2] * spec;
+        } else {
+          // 하늘 — 벌브 실루엣 뒤 크림↔민트 이중 그라데이션이 프레임마다 흐른다
+          var sky = dy > 0 ? dy : 0;
+          var wave = 0.5 + 0.5 * Math.sin(tSec * 1.7 + vx * 4.0);
+          var gr = 0.5 * wave;
+          r = C_SKY[0] + (C_HILITE[0] - C_SKY[0]) * sky * 0.3 + (C_SKY2[0] - C_SKY[0]) * gr;
+          g = C_SKY[1] + (C_HILITE[1] - C_SKY[1]) * sky * 0.3 + (C_SKY2[1] - C_SKY[1]) * gr;
+          b = C_SKY[2] + (C_HILITE[2] - C_SKY[2]) * sky * 0.3 + (C_SKY2[2] - C_SKY[2]) * gr;
+        }
+        data[i] = clamp255(r);
+        data[i + 1] = clamp255(g);
+        data[i + 2] = clamp255(b);
+        data[i + 3] = 255;
+        i += 4;
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+    // 저해상 버퍼를 캔버스 CSS 크기로 부드럽게 확대 — dpr 을 곱하지 않는다(버퍼가 저해상)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(buf, 0, 0, W, H);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    var bh = Math.max(12, Math.round(RT_W * H / W));
+    buf = document.createElement('canvas');
+    buf.width = RT_W; buf.height = bh;
+    bctx = buf.getContext('2d');
+    img = bctx.createImageData(RT_W, bh);
+    resOut.textContent = RT_W + '×' + bh;
+  }
+
+  function aim() {
+    // 포인터/키 입력 → 목표 각도. 프랙탈 뒷면까지 보여주는 넓은 heading ±1.8 · pitch 0.02..0.58
+    return [(px01 - 0.5) * 3.6, 0.3 + (py01 - 0.5) * 0.56];
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous(표 밖 자연 경로). 진폭을 끝까지 쓴다
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.48 * Math.sin(ph);
+      py01 = 0.5 + 0.42 * Math.sin(2 * ph + 0.7);
+    }
+    var a = aim();
+    heading += (a[0] - heading) * 0.14;
+    pitch += (a[1] - pitch) * 0.14;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { var a1 = aim(); heading = a1[0]; pitch = a1[1]; draw(0.6); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { var a2 = aim(); heading = a2[0]; pitch = a2[1]; draw(0.6); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(0.6); });
+
+  fit();
+  if (reduce) {
+    // reduce — rAF 를 돌리지 않고 주름이 읽히는 각도의 한 장만 그린다
+    heading = 0.55; pitch = 0.3;
+    draw(0.6);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

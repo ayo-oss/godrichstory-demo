@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>각 단계의 값 비율만큼 사다리꼴 폭을 계산해 좁혀, 이전 단계에서 얼마나 이탈했는지가 폭 차이로 드러난다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fst is-demo" id="fstRoot">
+  <canvas class="fst__canvas" id="fstCanvas" width="480" height="300"></canvas>
+  <p class="fst__caption">각 단계의 값 비율만큼 사다리꼴 폭을 계산해 좁혀, 이전 단계에서 얼마나 이탈했는지가 폭 차이로 드러난다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 시드로 두 데이터셋(A/B)을 만들고, 삼각파 blend 값으로 두 데이터셋을 단계별 값
+  // 단위에서 lerp 해 매 프레임 사다리꼴 폭을 다시 계산한다. 정적인 두 장을 겹쳐 페이드하는
+  // 것이 아니라 값 자체가 매 프레임 보간되므로 폭이 실제로 넓어지고 좁아진다.
+  var root = document.getElementById('fstRoot');
+  var canvas = document.getElementById('fstCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var rand = seedRand(425031);
+  function makeFunnel() {
+    var v = 100;
+    var out = [v];
+    for (var i = 0; i < 4; i += 1) {
+      v = v * (0.55 + rand() * 0.25);
+      out.push(v);
+    }
+    return out;
+  }
+  var DATASET_A = makeFunnel();
+  var DATASET_B = makeFunnel();
+
+  var STAGE_COLORS = ['#2f6df6', '#c2361a', '#2b9d74', '#8a5cd6', '#0a4fe8'];
+  var STAGE_COLORS_B = ['#8ec5ff', '#ffb199', '#8be0c2', '#d7c2fa', '#bcd4ff'];
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function hexToRgb(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function lerpColor(hexA, hexB, t) {
+    var a = hexToRgb(hexA), b = hexToRgb(hexB);
+    return 'rgb(' + Math.round(lerp(a[0], b[0], t)) + ',' + Math.round(lerp(a[1], b[1], t)) + ',' + Math.round(lerp(a[2], b[2], t)) + ')';
+  }
+
+  var LOOP_MS = 800;
+  var T0 = 200;
+  var cw = 480, ch = 300;
+
+  function draw(nowMs) {
+    var phase = reduce ? 1200 : (nowMs % LOOP_MS);
+    var t = Math.max(0, phase - T0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    var half = (LOOP_MS - T0) / 2;
+    var blend = t < half ? t / half : 2 - t / half;
+    blend = clamp(blend, 0, 1);
+
+    var values = [];
+    var i;
+    for (i = 0; i < DATASET_A.length; i += 1) values.push(lerp(DATASET_A[i], DATASET_B[i], blend));
+
+    var marginY = ch * 0.05;
+    var availH = ch - marginY * 2;
+    var bandH = availH / values.length;
+    var maxWidth = cw * 0.92;
+    var cx = cw / 2;
+
+    var baseFont = Math.max(10, cw * 0.026);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    for (i = 0; i < values.length; i += 1) {
+      var topVal = values[i];
+      var botVal = i < values.length - 1 ? values[i + 1] : values[i] * 0.86;
+      var topW = (topVal / 100) * maxWidth;
+      var botW = (botVal / 100) * maxWidth;
+      var y0 = marginY + bandH * i;
+      var y1 = y0 + bandH;
+
+      ctx.beginPath();
+      ctx.moveTo(cx - topW / 2, y0);
+      ctx.lineTo(cx + topW / 2, y0);
+      ctx.lineTo(cx + botW / 2, y1);
+      ctx.lineTo(cx - botW / 2, y1);
+      ctx.closePath();
+      ctx.fillStyle = lerpColor(STAGE_COLORS[i], STAGE_COLORS_B[i], blend);
+      ctx.fill();
+
+      var dropRate = i > 0 ? Math.max(0, (values[i - 1] - topVal) / values[i - 1] * 100) : 0;
+      ctx.font = baseFont + 'px sans-serif';
+      ctx.fillStyle = 'rgba(255,247,230,.95)';
+      ctx.fillText(String(Math.round(topVal)), cx, y0 + bandH / 2 - baseFont * 0.5);
+      if (i > 0) {
+        ctx.font = (baseFont * 0.78) + 'px sans-serif';
+        ctx.fillStyle = 'rgba(255,247,230,.78)';
+        ctx.fillText('-' + dropRate.toFixed(0) + '%', cx, y0 + bandH / 2 + baseFont * 0.62);
+      }
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) { elapsed += dt; draw(elapsed); }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

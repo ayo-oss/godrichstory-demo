@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camouflage Pattern Built From a Cell-size Variance Value — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">Camouflage Pattern Built From a Cell-size Variance Value</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var NOISE_WARP_PX = 13;
+  var WARP_FREQ = Math.PI * 2 / LOOP_MS;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(409081);
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  function hexToRgb(hex) {
+    var v = parseInt(hex.slice(1), 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+
+  var NEI = -1, ND = 0, ND2 = 0;
+  function nearestTwo(px, py, arr) {
+    var bd = Infinity, bd2 = Infinity, bi = -1;
+    for (var i = 0; i < arr.length; i += 1) {
+      var dx = px - arr[i].x, dy = py - arr[i].y, d = dx * dx + dy * dy;
+      if (d < bd) { bd2 = bd; bd = d; bi = i; } else if (d < bd2) { bd2 = d; }
+    }
+    NEI = bi; ND = Math.sqrt(bd); ND2 = Math.sqrt(bd2);
+  }
+
+  var camoPalette = ['#4cd4a6', '#6ec8ff', '#b9a0ff', '#17141a'];
+  var paletteRgb = {};
+  camoPalette.forEach(function (h) { paletteRgb[h] = hexToRgb(h); });
+
+  var MACRO_COUNT = 4;
+  var macroCenters = [];
+  for (var m0 = 0; m0 < MACRO_COUNT; m0 += 1) {
+    macroCenters.push({ x: rand() * CALC_W, y: rand() * CALC_H, spread: 10 + rand() * 26 });
+  }
+  var SEED_COUNT08 = 46;
+  var seeds = [];
+  for (var i8 = 0; i8 < SEED_COUNT08; i8 += 1) {
+    var mc = macroCenters[i8 % MACRO_COUNT];
+    seeds.push({
+      x: Math.min(CALC_W, Math.max(0, mc.x + (rand() - 0.5) * mc.spread * 2)),
+      y: Math.min(CALC_H, Math.max(0, mc.y + (rand() - 0.5) * mc.spread * 2)),
+      c: camoPalette[i8 % camoPalette.length]
+    });
+  }
+
+  var NOISE_GRID_W = 9, NOISE_GRID_H = 6;
+  var noiseGridX = [], noiseGridY = [];
+  for (var n0 = 0; n0 < NOISE_GRID_W * NOISE_GRID_H; n0 += 1) {
+    noiseGridX.push(rand()); noiseGridY.push(rand());
+  }
+  function valueNoise2D(gx, gy, arr) {
+    var x0 = Math.floor(gx), y0 = Math.floor(gy);
+    var x1 = Math.min(NOISE_GRID_W - 1, x0 + 1), y1 = Math.min(NOISE_GRID_H - 1, y0 + 1);
+    var tx = gx - x0, ty = gy - y0;
+    var v00 = arr[y0 * NOISE_GRID_W + x0], v10 = arr[y0 * NOISE_GRID_W + x1];
+    var v01 = arr[y1 * NOISE_GRID_W + x0], v11 = arr[y1 * NOISE_GRID_W + x1];
+    var top = v00 + (v10 - v00) * tx, bot = v01 + (v11 - v01) * tx;
+    return top + (bot - top) * ty;
+  }
+  function warpCoord(x, y, breathe) {
+    var gx = x / CALC_W * (NOISE_GRID_W - 1), gy = y / CALC_H * (NOISE_GRID_H - 1);
+    var n1 = valueNoise2D(gx, gy, noiseGridX), n2 = valueNoise2D(gx, gy, noiseGridY);
+    return { x: x + (n1 - 0.5) * 2 * NOISE_WARP_PX * breathe, y: y + (n2 - 0.5) * 2 * NOISE_WARP_PX * breathe };
+  }
+
+  function renderField(t) {
+    var breathe = 0.55 + 0.45 * Math.sin(t * WARP_FREQ);
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var w = warpCoord(x + 0.5, y + 0.5, breathe);
+        nearestTwo(w.x, w.y, seeds);
+        var rgb = paletteRgb[seeds[NEI].c];
+        var edge = ND2 - ND;
+        var dark = edge < 1.6 ? 0.55 + edge / 3.6 : 1;
+        offBuf[idx] = rgb[0] * dark; offBuf[idx + 1] = rgb[1] * dark; offBuf[idx + 2] = rgb[2] * dark; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

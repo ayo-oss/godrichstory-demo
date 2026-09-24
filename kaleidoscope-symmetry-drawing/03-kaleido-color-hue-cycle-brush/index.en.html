@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hue-cycle brush — a brush whose color turns with drawn length — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kh" id="kh">
+  <p class="kh__hint">Accumulated path length becomes the hue angle — the fading tail smears behind</p>
+  <div class="kh__row">
+    <div class="kh__field" id="field" role="application" aria-label="Hue-cycle brush lab" tabindex="0">
+      <canvas class="kh__cv" id="cv"></canvas>
+    </div>
+    <div class="kh__side">
+      <b class="kh__num" id="hue">0</b>
+      <span class="kh__unit">Current hue angle</span>
+      <p class="kh__meta">Total path <b id="len">0</b><span class="kh__metaUnit">px</span></p>
+      <p class="kh__meta">34% saturation, pastel</p>
+      <p class="kh__meta">Draw it yourself — color follows your hand</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 환색 붓 — 경로 길이 len 을 누적해 hsl(len*0.35, 34%, 74%) 로 선빛깔을 정한다.
+// hsl 의 색상축이 경로 길이에 물려 있어 선이 길어질수록 무지개로 돈다. 채도 34% 로
+// 잡아 만화경 특유의 강한 색을 파스텔로 눌렀다. 잔상 감쇠 0.92 는 매 프레임 캔버스
+// 전체를 아주 옅은 무대색으로 덮는 것이라 이전 붓질이 꼬리를 남긴다.
+(function () {
+  var root = document.getElementById('kh');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var hue = document.getElementById('hue');
+  var len = document.getElementById('len');
+  if (!root || !field || !cv || !hue || !len) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var STAGE = css.getPropertyValue('--stage').trim();
+  var PANEL = css.getPropertyValue('--panel').trim();
+  var ACCENT = css.getPropertyValue('--accent').trim();
+  var N = 10;                      // 차수 n — 반사 포함 2n = 20 갈래
+  var pathLen = 0;
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    var w0 = cv.width, h0 = cv.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+    // 리사이즈에도 쌓인 그림이 남게 — 기존 내용을 복사해 둔다
+    if (w0 && h0) {
+      var old = document.createElement('canvas');
+      old.width = w0; old.height = h0;
+      old.getContext('2d').drawImage(cv, 0, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(old, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  function fade() {
+    // 잔상 감쇠 — 알파 0.92 가 아니라 매 프레임 8% 씩 무대색을 겹쳐 옛 붓질을 녹인다
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = STAGE;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  function brushColor() {
+    var h = (pathLen * 0.35) % 360;
+    return 'hsl(' + h.toFixed(0) + ', 34%, 74%)';
+  }
+
+  function mirroredSeg(x0, y0, x1, y1, col) {
+    var dx = x1 - x0, dy = y1 - y0;
+    pathLen += Math.sqrt(dx * dx + dy * dy);
+    hue.textContent = String(Math.round((pathLen * 0.35) % 360));
+    len.textContent = String(Math.round(pathLen));
+    ctx.globalAlpha = 0.9;
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N, c = Math.cos(a), s = Math.sin(a);
+      ctx.setTransform(dpr * c, dpr * s, dpr * s, -dpr * c, cx * dpr, cy * dpr);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  // 시드 고정 자동 strokes — 나선을 그리며 색상축이 한 바퀴 이상 돈다
+  function pathAt(t) {
+    var ang = t * 0.9;
+    var r = R * (0.12 + 0.72 * ((t * 0.11) % 1)) * (0.8 + 0.2 * Math.sin(t * 0.7));
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t = 0, last = 0, prev = null, pen = false, penPt = null;
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    pen = true; penPt = toLocal(e);
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 그리기에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!pen || !penPt) return;
+    var p = toLocal(e);
+    mirroredSeg(penPt[0], penPt[1], p[0], p[1], brushColor());
+    penPt = p;
+  });
+  field.addEventListener('pointerup', function () { pen = false; penPt = null; });
+  field.addEventListener('pointercancel', function () { pen = false; penPt = null; });
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    fade();
+    if (!pen) {
+      t += dt;
+      var p = pathAt(t);
+      if (prev) mirroredSeg(prev[0], prev[1], p[0], p[1], brushColor());
+      prev = p;
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 감쇠 없이 나선 세 바퀴를 채운 상태
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = STAGE; ctx.fillRect(0, 0, W, H);
+    var pv = pathAt(0);
+    for (var j = 1; j <= 340; j++) {
+      var tt = j * 0.02, q = pathAt(tt);
+      mirroredSeg(pv[0], pv[1], q[0], q[1], brushColor());
+      pv = q;
+    }
+    root.classList.add('is-still');
+  } else {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = STAGE; ctx.fillRect(0, 0, W, H);
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

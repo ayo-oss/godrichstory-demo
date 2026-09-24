@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토러스 결정 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tl is-demo" id="tlRoot">
+  <p class="tl__hint">
+    <svg class="tl__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path opacity=".2" d="M128 44c52 0 92 24 92 56s-40 56-92 56-92-24-92-56 40-56 92-56Z"/><path d="M128 92c30 0 52 8 52 16s-22 16-52 16-52-8-52-16 22-16 52-16Zm0-24c-38 0-72 12-72 28 0 4-6 4-6 0 0-19 36-34 78-34s78 15 78 34c0 4-6 4-6 0 0-16-34-28-72-28Z"/></g></svg>
+    <span>二つの角 (u, v) がドーナツ格子を作ります — 光の位相が表面を巡り、格子が膨らんだり沈んだりします。ポインターで回転を加速しましょう</span>
+  </p>
+  <div class="tl__field" id="tlField" role="application" aria-label="トーラス結晶実験盤" tabindex="0">
+    <canvas class="tl__cv" id="tlCv"></canvas>
+  </div>
+  <div class="tl__bar">
+    <label class="tl__dial">チューブの太さ
+      <input type="range" id="tlTube" min="12" max="36" step="1" value="28" aria-label="チューブの太さ">
+      <b class="tl__val" id="tlTubeVal">28px</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 토러스 결정 — 격자점을 두 각도로 계산한다: x=(R+r·cos v)·cos u, y=(R+r·cos v)·sin u, z=r·sin v.
+// 파동 위상이 격자을 흘러가며(빛이 도넛 표면을 돈다) 각 셀의 밝기와 튜브 반경을 바꾼다.
+// 셀은 채워진 사각 쿼드 4모서리 투영 — z 내림차순 화가 알고리즘으로 겹침을 정리한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var UDIV = 26;         // 큰 원 방향 분할
+  var VDIV = 13;         // 튜브 둘레 분할
+  var WAVE_GAIN = 4.2;   // 격자 부풀림 진폭(px)
+  var LOOP_MS = 2200;    // 미리보기 가상 포인터의 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('tlRoot');
+  var field = document.getElementById('tlField');
+  var cv = document.getElementById('tlCv');
+  var ctx = cv.getContext('2d');
+  var tubeIn = document.getElementById('tlTube');
+  var tubeOut = document.getElementById('tlTubeVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var MINT = [76, 212, 166];      // $subject-mint
+  var LILAC = [185, 160, 255];    // $subject-lilac
+  var PINK = [255, 158, 187];     // $subject-pink
+  var CREAM = tok('--tl-cream');
+  var RIM = tok('--tl-rim');
+  var SHADOW = tok('--tl-shadow');
+  var GLOW = tok('--tl-glow');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var FOCAL = 300;
+  var yaw = 0.4, pitch = 0.42;
+  var spin = 0;
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 튜브 반경 — 파동 위상이 격자점을 부풀렸다 가라앉힌다
+  function tubeR(u, v, tube, now) {
+    var ph = (u / TAU) * 2 + (v / TAU) * 3 + now / 1300;
+    return tube + Math.sin(ph * TAU) * WAVE_GAIN;
+  }
+
+  // 토러스 한 점 — 두 각도 (u, v) 에서 직접 계산
+  function torusPoint(u, v, tube, now) {
+    var rr = tubeR(u, v, tube, now);
+    var ring = 112 + Math.cos(v) * rr;
+    return { x: ring * Math.cos(u), y: Math.sin(v) * rr, z: ring * Math.sin(u) };
+  }
+
+  // 카메라 — yaw(y축) 뒤 pitch(x축). 도넛을 내려다본다
+  function camRot(p) {
+    var ca = Math.cos(yaw), sa = Math.sin(yaw);
+    var x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca;
+    var cb = Math.cos(pitch), sb = Math.sin(pitch);
+    return { x: x1, y: p.y * cb - z1 * sb, z: p.y * sb + z1 * cb };
+  }
+
+  function project(p) { var s = FOCAL / (FOCAL + p.z); return { sx: W * 0.5 + p.x * s, sy: H * 0.47 - p.y * s, s: s }; }
+
+  function step(dt, now) {
+    spin += (0.25 + 2.3 * px01) * dt;          // 포인터 좌우 = 회전 가속
+    yaw = spin;
+    pitch = 0.42 + (0.5 - py01) * 0.42;        // 포인터 상하 = 내려다보는 각도
+  }
+
+  // 위상 → 민트·라일락·핑크 순환 보간
+  function phaseColor(u, v, now, lift) {
+    var ph = ((u / TAU) * 2 + (v / TAU) * 3 + now / 1300) % 1;
+    var t = ph * 3;
+    var a, b2, f;
+    if (t < 1) { a = MINT; b2 = LILAC; f = t; }
+    else if (t < 2) { a = LILAC; b2 = PINK; f = t - 1; }
+    else { a = PINK; b2 = MINT; f = t - 2; }
+    f = f * f * (3 - 2 * f);                   // smoothstep — 색이 부드럽게 이어진다
+    var lift2 = lift * lift;
+    var r = a[0] + (b2[0] - a[0]) * f;
+    var g = a[1] + (b2[1] - a[1]) * f;
+    var b3 = a[2] + (b2[2] - a[2]) * f;
+    r = r + (255 - r) * lift2 * 0.55;
+    g = g + (255 - g) * lift2 * 0.55;
+    b3 = b3 + (255 - b3) * lift2 * 0.55;
+    return 'rgb(' + (r | 0) + ',' + (g | 0) + ',' + (b3 | 0) + ')';
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    var tube = Number(tubeIn.value);
+
+    var scale = Math.min(W / 480, H / 300);
+    var hub = project(camRot({ x: 0, y: 0, z: 0 }));
+
+    // 바닥 그림자 — 도넛 아래 타원
+    var shadowPts = [];
+    for (var g = 0; g <= 30; g++) {
+      var ga = g / 30 * TAU;
+      shadowPts.push(project(camRot({ x: Math.cos(ga) * 112 * scale, y: -46, z: Math.sin(ga) * 112 * scale })));
+    }
+    ctx.beginPath();
+    ctx.moveTo(shadowPts[0].sx, shadowPts[0].sy);
+    for (var gi = 1; gi < shadowPts.length; gi++) ctx.lineTo(shadowPts[gi].sx, shadowPts[gi].sy);
+    ctx.closePath();
+    ctx.fillStyle = SHADOW;
+    ctx.fill();
+
+    // 중심 발광 — 결정 심장의 은은한 빛
+    var glowR = 104 * scale;
+    var glow = ctx.createRadialGradient(hub.sx, hub.sy, 0, hub.sx, hub.sy, glowR);
+    glow.addColorStop(0, GLOW);
+    glow.addColorStop(1, 'rgba(185,160,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(hub.sx, hub.sy, glowR, 0, TAU); ctx.fill();
+
+    // 격자 셀 — 채워진 사각 쿼드. 빛 각도는 시간에 따라 표면을 돈다
+    var lightA = now / 2600 * TAU;
+    var items = [];
+    for (var iu = 0; iu < UDIV; iu++) {
+      var u0 = iu / UDIV * TAU, u1 = (iu + 1) / UDIV * TAU;
+      for (var iv = 0; iv < VDIV; iv++) {
+        var v0 = iv / VDIV * TAU, v1 = (iv + 1) / VDIV * TAU;
+        var p00 = torusPoint(u0, v0, tube, now), p10 = torusPoint(u1, v0, tube, now);
+        var p11 = torusPoint(u1, v1, tube, now), p01 = torusPoint(u0, v1, tube, now);
+        var c = { x: (p00.x + p11.x) / 4 + (p10.x + p01.x) / 4, y: (p00.y + p11.y) / 4 + (p10.y + p01.y) / 4, z: (p00.z + p11.z) / 4 + (p10.z + p01.z) / 4 };
+        var pc = camRot(c);
+        // 빛 위상 — 셀 중심 각도와 흐르는 빛 각도의 각거리
+        var cellA = Math.atan2(c.y, Math.sqrt(c.x * c.x + c.z * c.z));
+        var lift = 0.5 + 0.5 * Math.cos((v0 / TAU) * TAU - lightA);
+        (function (q00, q10, q11, q01, zc, uu, vv, lf) {
+          items.push({ z: zc, fn: function () {
+            var s00 = project(camRot(q00)), s10 = project(camRot(q10));
+            var s11 = project(camRot(q11)), s01 = project(camRot(q01));
+            ctx.beginPath();
+            ctx.moveTo(s00.sx, s00.sy); ctx.lineTo(s10.sx, s10.sy);
+            ctx.lineTo(s11.sx, s11.sy); ctx.lineTo(s01.sx, s01.sy);
+            ctx.closePath();
+            ctx.fillStyle = phaseColor(uu, vv, now, lf);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(23,20,26,0.38)';   // 셀 틈 — 무대색 라인으로 결정을 읽게
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }});
+        })(p00, p10, p11, p01, pc.z, (u0 + u1) / 2, (v0 + v1) / 2, lift);
+      }
+    }
+    items.sort(function (a, b2) { return b2.z - a.z; });
+    for (var q = 0; q < items.length; q++) items[q].fn();
+
+    // 구멍 속 하이라이트 링 — 빛이 도는 방향을 알려주는 크림 테두리
+    var hl = [];
+    var hlA = lightA;
+    for (var h = 0; h <= 20; h++) {
+      var hv = hlA + (h / 20 - 0.5) * 0.9;
+      var hp = torusPoint(Math.PI * 0.5, hv, tube, now);
+      var hpj = project(camRot(hp));
+      hl.push(hpj);
+    }
+    ctx.strokeStyle = 'rgba(255,247,230,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(hl[0].sx, hl[0].sy);
+    for (var k = 1; k < hl.length; k++) ctx.lineTo(hl[k].sx, hl[k].sy);
+    ctx.stroke();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    if (!manual) {
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.38 * Math.sin(ph);
+      py01 = 0.5 + 0.32 * Math.sin(2 * ph + 1.05);
+    }
+    step(dt, now);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setTube(v) { tubeOut.textContent = v + 'px'; if (reduce) draw(last); }
+
+  tubeIn.addEventListener('input', function () { setTube(tubeIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { draw(last); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.08, 0], ArrowRight: [0.08, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(last);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(last); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 결정이 다 굳은 한 장만 남는다
+    px01 = 0.55; py01 = 0.42;
+    step(0, 0);
+    draw(900);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

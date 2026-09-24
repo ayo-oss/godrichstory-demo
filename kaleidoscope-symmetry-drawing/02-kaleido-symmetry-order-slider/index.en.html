@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Symmetry order slider — change n and the pattern re-forms — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ks" id="ks">
+  <p class="ks__hint">Drawn coordinates are stored; a new n replays the whole path at fresh angles</p>
+  <div class="ks__row">
+    <div class="ks__field" id="field" role="application" aria-label="Symmetry order lab" tabindex="0">
+      <canvas class="ks__cv" id="cv"></canvas>
+    </div>
+    <div class="ks__side">
+      <label class="ks__lab" for="order">Symmetry order n</label>
+      <b class="ks__val" id="val" aria-live="polite">6</b>
+      <input class="ks__slider" id="order" type="range" min="3" max="24" step="1" value="6"
+             aria-label="Symmetry order">
+      <p class="ks__meta">Wedge angle <b id="deg">60</b><span class="ks__degUnit">deg</span></p>
+      <p class="ks__meta"><b id="cnt">0</b><span class="ks__metaUnit">strokes recomputed</span></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// Symmetry order 슬라이더 — strokes 좌표를 strokes 배열에 쌓아 둔다. n 이 바뀌면 캔버스를 지우고
+// 저장한 전 경로를 새 Wedge angle(2π/n)의 반사 행렬로 전부 다시 찍는다. 무늬가 무너졌다
+// 다시 서는 순간이 이 재계산이다. 데모는 시드 고정 경로가 스스로 그리며, 4초마다 n 을
+// 3 → 6 → 12 → 18 → 24 → 3 으로 바꿔 재구성 과정을 보여 준다.
+(function () {
+  var root = document.getElementById('ks');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var order = document.getElementById('order');
+  var val = document.getElementById('val');
+  var deg = document.getElementById('deg');
+  var cnt = document.getElementById('cnt');
+  if (!root || !field || !cv || !order || !val || !deg || !cnt) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var C1 = css.getPropertyValue('--c1').trim();
+  var C2 = css.getPropertyValue('--c2').trim();
+  var GRID = css.getPropertyValue('--grid').trim();
+
+  var strokes = [];                // [[x0,y0,x1,y1,ci], ...] — 절대 좌표, n 과 무관하게 보존
+  var recalc = 0;
+  var N = 6;
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+    redraw();
+  }
+
+  function drawSeg(s) {
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N, c = Math.cos(a), sn = Math.sin(a);
+      ctx.setTransform(dpr * c, dpr * sn, dpr * sn, -dpr * c, cx * dpr, cy * dpr);
+      ctx.strokeStyle = s[4] ? C2 : C1;
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.stroke();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function redraw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    // 안내 Wedge 경계 — 현재 n 의 각도를 얇게 표시
+    ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N;
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); ctx.stroke();
+    }
+    for (var i = 0; i < strokes.length; i++) drawSeg(strokes[i]);
+  }
+
+  function setN(n) {
+    N = n;
+    val.textContent = String(n);
+    deg.textContent = String(Math.round(360 / n));
+    order.value = String(n);
+    redraw();
+  }
+  // change 이벤트 — 손을 뗀 뒤에 전체 재계산. input 이 아니라 change 를 쓰면
+  // 슬라이더를 끄는 동안 무늬가 흔들리지 않고 놓는 순간 한 번에 다시 선다
+  order.addEventListener('change', function () { setN(parseInt(order.value, 10) || 6); });
+
+  // 시드 고정 자동 strokes — 반경이 스치는 길게 늘어진 꽃잎 곡선
+  function pathAt(t) {
+    var ang = t * 1.1 + 1.3 * Math.sin(t * 0.23);
+    var r = R * (0.24 + 0.38 * Math.abs(Math.sin(t * 0.4)) + 0.18 * Math.sin(t * 0.09));
+    if (r < R * 0.06) r = R * 0.06;
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CYCLE = [3, 6, 12, 18, 24];  // 자동 시연이 돌아보는 차수
+  var t = 0, last = 0, prev = null, pen = false, penPt = null, ci = 0;
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    pen = true; penPt = toLocal(e);
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 그리기에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!pen || !penPt) return;
+    var p = toLocal(e);
+    var s = [penPt[0], penPt[1], p[0], p[1], ci];
+    strokes.push(s); drawSeg(s); recalc += 1; cnt.textContent = String(recalc);
+    penPt = p;
+  });
+  field.addEventListener('pointerup', function () { pen = false; penPt = null; ci = 1 - ci; });
+  field.addEventListener('pointercancel', function () { pen = false; penPt = null; });
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!pen) {
+      t += dt;
+      // 4초마다 차수 전환 — 재계산 순간을 보여 준다
+      var idx = Math.floor(t / 4) % CYCLE.length;
+      if (CYCLE[idx] !== N) setN(CYCLE[idx]);
+      var p = pathAt(t);
+      if (prev) {
+        var s2 = [prev[0], prev[1], p[0], p[1], 0];
+        strokes.push(s2); drawSeg(s2); recalc += 1; cnt.textContent = String(recalc);
+      }
+      prev = p;
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 차수 12 의 완성 무늬
+    setN(12);
+    for (var j = 1; j <= 260; j++) {
+      var tt = j * 0.02, a0 = pathAt(tt - 0.02), a1 = pathAt(tt);
+      strokes.push([a0[0], a0[1], a1[0], a1[1], 0]);
+    }
+    redraw();
+    recalc = strokes.length; cnt.textContent = String(recalc);
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

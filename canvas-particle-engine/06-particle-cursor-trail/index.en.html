@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>커서를 따라오는 유령 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ct" id="ct">
+  <p class="ct__hint">
+    <svg class="ct__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M164 128a36 36 0 1 1-36-36a36 36 0 0 1 36 36" opacity=".2"/><path d="M128 84a44 44 0 1 0 44 44a44.05 44.05 0 0 0-44-44m0 72a28 28 0 1 1 28-28a28 28 0 0 1-28 28m0-128a100 100 0 1 0 100 100A100.11 100.11 0 0 0 128 28m0 184a84 84 0 1 1 84-84a84.09 84.09 0 0 1-84 84"/></g></svg>
+    <span>Rub across the board and ghost grains linger where the cursor passed, sinking away</span>
+  </p>
+  <div class="ct__field" id="field" role="application" aria-label="Cursor ghost trail test board" tabindex="0">
+    <canvas class="ct__cv" id="cv"></canvas>
+    <b class="ct__live" aria-hidden="true"><span class="ct__liveMode" id="mode">Auto demo</span></b>
+  </div>
+  <div class="ct__bar">
+    <label class="ct__dial">Trail
+      <input type="range" id="trail" min="30" max="90" step="6" value="90" aria-label="Trail length">
+      <b class="ct__val" id="trailVal">90 slots</b>
+    </label>
+    <button class="ct__clear" id="clear" type="button">
+      <svg class="ct__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>Clear trail</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 커서 유령 Trail — 고정 길이 버퍼 90칸의 가장 낡은 칸을 덮어써 잔상을 남긴다.
+// 매 프레임 새로 만들지 않으므로 할당이 없다. 포인터가 없을 때는 가상 펜이 사인 곡선을 스스로
+// 움직여 잔상을 만든다(자동 모드가 측정·포스터를 책임진다 — 291 방식).
+var root = document.getElementById('ct');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var trailIn = document.getElementById('trail');
+var trailVal = document.getElementById('trailVal');
+var modeOut = document.getElementById('mode');
+var clearBtn = document.getElementById('clear');
+
+var N = 90;                     // 버퍼 길이 — 배열은 이 길이로 한 번만 정해지고 끝까지 그대로
+var trailK = 90;                // 최근 이  slots 수만큼의 잔상을 화면에 둔다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var slots = new Array(N);
+var head = 0;
+var pen = { x: 0, y: 0, tx: 0, ty: 0, real: false };
+var clock = 0;
+
+function blank() { return { on: false, x: 0, y: 0, r: 0, vx: 0, vy: 0, blue: false }; }
+for (var s = 0; s < N; s++) slots[s] = blank();
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 한  slots 덮어쓰기 — 다음 칸은 곧 가장 낡은 칸이다. 배열을 늘였다 줄이지 않는다.
+function writeSlot(x, y) {
+  head = (head + 1) % N;
+  var sl = slots[head];
+  sl.on = true; sl.x = x; sl.y = y;
+  sl.r = 2.2 + Math.random() * 2.4;
+  sl.vx = (Math.random() - 0.5) * 16;
+  sl.vy = 8 + Math.random() * 20;    // 찍힌 알갱이는 스며들듯 가라앉는다
+  sl.blue = Math.random() < 0.34;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 겹치는 유령은 잉크처럼 깊어진다 — 곱하기 합성
+  ctx.globalCompositeOperation = 'multiply';
+  for (var i = 0; i < N; i++) {
+    var sl = slots[i];
+    if (!sl.on) continue;
+    var age = (head - i + N) % N;    // 머리에서 몇  slots 뒤인가가 곧 나이다
+    if (age >= trailK) continue;
+    var f = age / trailK;
+    ctx.globalAlpha = Math.pow(1 - f, 1.7) * 0.85;
+    ctx.fillStyle = sl.blue ? '#2f6df6' : '#17141a';
+    ctx.beginPath();
+    ctx.arc(sl.x, sl.y, sl.r * (1 - 0.55 * f), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  // 펜 자국 — 가상 펜일 때도 보여야 자동 시연인 것이 눈에 보인다
+  ctx.strokeStyle = '#17141a';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(pen.x, pen.y, 5, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function step(dt) {
+  clock += dt;
+  // 포인터가 없으면 가상 펜이 사인 곡선을 스스로 그린다
+  var tx, ty;
+  if (pen.real) {
+    tx = pen.tx; ty = pen.ty;
+  } else {
+    tx = W * (0.5 + 0.36 * Math.sin(clock * 1.1));
+    ty = H * (0.5 + 0.3 * Math.sin(clock * 2.3 + 1.3));
+  }
+  pen.x += (tx - pen.x) * Math.min(1, dt * 11);
+  pen.y += (ty - pen.y) * Math.min(1, dt * 11);
+  writeSlot(pen.x, pen.y);
+  for (var i = 0; i < N; i++) {
+    var sl = slots[i];
+    if (!sl.on) continue;
+    sl.x += sl.vx * dt;
+    sl.y += sl.vy * dt;
+  }
+}
+
+var last = 0;
+function frame(now) {
+  var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+trailIn.addEventListener('input', function () {
+  trailK = Number(trailIn.value);
+  trailVal.textContent = trailK + ' slots';
+});
+clearBtn.addEventListener('click', function () {
+  for (var i = 0; i < N; i++) slots[i].on = false;
+  draw();
+});
+function onPoint(e) {
+  var r = field.getBoundingClientRect();
+  pen.tx = e.clientX - r.left;       // clientX 를 판 안 좌표로 바꿔 온다
+  pen.ty = e.clientY - r.top;
+  pen.real = true;
+  modeOut.textContent = 'Pointer tracking';
+}
+field.addEventListener('pointermove', onPoint);
+field.addEventListener('pointerdown', onPoint);
+function offPoint() {
+  pen.real = false;
+  modeOut.textContent = 'Auto demo';
+}
+field.addEventListener('pointerleave', offPoint);
+field.addEventListener('pointercancel', offPoint);
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    // 키보드 대체 — 판 중앙에 유령 한 다발을 밴다
+    for (var k = 0; k < 26; k++) {
+      var ang = (k / 26) * Math.PI * 2;
+      var rr = 8 + Math.random() * 30;
+      writeSlot(W / 2 + Math.cos(ang) * rr * 1.7, H / 2 + Math.sin(ang) * rr * 0.7);
+    }
+  }
+});
+window.addEventListener('resize', function () { fit(); draw(); });
+
+// 조작 실측용 — run/012/_probe/interact_b.py 가 살아 있는 참조를 읽는다
+window.__state = {
+  slots: slots, pen: pen,
+  snap: function () { return { trailK: trailK }; }
+};
+
+fit();
+pen.x = W * 0.5;
+pen.y = H * (0.5 + 0.3 * Math.sin(1.3));
+if (reduce) {
+  // reduce — 루프 없이 자동 경로를 90 slots 미리 걸어 두고 그 순간의 Trail 한 장을 그린다
+  root.classList.add('is-still');
+  for (var warm = 0; warm < N; warm++) {
+    clock = (warm + 1) / 60;
+    writeSlot(W * (0.5 + 0.36 * Math.sin(clock * 1.1)), H * (0.5 + 0.3 * Math.sin(clock * 2.3 + 1.3)));
+  }
+  pen.x = W * (0.5 + 0.36 * Math.sin((N / 60) * 1.1));
+  pen.y = H * (0.5 + 0.3 * Math.sin((N / 60) * 2.3 + 1.3));
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

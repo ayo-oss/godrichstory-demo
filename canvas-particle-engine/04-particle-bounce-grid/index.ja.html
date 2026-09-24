@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>벽과 이웃 파티클 튕김 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pb" id="pb">
+  <p class="pb__hint">
+    <svg class="pb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 48v160a16 16 0 0 1-16 16H48a16 16 0 0 1-16-16V48a16 16 0 0 1 16-16h160a16 16 0 0 1 16 16" opacity=".2"/><path d="M72 60a12 12 0 1 1-12-12a12 12 0 0 1 12 12m56-12a12 12 0 1 0 12 12a12 12 0 0 0-12-12m68 24a12 12 0 1 0-12-12a12 12 0 0 0 12 12M60 116a12 12 0 1 0 12 12a12 12 0 0 0-12-12m68 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12m68 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12M60 184a12 12 0 1 0 12 12a12 12 0 0 0-12-12m68 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12m68 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12"/></g></svg>
+    <span>ポインタを重ねると、粒がその周りへわずかに押し退けられます</span>
+  </p>
+  <div class="pb__field" id="field" role="application" aria-label="壁と隣接粒の実験台" tabindex="0">
+    <canvas class="pb__cv" id="cv"></canvas>
+    <b class="pb__live" aria-hidden="true"><span class="pb__liveNum" id="pairs">0</span><span class="pb__liveUnit">ペア/フレーム</span></b>
+  </div>
+  <div class="pb__bar">
+    <label class="pb__dial">速度
+      <input type="range" id="pace" min="0.5" max="2" step="0.25" value="1" aria-label="速度">
+      <b class="pb__val" id="paceVal">1.0倍</b>
+    </label>
+    <button class="pb__reset" id="reset" type="button">
+      <svg class="pb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>撒き直し</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 벽과 이웃 튕김 — 140개를 전부 견주면 9,730쌍이라 프레임이 무거워진다.
+// 공간을 칸으로 나눠 Map 에 "cx,cy" 문자열 열쇠로 묶고 이웃 칸만 견주는 공간 해시를 쓴다.
+// 枠 경계는 성능을 위한 것이니 화면에는 그리지 않는다 — 오른쪽 위 숫자가 줄인 쌍 수를 보여준다.
+var root = document.getElementById('pb');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var paceIn = document.getElementById('pace');
+var paceVal = document.getElementById('paceVal');
+var pairsOut = document.getElementById('pairs');
+var resetBtn = document.getElementById('reset');
+
+var N = 140;
+var CELL = 24;               // 枠 한 변 — 지름이 가장 큰 알갱이 둘을 더한 것보다 크면 놓치는 쌍이 없다
+var RP = 64;                 // 포인터로 미는 半径
+var COLS = ['#17141a', '#2f6df6', '#c2361a', '#2b9d74'];
+var OFF = [[1, 0], [-1, 1], [0, 1], [1, 1]];   // 오른쪽과 아래 반쪽만 — 왼쪽·위 짝은 상대가 챙긴다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var pool = new Array(N);
+var grid = new Map();
+var pace = 1;
+var pointX = 0, pointY = 0, pointOn = false;
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function scatter() {
+  for (var i = 0; i < N; i++) {
+    var ang = Math.random() * Math.PI * 2;
+    var sp = 40 + Math.random() * 90;
+    pool[i] = {
+      x: 12 + Math.random() * (W - 24),
+      y: 12 + Math.random() * (H - 24),
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp,
+      r: 2.6 + Math.random() * 2,
+      col: i % 4
+    };
+  }
+}
+
+// 枠 묶기 — 매 프레임 Map 을 비우고 다시 채운다. 열쇠는 "cx,cy" 문자열 하나
+function buildGrid() {
+  grid.clear();
+  for (var i = 0; i < N; i++) {
+    var p = pool[i];
+    p.cx = Math.floor(p.x / CELL);
+    p.cy = Math.floor(p.y / CELL);
+    var key = p.cx + ',' + p.cy;
+    var arr = grid.get(key);
+    if (!arr) {
+      arr = [];
+      grid.set(key, arr);
+    }
+    arr.push(i);
+  }
+}
+
+// 두 알갱이 충돌 — 겹침은 반씩 밀어내고, 충돌 방향 속도를 같은 질량끼리 맞바꾼다
+function hit(a, b) {
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var rr = a.r + b.r;
+  var d2 = dx * dx + dy * dy;
+  if (d2 >= rr * rr || d2 === 0) return;
+  var d = Math.sqrt(d2);
+  var nx = dx / d, ny = dy / d;
+  var push = (rr - d) / 2;
+  a.x -= nx * push; a.y -= ny * push;
+  b.x += nx * push; b.y += ny * push;
+  var rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+  if (rel < 0) {                        // 다가오는 중일 때만 — 헤어지는 쌍은 건드리지 않는다
+    var imp = rel * 0.97;               // (1 + 반발계수 0.94) / 2
+    a.vx += imp * nx; a.vy += imp * ny;
+    b.vx -= imp * nx; b.vy -= imp * ny;
+  }
+}
+
+function collideAll() {
+  var checked = 0;
+  for (var i = 0; i < N; i++) {
+    var a = pool[i];
+    var here = grid.get(a.cx + ',' + a.cy);
+    if (here) {
+      for (var k = 0; k < here.length; k++) {
+        var j = here[k];
+        if (j > i) {                    // 같은 枠 안에서는 번호가 큰 쪽만 한 번
+          checked++;
+          hit(a, pool[j]);
+        }
+      }
+    }
+    for (var o = 0; o < 4; o++) {
+      var near = grid.get((a.cx + OFF[o][0]) + ',' + (a.cy + OFF[o][1]));
+      if (!near) continue;
+      for (var k2 = 0; k2 < near.length; k2++) {
+        checked++;
+        hit(a, pool[near[k2]]);
+      }
+    }
+  }
+  return checked;
+}
+
+function step(dt) {
+  // 포인터 주변 밀어내기 — 손으로 헤치듯 半径 안의 알갱이를 민다
+  if (pointOn) {
+    for (var i = 0; i < N; i++) {
+      var p = pool[i];
+      var dx = p.x - pointX, dy = p.y - pointY;
+      var d2 = dx * dx + dy * dy;
+      if (d2 < RP * RP && d2 > 1) {
+        var d = Math.sqrt(d2);
+        var f = (1 - d / RP) * 900 * dt / d;
+        p.vx += dx * f;
+        p.vy += dy * f;
+      }
+    }
+  }
+  for (var m = 0; m < N; m++) {
+    var q = pool[m];
+    q.x += q.vx * pace * dt;
+    q.y += q.vy * pace * dt;
+  }
+  buildGrid();
+  var checked = collideAll();
+  for (var w = 0; w < N; w++) {
+    var g = pool[w];
+    if (g.x < g.r) { g.x = g.r; g.vx = Math.abs(g.vx) * 0.92; }
+    else if (g.x > W - g.r) { g.x = W - g.r; g.vx = -Math.abs(g.vx) * 0.92; }
+    if (g.y < g.r) { g.y = g.r; g.vy = Math.abs(g.vy) * 0.92; }
+    else if (g.y > H - g.r) { g.y = H - g.r; g.vy = -Math.abs(g.vy) * 0.92; }
+  }
+  // 속도 정리 — 최저를 두어 판이 죽지 않게, 최고를 두어 터지지 않게
+  for (var s = 0; s < N; s++) {
+    var v = pool[s];
+    var sp2 = v.vx * v.vx + v.vy * v.vy;
+    if (sp2 > 460 * 460) {
+      var down = 460 / Math.sqrt(sp2);
+      v.vx *= down; v.vy *= down;
+    } else if (sp2 < 34 * 34) {
+      if (sp2 < 0.01) {
+        var ka = Math.random() * Math.PI * 2;
+        v.vx = Math.cos(ka) * 34;
+        v.vy = Math.sin(ka) * 34;
+      } else {
+        var up = 34 / Math.sqrt(sp2);
+        v.vx *= up; v.vy *= up;
+      }
+    }
+  }
+  pairsOut.textContent = String(checked);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (var i = 0; i < N; i++) {
+    var p = pool[i];
+    ctx.fillStyle = COLS[p.col];
+    // 알갱이는 정사각형 — fillRect 로 찍는 게 그리기 비용이 가장 싸다
+    ctx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2);
+  }
+  // 미는 半径 링 — save 로 상태를 보관하고 translate 으로 원점을 옮겨 그린 뒤 restore 로 되돌린다
+  if (pointOn) {
+    ctx.save();
+    ctx.translate(pointX, pointY);
+    ctx.strokeStyle = 'rgba(23,20,26,.3)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 6]);
+    ctx.beginPath();
+    ctx.arc(0, 0, RP, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#2f6df6';
+    ctx.beginPath();
+    ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+var lastT = 0;
+function frame(now) {
+  var dt = lastT ? Math.min((now - lastT) / 1000, 0.05) : 0.016;
+  lastT = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function setPointer(e) {
+  var r = cv.getBoundingClientRect();
+  pointX = e.clientX - r.left;
+  pointY = e.clientY - r.top;
+}
+
+function restart() {
+  scatter();
+  if (reduce) draw();
+}
+
+paceIn.addEventListener('input', function () {
+  pace = Number(paceIn.value);
+  paceVal.textContent = pace.toFixed(1) + '倍';
+  if (reduce) draw();
+});
+resetBtn.addEventListener('click', restart);
+field.addEventListener('pointerenter', function (e) { setPointer(e); pointOn = true; });
+field.addEventListener('pointermove', function (e) { setPointer(e); pointOn = true; });
+field.addEventListener('pointerdown', function (e) { setPointer(e); pointOn = true; });
+field.addEventListener('pointerleave', function () { pointOn = false; });
+field.addEventListener('pointercancel', function () { pointOn = false; });
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    for (var i = 0; i < N; i++) {                 // 흔들기 — 전체에 한 번씩 충격을 준다
+      var ka = Math.random() * Math.PI * 2;
+      pool[i].vx += Math.cos(ka) * 150;
+      pool[i].vy += Math.sin(ka) * 150;
+    }
+    if (reduce) draw();
+  }
+});
+window.addEventListener('resize', function () {
+  fit();
+  for (var i = 0; i < N; i++) {
+    var p = pool[i];
+    if (p.x > W - p.r) p.x = W - p.r;
+    if (p.y > H - p.r) p.y = H - p.r;
+  }
+  draw();
+});
+
+fit();
+restart();
+if (reduce) {
+  // reduce — 루프를 돌리지 않는다. 튕김이 1.5秒 남짓 진행된 한 장만 남긴다.
+  for (var warm = 0; warm < 90; warm++) step(1 / 60);
+  root.classList.add('is-still');
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

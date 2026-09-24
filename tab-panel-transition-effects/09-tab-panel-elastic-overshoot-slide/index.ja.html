@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スプリング減衰で跳ねて止まる弾性スライドパネル — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="es is-demo" id="es">
+  <div class="es__tabs" role="tablist" aria-label="メニュータブ">
+    <button type="button" class="es__tab is-active" role="tab" id="es-tab-0" aria-selected="true" aria-controls="es-panel-0" data-idx="0">人気</button>
+    <button type="button" class="es__tab" role="tab" id="es-tab-1" aria-selected="false" aria-controls="es-panel-1" data-idx="1" tabindex="-1">新商品</button>
+    <button type="button" class="es__tab" role="tab" id="es-tab-2" aria-selected="false" aria-controls="es-panel-2" data-idx="2" tabindex="-1">割引</button>
+  </div>
+  <div class="es__viewport" id="esViewport">
+    <div class="es__track" id="esTrack">
+      <div class="es__panel" id="es-panel-0" role="tabpanel" aria-labelledby="es-tab-0" tabindex="0"><span class="es__num">128</span><p class="es__line">人気商品128種</p></div>
+      <div class="es__panel" id="es-panel-1" role="tabpanel" aria-labelledby="es-tab-1" tabindex="0"><span class="es__num">32</span><p class="es__line">今週の新商品32種</p></div>
+      <div class="es__panel" id="es-panel-2" role="tabpanel" aria-labelledby="es-tab-2" tabindex="0"><span class="es__num">54</span><p class="es__line">割引実施54種</p></div>
+    </div>
+  </div>
+  <p class="es__meta">超過分 <b id="esOver">0.0</b>px</p>
+</div>
+<script>
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var COUNT = 3;
+  var HOLD_MS = 900;
+  var STIFFNESS = 210; // 1/s^2 스케일 — 목표 지점으로 당기는 힘의 세기
+  var DAMPING = 20; // 계산 겹 상수: 스프링 감쇠 — 값이 작을수록 튕기는 폭이 커진다
+
+  var root = document.getElementById('es');
+  var viewport = document.getElementById('esViewport');
+  var track = document.getElementById('esTrack');
+  var overEl = document.getElementById('esOver');
+  var tabs = [0, 1, 2].map(function (i) { return document.getElementById('es-tab-' + i); });
+  var panels = [0, 1, 2].map(function (i) { return document.getElementById('es-panel-' + i); });
+
+  var isDemo = true;
+  var active = 0;
+  var pos = 0, vel = 0, target = 0;
+  var raf = 0, lastTs = 0;
+  var crossed = false, overshootPeak = 0, startErr = 0;
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function widths() {
+    var w = viewport.clientWidth;
+    panels.forEach(function (p) { p.style.width = w + 'px'; });
+    return w;
+  }
+
+  function settleInstant() {
+    var w = widths();
+    pos = -active * w;
+    target = pos;
+    track.style.transform = 'translateX(' + pos.toFixed(2) + 'px)';
+  }
+
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    var dt = Math.min(0.032, (ts - lastTs) / 1000);
+    lastTs = ts;
+    var err = target - pos;
+    if (!crossed && Math.sign(err) !== Math.sign(startErr) && startErr !== 0) crossed = true; // 계산 겹: 목표를 지나친 순간부터 超過分 추적 시작
+    if (crossed) overshootPeak = Math.max(overshootPeak, Math.abs(pos - target));
+    var force = err * STIFFNESS - vel * DAMPING; // 계산 겹: 스프링 힘 = 변위*강성 - 速度*감쇠
+    vel += force * dt;
+    pos += vel * dt;
+    track.style.transform = 'translateX(' + pos.toFixed(2) + 'px)';
+    overEl.textContent = overshootPeak.toFixed(1);
+    if (Math.abs(target - pos) < 0.4 && Math.abs(vel) < 2) {
+      pos = target; vel = 0; lastTs = 0;
+      track.style.transform = 'translateX(' + pos.toFixed(2) + 'px)';
+      raf = 0;
+      return;
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  function select(idx) {
+    if (idx === active) return;
+    var w = widths();
+    target = -idx * w;
+    startErr = target - pos;
+    crossed = false;
+    overshootPeak = 0;
+    overEl.textContent = '0.0';
+
+    tabs[active].classList.remove('is-active');
+    tabs[active].setAttribute('aria-selected', 'false');
+    tabs[active].setAttribute('tabindex', '-1');
+    tabs[idx].classList.add('is-active');
+    tabs[idx].setAttribute('aria-selected', 'true');
+    tabs[idx].setAttribute('tabindex', '0');
+    active = idx;
+
+    if (reduce) {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      pos = target; vel = 0;
+      track.style.transform = 'translateX(' + pos.toFixed(2) + 'px)';
+      return;
+    }
+    if (!raf) { lastTs = 0; raf = requestAnimationFrame(frame); }
+  }
+
+  settleInstant();
+
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { human(); select(i); });
+  });
+
+  root.addEventListener('keydown', function (e) {
+    var idx = tabs.indexOf(document.activeElement);
+    if (idx === -1) return;
+    var next = null;
+    if (e.key === 'ArrowRight') next = (idx + 1) % COUNT;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + COUNT) % COUNT;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = COUNT - 1;
+    if (next === null) return;
+    e.preventDefault();
+    human();
+    tabs[next].focus({ preventScroll: true });
+    select(next);
+  });
+
+  window.addEventListener('resize', function () {
+    if (!raf) settleInstant();
+  });
+
+  function loop() {
+    if (!isDemo) return;
+    select((active + 1) % COUNT);
+    window.setTimeout(loop, HOLD_MS);
+  }
+
+  if (!reduce) {
+    window.setTimeout(loop, HOLD_MS);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

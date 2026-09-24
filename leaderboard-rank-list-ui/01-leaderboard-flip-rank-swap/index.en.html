@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rows swap ranks by flipping over each other — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbf is-demo" id="lbf">
+  <ul class="lbf__list" id="lbfList" role="list"></ul>
+  <p class="lbf__sr" id="lbfSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_FLIP_DURATION_MS = 600;
+  var LEADERBOARD_FLIP_SWAP_MS = 460;
+  var LEADERBOARD_FLIP_HIGHLIGHT = "91,140,248";
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbf");
+  var list = document.getElementById("lbfList");
+  var sr = document.getElementById("lbfSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "NOVA_7", score: 980 },
+    { id: "p2", name: "ECHO_K", score: 940 },
+    { id: "p3", name: "RAPTOR9", score: 900 },
+    { id: "p4", name: "GLIDEX", score: 860 },
+    { id: "p5", name: "ZEN_44", score: 820 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function sortedPlayers() {
+    return players.slice().sort(function (a, b) { return b.score - a.score; });
+  }
+
+  function measureRects() {
+    var r = {};
+    players.forEach(function (p) { r[p.id] = nodes[p.id].li.getBoundingClientRect(); });
+    return r;
+  }
+
+  // 계산 겹: 이전 rect 와 재정렬 뒤 새 rect 의 차이를 translateY 오프셋으로 역보정(FLIP 의 Invert)한
+  // 다음 다음 프레임에 transform 을 0 으로 되돌려(Play) 두 행이 서로의 자리를 타고 넘듯 이동한다.
+  function flipSwap(before) {
+    var order = sortedPlayers();
+    order.forEach(function (p, i) {
+      list.appendChild(nodes[p.id].li);
+      nodes[p.id].rank.textContent = String(i + 1);
+      nodes[p.id].score.textContent = String(p.score);
+    });
+    if (reduce) return;
+    order.forEach(function (p) {
+      var li = nodes[p.id].li;
+      var after = li.getBoundingClientRect();
+      var dy = before[p.id].top - after.top;
+      if (Math.abs(dy) < 0.5) return;
+      animateFlipRow(nodes[p.id], dy);
+    });
+  }
+
+  // 계산 겹: 이동 진행률(hump = 0→1→0)을 그림자 크기·배경 톤에 실어 Web Animations API
+  // 키프레임으로 한 번에 재생한다 — CSS transition 대신 el.animate() 를 쓰는 이유는
+  // document.getAnimations() 로 잡혀야 demo.py 가 애니메이션 시계를 프레임마다 정확히
+  // 놓아 결정론적으로 캡처하기 때문이다(수동 rAF 폴링은 실시간이라 매 실행마다 흔들린다).
+  // 뒤늦게 같은 행이 다시 트리거되면 이전 재생을 취소하고 새 애니메이션으로 넘어간다.
+  function animateFlipRow(node, dy) {
+    var li = node.li;
+    if (node.anim) node.anim.cancel();
+    var baseShadow = "0 2px 10px rgba(10,16,32,0)";
+    var peakShadow = "0 " + (2 + 12).toFixed(1) + "px " + (10 + 20).toFixed(1) + "px rgba(10,16,32,.28)";
+    var baseBg = "rgba(" + LEADERBOARD_FLIP_HIGHLIGHT + ",0.08)";
+    var peakBg = "rgba(" + LEADERBOARD_FLIP_HIGHLIGHT + ",0.32)";
+    node.anim = li.animate([
+      { transform: "translateY(" + dy + "px)", boxShadow: baseShadow, background: baseBg, offset: 0 },
+      { boxShadow: peakShadow, background: peakBg, offset: 0.5 },
+      { transform: "translateY(0px)", boxShadow: baseShadow, background: baseBg, offset: 1 }
+    ], { duration: LEADERBOARD_FLIP_DURATION_MS, easing: "cubic-bezier(.2,.8,.2,1)", fill: "forwards" });
+    node.anim.onfinish = function () {
+      li.style.transform = "";
+      li.style.boxShadow = "";
+      li.style.background = "";
+    };
+  }
+
+  function bump(id) {
+    var before = measureRects();
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    var oldRank = sortedPlayers().indexOf(p);
+    p.score += 40 + Math.floor(rand() * 60);
+    flipSwap(before);
+    var newRank = sortedPlayers().indexOf(p);
+    if (newRank < oldRank) sr.textContent = p.name + " moved up to rank " + (newRank + 1) + " now";
+  }
+
+  // 한 틱에 서로 다른 두 참가자를 동시에 밀어올려 여러 행이 한 번에 FLIP 하게 한다.
+  function bumpMany() {
+    var before = measureRects();
+    var pool = players.slice();
+    var picks = [];
+    for (var n = 0; n < 2 && pool.length; n++) {
+      var i = Math.floor(rand() * pool.length);
+      picks.push(pool.splice(i, 1)[0]);
+    }
+    picks.forEach(function (p) { p.score += 35 + Math.floor(rand() * 55); });
+    flipSwap(before);
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbf__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var rank = document.createElement("span");
+    rank.className = "lbf__rank";
+    var name = document.createElement("span");
+    name.className = "lbf__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbf__score";
+
+    li.appendChild(rank);
+    li.appendChild(name);
+    li.appendChild(score);
+
+    nodes[p.id] = { li: li, rank: rank, score: score };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+  });
+
+  sortedPlayers().forEach(function (p, i) {
+    list.appendChild(nodes[p.id].li);
+    nodes[p.id].rank.textContent = String(i + 1);
+    nodes[p.id].score.textContent = String(p.score);
+  });
+
+  if (!reduce) {
+    (function loop() {
+      if (root.classList.contains("is-demo")) {
+        bumpMany();
+      }
+      window.setTimeout(loop, LEADERBOARD_FLIP_SWAP_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

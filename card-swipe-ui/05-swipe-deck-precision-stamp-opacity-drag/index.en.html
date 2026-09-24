@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Like/dislike stamps that darken on a nonlinear curve — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="so is-demo" id="so">
+  <p class="so__caption">Like/dislike stamps that darken on a nonlinear curve</p>
+  <div class="so__scene" id="soScene">
+    <div class="so__card" id="soCard" tabindex="0" role="group" aria-roledescription="Swipe card">
+      <span class="so__stamp so__stamp--like" id="soLike" aria-hidden="true">LIKE</span>
+      <span class="so__stamp so__stamp--nope" id="soNope" aria-hidden="true">NOPE</span>
+      <p class="so__label" id="soLabel">Travel notes</p>
+    </div>
+    <button class="so__btn so__btn--nope" id="soBtnNope" type="button" aria-label="Dislike">✕</button>
+    <button class="so__btn so__btn--like" id="soBtnLike" type="button" aria-label="Like">♥</button>
+  </div>
+  <p class="so__status" id="soStatus" aria-live="polite">Waiting</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 값 하나: 드래그 거리를 STAMP_OPACITY_CURVE_POWER 승으로 매핑해 도장이 선형이 아니라
+  // 중심 근처에선 느리게, 임계 근처에선 급하게 진해진다.
+  var STAMP_OPACITY_CURVE_POWER = 2.4;
+  var STAMP_RANGE_PX = 150;
+  var RELEASE_VELOCITY_MIN = 0.38;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("so");
+  var card = document.getElementById("soCard");
+  var label = document.getElementById("soLabel");
+  var like = document.getElementById("soLike");
+  var nope = document.getElementById("soNope");
+  var status = document.getElementById("soStatus");
+  var btnLike = document.getElementById("soBtnLike");
+  var btnNope = document.getElementById("soBtnNope");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["Travel notes", "Morning routine", "Evening walk", "Weekend café", "Home workout log", "Reading list"];
+  var rand = seedRand(64);
+  var idx = Math.floor(rand() * CARDS.length);
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vx = 0;
+  var x = 0, phase = "idle", exitDir = 1;
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  // 비선형 매핑: ratio^POWER — 중심 근처는 낮게 눌려 있다가 끝에서 급격히 1 로 치솟는다.
+  function stampOpacity(px) {
+    var ratio = clamp(Math.abs(px) / STAMP_RANGE_PX, 0, 1);
+    return Math.pow(ratio, STAMP_OPACITY_CURVE_POWER);
+  }
+
+  function render() {
+    var rot = clamp(x * 0.07, -18, 18);
+    card.style.transform = "translateX(" + x.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
+    var op = stampOpacity(x);
+    like.style.opacity = x > 0 ? op.toFixed(3) : "0";
+    nope.style.opacity = x < 0 ? op.toFixed(3) : "0";
+  }
+
+  function nextCard() {
+    idx += 1; setCard();
+    x = 0; vx = 0; phase = "idle";
+    render();
+    status.textContent = "Waiting";
+  }
+
+  function judge(velocity, dir) {
+    root.classList.remove("is-demo");
+    var flung = Math.abs(velocity) >= RELEASE_VELOCITY_MIN;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; nextCard(); }
+      else { x = 0; render(); status.textContent = "Snapped back to center"; phase = "idle"; }
+      return;
+    }
+    if (flung) { phase = "exit"; exitDir = dir; status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; }
+    else { phase = "settle"; status.textContent = "Snapped back to center"; }
+  }
+
+  function startDrag(clientX) {
+    root.classList.remove("is-demo");
+    dragging = true; phase = "idle";
+    startX = clientX; lastX = clientX; lastT = performance.now(); vx = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vx = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    x = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vx, x >= 0 ? 1 : -1);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function keyVerdict(dir) {
+    root.classList.remove("is-demo");
+    x = dir * 60; render();
+    judge(dir * (RELEASE_VELOCITY_MIN + 0.3), dir);
+  }
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { e.preventDefault(); keyVerdict(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); keyVerdict(-1); }
+  });
+  btnLike.addEventListener("click", function () { keyVerdict(1); });
+  btnNope.addEventListener("click", function () { keyVerdict(-1); });
+
+  function step(dt) {
+    if (phase === "exit") {
+      x += exitDir * Math.max(Math.abs(vx), RELEASE_VELOCITY_MIN * 1.4) * dt;
+      render();
+      if (Math.abs(x) > EXIT_PX) nextCard();
+    } else if (phase === "settle") {
+      x += (0 - x) * 0.22;
+      render();
+      if (Math.abs(x) < 0.4) { x = 0; phase = "idle"; render(); }
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 pointer 없이 x·judge() 를 같은 경로로 호출한다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.4 && t < 0.7 && synthPhase === "wait") synthPhase = "peekLike";
+    if (synthPhase === "peekLike") {
+      var p = clamp((t - 0.4) / 0.3, 0, 1);
+      x = p * 90; render();
+      if (t >= 0.7) { synthPhase = "afterPeek"; judge(0.1, 1); }
+    }
+    if (t > 1.25 && t < 1.55 && synthPhase === "afterPeek") synthPhase = "commit";
+    if (synthPhase === "commit") {
+      var q = clamp((t - 1.25) / 0.3, 0, 1);
+      x = -q * 150; render();
+      if (t >= 1.55) { synthPhase = "done"; judge(-(RELEASE_VELOCITY_MIN + 0.4), -1); }
+    }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

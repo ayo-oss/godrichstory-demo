@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>保存失敗の再試行回数 — 保存が失敗するたびに残り再試行回数の値が1つ減り、文言が揺れる方式 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ser is-demo" id="ser">
+  <div class="ser__card">
+    <span class="ser__label" id="serLabel">保存失敗</span>
+    <span class="ser__count" id="serCount">残り再試行 3</span>
+  </div>
+  <button class="ser__btn" id="serBtn" type="button">再保存</button>
+</div>
+<script>
+(function () {
+  var root = document.getElementById('ser');
+  var btn = document.getElementById('serBtn');
+  var card = root.querySelector('.ser__card');
+  var label = document.getElementById('serLabel');
+  var countEl = document.getElementById('serCount');
+
+  // 상수: 최대 재시도 횟수 · 흔들림 진폭 · 흔들림 지속시간 · 재시도 사이 待機 배증 기준(가속 ms)
+  var MAX_RETRY = 3;
+  var AMP = 5;
+  var SHAKE_MS = 260;
+  var BACKOFF_BASE_MS = 260;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var retries = MAX_RETRY;
+  var timer = null;
+
+  // 계산 겹: 흔들림 = 감쇠 사인(sin(t·2π·3)×(1−t)), 待機 = BACKOFF_BASE_MS×2^(실패 순번)
+  function shake(cb) {
+    if (reduce) { cb(); return; }
+    var start = null;
+    function frame(ts) {
+      if (start === null) start = ts;
+      var t = Math.min(1, (ts - start) / SHAKE_MS);
+      var x = AMP * Math.sin(t * Math.PI * 2 * 3) * (1 - t);
+      card.style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+      if (t < 1) requestAnimationFrame(frame); else { card.style.transform = 'translateX(0)'; cb(); }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function fail() {
+    retries -= 1;
+    label.textContent = '保存失敗';
+    root.classList.add('ser--fail');
+    shake(function () {
+      if (retries > 0) {
+        countEl.textContent = '残り再試行 ' + retries;
+        var wait = BACKOFF_BASE_MS * Math.pow(2, MAX_RETRY - retries - 1);
+        timer = setTimeout(fail, wait);
+      } else {
+        countEl.textContent = '再試行を使い切りました';
+        root.classList.add('ser--out');
+        timer = setTimeout(reset, 900);
+      }
+    });
+  }
+
+  function reset() {
+    retries = MAX_RETRY;
+    label.textContent = '保存失敗';
+    countEl.textContent = '残り再試行 ' + retries;
+    root.classList.remove('ser--out');
+    root.classList.remove('ser--fail');
+    timer = setTimeout(fail, BACKOFF_BASE_MS);
+  }
+  timer = setTimeout(fail, BACKOFF_BASE_MS);
+
+  btn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    if (timer) clearTimeout(timer);
+    reset();
+  });
+})();
+</script>
+</main>
+</body>
+</html>

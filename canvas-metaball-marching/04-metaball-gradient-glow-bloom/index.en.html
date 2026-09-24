@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>빛 번짐 — 글로우 블룸 메타볼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>Read the field value as brightness everywhere, above or below threshold, and layer it with lighter — the balls glow brighter inside as they approach, then burst into a flare at the moment of merging</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Glow-Bloom test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">balls <b class="cd__val" id="cdN">6</b>count · light multiplier <b class="cd__val">2.6</b></span>
+    <span class="cd__meta cd__meta--dim">canvas · createRadialGradient · lighter</span>
+  </div>
+</div>
+</main>
+<script>
+// 빛 번짐 글로우 블룸(04). 메타볼 필드 r²/(r²+d²) 을 임계값으로 자르지 않고 명도에 그대로 대응시킨다.
+// createRadialGradient 정지점마다 falloff 값에서 색·알파를 계산해 넣고 globalCompositeOperation="lighter"
+// 로 겹치면 필드가 더해지는 셈이라 볼이 다가올수록 내부가 밝아진다. 두 볼이 합체 직전이 되면 사이 중점에
+// 플레어(코어·민트 확산 + 핑크 고리)가 터진다. 어두운 무대 안개·먼지가 배경도 느리게 숨쉬게 한다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N_BALLS = 7;    // balls 수
+  var GLOW    = 3.0;  // 광원 배율 — 시각 광원 반경이 balls 반경의 몇 배인지
+  var FLARE   = 1.0;  // 합체 플레어 강도
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 흐름으로 시작한다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x317A04);
+
+  // 색은 CSS 커스텀 프로퍼티(--glow-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--glow-ink');
+  var C_DUSK = tokRGB('--glow-dusk');
+  var C_CORE = tokRGB('--glow-core');
+  var C_LILA = tokRGB('--glow-lilac');
+  var C_MINT = tokRGB('--glow-mint');
+  var C_PINK = tokRGB('--glow-pink');
+  var C_MIST = tokRGB('--glow-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+
+  var balls = [], fogs = [], specks = [];
+
+  function build() {
+    balls = [];
+    var cols = 3, rows = 2;
+    for (var i = 0; i < N_BALLS; i++) {
+      var gx = ((i % cols) + 0.5) / cols, gy = (Math.floor(i / cols) + 0.5) / rows;
+      var ang = rand() * TAU, spd = 15 + rand() * 19;
+      balls.push({
+        x: gx * W, y: gy * H,
+        r: 17 + rand() * 14,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+        ph: rand() * TAU,
+        k: 0
+      });
+    }
+    fogs = [];
+    for (var f = 0; f < 4; f++) {
+      fogs.push({ x: rand() * W, y: rand() * H, R: 130 + rand() * 90, vx: (rand() - 0.5) * 14, ph: rand() * TAU });
+    }
+    specks = [];
+    for (var s = 0; s < 24; s++) {
+      specks.push({ rx: rand(), ry: rand() * 0.85, ph: rand() * TAU, spd: 0.8 + rand() * 1.6 });
+    }
+  }
+
+  // 메타볼 필드 — u = d/r 로 balls 때 r²/(r²+d²) = 1/(1+u²). 임계값 없이 전 구간을 쓴다
+  function falloff(u) {
+    var q = u * GLOW;
+    return 1 / (1 + q * q);
+  }
+
+  // 주변 볼과의 접근도(0..1) — 가까워질수록 내부가 밝아진다
+  function heat(b) {
+    var s = 0;
+    for (var j = 0; j < balls.length; j++) {
+      var o = balls[j];
+      if (o === b) continue;
+      var d = Math.hypot(o.x - b.x, o.y - b.y);
+      var lim = (o.r + b.r) * 1.5;
+      if (d < lim) s += 1 - d / lim;
+    }
+    return Math.min(1, s);
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function mix(c1, c2, k) {
+    return [c1[0] + (c2[0] - c1[0]) * k, c1[1] + (c2[1] - c1[1]) * k, c1[2] + (c2[2] - c1[2]) * k];
+  }
+
+  function update(t, dt) {
+    var m = 24;
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      // 배회 — 속도 방향을 천천히 휘게 한다(관성은 유지)
+      var ang = Math.atan2(b.vy, b.vx) + Math.sin(t * 0.6 + b.ph) * dt * 1.2;
+      var spd = Math.min(34, Math.hypot(b.vx, b.vy) + dt * 4);
+      b.vx = Math.cos(ang) * spd; b.vy = Math.sin(ang) * spd;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < m) { b.x = m; b.vx = Math.abs(b.vx); }
+      if (b.x > W - m) { b.x = W - m; b.vx = -Math.abs(b.vx); }
+      if (b.y < m) { b.y = m; b.vy = Math.abs(b.vy); }
+      if (b.y > H - m) { b.y = H - m; b.vy = -Math.abs(b.vy); }
+      b.k += (heat(b) - b.k) * Math.min(1, dt * 5);
+    }
+    for (var f = 0; f < fogs.length; f++) {
+      var fg = fogs[f];
+      fg.x += fg.vx * dt;
+      if (fg.x < -fg.R) fg.x = W + fg.R;
+      if (fg.x > W + fg.R) fg.x = -fg.R;
+    }
+  }
+
+  function draw(t) {
+    // 무대 — 잉크
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = rgba(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+
+    // 안개 — 낮은 알파의 큰 방사가 배경도 느리게 바꾼다
+    for (var f = 0; f < fogs.length; f++) {
+      var fg = fogs[f];
+      var fy = fg.y + Math.sin(t * 0.22 + fg.ph) * 16;
+      var g = ctx.createRadialGradient(fg.x, fy, 0, fg.x, fy, fg.R);
+      g.addColorStop(0, rgba(C_DUSK, 0.2));
+      g.addColorStop(1, rgba(C_DUSK, 0));
+      ctx.fillStyle = g;
+      ctx.fillRect(fg.x - fg.R, fy - fg.R, fg.R * 2, fg.R * 2);
+    }
+
+    // 발광 balls — 필드 falloff 를 명도(알파·색)로 그대로 얹는다
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var R = b.r * GLOW;
+      var g2 = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
+      for (var s = 0; s <= 4; s++) {
+        var u = s / 4;
+        var fv = falloff(u);
+        var a = Math.min(1, Math.pow(fv, 1.35) * (1 - u * u) * (0.8 + 0.28 * b.k));
+        var c = fv > 0.5 ? mix(C_LILA, C_CORE, (fv - 0.5) / 0.5) : mix(C_DUSK, C_LILA, fv / 0.5);
+        g2.addColorStop(u, rgba(c, a));
+      }
+      ctx.fillStyle = g2;
+      ctx.fillRect(b.x - R, b.y - R, R * 2, R * 2);
+    }
+
+    // 플레어 — 합체 직전 두 balls 사이에서 터지는 빛
+    for (var p = 0; p < balls.length; p++) {
+      for (var q = p + 1; q < balls.length; q++) {
+        var a1 = balls[p], b1 = balls[q];
+        var d = Math.hypot(a1.x - b1.x, a1.y - b1.y);
+        var lim = (a1.r + b1.r) * 1.6;
+        if (d >= lim) continue;
+        var e = 1 - d / lim;
+        e = e * e;
+        var mx = (a1.x + b1.x) / 2, my = (a1.y + b1.y) / 2;
+        var pulse = 0.72 + 0.28 * Math.sin(t * 8 + p * 2.1);
+        var fr = 20 + d * 0.55 + 42 * e;
+        var g3 = ctx.createRadialGradient(mx, my, 0, mx, my, fr);
+        g3.addColorStop(0, rgba(C_CORE, 0.5 * e * pulse * FLARE + 0.04 * e));
+        g3.addColorStop(0.45, rgba(C_MINT, 0.26 * e * pulse));
+        g3.addColorStop(1, rgba(C_PINK, 0));
+        ctx.fillStyle = g3;
+        ctx.fillRect(mx - fr, my - fr, fr * 2, fr * 2);
+        ctx.beginPath();
+        ctx.arc(mx, my, 10 + 26 * e, 0, TAU);
+        ctx.strokeStyle = rgba(C_PINK, 0.34 * e * pulse);
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+
+    // 밤 먼지 — 깜빡이는 스펙
+    for (var s2 = 0; s2 < specks.length; s2++) {
+      var sp = specks[s2];
+      var al = 0.05 + 0.26 * (0.5 + 0.5 * Math.sin(t * sp.spd + sp.ph));
+      ctx.fillStyle = rgba(C_MIST, al);
+      ctx.fillRect(sp.rx * W, sp.ry * H, 1.5, 1.5);
+    }
+
+    // 비네트 — 시선을 중앙으로
+    ctx.globalCompositeOperation = 'source-over';
+    var vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.72);
+    vg.addColorStop(0, rgba(C_INK, 0));
+    vg.addColorStop(1, rgba(C_INK, 0.42));
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+  }
+
+  function stillFrame() {
+    build();
+    balls[0].x = W * 0.44; balls[0].y = H * 0.5;
+    balls[1].x = W * 0.56; balls[1].y = H * 0.52;
+    for (var i = 0; i < balls.length; i++) balls[i].k = heat(balls[i]);
+    draw(0.4);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    update(t, dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); build();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  build();
+  nOut.textContent = String(N_BALLS);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

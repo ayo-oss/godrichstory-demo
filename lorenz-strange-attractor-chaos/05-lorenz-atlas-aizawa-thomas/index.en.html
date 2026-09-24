@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아이자와·토머스 — 로렌츠 어트랙터 카오스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lz is-demo" id="lzRoot">
+  <p class="lz__hint">
+    <span>Swap a handful of coefficients and other differential equations draw Aizawa wrapping a sphere and Thomas spinning thread</span>
+  </p>
+  <div class="lz__field" role="application" aria-label="Aizawa and Thomas playground" tabindex="0">
+    <canvas class="lz__cv" id="lzCv"></canvas>
+  </div>
+  <div class="lz__bar">
+    <span class="lz__meta">left Aizawa · right Thomas · RK4</span>
+    <span class="lz__meta lz__meta--dim">canvas · depth shading · 2s cycle</span>
+  </div>
+</div>
+</main>
+<script>
+// 아이자와·토머스(05) — 로렌츠가 아닌 어트랙터 두 개를 나란히 보여준다.
+// 아이자와(구면): dx = (z−b)x − d·y, dy = d·x + (z−b)y, dz = c + a·z − z³/3 − (x²+y²)(1+e·z) + f·z·x³
+// 토머스(나선):   dx = sin(y) − b·x, dy = sin(z) − b·y, dz = sin(x) − b·z
+// 두 계통 모두 RK4 로 적분하고, 관찰축을 천천히 돌려 입체 형태를 보여준다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var DT     = 0.02;    // RK4 걸음
+  var STEPS  = 1800;    // 각 판의 사전 적분 걸음 수
+  var SPIN_S = 2.0;     // 궤적 드러나기 주기(초) — 설정 초(2s)와 같다
+  var SPIN_L = 12.0;    // 관찰축 회전 주기(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('lzRoot');
+  var cvEl = document.getElementById('lzCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var CA     = tokRGB('--lz-ca');   // 아이자와 — 라일락 화이트
+  var CT     = tokRGB('--lz-ct');   // 토머스 — 민트 크림
+  var HEAD   = tokRGB('--lz-head'); // 머리 — 크림(토큰)
+  var PANEL  = tokRGB('--lz-panel');
+  function rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+
+  // 아이자와 계수 — a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1 의 대표 형태
+  function dAizawa(x, y, z) {
+    var a = 0.95, b = 0.7, c = 0.6, d = 3.5, e = 0.25, f = 0.1;
+    return [
+      (z - b) * x - d * y,
+      d * x + (z - b) * y,
+      c + a * z - z * z * z / 3 - (x * x + y * y) * (1 + e * z) + f * z * x * x * x
+    ];
+  }
+  // 토머스 계수 b=0.19 — 주기적으로 겹는 나선
+  function dThomas(x, y, z) {
+    var b = 0.19;
+    return [Math.sin(y) - b * x, Math.sin(z) - b * y, Math.sin(x) - b * z];
+  }
+  function rk4(p, f) {
+    var k1 = f(p[0], p[1], p[2]);
+    var k2 = f(p[0] + k1[0] * DT / 2, p[1] + k1[1] * DT / 2, p[2] + k1[2] * DT / 2);
+    var k3 = f(p[0] + k2[0] * DT / 2, p[1] + k2[1] * DT / 2, p[2] + k2[2] * DT / 2);
+    var k4 = f(p[0] + k3[0] * DT, p[1] + k3[1] * DT, p[2] + k3[2] * DT);
+    return [
+      p[0] + DT / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]),
+      p[1] + DT / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]),
+      p[2] + DT / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
+    ];
+  }
+
+  // 사전 적분 — 아이자와는 구 중심 근처, 토머스는 원점에서
+  var azX = new Float32Array(STEPS), azY = new Float32Array(STEPS), azZ = new Float32Array(STEPS);
+  var thX = new Float32Array(STEPS), thY = new Float32Array(STEPS), thZ = new Float32Array(STEPS);
+  var pa = [0.1, 0, 0], pt = [1.1, 1.2, -0.6], i;
+  for (i = 0; i < 100; i++) { pa = rk4(pa, dAizawa); pt = rk4(pt, dThomas); }
+  for (i = 0; i < STEPS; i++) {
+    azX[i] = pa[0]; azY[i] = pa[1]; azZ[i] = pa[2]; pa = rk4(pa, dAizawa);
+    thX[i] = pt[0]; thY[i] = pt[1]; thZ[i] = pt[2]; pt = rk4(pt, dThomas);
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0;
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.font = '600 10px -apple-system, "Segoe UI", sans-serif';
+  }
+
+  var REVEAL_END = 0.82;
+  // 한 판 그리기 — xz 투영 + y 깊이 음영. xz: x 가로, z 세로, y 를 사선 성분으로
+  function drawPane(X, Y, Z, cx, cy, s, col, n, fade, tilt) {
+    if (n < 2) return;
+    var i2, hx, hy;
+    // 뒤네루게
+    ctx.strokeStyle = rgba(col, 0.12 * fade);
+    ctx.lineWidth = 3.0;
+    ctx.beginPath();
+    hx = cx + (X[0] + Y[0] * tilt) * s; hy = cy - Z[0] * s;
+    ctx.moveTo(hx, hy);
+    for (i2 = 1; i2 < n; i2++) ctx.lineTo(cx + (X[i2] + Y[i2] * tilt) * s, cy - Z[i2] * s);
+    ctx.stroke();
+    // 알맹이 — 걸음 진행에 따라 밝아지는 램프
+    var ramp = Math.max(0.10, 0.5 * (1 - n / STEPS) + 0.15);
+    ctx.strokeStyle = rgba(col, ramp * fade);
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx + (X[0] + Y[0] * tilt) * s, cy - Z[0] * s);
+    for (i2 = 1; i2 < n; i2++) ctx.lineTo(cx + (X[i2] + Y[i2] * tilt) * s, cy - Z[i2] * s);
+    ctx.stroke();
+    // 머리
+    hx = cx + (X[n - 1] + Y[n - 1] * tilt) * s; hy = cy - Z[n - 1] * s;
+    ctx.fillStyle = rgba(HEAD, 0.22 * fade);
+    ctx.beginPath(); ctx.arc(hx, hy, 5, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = rgba(HEAD, fade);
+    ctx.beginPath(); ctx.arc(hx, hy, 2, 0, 6.2832); ctx.fill();
+  }
+
+  function draw(phase, tSec) {
+    ctx.fillStyle = rgba(PANEL, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var upto = Math.min(1, phase / REVEAL_END);
+    var n = Math.floor(upto * STEPS);
+    var fade = phase > REVEAL_END ? Math.max(0, 1 - (phase - REVEAL_END) / (1 - REVEAL_END)) : 1;
+    // 관찰축 회전 — 사선 성분 tilt 를 진동시킨다
+    var tilt = Math.sin(tSec / SPIN_L * 6.2832) * 0.5;
+
+    var mid = W / 2;
+    ctx.strokeStyle = rgba(CA, 0.14);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(mid, 0); ctx.lineTo(mid, H); ctx.stroke();
+
+    drawPane(azX, azY, azZ, mid * 0.52, H * 0.52, Math.min(W / 46, H / 42) * 0.6, CA, n, fade, tilt);
+    drawPane(thX, thY, thZ, mid * 1.48, H * 0.5, Math.min(W / 46, H / 42) * 0.5, CT, n, fade, tilt);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = rgba(CA, 0.9 * fade + 0.1);
+    ctx.fillText('AIZAWA', mid * 0.52, H - 6);
+    ctx.fillStyle = rgba(CT, 0.9 * fade + 0.1);
+    ctx.fillText('THOMAS', mid * 1.48, H - 6);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var tSec = (now - t0) / 1000;
+    draw((tSec % SPIN_S) / SPIN_S, tSec);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.62, 0.4);
+  });
+  fit();
+  if (reduce) {
+    draw(0.62, 0.4);
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Page Flip Whose Shadow Is Calculated Along the Fold Line — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">A Page Flip Whose Shadow Is Calculated Along the Fold Line</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var BOOK_L = 96, BOOK_T = 26, BOOK_R = 244, BOOK_B = 176;
+  var FOLD_X = BOOK_L;
+  var SCENE_BG = '#17141a';
+  var BACK_PAGE = '#e7dcc2';
+  var FRONT_PAGE = '#fff7e6';
+  var FRONT_PAGE_BACK = '#caa96b';
+  var LINE_COLOR = 'rgba(23,20,26,.28)';
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(41302);
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  function drawLines(x, y, w, h, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    for (var i = 0; i < 5; i += 1) {
+      var ly = y + h * (0.18 + i * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(x + w * 0.08, ly);
+      ctx.lineTo(x + w * (0.92 - (i % 2) * 0.18), ly);
+      ctx.stroke();
+    }
+  }
+
+  var FLIP_MS = 900;
+  var angle = 0;
+  function flipAngle(tMs) {
+    var p = (tMs % FLIP_MS) / FLIP_MS;                // 0→1, 2.2회/2초
+    var w = p < 0.5 ? p * 2 : (1 - p) * 2;             // 삼각파
+    return w * Math.PI;
+  }
+
+  function pageFlip() {
+    var w = BOOK_R - BOOK_L, h = BOOK_B - BOOK_T;
+    ctx.fillStyle = BACK_PAGE;
+    ctx.fillRect(BOOK_L, BOOK_T, w, h);
+    drawLines(BOOK_L, BOOK_T, w, h, LINE_COLOR);
+
+    var c = Math.cos(angle);
+    var frontFacing = c >= 0;
+    var scaleW = Math.max(0.001, Math.abs(c)) * w;
+    ctx.save();
+    ctx.translate(FOLD_X, 0);
+    ctx.scale(c === 0 ? 0.001 : c, 1);
+    ctx.fillStyle = frontFacing ? FRONT_PAGE : FRONT_PAGE_BACK;
+    ctx.fillRect(0, BOOK_T, w, h);
+    if (frontFacing) drawLines(6, BOOK_T, w - 12, h, LINE_COLOR);
+    ctx.restore();
+
+    var shadowW = 6 + Math.abs(Math.sin(angle)) * 46;
+    var shadowA = 0.08 + Math.abs(Math.sin(angle)) * 0.34;
+    var gx = FOLD_X + scaleW * (frontFacing ? 1 : -1);
+    var dir = frontFacing ? -1 : 1;
+    var g = ctx.createLinearGradient(gx, 0, gx + shadowW * dir, 0);
+    g.addColorStop(0, 'rgba(0,0,0,' + shadowA + ')');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(Math.min(gx, gx + shadowW * dir), BOOK_T, shadowW, h);
+  }
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    ctx.fillRect(BOOK_L - 6, BOOK_B + 3, BOOK_R - BOOK_L + 14, 6);
+    ctx.strokeStyle = 'rgba(255,247,230,.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(FOLD_X, BOOK_T - 4); ctx.lineTo(FOLD_X, BOOK_B + 4); ctx.stroke();
+    pageFlip();
+  }
+
+  function update(dt, tMs) {
+    if (reduce) return;
+    angle = flipAngle(tMs);
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) {
+    root.classList.remove('is-demo');
+    angle = Math.PI / 2;
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

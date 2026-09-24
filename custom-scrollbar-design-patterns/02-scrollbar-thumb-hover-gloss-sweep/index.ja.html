@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カーソルが乗ると光沢が通り過ぎるつまみ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sb is-demo" id="sb">
+  <div class="sb__viewport" id="sbViewport">
+    <div class="sb__content" id="sbContent"></div>
+  </div>
+  <div class="sb__track" id="sbTrack">
+    <div class="sb__thumb" id="sbThumb" role="scrollbar" aria-orientation="vertical" aria-controls="sbViewport" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" tabindex="0">
+      <span class="sb__thumbGloss" id="sbGloss"></span>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var THUMB_MIN_PX = 26;
+  var KEY_STEP_PX = 32;
+  var GLOSS_SWEEP_MS = 520;
+
+  var root = document.getElementById('sb');
+  var viewport = document.getElementById('sbViewport');
+  var content = document.getElementById('sbContent');
+  var track = document.getElementById('sbTrack');
+  var thumb = document.getElementById('sbThumb');
+  var gloss = document.getElementById('sbGloss');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  for (var i = 1; i <= 8; i++) {
+    var card = document.createElement('div');
+    card.className = 'sb__card';
+    var h = document.createElement('p');
+    h.className = 'sb__cardTitle';
+    h.textContent = 'メニュー ' + i;
+    var p = document.createElement('p');
+    p.className = 'sb__cardLine';
+    p.textContent = 'ポインターがつまみに乗ると、光沢位置の値が一度移動します。';
+    card.appendChild(h);
+    card.appendChild(p);
+    content.appendChild(card);
+  }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function maxScroll() { return Math.max(0, viewport.scrollHeight - viewport.clientHeight); }
+
+  function syncThumb() {
+    var trackLen = track.clientHeight;
+    var total = viewport.scrollHeight;
+    var visible = viewport.clientHeight;
+    var thumbLen = clamp(trackLen * (visible / total), THUMB_MIN_PX, trackLen);
+    var ms = maxScroll();
+    var ratio = ms > 0 ? viewport.scrollTop / ms : 0;
+    var thumbPos = (trackLen - thumbLen) * ratio;
+    thumb.style.height = thumbLen.toFixed(1) + 'px';
+    thumb.style.transform = 'translateY(' + thumbPos.toFixed(1) + 'px)';
+    thumb.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+  }
+
+  var sweeping = false;
+  function triggerGloss() {
+    if (reduce) return;
+    if (sweeping) return;
+    sweeping = true;
+    gloss.classList.add('is-sweeping');
+  }
+  gloss.addEventListener('animationend', function () {
+    gloss.classList.remove('is-sweeping');
+    sweeping = false;
+  });
+
+  viewport.addEventListener('scroll', syncThumb);
+
+  var dragging = false;
+  var dragStartY = 0;
+  var dragStartScroll = 0;
+
+  thumb.addEventListener('pointerenter', function () { triggerGloss(); });
+  thumb.addEventListener('focus', function () { triggerGloss(); });
+
+  thumb.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    root.classList.remove('is-demo');
+    dragStartY = e.clientY;
+    dragStartScroll = viewport.scrollTop;
+    thumb.setPointerCapture(e.pointerId);
+  });
+  thumb.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var trackLen = track.clientHeight;
+    var thumbLen = thumb.clientHeight;
+    var deltaPx = e.clientY - dragStartY;
+    var moveRange = Math.max(1, trackLen - thumbLen);
+    viewport.scrollTop = clamp(dragStartScroll + deltaPx * (maxScroll() / moveRange), 0, maxScroll());
+  });
+  thumb.addEventListener('pointerup', function () { dragging = false; });
+  thumb.addEventListener('pointercancel', function () { dragging = false; });
+
+  track.addEventListener('pointerdown', function (e) {
+    if (e.target !== track) return;
+    root.classList.remove('is-demo');
+    var rect = track.getBoundingClientRect();
+    var trackLen = track.clientHeight;
+    var thumbLen = thumb.clientHeight;
+    var clickPos = clamp(e.clientY - rect.top - thumbLen / 2, 0, trackLen - thumbLen);
+    var ratio = (trackLen - thumbLen) > 0 ? clickPos / (trackLen - thumbLen) : 0;
+    viewport.scrollTop = ratio * maxScroll();
+  });
+
+  thumb.addEventListener('keydown', function (e) {
+    var ms = maxScroll();
+    if (e.key === 'ArrowDown') { viewport.scrollTop = clamp(viewport.scrollTop + KEY_STEP_PX, 0, ms); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { viewport.scrollTop = clamp(viewport.scrollTop - KEY_STEP_PX, 0, ms); e.preventDefault(); }
+    else if (e.key === 'PageDown') { viewport.scrollTop = clamp(viewport.scrollTop + viewport.clientHeight, 0, ms); e.preventDefault(); }
+    else if (e.key === 'PageUp') { viewport.scrollTop = clamp(viewport.scrollTop - viewport.clientHeight, 0, ms); e.preventDefault(); }
+    else if (e.key === 'Home') { viewport.scrollTop = 0; e.preventDefault(); }
+    else if (e.key === 'End') { viewport.scrollTop = ms; e.preventDefault(); }
+    if (e.key.indexOf('Arrow') === 0 || e.key === 'PageDown' || e.key === 'PageUp' || e.key === 'Home' || e.key === 'End') {
+      root.classList.remove('is-demo');
+    }
+  });
+
+  var startTime = null;
+  var lastSweepAt = -10;
+  function demoTick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000;
+    if (root.classList.contains('is-demo')) {
+      var phase = (Math.sin(t * Math.PI) + 1) / 2;
+      viewport.scrollTop = phase * maxScroll();
+      if (t - lastSweepAt >= 0.85) { triggerGloss(); lastSweepAt = t; }
+    }
+    requestAnimationFrame(demoTick);
+  }
+
+  syncThumb();
+  if (!reduce) { requestAnimationFrame(demoTick); }
+})();
+</script>
+</body>
+</html>

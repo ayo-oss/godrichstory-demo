@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>고스트 프리뷰 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gp">
+  <p class="gp__hint">프레임 사이 x 이동량을 각도로 환산해 잔상이 기울어집니다</p>
+  <ul class="gp__list" id="gpList">
+    <li class="gp__row" data-id="0"><span class="gp__txt">메시지</span></li>
+    <li class="gp__row" data-id="1"><span class="gp__txt">사진</span></li>
+    <li class="gp__row" data-id="2"><span class="gp__txt">메모</span></li>
+    <li class="gp__row" data-id="3"><span class="gp__txt">음악</span></li>
+  </ul>
+  <p class="gp__meta"><b class="gp__state" id="gpState">angle 0°</b></p>
+</div>
+</main>
+<script>
+// 고스트 프리뷰(08) — pointermove 의 프레임 간 x 이동량(dx)을 기울기 목표값으로 바꾸고,
+// 매 rAF 마다 현재 각도를 목표로 lerp 시켜 든 카드에 transform: rotate 로 남긴다.
+// 이동을 멈추거나 놓으면 목표가 0으로 떨어져 흔들림이 자연히 가라앉는다.
+(function () {
+  var list = document.getElementById('gpList');
+  var stateEl = document.getElementById('gpState');
+  if (!list || !stateEl) return;
+
+  var LERP = 0.25;
+  var K = 2.4;       // dx(px/frame) → 각도(deg) 배율
+  var MAX_ANGLE = 18;
+
+  var drag = null; // { row, offsetInRow, lastX, angle, target, raf }
+
+  function rowsExcept(row) {
+    return Array.prototype.slice.call(list.children).filter(function (r) { return r !== row; });
+  }
+
+  function flipInsert(row, target) {
+    var siblings = rowsExcept(row);
+    var first = siblings.map(function (s) { return s.getBoundingClientRect(); });
+    list.insertBefore(row, target);
+    siblings.forEach(function (s, i) {
+      var r = s.getBoundingClientRect();
+      var dy = first[i].top - r.top;
+      if (dy !== 0) {
+        s.style.transition = 'none';
+        s.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(function () {
+          s.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+          s.style.transform = 'translateY(0)';
+        });
+      }
+    });
+  }
+
+  function reflow(row, pointerY) {
+    var siblings = rowsExcept(row);
+    var target = null;
+    for (var i = 0; i < siblings.length; i++) {
+      var r = siblings[i].getBoundingClientRect();
+      if (pointerY < r.top + r.height / 2) { target = siblings[i]; break; }
+    }
+    if (target === row.nextElementSibling) return;
+    if (target === null && row === list.lastElementChild) return;
+    flipInsert(row, target);
+  }
+
+  function tick() {
+    if (!drag) return;
+    drag.angle += (drag.target - drag.angle) * LERP;
+    drag.row.style.setProperty('--rot', drag.angle.toFixed(2) + 'deg');
+    stateEl.textContent = 'angle ' + Math.round(drag.angle) + '°';
+    drag.target *= 0.82; // 매 프레임 목표를 줄여 이동이 멈추면 0으로 가라앉는다
+    drag.raf = requestAnimationFrame(tick);
+  }
+
+  function beginDrag(row, clientX, clientY) {
+    var r = row.getBoundingClientRect();
+    row.classList.add('gp__row--drag');
+    drag = { row: row, offsetInRow: clientY - r.top, lastX: clientX, angle: 0, target: 0, raf: null };
+    drag.raf = requestAnimationFrame(tick);
+  }
+
+  function moveDrag(clientX, clientY) {
+    if (!drag) return;
+    var listRect = list.getBoundingClientRect();
+    var ty = clientY - drag.offsetInRow - listRect.top - drag.row.offsetTop;
+    drag.row.style.setProperty('--ty', ty.toFixed(1) + 'px');
+    var dx = clientX - drag.lastX;
+    drag.lastX = clientX;
+    var t = dx * K;
+    if (t > MAX_ANGLE) t = MAX_ANGLE;
+    if (t < -MAX_ANGLE) t = -MAX_ANGLE;
+    drag.target = t;
+    reflow(drag.row, clientY);
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    var row = drag.row;
+    if (drag.raf) cancelAnimationFrame(drag.raf);
+    drag = null;
+    row.classList.remove('gp__row--drag');
+    row.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+    row.style.setProperty('--ty', '0px');
+    row.style.setProperty('--rot', '0deg');
+    setTimeout(function () { row.style.transition = ''; }, 240);
+    stateEl.textContent = 'angle 0°';
+  }
+
+  function onDown(e) {
+    var row = e.target.closest('.gp__row');
+    if (!row) return;
+    stop();
+    row.setPointerCapture(e.pointerId);
+    beginDrag(row, e.clientX, e.clientY);
+  }
+  function onMove(e) { moveDrag(e.clientX, e.clientY); }
+  function onUp() { endDrag(); }
+
+  list.addEventListener('pointerdown', onDown);
+  list.addEventListener('pointermove', onMove);
+  list.addEventListener('pointerup', onUp);
+  list.addEventListener('pointercancel', onUp);
+
+  // 자동 시연 — 같은 함수를 합성 좌표로 호출해 좌우로 흔들며 기울기가 오간다
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function loopOnce() {
+    var row = list.children[1];
+    var r = row.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    beginDrag(row, cx, cy);
+    moveDrag(cx + 46, cy + 4);
+    setTimeout(function () { if (drag) moveDrag(cx - 40, cy + 34); }, 180);
+    setTimeout(function () { if (drag) moveDrag(cx + 30, cy + 60); }, 360);
+    setTimeout(function () { if (drag) moveDrag(cx, cy + 84); }, 540);
+    setTimeout(function () { endDrag(); }, 860);
+  }
+
+  if (reduce) {
+    // 정지 상태 그대로 — 연출 없음
+  } else {
+    loopOnce();
+    setInterval(function () { if (playing) loopOnce(); }, 1700);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loader a Button Icon Sparkles When the Done Value Flips — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld" id="ld">
+  <p class="ld__hint">
+    <svg class="ld__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 56v56a8 8 0 0 1-16 0V91.3l-25.6 25.7A80 80 0 1 1 174 60a8 8 0 1 1-9 13.2A64 64 0 1 0 179.7 128H216a8 8 0 0 1 0 16h-56a8 8 0 0 1-8-8V80a8 8 0 0 1 16 0v20.7L192.7 76A80.1 80.1 0 0 0 64 128a8 8 0 0 1-16 0a96 96 0 0 1 163.6-68.3L224 71.3V56a8 8 0 0 1 8 8" opacity=".2"/><path d="M224 48a8 8 0 0 0-8 8v15.3l-11.7-11.6a96 96 0 1 0 27.6 51.6a8 8 0 0 0-15.8 2.5a80 80 0 1 1-23-43l-25.7 25.7A8 8 0 0 0 173 112h56a8 8 0 0 0 8-8V56a8 8 0 0 0-13-8"/></g></svg>
+    <span>Click or press the space bar to pause or restart</span>
+  </p>
+  <div class="ld__field" id="field" role="application" aria-label="Button icon sparkle-morph test panel" tabindex="0">
+    <button class="ld__btn" type="button" tabindex="-1">
+      <svg class="ld__btnIco" id="btnIco" viewBox="-46 -46 92 92" aria-hidden="true">
+        <path id="path"></path>
+      </svg>
+    </button>
+    <b class="ld__badge" aria-hidden="true"><span class="ld__badgeNum" id="pct">Processing</span></b>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var LOOP = 2.0;
+  var FLIP_AT = LOOP * 0.5;     // Done 값이 뒤집히는 시각
+  var MORPH_MS = 0.32;          // path 값 보간 시간
+  var ROT_SPEED = 220;          // 스피너 회전 속도(도/초)
+  var R_RING = 26, R_OUT = 40, R_IN = 13;
+
+  var root = document.getElementById('ld');
+  var field = document.getElementById('field');
+  var path = document.getElementById('path');
+  var pctEl = document.getElementById('pct');
+  var paused = false;
+  var t0 = performance.now();
+  var raf = 0;
+  var DONE = false;             // Done 값(초기)
+
+  function reduced() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function pt(ang, r) { return [r * Math.cos(ang), r * Math.sin(ang)]; }
+
+  function buildPath(radii, angOffset) {
+    var d = '';
+    for (var i = 0; i < 8; i++) {
+      var ang = angOffset + i * Math.PI / 4;
+      var p = pt(ang, radii[i]);
+      d += (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2) + ' ';
+    }
+    return d + 'Z';
+  }
+
+  function draw(sec) {
+    var t = sec % LOOP;
+    var localFlip = t - FLIP_AT;
+
+    if (localFlip >= 0) { DONE = true; } else { DONE = false; }
+
+    var morphT = DONE ? smooth(clamp01(localFlip / MORPH_MS)) : 0;
+    var radii = [];
+    for (var i = 0; i < 8; i++) {
+      var spinnerR = R_RING;
+      var sparkleR = (i % 2 === 0) ? R_OUT : R_IN;
+      radii[i] = spinnerR + (sparkleR - spinnerR) * morphT;
+    }
+    var angleOffset = (sec * ROT_SPEED) % 360 * Math.PI / 180;
+    var rot = DONE ? angleOffset * 0.12 : angleOffset;
+    path.setAttribute('d', buildPath(radii, rot));
+
+    var pulse = 1;
+    if (DONE && localFlip < 0.5) {
+      pulse = 1 + 0.22 * Math.sin(clamp01(localFlip / 0.5) * Math.PI);
+    }
+    path.setAttribute('transform', 'scale(' + pulse.toFixed(3) + ')');
+    path.setAttribute('fill', DONE ? 'var(--done)' : 'var(--spin)');
+
+    pctEl.textContent = DONE ? 'Done' : 'Processing';
+  }
+
+  function togglePause() { paused = !paused; root.classList.toggle('is-paused', paused); }
+  function restart() { t0 = performance.now(); draw(0); }
+  function onKey(e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePause(); }
+    else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+  }
+  field.addEventListener('click', togglePause);
+  field.addEventListener('keydown', onKey);
+
+  function onResize() {
+    if (paused || reduced()) draw((performance.now() - t0) / 1000);
+  }
+  window.addEventListener('resize', onResize);
+
+  function frame(now) {
+    if (!paused) draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  if (reduced()) {
+    root.classList.add('is-still');
+    draw(LOOP * 0.62);
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

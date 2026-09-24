@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card that springs back in for a refill once you've swiped through them all — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="er is-demo" id="er">
+  <p class="er__caption">Card that springs back in for a refill once you've swiped through them all</p>
+  <div class="er__scene" id="erScene">
+    <div class="er__empty" id="erEmpty" hidden>
+      <p class="er__empty-text">You've seen today's cards</p>
+      <button class="er__refill" id="erRefill" type="button">Refill</button>
+    </div>
+    <div class="er__card" id="erCard" tabindex="0" role="group" aria-roledescription="Swipe card">
+      <p class="er__label" id="erLabel">Evening walk</p>
+    </div>
+    <button class="er__btn er__btn--nope" id="erNope" type="button" aria-label="Dislike">✕</button>
+    <button class="er__btn er__btn--like" id="erLike" type="button" aria-label="Like">♥</button>
+  </div>
+  <p class="er__status" id="erStatus" aria-live="polite">Waiting</p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 값 하나: 카드를 REFILL_COUNT 장 다 넘기면 빈 상태가 뜨고, 다시 채우면 스프링(강성·감쇠)을
+  // scale 에 적분해 오버슛하며 튀어 들어온다.
+  var REFILL_COUNT = 3;
+  var REFILL_SPRING_STIFFNESS = 160;
+  var REFILL_SPRING_DAMPING = 12;
+  var RELEASE_VELOCITY_MIN = 0.38;
+  var EXIT_PX = 320;
+  var CYCLE_S = 2;
+
+  var root = document.getElementById("er");
+  var card = document.getElementById("erCard");
+  var label = document.getElementById("erLabel");
+  var empty = document.getElementById("erEmpty");
+  var refillBtn = document.getElementById("erRefill");
+  var status = document.getElementById("erStatus");
+  var btnLike = document.getElementById("erLike");
+  var btnNope = document.getElementById("erNope");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var CARDS = ["Evening walk", "Weekend café", "Home workout log", "Reading list", "Travel notes", "Morning routine"];
+  var rand = seedRand(101);
+  var idx = Math.floor(rand() * CARDS.length);
+  var swiped = 0;
+
+  var dragging = false;
+  var startX = 0, lastX = 0, lastT = 0, vx = 0;
+  var x = 0, phase = "idle", exitDir = 1;
+  var scale = 1, scaleVel = 0;
+
+  function setCard() { label.textContent = CARDS[idx % CARDS.length]; }
+  setCard();
+
+  function render() {
+    var rot = clamp(x * 0.08, -20, 20);
+    card.style.transform = "translateX(" + x.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg) scale(" + scale.toFixed(3) + ")";
+  }
+
+  function showEmpty() {
+    card.hidden = true;
+    empty.hidden = false;
+    status.textContent = "You've gone through every card — try Refill";
+  }
+
+  function refill() {
+    root.classList.remove("is-demo");
+    empty.hidden = true;
+    card.hidden = false;
+    swiped = 0;
+    idx += 1; setCard();
+    x = 0; vx = 0;
+    if (reduce) { scale = 1; scaleVel = 0; render(); phase = "idle"; status.textContent = "Refilled"; return; }
+    scale = 0.2; scaleVel = 0;
+    phase = "refill";
+    status.textContent = "Springing back in with overshoot";
+  }
+  refillBtn.addEventListener("click", refill);
+
+  function nextCard() {
+    swiped += 1;
+    idx += 1; setCard();
+    x = 0; vx = 0; scale = 1; phase = "idle";
+    render();
+    status.textContent = "Waiting";
+    if (swiped >= REFILL_COUNT) showEmpty();
+  }
+
+  function judge(velocity, dir) {
+    root.classList.remove("is-demo");
+    var flung = Math.abs(velocity) >= RELEASE_VELOCITY_MIN;
+    if (reduce) {
+      if (flung) { status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; nextCard(); }
+      else { x = 0; render(); status.textContent = "Snapped back to center"; phase = "idle"; }
+      return;
+    }
+    if (flung) { phase = "exit"; exitDir = dir; status.textContent = dir > 0 ? "Marked as liked" : "Marked as disliked"; }
+    else { phase = "settle"; status.textContent = "Snapped back to center"; }
+  }
+
+  function startDrag(clientX) {
+    if (card.hidden) return;
+    root.classList.remove("is-demo");
+    dragging = true; phase = "idle";
+    startX = clientX; lastX = clientX; lastT = performance.now(); vx = 0;
+  }
+  function moveDrag(clientX) {
+    if (!dragging) return;
+    var now = performance.now();
+    var dt = Math.max(now - lastT, 1);
+    vx = (clientX - lastX) / dt;
+    lastX = clientX; lastT = now;
+    x = clientX - startX;
+    render();
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    judge(vx, x >= 0 ? 1 : -1);
+  }
+
+  card.addEventListener("pointerdown", function (e) { card.setPointerCapture(e.pointerId); startDrag(e.clientX); });
+  card.addEventListener("pointermove", function (e) { moveDrag(e.clientX); });
+  card.addEventListener("pointerup", endDrag);
+  card.addEventListener("pointercancel", endDrag);
+
+  function keyVerdict(dir) {
+    if (card.hidden) return;
+    root.classList.remove("is-demo");
+    x = dir * 60; render();
+    judge(dir * (RELEASE_VELOCITY_MIN + 0.3), dir);
+  }
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { e.preventDefault(); keyVerdict(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); keyVerdict(-1); }
+  });
+  btnLike.addEventListener("click", function () { keyVerdict(1); });
+  btnNope.addEventListener("click", function () { keyVerdict(-1); });
+
+  // 스프링 방정식을 scale 에 적분한다 — 목표(1)를 넘겼다가(오버슛) 되돌아와 정착한다.
+  function integrateScale(dt) {
+    var accel = REFILL_SPRING_STIFFNESS * (1 - scale) - REFILL_SPRING_DAMPING * scaleVel;
+    scaleVel += accel * dt;
+    scale += scaleVel * dt;
+    if (Math.abs(1 - scale) < 0.004 && Math.abs(scaleVel) < 0.02) { scale = 1; scaleVel = 0; phase = "idle"; }
+  }
+
+  function step(dt) {
+    var dtS = Math.min(dt / 1000, 0.032);
+    if (phase === "exit") {
+      x += exitDir * Math.max(Math.abs(vx), RELEASE_VELOCITY_MIN * 1.4) * dt;
+      render();
+      if (Math.abs(x) > EXIT_PX) nextCard();
+    } else if (phase === "settle") {
+      x += (0 - x) * 0.22;
+      render();
+      if (Math.abs(x) < 0.4) { x = 0; phase = "idle"; render(); }
+    } else if (phase === "refill") {
+      integrateScale(dtS);
+      render();
+    }
+  }
+
+  // .is-demo 자동 시연: 실제 클릭 없이 judge()·refill() 을 같은 경로로 호출해 상태를 두 번 바꾼다.
+  var start = null, lastNow = 0, prevT = 0, synthPhase = "wait";
+  function synth(t) {
+    if (t > 0.35 && t < 0.65 && synthPhase === "wait") synthPhase = "swipeOut";
+    if (synthPhase === "swipeOut") {
+      var p = clamp((t - 0.35) / 0.3, 0, 1);
+      x = p * 140; render();
+      if (t >= 0.65) {
+        synthPhase = "afterSwipe";
+        swiped = REFILL_COUNT - 1;
+        judge(RELEASE_VELOCITY_MIN + 0.4, 1);
+      }
+    }
+    if (t > 1.25 && synthPhase === "afterSwipe" && !empty.hidden) { refill(); synthPhase = "done"; }
+  }
+
+  function loop(now) {
+    if (start === null) { start = now; lastNow = now; lastT = now; }
+    var dt = Math.min(now - lastNow, 48);
+    lastNow = now;
+    var t = ((now - start) / 1000) % CYCLE_S;
+    if (t < prevT) synthPhase = "wait";
+    prevT = t;
+    if (!reduce && root.classList.contains("is-demo")) synth(t);
+    if (!reduce) step(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

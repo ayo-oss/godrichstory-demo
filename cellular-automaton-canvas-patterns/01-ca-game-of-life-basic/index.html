@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>이웃 수 값으로 생사가 갈리는 기본 격자 오토마타 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="생명 게임 진행 중 — 클릭하거나 스페이스바로 정지, R 로 재시드">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">클릭·스페이스바로 정지, R 로 재시드</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(셀룰러 오토마타 로더 — 진행률 채움)와 다른 축: 여기선 규칙·세대·격자 자체가 주인공이지 진행률 표시가 아니다.
+  // 매 세대 이웃 수 값을 세어 살아있는 칸 전체를 다시 계산하고 fillRect 로 그린다 — 속성 트윈 없음.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const CELL = 10, COLS = W / CELL, ROWS = H / CELL;
+  const INK = '#17141a';
+  const ALIVE_COLOR = '#93a4ca';
+  let SEED = 71301;
+  let rnd = makeLcg(SEED);
+
+  const SURVIVE_MIN = 2; // 변형 01 대상 — 생존에 필요한 최소 이웃 수
+  const SURVIVE_MAX = 3;
+  const BIRTH_COUNT = 3; // 죽은 칸이 태어나는 데 필요한 이웃 수
+
+  let grid = new Uint8Array(COLS * ROWS);
+  let next = new Uint8Array(COLS * ROWS);
+  let generation = 0;
+
+  function idx(x, y){ return y * COLS + x; }
+
+  function seedGrid(){
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        grid[idx(x, y)] = rnd() < 0.32 ? 1 : 0;
+      }
+    }
+    generation = 0;
+  }
+
+  function neighborCount(x, y){
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dx = -1; dx <= 1; dx++){
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+        n += grid[idx(nx, ny)];
+      }
+    }
+    return n;
+  }
+
+  function step(){
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        const alive = grid[idx(x, y)] === 1;
+        const n = neighborCount(x, y);
+        let willLive = 0;
+        if (alive){
+          willLive = (n >= SURVIVE_MIN && n <= SURVIVE_MAX) ? 1 : 0;
+        } else {
+          willLive = (n === BIRTH_COUNT) ? 1 : 0;
+        }
+        next[idx(x, y)] = willLive;
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+    generation++;
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function render(){
+    ctx.fillStyle = INK;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = ALIVE_COLOR;
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 1, CELL - 1);
+        }
+      }
+    }
+  }
+
+  const ARIA_PLAY = '생명 게임 진행 중 — 클릭하거나 스페이스바로 정지, R 로 재시드';
+  const ARIA_PAUSE = '생명 게임 정지됨 — 클릭하거나 스페이스바로 재생, R 로 재시드';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', paused ? ARIA_PAUSE : ARIA_PLAY);
+  }
+
+  let paused = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){ rootEl.classList.remove('is-demo'); }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    seedGrid();
+  }
+
+  function togglePause(){
+    paused = !paused;
+    updateAria();
+  }
+
+  function onActivate(e){
+    if (e.type === 'keydown'){
+      if (e.key === 'r' || e.key === 'R'){
+        human();
+        reseed();
+        render();
+        return;
+      }
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      togglePause();
+    }
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R' || e.key === 'Enter' || e.key === ' '){
+      onActivate(e);
+    }
+  }
+
+  const GEN_INTERVAL_MS = 85;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('click', onActivate);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  seedGrid();
+  updateAria();
+  render();
+  if (reduceMQ.matches){
+    // 정지 세대 1장 — 입력 직후 render() 를 즉시 1회 더 부른다 (rAF 루프 없이)
+  } else {
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

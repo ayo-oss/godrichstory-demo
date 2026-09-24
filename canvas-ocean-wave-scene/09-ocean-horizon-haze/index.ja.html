@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>水平線 안개 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hh" id="hh">
+  <p class="hh__hint">
+    <svg class="hh__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M16 120c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".25"/><path d="M16 168c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".15"/><path d="M228.92 49.09a112 112 0 1 0 14 84.91a8 8 0 0 0-15.5-4a96 96 0 1 1-12-72.91A8 8 0 0 1 216 71.63V40a8 8 0 0 1-8-8h-31.63a8 8 0 0 1-5.65-13.09ZM64 104a12 12 0 1 1 12 12a12 12 0 0 1-12-12m40 64a12 12 0 1 1 12 12a12 12 0 0 1-12-12m72-16a16 16 0 1 1 16 16a16 16 0 0 1-16-16" opacity=".9"/></g></svg>
+    <span>水平線から遠いほど水色を空色に混ぜ振幅も抑えて空気遠近法を作ります — マウスで水平線を上下に動かせます</span>
+  </p>
+  <div class="hh__field" id="field" role="application" aria-label="水平線のかすみお試しパネル" tabindex="0">
+    <canvas class="hh__cv" id="cv"></canvas>
+    <b class="hh__badge" aria-hidden="true"><span class="hh__badgeNum" id="horizonVal">水平線 34%</span><span class="hh__badgeUnit" id="windVal">風 1.0</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 水平線 안개 — 01 과 같은 뿌리(정현파 6개 mulberry32(7))의 파도장에 두 겹을 얹는다.
+// ① 원근 감쇠 — 수평선에 가까운 행일수록 공간 주파수를 높이고(잦은 잔물결) 진폭을 낮춰
+//   "멀리 있는 파도는 잘게 부서져 보인다"는 원근 압축을 흉내낸다.
+// ② 안개 블렌드(공기원근) — 픽셀의 수평선까지 남은 거리에 비례해 물색을 하늘색과 섞는다.
+//   가까울수록(화면 아래) 안개가 거의 없고, 수평선에 닿으면 거의 하늘색 한 가지로 뭉갠다.
+// 水平線 위쪽은 하늘(고정 그라디언트 두 톤), 水平線 자체는 포인터로 위아래 이동한다.
+var root = document.getElementById('hh');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var horizonVal = document.getElementById('horizonVal');
+var windVal = document.getElementById('windVal');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var CREST = [v('--crest'), v('--crest-2')];   // 마루 — 민트 계열
+var TROUGH = [v('--trough'), v('--trough-2')]; // 골 — 파랑 계열
+var SKY = [v('--sky'), v('--sky-2')];          // 하늘 — 위 옅은 라일락 → 水平線 쪽 밝은 하늘
+
+var COLS = 110;   // 파도장 가로 칸 수(01 과 동일)
+var STEP = 3;     // 격자 한 칸이 렌더 버퍼에서 차지하는 픽셀
+var NW = 6;       // 겹칠 정현파 개수(공통 물리)
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    var u = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((u ^ (u >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var rng = mulberry32(7);
+
+var WAVES = [];
+(function () {
+  var lam = 34;
+  for (var i = 0; i < NW; i++) {
+    var ang = rng() * Math.PI * 2;
+    WAVES.push({
+      lam: lam,
+      freq: (Math.PI * 2) / lam,
+      dirX: Math.cos(ang), dirY: Math.sin(ang),
+      amp: 0.58 / (i * 0.62 + 1),
+      spd: 0.55 + rng() * 0.25,
+      ph: rng() * Math.PI * 2
+    });
+    lam *= 0.55;
+  }
+})();
+for (var w = 0; w < NW; w++) {
+  WAVES[w].om = WAVES[w].spd * 3.6 * Math.sqrt(1 / WAVES[w].lam) * 6;
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, ROWS = 0;
+var hgt = null;                           // 파도장 높이(원근 압축 반영)
+var buf = null, bctx = null, out = null;
+var RW = 0, RH = 0;
+var raf = 0, auto = true, nowSec = 0;
+var wind = 1.0, windT = 1.0;
+var windAng = 0.5, windAngT = 0.5;
+var horizon = 0.34, horizonT = 0.34;      // 水平線 위치(판 세로 비율, 0=위 1=아래)
+var lastPX = -1, lastPY = -1, lastPT = 0;
+
+function hex2rgb(s) {
+  var pm = /^\s*rgb\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)\s*$/.exec(s);
+  if (pm) return [Math.round(pm[1] * 2.55), Math.round(pm[2] * 2.55), Math.round(pm[3] * 2.55)];
+  s = s.replace('#', '');
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+  var n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+var C0 = hex2rgb(CREST[0]), C1 = hex2rgb(CREST[1]);
+var T0 = hex2rgb(TROUGH[0]), T1 = hex2rgb(TROUGH[1]);
+var SK0 = hex2rgb(SKY[0]), SK1 = hex2rgb(SKY[1]);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROWS = Math.max(40, Math.round(COLS * H / W));
+  var n = COLS * ROWS;
+  hgt = new Float32Array(n);
+  RW = COLS * STEP; RH = ROWS * STEP;
+  buf = document.createElement('canvas');
+  buf.width = RW; buf.height = RH;
+  bctx = buf.getContext('2d');
+  out = bctx.createImageData(RW, RH);
+}
+
+// 파도장 — 행마다 "수평선까지 남은 거리"로 원근 압축을 건다.
+// horizonRow 보다 위(작은 y)는 바다가 아니라 하늘이므로 계산을 건너뛴다.
+// dist = 1(맨 아래·가장 가까움) .. 0(水平線 바로 아래·가장 멂)
+// 공간 주파수는 (1 + (1-dist)*2.4)배로 빨라지고, 진폭은 (0.15 + dist*0.85)배로 준다.
+function fieldcalc(t, wstr, wang, horizonRow) {
+  var i = 0;
+  for (var y = 0; y < ROWS; y++) {
+    if (y < horizonRow) { i += COLS; continue; }
+    var dist = ROWS > horizonRow ? (y - horizonRow) / (ROWS - horizonRow) : 1;
+    if (dist > 1) dist = 1; else if (dist < 0) dist = 0;
+    var freqMul = 1 + (1 - dist) * 2.4;
+    var ampMul = 0.15 + dist * 0.85;
+    for (var x = 0; x < COLS; x++, i++) {
+      var h = 0;
+      for (var w2 = 0; w2 < NW; w2++) {
+        var WV = WAVES[w2];
+        var da = wang * 0.5;
+        var dx = WV.dirX * Math.cos(da) - WV.dirY * Math.sin(da);
+        var dy = WV.dirX * Math.sin(da) + WV.dirY * Math.cos(da);
+        var ph = (x * dx + y * dy) * WV.freq * 0.62 * freqMul + t * WV.om + WV.ph;
+        h += WV.amp * wstr * ampMul * Math.sin(ph);
+      }
+      hgt[i] = h;
+    }
+  }
+}
+
+// 렌더 — 水平線 위는 하늘 그라디언트, 아래는 파도 색 램프 뒤 거리 기반 안개(하늘색 블렌드)를 얹는다.
+// 안개 강도 fog = (1-dist)^1.6 — 水平線 바로 아래가 거의 하늘색, 화면 아래는 안개가 거의 없다.
+function render(horizonRow) {
+  var o = out.data;
+  for (var y = 0; y < ROWS; y++) {
+    var row = y * COLS;
+    if (y < horizonRow) {
+      // 하늘 — 위(짙은 라일락)에서 水平線(밝은 하늘)으로 램프
+      var sk = horizonRow > 0 ? y / horizonRow : 0;
+      var sr = SK0[0] + (SK1[0] - SK0[0]) * sk;
+      var sg = SK0[1] + (SK1[1] - SK0[1]) * sk;
+      var sb = SK0[2] + (SK1[2] - SK0[2]) * sk;
+      for (var x2 = 0; x2 < COLS; x2++) {
+        for (var sy2 = 0; sy2 < STEP; sy2++) {
+          var base2 = ((y * STEP + sy2) * RW + x2 * STEP) * 4;
+          for (var sx2 = 0; sx2 < STEP; sx2++, base2 += 4) {
+            o[base2] = sr; o[base2 + 1] = sg; o[base2 + 2] = sb; o[base2 + 3] = 255;
+          }
+        }
+      }
+      continue;
+    }
+    var dist = ROWS > horizonRow ? (y - horizonRow) / (ROWS - horizonRow) : 1;
+    if (dist > 1) dist = 1; else if (dist < 0) dist = 0;
+    var fog = Math.pow(1 - dist, 1.6);
+    for (var x = 0; x < COLS; x++) {
+      var i = row + x;
+      var h = hgt[i];
+      var u = h * 1.24 + 0.5;
+      if (u < 0) u = 0; else if (u > 1) u = 1;
+      var r, g, b;
+      if (u > 0.5) {
+        var k = (u - 0.5) * 2;
+        r = C1[0] + (C0[0] - C1[0]) * k;
+        g = C1[1] + (C0[1] - C1[1]) * k;
+        b = C1[2] + (C0[2] - C1[2]) * k;
+      } else {
+        var k2 = u * 2;
+        r = T0[0] + (T1[0] - T0[0]) * k2;
+        g = T0[1] + (T1[1] - T0[1]) * k2;
+        b = T0[2] + (T1[2] - T0[2]) * k2;
+      }
+      // 안개 — 水平線 색(SK1, 하늘의 水平線 쪽 톤)과 섞는다
+      r += (SK1[0] - r) * fog;
+      g += (SK1[1] - g) * fog;
+      b += (SK1[2] - b) * fog;
+      for (var sy = 0; sy < STEP; sy++) {
+        var base = ((y * STEP + sy) * RW + x * STEP) * 4;
+        for (var sx = 0; sx < STEP; sx++, base += 4) {
+          o[base] = r;
+          o[base + 1] = g;
+          o[base + 2] = b;
+          o[base + 3] = 255;
+        }
+      }
+    }
+  }
+  bctx.putImageData(out, 0, 0);
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+
+function frame(now) {
+  nowSec = now / 1000;
+  if (auto) {
+    var th = nowSec * 0.31;
+    windT = 1.05 + Math.sin(th * 0.9 + 0.4) * 0.55 + Math.sin(th * 2.3) * 0.12;
+    windAngT = 0.5 + Math.sin(th * 0.42) * 0.85;
+    horizonT = 0.34 + Math.sin(th * 0.22) * 0.14;   // 수평선도 천천히 오르내려 화면이 산다
+  }
+  wind += (windT - wind) * 0.05;
+  windAng += (windAngT - windAng) * 0.05;
+  horizon += (horizonT - horizon) * 0.05;
+  var hr = Math.round(horizon * ROWS);
+  fieldcalc(nowSec, wind, windAng, hr);
+  render(hr);
+  horizonVal.textContent = '水平線 ' + Math.round(horizon * 100) + '%';
+  windVal.textContent = '風 ' + wind.toFixed(2);
+  raf = requestAnimationFrame(frame);
+}
+
+// 정지판 — 루프 없이 시드가 정한 한 시각의 안개·파도가 살아 있는 정적 한 장
+function still() {
+  var hr = Math.round(0.34 * ROWS);
+  fieldcalc(7.3, 1.35, 0.5, hr);
+  render(hr);
+}
+
+function localXY(e) {
+  var r = field.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+field.addEventListener('pointermove', function (e) {
+  var p = localXY(e);
+  var t = performance.now();
+  // 포인터 세로 위치 = 水平線 목표(위쪽 65%까지만 — 바다가 항상 화면 아래를 채우게)
+  horizonT = Math.max(0.06, Math.min(0.68, p[1] / H));
+  if (lastPX >= 0 && t > lastPT) {
+    var vx = p[0] - lastPX, vy = p[1] - lastPY;
+    var sp2 = Math.sqrt(vx * vx + vy * vy);
+    if (sp2 > 0.5) {
+      windT = Math.max(0.35, Math.min(2.1, 0.9 + sp2 * 0.02));
+      windAngT = Math.atan2(vy, vx) * 0.16;
+    }
+  }
+  lastPX = p[0]; lastPY = p[1]; lastPT = t;
+  auto = false;
+});
+field.addEventListener('pointerleave', function () {
+  auto = true;
+  lastPX = -1;
+});
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  auto = false;
+  horizonT = Math.max(0.06, Math.min(0.68, horizonT + d[1] * 0.05));
+  windT = Math.max(0.35, Math.min(2.1, windT + d[0] * 0.15));
+  if (reduce) { var hr = Math.round(horizonT * ROWS); fieldcalc(nowSec || 3.1, windT, windAngT, hr); render(hr); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+fit();
+if (reduce) {
+  root.classList.add('is-still');
+  still();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

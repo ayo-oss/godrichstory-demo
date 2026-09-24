@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>누름 상태 값에 따라 갈라지는 균열선 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="root">
+  <canvas class="cc__cv" id="cv" width="480" height="300"></canvas>
+  <button class="cc__btn" id="btn" type="button">삭제하기</button>
+  <p class="cc__hint">버튼을 누르면 중심에서 균열이 갈라져 뻗습니다</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var W = 480, H = 300;
+  var COLS = 60, ROWS = 38;
+  var CELL_W = W / COLS, CELL_H = H / ROWS;
+  var SEED = 20205;
+  var rnd = makeLcg(SEED);
+
+  var BTN_CANVAS_CRACK_BRANCH_COUNT = 6; // 중심에서 뻗는 1차 균열 가지 수 — 변형 칩이 바꾸는 값
+  var CRACK_MAX_DEPTH = 3;      // 가지가 다시 갈라지는 깊이
+  var CRACK_SEG_LEN = 44;       // 1차 가지 길이(px)
+  var CRACK_LEN_DECAY = 0.6;    // 갈라질 때마다 길이가 줄어드는 비율
+  var CRACK_ANGLE_SPREAD = 0.85; // 두 자식 가지가 벌어지는 각도(rad)
+  var GLOW_DECAY = 0.90;        // 균열 앞머리 잔광이 사그라드는 비율
+  var MAX_TREES = 3;            // 화면에 동시에 남겨 둘 균열 나무 수
+  var LINE_COLOR = [23, 20, 26];   // $subject-ink
+  var GLOW_COLOR = [255, 247, 230]; // $subject-cream
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  var field = new Float32Array(COLS * ROWS);
+  function fidx(gx, gy) { return gy * COLS + gx; }
+  function stampGlow(px, py, r) {
+    var gx = Math.round(px / CELL_W), gy = Math.round(py / CELL_H);
+    for (var dy = -r; dy <= r; dy++) {
+      for (var dx = -r; dx <= r; dx++) {
+        var x = gx + dx, y = gy + dy;
+        if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (d > r) continue;
+        var v = 1 - d / (r + 1);
+        var i = fidx(x, y);
+        field[i] = Math.min(1, field[i] + v * 0.6);
+      }
+    }
+  }
+
+  function genBranch(x, y, angle, len, depth, t0, segs) {
+    if (depth > CRACK_MAX_DEPTH || len < 5) return;
+    var ang = angle + (rnd() - 0.5) * 0.35;
+    var x2 = x + Math.cos(ang) * len;
+    var y2 = y + Math.sin(ang) * len;
+    var dur = 120 + len * 4;
+    segs.push({ x1: x, y1: y, x2: x2, y2: y2, t0: t0, t1: t0 + dur, w: Math.max(1, 3 - depth) });
+    var childT0 = t0 + dur * 0.6;
+    var childA = [ang + CRACK_ANGLE_SPREAD * 0.5, ang - CRACK_ANGLE_SPREAD * 0.5];
+    for (var i = 0; i < childA.length; i++) {
+      genBranch(x2, y2, childA[i] + (rnd() - 0.5) * 0.3, len * CRACK_LEN_DECAY, depth + 1, childT0, segs);
+    }
+  }
+
+  function buildTree(cx, cy) {
+    var segs = [];
+    for (var i = 0; i < BTN_CANVAS_CRACK_BRANCH_COUNT; i++) {
+      var base = (Math.PI * 2 * i) / BTN_CANVAS_CRACK_BRANCH_COUNT;
+      var ang = base + (rnd() - 0.5) * 0.5;
+      genBranch(cx, cy, ang, CRACK_SEG_LEN, 0, 0, segs);
+    }
+    return segs;
+  }
+
+  var trees = [];
+
+  function paint(now) {
+    for (var i = 0; i < field.length; i++) field[i] *= GLOW_DECAY;
+
+    var lineDraws = [];
+    for (var t = 0; t < trees.length; t++) {
+      var tree = trees[t];
+      var elapsed = now - tree.t0;
+      for (var s = 0; s < tree.segs.length; s++) {
+        var seg = tree.segs[s];
+        if (elapsed < seg.t0) continue;
+        var progress = Math.max(0, Math.min(1, (elapsed - seg.t0) / (seg.t1 - seg.t0)));
+        var tipx = seg.x1 + (seg.x2 - seg.x1) * progress;
+        var tipy = seg.y1 + (seg.y2 - seg.y1) * progress;
+        if (progress < 1) stampGlow(tipx, tipy, 3);
+        lineDraws.push([seg.x1, seg.y1, tipx, tipy, seg.w]);
+      }
+    }
+
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(0, 0, W, H);
+
+    for (var y = 0; y < ROWS; y++) {
+      for (var x = 0; x < COLS; x++) {
+        var v = field[fidx(x, y)];
+        if (v < 0.03) continue;
+        var a = Math.min(1, v);
+        ctx.fillStyle = 'rgba(' + GLOW_COLOR[0] + ',' + GLOW_COLOR[1] + ',' + GLOW_COLOR[2] + ',' + a.toFixed(3) + ')';
+        ctx.fillRect(x * CELL_W, y * CELL_H, CELL_W + 1, CELL_H + 1);
+      }
+    }
+
+    ctx.strokeStyle = 'rgba(' + LINE_COLOR[0] + ',' + LINE_COLOR[1] + ',' + LINE_COLOR[2] + ',.92)';
+    ctx.lineCap = 'round';
+    for (var d = 0; d < lineDraws.length; d++) {
+      var ln = lineDraws[d];
+      ctx.lineWidth = ln[4];
+      ctx.beginPath();
+      ctx.moveTo(ln[0], ln[1]);
+      ctx.lineTo(ln[2], ln[3]);
+      ctx.stroke();
+    }
+  }
+
+  function press(px, py) {
+    root.classList.remove('is-demo');
+    trees.push({ segs: buildTree(px, py), t0: performance.now() });
+    if (trees.length > MAX_TREES) trees.shift();
+    if (reduceMQ.matches) {
+      trees[trees.length - 1].t0 = performance.now() - 999999;
+      paint(performance.now());
+    }
+  }
+
+  function pointFromEvent(e) {
+    var r = cv.getBoundingClientRect();
+    return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)];
+  }
+  function buttonCenter() {
+    var r = btn.getBoundingClientRect(), c = cv.getBoundingClientRect();
+    return [(r.left + r.width / 2 - c.left) * (W / c.width), (r.top + r.height / 2 - c.top) * (H / c.height)];
+  }
+
+  btn.addEventListener('click', function () { var p = buttonCenter(); press(p[0], p[1]); });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    var p = buttonCenter(); press(p[0], p[1]);
+  });
+  cv.addEventListener('pointerdown', function (e) { var p = pointFromEvent(e); press(p[0], p[1]); });
+  window.addEventListener('resize', function () { paint(performance.now()); });
+
+  var nextAutoAt = 0;
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      if (root.classList.contains('is-demo') && now >= nextAutoAt) {
+        var p = buttonCenter();
+        trees.push({ segs: buildTree(p[0], p[1]), t0: now });
+        if (trees.length > MAX_TREES) trees.shift();
+        nextAutoAt = now + 640;
+      }
+      paint(now);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    var c0 = buttonCenter();
+    trees.push({ segs: buildTree(c0[0], c0[1]), t0: performance.now() - 999999 });
+    paint(performance.now());
+  } else {
+    var c1 = buttonCenter();
+    trees.push({ segs: buildTree(c1[0], c1[1]), t0: performance.now() });
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

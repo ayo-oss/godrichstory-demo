@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>빛 산란 광선 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls" id="ls">
+  <p class="ls__hint">
+    <svg class="ls__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M184 128a56 56 0 1 1-56-56a56 56 0 0 1 56 56" opacity=".2"/><path d="M120 40V16a8 8 0 0 1 16 0v24a8 8 0 0 1-16 0m72 88a64 64 0 1 1-64-64a64.07 64.07 0 0 1 64 64m-16 0a48 48 0 1 0-48 48a48.05 48.05 0 0 0 48-48M58.34 69.66a8 8 0 0 0 11.32-11.32l-16-16a8 8 0 0 0-11.32 11.32Zm0 116.68l-16 16a8 8 0 0 0 11.32 11.32l16-16a8 8 0 0 0-11.32-11.32M192 72a8 8 0 0 0 5.66-2.34l16-16a8 8 0 0 0-11.32-11.32l-16 16A8 8 0 0 0 192 72m5.66 114.34a8 8 0 0 0-11.32 11.32l16 16a8 8 0 0 0 11.32-11.32ZM48 128a8 8 0 0 0-8-8H16a8 8 0 0 0 0 16h24a8 8 0 0 0 8-8m80 80a8 8 0 0 0-8 8v24a8 8 0 0 0 16 0v-24a8 8 0 0 0-8-8m112-88h-24a8 8 0 0 0 0 16h24a8 8 0 0 0 0-16"/></g></svg>
+    <span>커서를 움직이면 광원이 천천히 따라와 빛이 부챗살로 갈라집니다</span>
+  </p>
+  <div class="ls__field" id="field" role="application" aria-label="빛 산란 실험판" tabindex="0">
+    <canvas class="ls__cv" id="cv"></canvas>
+    <b class="ls__badge" aria-hidden="true"><span class="ls__badgeNum">12</span><span class="ls__badgeUnit">겹 누적</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 빛 산란 광선 — 밑그림(그라디언트 하늘 + 실루엣 능선·나무)을 광원 기준으로 매번 1.03배씩
+// 키우며 lighter 합성으로 열두 번 겹쳐 더한다. 겹칠수록 밝아지는 성질 때문에 나무 사이 틈으로
+// 새어 나온 밝은 하늘이 부챗살 광선으로 자란다 — 광선을 그린 게 아니라 쌓아 자라게 한 것이다.
+// 겹마다 알파를 광원에서 멀어지는 선형 그라디언트로 깎아, 광원 가까운 밝기만 누적에 기여하게 한다.
+var root = document.getElementById('ls');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(n) { return css.getPropertyValue(n).trim(); }
+var SKY0 = v('--sky-0'), SKY1 = v('--sky-1');
+var GLOW0 = v('--glow-0'), GLOW1 = v('--glow-1');
+var RIDGE_FAR = v('--ridge-far'), RIDGE_NEAR = v('--ridge-near'), TREE = v('--tree');
+var CLOUD = v('--cloud');
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var STACK = 12;     // 겹치는 횟수 — 늘리면 광선이 더 길게 자란다
+var GROW = 1.03;    // 한 겹이 광원 기준으로 자라는 배율
+var LERP = 0.05;   // 광원이 목표를 따라오는 비율(프레임당) — 느리게 따라와 빛이 흐르는 느낌
+var TOUR = 7;       // 자율 광원이 한 바퀴 도는 초
+var raf = 0, W = 0, H = 0, dpr = 1;
+var lx = 0, ly = 0, tx = 0, ty = 0, manual = false;
+
+var scene = document.createElement('canvas');
+var sctx = scene.getContext('2d');
+var veil = document.createElement('canvas');
+var vctx = veil.getContext('2d');
+
+// 시드 고정 난수 — 새로고침해도 같은 능선·나무가 자란다
+function rng(seed) {
+  return function () { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+}
+
+// 능선 점렬(정규화 0..1) — 조절점 사이를 코사인으로 부드럽게 잇는 값 노이즈. 양 끝이 이어진다
+function ridgePts(seed, bumps) {
+  var rr = rng(seed);
+  var cp = [];
+  for (var i = 0; i < bumps; i++) cp.push(rr());
+  cp.push(cp[0]);
+  var pts = [];
+  var n = bumps * 12;
+  for (var k = 0; k <= n; k++) {
+    var t = k / n * bumps;
+    var i0 = Math.floor(t), f = t - i0;
+    var s = (1 - Math.cos(f * Math.PI)) * 0.5;
+    pts.push(cp[i0] + (cp[i0 + 1] - cp[i0]) * s);
+  }
+  return pts;
+}
+var farPts = ridgePts(11, 3);
+var nearPts = ridgePts(77, 5);
+var trees = [];
+(function () {
+  var rr = rng(5);
+  for (var i = 0; i < 16; i++) trees.push({ x: rr(), h: 0.06 + rr() * 0.05 });
+})();
+var clouds = [];
+(function () {
+  var rr = rng(23);
+  for (var i = 0; i < 3; i++) clouds.push({ x: 0.08 + rr() * 0.78, y: 0.09 + rr() * 0.17, w: 0.2 + rr() * 0.16, h: 0.026 + rr() * 0.02 });
+})();
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = scene.width = veil.width = Math.round(W * dpr);
+  cv.height = scene.height = veil.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!lx) { lx = W * 0.34; ly = H * 0.26; tx = lx; ty = ly; }
+}
+
+// 능선 위 한 점의 y — 정규화 점렬을 CSS px 로 샘플한다
+function ridgeY(pts, base, amp, x) {
+  var t = x / W * (pts.length - 1);
+  var i0 = Math.floor(t);
+  if (i0 >= pts.length - 1) return H * (base - amp * pts[pts.length - 1]);
+  var f = t - i0;
+  return H * (base - amp * (pts[i0] + (pts[i0 + 1] - pts[i0]) * f));
+}
+
+function fillRidge(c, pts, base, amp, color) {
+  c.fillStyle = color;
+  c.beginPath();
+  c.moveTo(0, H + 2);
+  for (var x = 0; x <= W; x += 4) c.lineTo(x, ridgeY(pts, base, amp, x));
+  c.lineTo(W, H + 2);
+  c.closePath();
+  c.fill();
+}
+
+// 가늘고 긴 구름 세 조각 — 하늘의 가림막. 광원과 구름 사이 틈이 하늘의 광선 뼈대다
+function drawClouds(c) {
+  c.fillStyle = CLOUD;
+  for (var i = 0; i < clouds.length; i++) {
+    var cl = clouds[i];
+    var cx = cl.x * W, cy = cl.y * H, cw = cl.w * W, ch = cl.h * H;
+    c.beginPath();
+    c.moveTo(cx + cw * 0.5, cy);
+    c.ellipse(cx, cy, cw * 0.5, ch, 0, 0, Math.PI * 2);
+    c.moveTo(cx - cw * 0.32 + cw * 0.22, cy + ch * 0.35);
+    c.ellipse(cx - cw * 0.32, cy + ch * 0.35, cw * 0.22, ch * 0.62, 0, 0, Math.PI * 2);
+    c.moveTo(cx + cw * 0.3 + cw * 0.2, cy - ch * 0.3);
+    c.ellipse(cx + cw * 0.3, cy - ch * 0.3, cw * 0.2, ch * 0.6, 0, 0, Math.PI * 2);
+    c.fill();
+  }
+}
+
+// 침엽수 실루엣 — 앞 능선 등선선 위에 삼각 두 개를 포개 얹는다. 틈이 벌어질수록 광선이 굵어진다
+function drawTrees(c) {
+  c.fillStyle = TREE;
+  for (var i = 0; i < trees.length; i++) {
+    var tr = trees[i];
+    var x = tr.x * W;
+    var y = ridgeY(nearPts, 0.80, 0.15, x) + 1;
+    var h = tr.h * H;
+    var w = h * 0.44;
+    c.beginPath();
+    c.moveTo(x, y - h);
+    c.lineTo(x + w * 0.5, y - h * 0.34);
+    c.lineTo(x + w * 0.28, y - h * 0.34);
+    c.lineTo(x + w * 0.85, y);
+    c.lineTo(x - w * 0.85, y);
+    c.lineTo(x - w * 0.28, y - h * 0.34);
+    c.lineTo(x - w * 0.5, y - h * 0.34);
+    c.closePath();
+    c.fill();
+  }
+}
+
+// 밑그림 — 세로 그라디언트 하늘 + 광원 주위 광운 + 실루엣 두 겹
+function drawScene() {
+  var sky = sctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, SKY0);
+  sky.addColorStop(1, SKY1);
+  sctx.fillStyle = sky;
+  sctx.fillRect(0, 0, W, H);
+  var glow = sctx.createRadialGradient(lx, ly, 2, lx, ly, Math.max(W, H) * 0.26);
+  glow.addColorStop(0, GLOW0);
+  glow.addColorStop(0.22, GLOW0);
+  glow.addColorStop(1, GLOW1);
+  sctx.fillStyle = glow;
+  sctx.fillRect(0, 0, W, H);
+  drawClouds(sctx);
+  fillRidge(sctx, farPts, 0.58, 0.09, RIDGE_FAR);
+  fillRidge(sctx, nearPts, 0.80, 0.15, RIDGE_NEAR);
+  drawTrees(sctx);
+}
+
+// 베일 — 밑그림을 복사한 뒤 광원에서 장면 반대편으로 빠지는 선형 그라디언트로 알파를 깎는다
+function drawVeil() {
+  vctx.globalCompositeOperation = 'source-over';
+  vctx.clearRect(0, 0, W, H);
+  vctx.drawImage(scene, 0, 0, W, H);
+  var ux = W * 0.5 - lx, uy = H * 0.5 - ly;
+  var ul = Math.sqrt(ux * ux + uy * uy) || 1;
+  var far = Math.sqrt(W * W + H * H) * 1.05;
+  var fx = lx + ux / ul * far, fy = ly + uy / ul * far;
+  var g = vctx.createLinearGradient(lx, ly, fx, fy);
+  g.addColorStop(0, 'rgba(0, 0, 0, .95)');
+  g.addColorStop(0.5, 'rgba(0, 0, 0, .5)');
+  g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  vctx.globalCompositeOperation = 'destination-in';
+  vctx.fillStyle = g;
+  vctx.fillRect(0, 0, W, H);
+}
+
+function paint() {
+  drawScene();
+  drawVeil();
+  // ① 밑그림을 그대로 깐다
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.drawImage(scene, 0, 0, W, H);
+  // ② 광원 기준 1.03배씩 커지는 겹 12장 — 겹칠수록 밝아지는 lighter 합성으로 광선이 자란다
+  var s = 1;
+  for (var i = 1; i <= STACK; i++) {
+    s *= GROW;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.55 * (1 - i / (STACK + 1));
+    ctx.drawImage(veil, lx * (1 - s), ly * (1 - s), W * s, H * s);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function frame(now) {
+  var sec = now / 1000;
+  if (!manual) {
+    var th = sec / TOUR * Math.PI * 2;
+    tx = W * (0.34 + Math.sin(th) * 0.18);
+    ty = H * (0.25 + Math.sin(th * 2 + 0.8) * 0.12);
+  }
+  lx += (tx - lx) * LERP;
+  ly += (ty - ly) * LERP;
+  paint();
+  raf = requestAnimationFrame(frame);
+}
+
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  tx = Math.max(W * 0.08, Math.min(W * 0.92, e.clientX - r.left));
+  ty = Math.max(H * 0.06, Math.min(H * 0.6, e.clientY - r.top));
+  manual = true;
+});
+field.addEventListener('pointerleave', function () { manual = false; });
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-12, 0], ArrowRight: [12, 0], ArrowUp: [0, -12], ArrowDown: [0, 12] }[e.key];
+  if (!d) { if (e.key === 'Escape') manual = false; return; }
+  e.preventDefault();
+  manual = true;
+  tx = Math.max(W * 0.08, Math.min(W * 0.92, tx + d[0]));
+  ty = Math.max(H * 0.06, Math.min(H * 0.6, ty + d[1]));
+  if (reduce) { lx = tx; ly = ty; paint(); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) paint(); });
+
+fit();
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 광선이 다 자란 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spring overshoot dial — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kd is-demo" id="kd">
+  <button class="kd__knob" id="kdKnob" type="button" aria-label="Press to spring the brightness dial">
+    <span class="kd__face"></span>
+  </button>
+  <p class="kd__value" id="kdValue">Brightness 40%</p>
+</div>
+<script>
+(function () {
+  var SPRING_K = 0.18;      // 용수철 상수 — 클수록 목표로 더 빨리 당겨진다
+  var SPRING_DAMP = 0.72;   // 감쇠 — 1에 가까울수록 오래 흔들린다
+  var LOOP_MS = 2000;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var root = document.getElementById('kd');
+  var knob = document.getElementById('kdKnob');
+  var valueEl = document.getElementById('kdValue');
+  var isDemo = true;
+
+  var LEVELS = [10, 40, 70, 100];
+  var levelIdx = 1;
+  var scaleCur = 1;
+  var scaleVel = 0;
+  var scaleTarget = 1;
+  var pressed = false;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  // 계산 겹: 감쇠 스프링. 매 프레임 목표까지의 거리에 SPRING_K 를 곱해 가속하고,
+  // 누적 속도에 SPRING_DAMP 를 곱해 서서히 잦아들게 한다(단순 lerp 와 달리 목표를 넘겨 튕긴다).
+  function springStep() {
+    if (reduce) { scaleCur = scaleTarget; scaleVel = 0; return; }
+    var force = (scaleTarget - scaleCur) * SPRING_K;
+    scaleVel = (scaleVel + force) * SPRING_DAMP;
+    scaleCur += scaleVel;
+  }
+
+  function apply() {
+    knob.style.setProperty('--scale', scaleCur.toFixed(4));
+    valueEl.textContent = 'Brightness ' + LEVELS[levelIdx] + '%';
+  }
+
+  function press() {
+    human();
+    pressed = true;
+    scaleTarget = 0.86;
+  }
+  function release() {
+    if (!pressed) return;
+    pressed = false;
+    levelIdx = (levelIdx + 1) % LEVELS.length;
+    scaleTarget = 1.12;
+    scaleVel += reduce ? 0 : 0.03;
+    setTimeout(function () { scaleTarget = 1; }, reduce ? 0 : 90);
+  }
+
+  knob.addEventListener('pointerdown', press);
+  knob.addEventListener('pointerup', release);
+  knob.addEventListener('pointerleave', function () { if (pressed) release(); });
+  knob.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); press(); release(); }
+  });
+
+  // 자동 루프: 누름 → 뗌 → 스프링 정착을 반복한다. 사람 조작과 같은 springStep()/apply() 를 쓴다.
+  function loop(ts) {
+    if (isDemo && !reduce) {
+      var phase = (ts % LOOP_MS) / LOOP_MS;
+      if (phase < 0.06) { scaleTarget = 0.86; }
+      else if (phase < 0.12 && scaleTarget !== 1.12) {
+        levelIdx = (levelIdx + 1) % LEVELS.length;
+        scaleTarget = 1.12;
+      } else if (phase >= 0.12 && phase < 0.2) { scaleTarget = 1; }
+    } else if (isDemo && reduce) {
+      scaleTarget = 1;
+    }
+    springStep();
+    apply();
+    requestAnimationFrame(loop);
+  }
+  apply();
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

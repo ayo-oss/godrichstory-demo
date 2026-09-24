@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>揺れる3Dテキストのデモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tw" id="tw">
+  <p class="tw__hint">
+    <svg class="tw__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128c-52 110.85-78 55.43-104 0Zm-208 0h104c-26-55.43-52-110.85-104 0" opacity=".2"/><path d="M239.24 131.4c-22 46.8-41.4 68.6-61.2 68.6c-25.1 0-40.73-33.32-57.28-68.6C107.7 103.56 92.9 72 78 72c-16.4 0-36.31 37.21-46.72 59.4a8 8 0 0 1-14.48-6.8C38.71 77.8 58.16 56 78 56c25.1 0 40.73 33.32 57.28 68.6C148.3 152.44 163.1 184 178 184c16.4 0 36.31-37.21 46.72-59.4a8 8 0 0 1 14.48 6.8Z"/></g></svg>
+    <span>文字を変えると横の行ごとに正弦波の位相だけずれてうねります</span>
+  </p>
+  <div class="tw__field">
+    <canvas class="tw__cv" id="cv"></canvas>
+    <b class="tw__badge" aria-hidden="true"><span class="tw__badgeNum">2px</span><span class="tw__badgeUnit">走査線</span></b>
+  </div>
+  <div class="tw__bar">
+    <input class="tw__in" id="phraseIn" type="text" maxlength="12" value="旗のようにうねる" placeholder="文字を入力" aria-label="表示する文字">
+    <button class="tw__btn" id="nextBtn" type="button">次の文字</button>
+  </div>
+</div>
+</main>
+<script>
+// 흔들리는 3D 텍스트 — 글자를 보이지 않는 캔버스에 딱 한 번 fillText 로 그려 두고,
+// 본 캔버스에는 가로 走査線(2px) 단위로 drawImage 잘라 붙인다. 이때 줄마다 사인파 위상만큼
+// 옆으로 밀고 가로 폭도 살짝 들숨 쉬게 하면 깃발처럼 출렁이는 글자가 된다.
+// 아래쪽에 먼저 깔아 두는 어두운 복사층이 두께(가짜 3D 돌출)를 만든다.
+var root = document.getElementById('tw');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var phraseIn = document.getElementById('phraseIn');
+var nextBtn = document.getElementById('nextBtn');
+
+var css = getComputedStyle(root);
+var FACE = css.getPropertyValue('--face').trim();    // 글자 앞면
+var DEPTH = css.getPropertyValue('--depth').trim();  // 아래 복사층(돌출)
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+var PRESETS = ['旗のようにうねる', 'canvas ひとつで', '3Dの飛び出す文字'];
+var presetAt = 0;
+var ROW = 2;            // 走査線 한 줄의 높이(CSS px). 화면 배지와 같은 값이다
+var DROP = 7;           // 복사층을 아래로 미루는 양 — 두께로 읽힌다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var phrase = phraseIn.value;
+
+// 글자 원본 — 앞면과 복사층 두 장. 그리는 시점마다 다시 만든다(문구·창 폭이 바뀔 때뿐이다)
+var face = document.createElement('canvas');
+var depth = document.createElement('canvas');
+var fctx = face.getContext('2d');
+var dctx = depth.getContext('2d');
+
+function fit() {
+  var r = cv.parentElement.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 오프스크린 한 번 그리기 — measureText 로 100px 에서 폭을 재고 판 폭의 84% 에 맞춰 크기를 역산해
+// 중앙 정렬한다. 긴 문구를 넣어도 넘치지 않는 이유가 이 두 줄이다.
+function build() {
+  face.width = cv.width; face.height = cv.height;
+  depth.width = cv.width; depth.height = cv.height;
+  var w = face.width, h = face.height;
+  fctx.font = '700 100px ' + FONT;
+  var wide = Math.max(1, fctx.measureText(phrase).width);
+  var size = Math.min(100 * (w * 0.84) / wide, h * 0.5);
+  fctx.textAlign = 'center';
+  fctx.textBaseline = 'middle';
+  fctx.fillStyle = FACE;
+  fctx.font = '700 ' + size + 'px ' + FONT;
+  fctx.fillText(phrase, w * 0.5, h * 0.47);
+  dctx.textAlign = 'center';
+  dctx.textBaseline = 'middle';
+  dctx.fillStyle = DEPTH;
+  dctx.font = '700 ' + size + 'px ' + FONT;
+  dctx.fillText(phrase, w * 0.5, h * 0.47);
+}
+
+// 파동 — 사인 합성. 줄의 옆 이동 sx 는 y 와 시간 t 의 사인 둘(서로 반대 방향으로 달리는 행파),
+// 가로 스케일 w 는 y 와 t 의 사인 하나. 스케일은 중심 기준이므로 밀림이 x 의 1차 함수가 되어
+// 세 항을 합하면 변위가 x·y·t 에 모두 의존하는 마퀴식 출렁임이 된다.
+function pass(img, drop, t) {
+  for (var y = 0; y < H; y += ROW) {
+    var sx = 7 * Math.sin(0.055 * y + 2.4 * t) + 3 * Math.sin(0.021 * y - 1.5 * t + 1.4);
+    var w = 1 + 0.05 * Math.sin(0.026 * y - 1.9 * t + 0.7);
+    ctx.drawImage(img, 0, y * dpr, img.width, ROW * dpr, (W - W * w) * 0.5 + sx, y + drop, W * w, ROW);
+  }
+}
+
+function draw(t) {
+  ctx.clearRect(0, 0, W, H);
+  pass(depth, DROP, t - 0.12);   // 복사층 먼저 — 위상을 조금 늦게 줘 앞면과 어긋나면 돌출이 더 산다
+  pass(face, 0, t);
+}
+
+function frame(now) {
+  draw(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function setPhrase(p) {
+  phrase = p || PRESETS[0];
+  build();
+  if (reduce) draw(1.7);
+}
+
+phraseIn.addEventListener('input', function () { setPhrase(phraseIn.value); });
+nextBtn.addEventListener('click', function () {
+  presetAt = (presetAt + 1) % PRESETS.length;
+  phraseIn.value = PRESETS[presetAt];
+  setPhrase(phraseIn.value);
+});
+window.addEventListener('resize', function () { fit(); build(); if (reduce) draw(1.7); });
+
+fit();
+build();
+if (reduce) {
+  // reduce — 루프를 시작하지 않는다. 출렁임이 잡힌 한 순간의 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  draw(1.7);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

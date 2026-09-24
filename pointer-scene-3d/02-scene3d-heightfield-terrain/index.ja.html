@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지형 높이맵 미니어처 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tf is-demo" id="tfRoot">
+  <p class="tf__hint">
+    <svg class="tf__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M144 52a20 20 0 1 1 20 20a20 20 0 0 1-20-20m49.44 55.92a8 8 0 0 0-13.77 0l-33 55.75l-21-35.67H50.35L8 200h240Z" opacity=".2"/><path d="M164 80a28 28 0 1 0-28-28a28 28 0 0 0 28 28m0-40a12 12 0 1 1-12 12a12 12 0 0 1 12-12m90.88 155.92l-54.56-92.08A15.87 15.87 0 0 0 186.55 96a15.85 15.85 0 0 0-13.76 7.84L146.63 148l-44.84-76.1a16 16 0 0 0-27.58 0L1.11 195.94A8 8 0 0 0 8 208h240a8 8 0 0 0 6.88-12.08M88 80l23.57 40H64.43ZM22 192l33-56h66l33 56Zm150.57 0l-16.66-28.28L186.55 112L234 192Z"/></g></svg>
+    <span>二つの波が重なって山と谷を作ります — ポインターで視点が回り、波が流れ続けます</span>
+  </p>
+  <div class="tf__field" id="tfField" role="application" aria-label="地形遠近実験盤" tabindex="0">
+    <canvas class="tf__cv" id="tfCv"></canvas>
+  </div>
+  <div class="tf__bar">
+    <label class="tf__dial">波の振幅
+      <input type="range" id="tfAmp" min="4" max="26" step="1" value="13" aria-label="波の振幅">
+      <b class="tf__val" id="tfAmpVal">13px</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 지형 높이맵 미니어처 — 17×13 격자의 높이를 두 사인파의 합으로 계산하고(계산으로 움직인다),
+// 셀을 사다리꼴 리본(채운 면)으로 그린다. 선만 그리면 면적이 안 나오므로 반드시 fill.
+// 카메라는 고정 고도각, 포인터 좌우로 편요(pan)·상하로 약간의 상하(pitch).
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var AMP = 13;          // 파도 기본 진폭(월드 단위) — 다이얼로도 움직인다
+  var F1 = 1.7;          // x 방향 파도 주파수
+  var F2 = 2.3;          // y 방향 파도 주파수
+  var LOOP_MS = 2000;    // 미리보기 가상 포인터 주기
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('tfRoot');
+  var field = document.getElementById('tfField');
+  var cv = document.getElementById('tfCv');
+  var ctx = cv.getContext('2d');
+  var ampIn = document.getElementById('tfAmp');
+  var ampOut = document.getElementById('tfAmpVal');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var C_MINT = tok('--tf-mint');
+  var C_SKY = tok('--tf-sky');
+  var C_LILAC = tok('--tf-lilac');
+  var C_CREAM = tok('--tf-cream');
+  var C_PAPER = tok('--tf-paper');
+  var C_LINE = tok('--tf-line');
+
+  var COLS = 17, ROWS = 13, TAU = Math.PI * 2;
+  var ALT = 0.62;                     // 카메라 고도각(라디안) — 내려다보는 각
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, dpr = 1;
+  var amp = Number(ampIn.value);
+  var heading = 0;                    // 편요(라디안) — 포인터 좌우
+  var pitch = 0;                      // 추가 상하(라디안) — 포인터 상하 ±0.14
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var last = 0, raf = 0, t0 = -1;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function height(i, j, t) {
+    var x = i / (COLS - 1) * TAU;      // 0..TAU
+    var y = j / (ROWS - 1) * TAU;
+    return Math.sin(x * F1 + t) * 0.62 + Math.sin(y * F2 + t * 0.8) * 0.38
+         + Math.sin((x + y) * 0.9 + t * 1.3) * 0.18;
+  }
+
+  // 셀 (i,j) 네 모서리의 월드 좌표 → 회전 → 투영
+  function corner(i, j, t) {
+    var wx = (i / (COLS - 1) - 0.5) * 430;
+    var wz = (j / (ROWS - 1) - 0.5) * 340;
+    var wy = height(i, j, t) * amp;
+    var ch = Math.cos(heading), sh = Math.sin(heading);
+    var x1 = wx * ch - wz * sh;
+    var z1 = wx * sh + wz * ch;
+    // 카메라 고도각 ALT + pitch — x축 회전으로 들여다본다
+    var a = ALT + pitch;
+    var ca = Math.cos(a), sa = Math.sin(a);
+    var y2 = wy * ca - z1 * sa;
+    var z2 = wy * sa + z1 * ca;
+    var focal = 300;
+    var s = focal / (focal + z2 + 300);
+    return { sx: W * 0.5 + x1 * s, sy: H * 0.62 - y2 * s, s: s, h: wy };
+  }
+
+  // 높이 → 색: mint → sky → lilac 파스텔 보간
+  function shade(h, s) {
+    var u = Math.max(0, Math.min(1, (h / amp) * 0.5 + 0.5));   // 0..1
+    function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+    function mix(c1, c2, t) {
+      return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
+    }
+    var mint = [76, 212, 166], sky = [110, 200, 255], lilac = [185, 160, 255];
+    var c = u < 0.5 ? mix(mint, sky, u * 2) : mix(sky, lilac, (u - 0.5) * 2);
+    // 셀 방향 음영 — 북쪽 면(위 = j 작은 쪽)을 밝게, 아래를 어둡게(입체감 한 겹)
+    var lit = 0.9 + 0.18 * s;
+    return 'rgb(' + Math.round(c[0] * lit) + ',' + Math.round(c[1] * lit) + ',' + Math.round(c[2] * lit) + ')';
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+
+    var focal = 300;
+    // 바닥 받침 판 — 지형보다 한 단계 아래 얇은 크림 베이스(모형 받침)
+    var base = [];
+    for (var b = 0; b <= 32; b++) {
+      var ga = b / 32 * TAU - Math.PI / 2;
+      var wx = Math.cos(ga) * 252, wz = Math.sin(ga) * 208;
+      var ch = Math.cos(heading), sh = Math.sin(heading);
+      var x1 = wx * ch - wz * sh, z1 = wx * sh + wz * ch;
+      var a = ALT + pitch, ca = Math.cos(a), sa = Math.sin(a);
+      var y2 = -26 * ca - z1 * sa;
+      var z2 = -26 * sa + z1 * ca;
+      var sc = focal / (focal + z2 + 300);
+      base.push({ sx: W * 0.5 + x1 * sc, sy: H * 0.62 - y2 * sc });
+    }
+    ctx.beginPath();
+    ctx.moveTo(base[0].sx, base[0].sy);
+    for (var bi = 1; bi < base.length; bi++) ctx.lineTo(base[bi].sx, base[bi].sy);
+    ctx.closePath();
+    ctx.fillStyle = C_CREAM;
+    ctx.fill();
+    ctx.strokeStyle = C_LINE;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 지형 리본 — 뒤(먼 z) 행부터 앞으로. 셀마다 사다리꼴 fill(선이 아니라 면).
+    var count = 0;
+    for (var j = ROWS - 1; j >= 0; j--) {
+      for (var i = 0; i < COLS - 1; i++) {
+        var p00 = corner(i, j, t), p10 = corner(i + 1, j, t);
+        var p01c = corner(i, j + 1, t), p11 = corner(i + 1, j + 1, t);
+        ctx.beginPath();
+        ctx.moveTo(p00.sx, p00.sy);
+        ctx.lineTo(p10.sx, p10.sy);
+        ctx.lineTo(p11.sx, p11.sy);
+        ctx.lineTo(p01c.sx, p01c.sy);
+        ctx.closePath();
+        var hAvg = (p00.h + p10.h + p01c.h + p11.h) / 4;
+        var sAvg = (p00.s + p11.s) / 2;
+        ctx.fillStyle = shade(hAvg, sAvg);
+        ctx.fill();
+        count++;
+      }
+    }
+
+    // 정상 봉우리 표식 — 가장 높은 셀 위 크림 점(지도 핀 느낌)
+    var best = null;
+    for (var jj = 0; jj < ROWS; jj++) {
+      for (var ii = 0; ii < COLS; ii++) {
+        var hh = height(ii, jj, t);
+        if (!best || hh > best.h) best = { i: ii, j: jj, h: hh };
+      }
+    }
+    var pk = corner(best.i, best.j, t);
+    ctx.beginPath();
+    ctx.arc(pk.sx, pk.sy - 3, 2.6, 0, TAU);
+    ctx.fillStyle = C_PAPER;
+    ctx.fill();
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = last ? Math.min((now - last) / 1000, 0.05) : 0.016;
+    last = now;
+    var t = (now - t0) / 1000;
+    if (!manual) {
+      // 미리보기 가상 포인터 — 시드 고정 Lissajous(표 밖 자연 경로)
+      var ph = ((now - t0) % LOOP_MS) / LOOP_MS * TAU;
+      px01 = 0.5 + 0.4 * Math.sin(ph);
+      py01 = 0.5 + 0.34 * Math.sin(2 * ph + 0.7);
+    }
+    heading += ((px01 - 0.5) * 1.9 - heading) * 0.1;
+    pitch += ((py01 - 0.5) * 0.28 - pitch) * 0.1;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setAmp(v) {
+    amp = Number(v);
+    ampOut.textContent = amp + 'px';
+    if (reduce) draw(0.6);
+  }
+
+  ampIn.addEventListener('input', function () { setAmp(ampIn.value); });
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) { heading = (px01 - 0.5) * 1.9; pitch = (py01 - 0.5) * 0.28; draw(0.6); }
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) { heading = (px01 - 0.5) * 1.9; pitch = (py01 - 0.5) * 0.28; draw(0.6); }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(0.6); });
+
+  fit();
+  if (reduce) {
+    // reduce — 파도가 멈춘 한 장. 봉우리가 읽히는 각도로 고정
+    heading = 0.5; pitch = -0.05;
+    draw(0.6);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

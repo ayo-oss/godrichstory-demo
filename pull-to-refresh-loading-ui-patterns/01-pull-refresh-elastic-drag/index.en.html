@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elastic drag — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pred is-demo" id="pred">
+  <div class="pred__phone" id="predPhone">
+    <div class="pred__zone">
+      <span class="pred__ghost" id="predGhost"></span>
+      <span class="pred__dot" id="predDot"></span>
+    </div>
+    <div class="pred__list" id="predList">
+      <div class="pred__row"></div>
+      <div class="pred__row"></div>
+      <div class="pred__row"></div>
+    </div>
+  </div>
+  <span class="pred__hint" id="predHint">Pull down to try</span>
+</div>
+</main>
+<script>
+(function () {
+  var phone = document.getElementById('predPhone');
+  var ghost = document.getElementById('predGhost');
+  var dot = document.getElementById('predDot');
+  var list = document.getElementById('predList');
+  var hint = document.getElementById('predHint');
+  var root = document.getElementById('pred');
+
+  // 계산 겹: 당긴 원 거리(raw)를 Displaced 거리(displayed)로 바꾸는 저항 곡선.
+  // displayed = D_MAX * raw / (raw + K) — raw 가 커질수록 늘어나는 폭이 점점 좁아지는 포화 곡선(Michaelis-Menten).
+  var D_MAX = 56, K = 80, RAW_MAX = 200;
+
+  function resist(raw) { return D_MAX * raw / (raw + K); }
+
+  function apply(raw) {
+    var displayed = resist(raw);
+    var ratio = displayed / D_MAX;
+    ghost.style.transform = 'translateY(' + Math.min(raw, D_MAX + 24).toFixed(1) + 'px)';
+    ghost.style.opacity = String(Math.min(1, raw / 30));
+    dot.style.transform = 'translateY(' + displayed.toFixed(1) + 'px) scale(' + (0.6 + 0.4 * ratio).toFixed(2) + ')';
+    dot.style.opacity = String(ratio);
+    list.style.transform = 'translateY(' + displayed.toFixed(1) + 'px)';
+    hint.textContent = raw > 4 ? ('Pull ' + Math.round(raw) + 'px · Displaced ' + Math.round(displayed) + 'px') : 'Pull down to try';
+  }
+
+  var raw = 0, target = 0, raf = null;
+  function settle() {
+    raw += (target - raw) * 0.28;
+    if (Math.abs(target - raw) < 0.3) { raw = target; }
+    apply(raw);
+    if (raw !== target) { raf = requestAnimationFrame(settle); } else { raf = null; }
+  }
+  function goTo(v) { target = v; if (raf === null) { raf = requestAnimationFrame(settle); } }
+
+  var dragging = false, startY = 0, startRaw = 0;
+  function onDown(y) { dragging = true; startY = y; startRaw = raw; if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function onMove(y) {
+    if (!dragging) { return; }
+    raw = Math.max(0, Math.min(RAW_MAX, startRaw + (y - startY)));
+    apply(raw);
+  }
+  function onUp() { if (!dragging) { return; } dragging = false; goTo(0); }
+
+  function wireReal() {
+    phone.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientY); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientY); });
+    window.addEventListener('pointerup', onUp);
+  }
+  phone.style.touchAction = 'none';
+  wireReal();
+  apply(0);
+
+  // 자동 루프: raw 를 0→RAW_MAX 로 단계적으로 올렸다가 놓아 같은 resist()·settle() 경로를 탄다.
+  var autoRaw = 0, autoTimer = null, autoDir = 1;
+  function autoTick() {
+    autoRaw += autoDir * 40;
+    if (autoRaw >= RAW_MAX) { autoRaw = RAW_MAX; autoDir = -1; goTo(0); return; }
+    if (autoRaw <= 0 && autoDir < 0) { autoRaw = 0; autoDir = 1; }
+    if (autoDir > 0) { raw = autoRaw; apply(raw); }
+  }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 180); }
+})();
+</script>
+</body>
+</html>

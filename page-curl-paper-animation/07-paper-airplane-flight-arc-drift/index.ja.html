@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>放物線と揺れ値で飛ぶ紙飛行機 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vd is-demo" id="vdRoot">
+  <canvas class="vd__canvas" id="vdCanvas" width="480" height="300"></canvas>
+  <p class="vd__caption">放物線と揺れ値で飛ぶ紙飛行機</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('vdRoot');
+  var canvas = document.getElementById('vdCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var LW = 320, LH = 200;
+  var LAUNCH = { x: 30, y: 158 };
+  var LAND = { x: 296, y: 66 };
+  var ARC_HEIGHT = 60;
+  var DRIFT_AMPLITUDE_PX = 8;
+  var DRIFT_CYCLES = 2.4;
+  var FLIGHT_MS = 900;
+  var SCENE_BG = '#17141a';
+  var PAPER = '#fff7e6';
+  var PLANE_SCALE = 4.5;
+  var FLOOR_Y = 184;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(41307);
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function driftFlight(t) {
+    var x = lerp(LAUNCH.x, LAND.x, t) + Math.sin(t * DRIFT_CYCLES * Math.PI * 2) * DRIFT_AMPLITUDE_PX;
+    var y = lerp(LAUNCH.y, LAND.y, t) - ARC_HEIGHT * 4 * t * (1 - t);
+    return { x: x, y: y };
+  }
+
+  var pos = driftFlight(0), heading = 0, curT = 0;
+  var trail = [];
+  var TRAIL_MAX = 18;
+
+  function drawShadow(x, t) {
+    var alt = ARC_HEIGHT * 4 * t * (1 - t);
+    var rx = clamp(34 - alt * 0.28, 8, 34);
+    var ry = rx * 0.36;
+    var alpha = clamp(0.32 - alt * 0.003, 0.06, 0.32);
+    ctx.fillStyle = 'rgba(10,8,12,' + alpha + ')';
+    ctx.beginPath();
+    ctx.ellipse(x, FLOOR_Y, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPlane(x, y, angle) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.scale(PLANE_SCALE, PLANE_SCALE);
+    ctx.fillStyle = PAPER;
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-10, -7);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-10, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = 'rgba(23,20,26,.22)';
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-4, -0.5);
+    ctx.lineTo(-4, 0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.fillStyle = SCENE_BG;
+    ctx.fillRect(0, 0, LW, LH);
+
+    ctx.strokeStyle = 'rgba(255,247,230,.14)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var i = 0; i <= 30; i += 1) {
+      var p = driftFlight(i / 30);
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+
+    drawShadow(pos.x, curT);
+
+    for (var j = 0; j < trail.length; j += 1) {
+      var tp = trail[j];
+      var a = (j + 1) / trail.length * 0.55;
+      ctx.fillStyle = 'rgba(255,247,230,' + a + ')';
+      ctx.beginPath(); ctx.arc(tp.x, tp.y, 3.4, 0, Math.PI * 2); ctx.fill();
+    }
+    drawPlane(pos.x, pos.y, heading);
+  }
+
+  function update(dt, tMs) {
+    if (reduce) return;
+    var t = (tMs % FLIGHT_MS) / FLIGHT_MS;
+    curT = t;
+    var next = driftFlight(t);
+    var ahead = driftFlight(Math.min(1, t + 0.01));
+    heading = Math.atan2(ahead.y - next.y, ahead.x - next.x);
+    pos = next;
+    trail.push({ x: pos.x, y: pos.y });
+    if (trail.length > TRAIL_MAX) trail.shift();
+    if (t < 0.02) trail.length = 0;
+  }
+
+  var cw = 480, ch = 300, sx = 1, sy = 1;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sx = cw / LW; sy = ch / LH;
+    render();
+  }
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save();
+    ctx.scale(sx, sy);
+    draw();
+    ctx.restore();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  if (reduce) {
+    root.classList.remove('is-demo');
+    pos = driftFlight(0.5);
+    curT = 0.5;
+    var a2 = driftFlight(0.51);
+    heading = Math.atan2(a2.y - pos.y, a2.x - pos.x);
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (playing) update(dt, ts);
+    render();
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render();
+  if (playing) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

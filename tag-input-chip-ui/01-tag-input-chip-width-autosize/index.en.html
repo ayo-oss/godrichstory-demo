@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tag chip input whose width grows by character count — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ti is-demo" id="ti">
+  <div class="ti__row" id="tiRow">
+    <span class="ti__chip" id="tiChip0"><span class="ti__chipText">Research</span><button type="button" class="ti__chipX" aria-label="Remove tag: Research">×</button></span>
+    <span class="ti__draft" id="tiDraft" aria-hidden="true"><span class="ti__draftText" id="tiDraftText"></span><span class="ti__caret"></span></span>
+    <input type="text" class="ti__input" id="tiInput" aria-label="Tag input, chip width grows with character count" placeholder="Tag input">
+  </div>
+  <p class="ti__meta">Measured width <b id="tiW">0</b>px · chars <b id="tiN">0</b> chars</p>
+  <p class="ti__sr" role="status" aria-live="polite" id="tiLive"></p>
+</div>
+<script>
+(function () {
+  var WIDTH_PER_CHAR = 6.4; // 계산 겹 상수: 정밀 측정 전에 즉시 보여줄 어림 Width(글자당 px) — 다음 프레임에 canvas measureText 실측값으로 보정된다
+  var CH_PAD = 24; // 좌우 안쪽 여백 합
+  var MIN_W = 32, MAX_W = 208;
+  var WORDS = ['Prototype', 'Wireframe', 'Draft'];
+  var TYPE_MS = 130, HOLD_MS = 560, GAP_MS = 420;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('ti');
+  var draft = document.getElementById('tiDraft');
+  var draftText = document.getElementById('tiDraftText');
+  var input = document.getElementById('tiInput');
+  var wOut = document.getElementById('tiW');
+  var nOut = document.getElementById('tiN');
+  var live = document.getElementById('tiLive');
+  var row = document.getElementById('tiRow');
+  var chipSeq = 0;
+
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  function syncFont() {
+    var cs = window.getComputedStyle(draftText);
+    ctx.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+  }
+  function measureWidth(text) {
+    // 계산 겹: canvas measureText 로 실제 글리프 폭을 잰다 — 글자 수 곱셈 추정이 아니다
+    return ctx.measureText(text).width;
+  }
+
+  var target = '';
+  function applyWidth(text, precise) {
+    var guess = Math.min(MAX_W, Math.max(MIN_W, text.length * WIDTH_PER_CHAR + CH_PAD));
+    draft.style.width = guess.toFixed(1) + 'px';
+    if (precise) {
+      syncFont();
+      var real = Math.min(MAX_W, Math.max(MIN_W, measureWidth(text) + CH_PAD));
+      requestAnimationFrame(function () {
+        draft.style.width = real.toFixed(1) + 'px';
+        wOut.textContent = Math.round(real);
+      });
+    } else {
+      wOut.textContent = Math.round(guess);
+    }
+    nOut.textContent = text.length;
+  }
+
+  function render() {
+    draftText.textContent = target;
+    applyWidth(target, true);
+  }
+
+  function commit(text) {
+    if (!text) return;
+    chipSeq++;
+    var chip = document.createElement('span');
+    chip.className = 'ti__chip ti__chip--enter';
+    chip.id = 'tiChip' + chipSeq;
+    var t = document.createElement('span');
+    t.className = 'ti__chipText';
+    t.textContent = text;
+    var x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'ti__chipX';
+    x.setAttribute('aria-label', 'Remove tag: ' + text);
+    x.addEventListener('click', function () { human(); chip.remove(); announce(); });
+    chip.appendChild(t);
+    chip.appendChild(x);
+    row.insertBefore(chip, draft);
+    requestAnimationFrame(function () { chip.classList.remove('ti__chip--enter'); });
+    announce();
+  }
+
+  function announce() {
+    live.textContent = 'Tags ' + row.querySelectorAll('.ti__chip').length + ' ';
+  }
+
+  function human() {
+    if (root.classList.contains('is-demo')) { root.classList.remove('is-demo'); }
+  }
+
+  input.addEventListener('input', function () {
+    human();
+    target = input.value;
+    render();
+  });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && input.value.trim()) {
+      human();
+      commit(input.value.trim());
+      input.value = '';
+      target = '';
+      render();
+    }
+  });
+
+  var timer = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function typeLoop(wi, ci) {
+    if (!root.classList.contains('is-demo')) return;
+    var word = WORDS[wi % WORDS.length];
+    if (ci <= word.length) {
+      target = word.slice(0, ci);
+      render();
+      schedule(function () { typeLoop(wi, ci + 1); }, TYPE_MS);
+    } else {
+      schedule(function () {
+        if (!root.classList.contains('is-demo')) return;
+        commit(word);
+        target = '';
+        render();
+        schedule(function () { typeLoop(wi + 1, 0); }, GAP_MS);
+      }, HOLD_MS);
+    }
+  }
+
+  render();
+  announce();
+  if (!reduce) {
+    schedule(function () { typeLoop(0, 0); }, 320);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

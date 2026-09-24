@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>모래시계 타이머 — 벽이 유도하는 낙하로 짜는 시간 표시 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint"><span>Passing the narrow neck, the top empties and the bottom fills</span></p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Hourglass cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">3</b>cells neck width · hourglass fall</span>
+    <span class="cd__meta cd__meta--dim">canvas · fillRect · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 모래시계 타이머(08). 재료 코드: 0 빈칸 1 모래 3 벽(고정).
+// 위 원뿔 + 아래 역원뿔 모양으로 벽을 1 칸 두께 계단선으로 그려 목 폭 NECK 칸을 만들고,
+// 위칸을 모래로 가득 채운다. 규칙은 기본 낙하(아래 비었으면 스왑) + 대각 미끄짐(SLIDE_P) 뿐 —
+// 벽이 유도하는 것만으로 위가 비고 아래가 차는 모래시계 리듬이 나온다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var NECK = 3;       // 목 폭(칸) — 늘리면 낙하가 빨라져 시계가 급하게 다 찬다
+  var SLIDE_P = 1.0;  // 사면 대각 미끄짐 확률 — 낮추면 모래가 봉긋하게 쌓인다
+  // ────────────────────────────
+
+  var EMPTY = 0, SAND = 1, WALL = 3;
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A08);
+
+  function hexToRgb(hex) {
+    hex = hex.trim();
+    if (hex.length === 4) hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var cols = 0, rows = 0, grid = null;
+  var COL = {};
+  var leftWall = null, rightWall = null; // 행별 벽 칼럼(좌/우)
+
+  function readColors() {
+    var css = getComputedStyle(root);
+    COL.night = hexToRgb(css.getPropertyValue('--sand-night'));
+    COL.mist = hexToRgb(css.getPropertyValue('--sand-mist'));
+    COL.ice = hexToRgb(css.getPropertyValue('--sand-ice'));
+    COL.sandA = hexToRgb(css.getPropertyValue('--sand-grain'));
+    COL.sandB = hexToRgb(css.getPropertyValue('--sand-gold'));
+    COL.glow = hexToRgb(css.getPropertyValue('--sand-glow'));
+  }
+
+  function idx(x, y) { return y * cols + x; }
+  function get(x, y) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return WALL;
+    return grid[idx(x, y)];
+  }
+  function set(x, y, v) {
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+    grid[idx(x, y)] = v;
+  }
+
+  function buildHourglass() {
+    var cx = cols / 2;
+    var neckHalf = NECK / 2;
+    var edgeMargin = Math.max(1, Math.round(cols * 0.04)); // 화면 폭 대부분을 쓰도록 가장자리 여백 최소화
+    var wideHalf = cols / 2 - edgeMargin;
+    var neckBand = Math.max(2, Math.round(rows * 0.05));
+    var mid = rows / 2;
+    leftWall = new Int16Array(rows);
+    rightWall = new Int16Array(rows);
+    for (var y = 0; y < rows; y++) {
+      var half;
+      if (Math.abs(y - mid) <= neckBand) {
+        half = neckHalf;
+      } else if (y < mid) {
+        var f = 1 - (mid - neckBand - y) / Math.max(1, mid - neckBand);
+        half = neckHalf + (wideHalf - neckHalf) * Math.max(0, Math.min(1, 1 - f));
+      } else {
+        var f2 = (y - mid - neckBand) / Math.max(1, rows - 1 - mid - neckBand);
+        half = neckHalf + (wideHalf - neckHalf) * Math.max(0, Math.min(1, f2));
+      }
+      leftWall[y] = Math.round(cx - half);
+      rightWall[y] = Math.round(cx + half);
+    }
+    for (var yy = 0; yy < rows; yy++) {
+      set(leftWall[yy], yy, WALL);
+      set(rightWall[yy], yy, WALL);
+    }
+    // 위칸 가득 채우기 — mid - neckBand 위쪽 내부 전부 모래
+    var fillBottom = Math.floor(mid - neckBand);
+    for (var y2 = 0; y2 < fillBottom; y2++) {
+      for (var x2 = leftWall[y2] + 1; x2 < rightWall[y2]; x2++) {
+        set(x2, y2, SAND);
+      }
+    }
+  }
+
+  function resetGrid() {
+    grid = new Uint8Array(cols * rows);
+    buildHourglass();
+  }
+
+  function moveInto(x, y, nx, ny) {
+    if (get(nx, ny) !== EMPTY) return false;
+    set(x, y, EMPTY);
+    set(nx, ny, SAND);
+    return true;
+  }
+
+  function updateSand(x, y, dir) {
+    if (get(x, y) !== SAND) return false;
+    if (moveInto(x, y, x, y + 1)) return true;
+    if (rand() > SLIDE_P) return false;
+    var first = dir > 0 ? -1 : 1;
+    if (moveInto(x, y, x + first, y + 1)) return true;
+    return moveInto(x, y, x - first, y + 1);
+  }
+
+  var tick = 0;
+  var cycleTick = 0;            // 뒤집기 후 경과 틱
+  var CYCLE_TICKS = 150;        // 한 뒤집기 주기(틱) — 위칸이 다시 채워지는 시간 포함
+  var lastMove = 0;             // 마지막 모래 이동 틱(정지 감지)
+  function update() {
+    tick++;
+    cycleTick++;
+    var dir = (tick % 2 === 0) ? 1 : -1;
+    var moved = false;
+    for (var y = rows - 2; y >= 0; y--) {
+      if (dir > 0) {
+        for (var x = 0; x < cols; x++) { if (updateSand(x, y, dir)) moved = true; }
+      } else {
+        for (var x2 = cols - 1; x2 >= 0; x2--) { if (updateSand(x2, y, dir)) moved = true; }
+      }
+    }
+    if (moved) lastMove = tick;
+    // 뒤집기 — 낙하가 멎은 뒤 잠깐 멈춤 보여주고 위칸을 다시 채운다(무한 타이머)
+    if (!moved && tick - lastMove > 12 && cycleTick > 40) {
+      grid = new Uint8Array(cols * rows);
+      buildHourglass();
+      cycleTick = 0;
+      lastMove = tick;
+    }
+  }
+
+  function draw(t) {
+    var W = cv.width, H = cv.height;
+    var wave = Math.sin(t * 0.00055) * 0.5 + 0.5;
+    var cx = W * (0.5 + 0.3 * Math.sin(t * 0.00042));
+    var cy = H * (0.5 + 0.3 * Math.cos(t * 0.00036));
+    var maxD = Math.hypot(W, H) * 0.6;
+    var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxD);
+    grad.addColorStop(0, rgba(COL.glow, 0.10 + 0.05 * wave));
+    grad.addColorStop(1, rgba(COL.night, 0));
+    ctx.fillStyle = rgba(COL.night, 1);
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var m = grid[idx(x, y)];
+        if (m === EMPTY) continue;
+        var px = x * CELL, py = y * CELL;
+        if (m === WALL) {
+          ctx.fillStyle = rgba(COL.mist, 0.42);
+        } else {
+          ctx.fillStyle = rgba(((x + y) % 3 === 0) ? COL.sandA : COL.sandB, 1);
+        }
+        ctx.fillRect(px, py, CELL, CELL);
+      }
+    }
+  }
+
+  function fit() {
+    readColors();
+    var r = field.getBoundingClientRect();
+    cv.width = Math.max(1, Math.round(r.width));
+    cv.height = Math.max(1, Math.round(r.height));
+    cols = Math.max(1, Math.floor(cv.width / CELL));
+    rows = Math.max(1, Math.floor(cv.height / CELL));
+    resetGrid();
+  }
+
+  function stillFrame() {
+    for (var i = 0; i < 220; i++) update();
+    draw(3600);
+    root.classList.add('is-still');
+  }
+
+  var last = 0, acc = 0;
+  var STEP = 1000 / 60;
+  function frame(now) {
+    if (!last) last = now;
+    acc += now - last;
+    last = now;
+    var guard = 0;
+    while (acc >= STEP && guard < 6) { update(); acc -= STEP; guard++; }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+  if (reduce) { stillFrame(); } else { requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>

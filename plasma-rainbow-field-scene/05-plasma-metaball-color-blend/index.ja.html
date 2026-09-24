@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>半径の分だけ近づいた塊が触れ合う場所から色が混ざる背景 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pv is-demo" id="pvRoot">
+  <canvas class="pv__canvas" id="pvCanvas" width="480" height="300"></canvas>
+  <p class="pv__caption">半径の分だけ近づいた塊が触れ合う場所から色が混ざる背景</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 덩어리마다 메타볼 필드(반지름^2 / 거리^2 형태의 감쇠)를 계산해 제곱으로 날카롭게 만든 뒤
+  // 필드 값으로 색을 가중 평균한다 — 두 덩어리가 가까워질수록 경계에서 색이 섞인다.
+  // 실제 입력: 덩어리를 손가락·마우스로 드래그해 옮길 수 있다.
+  var root = document.getElementById('pvRoot');
+  var canvas = document.getElementById('pvCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var LOOP_MS = 2000;
+  var PLASMA_BLOB_RADIUS_PX = 60;
+  var DRIFT_AMP = 14;
+  var DRIFT_FREQ = Math.PI * 2 / LOOP_MS;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(417051);
+
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+
+  var off = document.createElement('canvas');
+  off.width = CALC_W; off.height = CALC_H;
+  var octx = off.getContext('2d');
+  var offImg = octx.createImageData(CALC_W, CALC_H);
+  var offBuf = offImg.data;
+
+  var blobHues = [205, 325, 55];
+  var blobs = blobHues.map(function (h, i) {
+    return {
+      bx: CALC_W * (0.28 + i * 0.24), by: CALC_H * (0.35 + (i % 2) * 0.3),
+      x: 0, y: 0, phase: rand() * Math.PI * 2, rgb: hslToRgb(h, 0.72, 0.56)
+    };
+  });
+  var dragIndex = -1;
+
+  function updateBlobs(t) {
+    blobs.forEach(function (b, i) {
+      if (i === dragIndex) return;
+      b.x = b.bx + Math.sin(t * DRIFT_FREQ + b.phase) * DRIFT_AMP;
+      b.y = b.by + Math.cos(t * DRIFT_FREQ * 0.75 + b.phase * 1.2) * DRIFT_AMP;
+    });
+  }
+
+  function renderField(t) {
+    updateBlobs(t);
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var sw = 0, rr = 0, gg = 0, bb = 0;
+        for (var k = 0; k < blobs.length; k += 1) {
+          var bo = blobs[k];
+          var dx = x - bo.x, dy = y - bo.y;
+          var d2 = dx * dx + dy * dy;
+          var w = (PLASMA_BLOB_RADIUS_PX * PLASMA_BLOB_RADIUS_PX) / (d2 + PLASMA_BLOB_RADIUS_PX * 2);
+          w = w * w;
+          sw += w; rr += bo.rgb[0] * w; gg += bo.rgb[1] * w; bb += bo.rgb[2] * w;
+        }
+        offBuf[idx] = rr / sw; offBuf[idx + 1] = gg / sw; offBuf[idx + 2] = bb / sw; offBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(elapsed) {
+    lastElapsed = elapsed;
+    renderField(elapsed);
+    octx.putImageData(offImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(off, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = !reduce;
+  var elapsed = reduce ? LOOP_MS * 0.5 : 0;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function calcPoint(e) {
+    var r = wrap.getBoundingClientRect();
+    var t0 = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    var relX = (t0.clientX - r.left) / r.width * cw;
+    var relY = (t0.clientY - r.top) / r.height * ch;
+    return { x: relX * (CALC_W / cw), y: relY * (CALC_H / ch) };
+  }
+  function nearestBlobIndex(p) {
+    var bi = -1, bd = Infinity;
+    blobs.forEach(function (b, i) {
+      var dx = b.x - p.x, dy = b.y - p.y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; bi = i; }
+    });
+    return Math.sqrt(bd) < PLASMA_BLOB_RADIUS_PX * 1.4 ? bi : -1;
+  }
+  wrap.addEventListener('pointerdown', function (e) {
+    var p = calcPoint(e);
+    dragIndex = nearestBlobIndex(p);
+    if (dragIndex >= 0) { blobs[dragIndex].x = p.x; blobs[dragIndex].y = p.y; draw(lastElapsed); }
+  });
+  wrap.addEventListener('pointermove', function (e) {
+    if (dragIndex < 0) return;
+    var p = calcPoint(e);
+    blobs[dragIndex].x = p.x; blobs[dragIndex].y = p.y;
+    draw(lastElapsed);
+  });
+  window.addEventListener('pointerup', function () {
+    if (dragIndex >= 0) {
+      blobs[dragIndex].bx = blobs[dragIndex].x;
+      blobs[dragIndex].by = blobs[dragIndex].y;
+    }
+    dragIndex = -1;
+  });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      elapsed += dt;
+      if (elapsed >= LOOP_MS) elapsed -= LOOP_MS;
+    }
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

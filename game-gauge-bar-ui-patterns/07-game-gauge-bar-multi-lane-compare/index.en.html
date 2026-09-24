@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-Lane Compare Transition — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gb">
+  <div class="gb__head">
+    <span class="gb__label">Progress Compare</span>
+  </div>
+  <div class="gb__lanes" id="gbLanes"></div>
+  <button type="button" class="gb__hit" id="gbJolt">Shake Ranking</button>
+</div>
+<script>
+(function () {
+  // 계산 겹 상수: 레인마다 다른 위상·주파수의 사인 궤적 — 시드 고정, Math.random 미사용
+  var LANES = [
+    { label: 'A', base: 55, amp: 22, freq: .55, phase: 0.0, offset: 0 },
+    { label: 'B', base: 60, amp: 18, freq: .70, phase: 1.3, offset: 0 },
+    { label: 'C', base: 45, amp: 25, freq: .40, phase: 2.8, offset: 0 },
+    { label: 'D', base: 50, amp: 20, freq: .62, phase: 4.1, offset: 0 }
+  ];
+  var JOLTS = [
+    [0, 0, 20, 0],
+    [-15, 0, 0, 18],
+    [0, 22, -10, 0],
+    [16, -12, 0, 0]
+  ]; // 클릭마다 순환 적용되는 레인별 고정 오프셋 증가량
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gb = document.getElementById('gb');
+  var lanesEl = document.getElementById('gbLanes');
+  var joltBtn = document.getElementById('gbJolt');
+
+  var rows = LANES.map(function (l) {
+    var row = document.createElement('div');
+    row.className = 'gb__row';
+    var label = document.createElement('span');
+    label.className = 'gb__laneLabel';
+    label.textContent = l.label;
+    var track = document.createElement('div');
+    track.className = 'gb__laneTrack';
+    var fill = document.createElement('div');
+    fill.className = 'gb__laneFill';
+    var lead = document.createElement('div');
+    lead.className = 'gb__laneLead';
+    track.appendChild(fill);
+    track.appendChild(lead);
+    row.appendChild(label);
+    row.appendChild(track);
+    lanesEl.appendChild(row);
+    return { row: row, fill: fill, lead: lead };
+  });
+
+  var crown = document.createElement('div');
+  crown.className = 'gb__crown';
+  lanesEl.appendChild(crown);
+
+  // 계산 겹: 왕관을 옮기는 간격은 고정 px 이 아니라 실제 행 간격을 측정한 값이다 — 320px 폭에서
+  // 행 높이·행간이 좁아져도(미디어 쿼리) 왕관이 항상 정확히 다음 행 위에 앉는다.
+  var rowStep = rows.length > 1
+    ? rows[1].row.getBoundingClientRect().top - rows[0].row.getBoundingClientRect().top
+    : rows[0].row.getBoundingClientRect().height;
+
+  var isDemo = true;
+  var joltIdx = 0;
+
+  function valuesAt(t) {
+    return LANES.map(function (l) {
+      var v = l.base + l.offset + l.amp * Math.sin(l.freq * t / 1000 + l.phase);
+      return Math.max(4, Math.min(100, v));
+    });
+  }
+
+  function human() {
+    if (isDemo) { gb.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  joltBtn.addEventListener('click', function () {
+    human();
+    var d = JOLTS[joltIdx % JOLTS.length];
+    for (var i = 0; i < LANES.length; i++) LANES[i].offset += d[i];
+    joltIdx++;
+  });
+  joltBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    joltBtn.click();
+  });
+
+  function render(t) {
+    var values = valuesAt(t);
+    var sorted = values.slice().sort(function (a, b) { return b - a; });
+    var leaderVal = sorted[0];
+    var secondVal = sorted[1];
+    var leaderIdx = values.indexOf(leaderVal);
+
+    for (var i = 0; i < rows.length; i++) {
+      var v = values[i];
+      rows[i].fill.style.width = v.toFixed(2) + '%';
+      var isLeader = i === leaderIdx;
+      rows[i].fill.classList.toggle('gb__laneFill--lead', isLeader);
+      // 계산 겹: 선두와 2위의 값 차이만큼만 밝은 겹으로 얹어 "얼마나 앞섰는지" 를 보인다
+      if (isLeader && leaderVal - secondVal > 0.3) {
+        rows[i].lead.style.left = secondVal.toFixed(2) + '%';
+        rows[i].lead.style.width = (leaderVal - secondVal).toFixed(2) + '%';
+        rows[i].lead.style.opacity = '1';
+      } else {
+        rows[i].lead.style.opacity = '0';
+      }
+    }
+    // 계산 겹: translateY 로 왕관 표시를 현재 선두 레인 행으로 옮긴다(DOM 재배치 없이 순위만 계산)
+    crown.style.transform = 'translateY(' + (leaderIdx * rowStep) + 'px)';
+  }
+
+  function loop(ts) {
+    render(ts);
+    requestAnimationFrame(loop);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  } else {
+    render(0);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

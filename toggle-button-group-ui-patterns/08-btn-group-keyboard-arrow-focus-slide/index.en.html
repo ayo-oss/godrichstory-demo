@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboard arrow focus slide — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kfs is-demo" id="kfs">
+  <div class="kfs__group" id="kfsGroup" role="radiogroup" aria-label="View mode"></div>
+  <span class="kfs__ring" id="kfsRing" aria-hidden="true"></span>
+</div>
+<script>
+(function () {
+  var LABELS = ['Grid view', 'List view', 'Timeline view', 'Board view'];
+  var CYCLE_MS = 500; // 데모 자동 순회 간격 — 측정 창(2s) 안에 전환이 여러 번 들어오게 짧게 잡음
+  var FOCUS_EASE = 'easeInOut'; // 변형: easeInOut → linear (등속)
+  var EASES = {
+    linear: function (t) { return t; },
+    easeInOut: function (t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+  };
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('kfs');
+  var group = document.getElementById('kfsGroup');
+  var ring = document.getElementById('kfsRing');
+  var isDemo = true;
+  var current = 0;
+
+  var btns = LABELS.map(function (label, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'kfs__btn';
+    b.textContent = label;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', i === 0 ? 'true' : 'false');
+    b.tabIndex = i === 0 ? 0 : -1;
+    group.appendChild(b);
+    return b;
+  });
+
+  function human() {
+    if (isDemo) { root.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  // 계산 겹: 포커스 링을 목표 버튼의 실측 좌표(getBoundingClientRect, 그룹 기준 상대값)로 진행률 t 를
+  // FOCUS_EASE 로 보간해 translate·scale 한다 — % 나 고정폭이 아니라 매번 실측한다.
+  var raf = 0, from = null;
+  function measure(i) {
+    var r = btns[i].getBoundingClientRect();
+    var gr = group.getBoundingClientRect();
+    return { x: r.left - gr.left, y: r.top - gr.top, w: r.width, h: r.height };
+  }
+
+  function render(box) {
+    ring.style.transform = 'translate(' + box.x + 'px,' + box.y + 'px)';
+    ring.style.width = box.w + 'px';
+    ring.style.height = box.h + 'px';
+  }
+
+  function moveRing(toIdx) {
+    var to = measure(toIdx);
+    if (reduce || !from) { render(to); from = to; return; }
+    var start = from, dur = 260, t0 = 0;
+    var ease = EASES[FOCUS_EASE] || EASES.linear;
+    if (raf) cancelAnimationFrame(raf);
+    function step(ts) {
+      if (!t0) t0 = ts;
+      var t = Math.min(1, (ts - t0) / dur);
+      var e = ease(t);
+      render({
+        x: start.x + (to.x - start.x) * e,
+        y: start.y + (to.y - start.y) * e,
+        w: start.w + (to.w - start.w) * e,
+        h: start.h + (to.h - start.h) * e
+      });
+      if (t < 1) raf = requestAnimationFrame(step);
+      else { raf = 0; from = to; }
+    }
+    raf = requestAnimationFrame(step);
+  }
+
+  function select(i, focus) {
+    btns.forEach(function (b, j) {
+      b.setAttribute('aria-checked', String(j === i));
+      b.tabIndex = j === i ? 0 : -1;
+    });
+    current = i;
+    moveRing(i);
+    if (focus) btns[i].focus({ preventScroll: true });
+  }
+
+  btns.forEach(function (b, i) {
+    b.addEventListener('click', function () { human(); select(i, false); });
+    b.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      human();
+      e.preventDefault();
+      var dir = e.key === 'ArrowRight' ? 1 : -1;
+      select((current + dir + btns.length) % btns.length, true);
+    });
+  });
+
+  from = measure(0);
+  render(from);
+
+  var start0 = 0;
+  function loop(ts) {
+    if (!start0) start0 = ts;
+    if (isDemo && !reduce) {
+      var idx = Math.floor((ts - start0) / CYCLE_MS) % btns.length;
+      if (idx !== current) select(idx, false);
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</main>
+</body>
+</html>

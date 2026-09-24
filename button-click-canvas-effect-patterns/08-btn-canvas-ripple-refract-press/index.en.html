@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refraction-Ripple Button that Pushes Pixels from the Pressed Point — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rf is-demo" id="root">
+  <canvas class="rf__cv" id="cv" width="480" height="300"></canvas>
+  <button class="rf__btn" id="btn" type="button">Search</button>
+  <p class="rf__hint">A ripple spreads from the pressed point, pushing pixels aside</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function hashNoise(x, y, seed) {
+    var v = Math.sin(x * 12.9898 + y * 78.233 + seed * 0.0013) * 43758.5453;
+    return v - Math.floor(v);
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  function clampInt(v, lo, hi) {
+    v = v | 0;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+  }
+
+  var W = 480, H = 300;
+  var SEED = 80809;
+  var rnd = makeLcg(SEED);
+
+  // 02번(btn-canvas-crack-shatter-press)의 균열 각도 값(BTN_CANVAS_CRACK_BRANCH_COUNT = 6)을
+  // 이 편의 "눌린 좌표를 중심으로 화면을 밀어내는 픽셀 이동량"에 그대로 재사용한다 (훅 참고).
+  var CRACK_VALUE_ECHO = 6;
+
+  var BTN_CANVAS_RIPPLE_DECAY_MS = 320; // 진폭 값이 e분의 1로 줄어드는 데 걸리는 시간
+
+  var WAVE_SPEED = 850;   // px/s — 물결이 밀려 나가는 속도
+  var FREQ = 0.16;        // rad/px — 물결의 공간 주파수
+  var ANG_SPEED = FREQ * WAVE_SPEED; // rad/s
+  var BAND_WIDTH = 46;    // px — 물결 띠의 두께
+  var MAX_RIPPLES = 3;
+
+  var BW = 300, BH = 140;
+  var BX = (W - BW) / 2, BY = (H - BH) / 2;
+
+  // 화면 전체에 잔무늬를 깔아 둔다 — 물결이 지나가는 자리마다 픽셀이 이 무늬 경계를
+  // 넘나들며 눈에 보이는 차이를 만든다 (민무늬 배경만이면 안쪽은 밀려도 색이 같아 안 보인다).
+  var TEXTURE_CELL = 4;
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  // 눌리지 않은 원래 화면을 한 번만 그려 픽셀을 표본할 원본으로 둔다.
+  var base = document.createElement('canvas');
+  base.width = W; base.height = H;
+  var bctx = base.getContext('2d');
+
+  for (var ty = 0; ty < H; ty += TEXTURE_CELL) {
+    for (var tx = 0; tx < W; tx += TEXTURE_CELL) {
+      var tn = hashNoise(tx, ty, SEED);
+      bctx.fillStyle = tn > 0.5 ? '#eef0f4' : '#d8dbe3';
+      bctx.fillRect(tx, ty, TEXTURE_CELL, TEXTURE_CELL);
+    }
+  }
+
+  roundRect(bctx, BX, BY, BW, BH, 16);
+  bctx.fillStyle = '#17141a';
+  bctx.fill();
+  bctx.fillStyle = '#fff7e6';
+  bctx.font = '700 20px system-ui, sans-serif';
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.fillText('Search', BX + BW / 2, BY + BH / 2);
+  var baseData = bctx.getImageData(0, 0, W, H).data;
+
+  var outImg = ctx.createImageData(W, H);
+  var outData = outImg.data;
+
+  var ripples = [];
+
+  function pushRipple(x, y, now) {
+    ripples.push({ x: x, y: y, t0: now });
+    if (ripples.length > MAX_RIPPLES) ripples.shift();
+  }
+
+  function toCanvasXY(e) {
+    var rect = cv.getBoundingClientRect();
+    var scaleX = W / rect.width, scaleY = H / rect.height;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  function render(now) {
+    outData.set(baseData);
+
+    ripples = ripples.filter(function (r) {
+      return Math.exp(-(now - r.t0) / BTN_CANVAS_RIPPLE_DECAY_MS) > 0.02;
+    });
+
+    for (var i = 0; i < ripples.length; i++) {
+      var r = ripples[i];
+      var elapsed = now - r.t0;
+      if (elapsed < 0) continue;
+      var radius = (elapsed / 1000) * WAVE_SPEED;
+      var ampDecay = Math.exp(-elapsed / BTN_CANVAS_RIPPLE_DECAY_MS);
+      var minX = clampInt(Math.floor(r.x - radius - BAND_WIDTH), 0, W - 1);
+      var maxX = clampInt(Math.ceil(r.x + radius + BAND_WIDTH), 0, W - 1);
+      var minY = clampInt(Math.floor(r.y - radius - BAND_WIDTH), 0, H - 1);
+      var maxY = clampInt(Math.ceil(r.y + radius + BAND_WIDTH), 0, H - 1);
+
+      for (var y = minY; y <= maxY; y++) {
+        for (var x = minX; x <= maxX; x++) {
+          var dx = x - r.x, dy = y - r.y;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          var bandDist = dist - radius;
+          if (bandDist > BAND_WIDTH || bandDist < -BAND_WIDTH) continue;
+          var envelope = 1 - Math.abs(bandDist) / BAND_WIDTH;
+          var phase = dist * FREQ - (elapsed / 1000) * ANG_SPEED;
+          var shiftMag = CRACK_VALUE_ECHO * ampDecay * envelope * Math.sin(phase);
+          var nx = dist > 0.0001 ? dx / dist : 0, ny = dist > 0.0001 ? dy / dist : 0;
+          var sx = clampInt(Math.round(x + nx * shiftMag), 0, W - 1);
+          var sy = clampInt(Math.round(y + ny * shiftMag), 0, H - 1);
+          var srcIdx = (sy * W + sx) * 4, dstIdx = (y * W + x) * 4;
+          outData[dstIdx] = baseData[srcIdx];
+          outData[dstIdx + 1] = baseData[srcIdx + 1];
+          outData[dstIdx + 2] = baseData[srcIdx + 2];
+          outData[dstIdx + 3] = baseData[srcIdx + 3];
+        }
+      }
+    }
+
+    ctx.putImageData(outImg, 0, 0);
+  }
+
+  function trigger(x, y) {
+    root.classList.remove('is-demo');
+    pushRipple(x, y, performance.now());
+    if (reduceMQ.matches) render(performance.now());
+  }
+
+  btn.addEventListener('click', function () { trigger(BX + BW / 2, BY + BH / 2); });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    trigger(BX + BW / 2, BY + BH / 2);
+  });
+  cv.addEventListener('pointerdown', function (e) {
+    var p = toCanvasXY(e);
+    trigger(p.x, p.y);
+  });
+  window.addEventListener('resize', function () { render(performance.now()); });
+
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      if (root.classList.contains('is-demo')) {
+        var t = now % 550;
+        if (t < 16) {
+          var cx = BX + 40 + rnd() * (BW - 80);
+          var cy = BY + 24 + rnd() * (BH - 48);
+          pushRipple(cx, cy, now);
+        }
+      }
+      render(now);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    pushRipple(BX + BW / 2, BY + BH / 2, performance.now() - 140);
+    render(performance.now());
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

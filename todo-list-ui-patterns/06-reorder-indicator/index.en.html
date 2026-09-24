@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reorder Insertion-Line Preview — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<ul class="list is-demo" id="list">
+</ul>
+<p class="liveNote" id="liveNote" aria-live="polite"></p>
+</main>
+<script>
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var list = document.getElementById('list');
+  var liveNote = document.getElementById('liveNote');
+  var HANDLE_SVG = '<svg viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 32v192a16 16 0 0 1-16 16H64a16 16 0 0 1-16-16V32a16 16 0 0 1 16-16h128a16 16 0 0 1 16 16" opacity=".2"/><path d="M104 60a12 12 0 1 1-12-12a12 12 0 0 1 12 12m60 12a12 12 0 1 0-12-12a12 12 0 0 0 12 12m-72 44a12 12 0 1 0 12 12a12 12 0 0 0-12-12m72 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12m-72 68a12 12 0 1 0 12 12a12 12 0 0 0-12-12m72 0a12 12 0 1 0 12 12a12 12 0 0 0-12-12"/></g></svg>';
+
+  var order = ['Organize market research', 'Draft writing', 'Request team review', 'Submit final version'];
+  var dragIndex = -1;
+  var line = document.createElement('div');
+  line.className = 'insertLine';
+  line.setAttribute('aria-hidden', 'true');
+
+  function human() { list.classList.remove('is-demo'); window.clearInterval(autoTimer); }
+
+  function render() {
+    list.innerHTML = '';
+    order.forEach(function (text, i) {
+      var li = document.createElement('li');
+      li.className = 'row';
+      li.dataset.index = i;
+      li.innerHTML =
+        '<button class="handle" type="button" aria-label="' + text + ' reorder handle — arrow keys also move it">' + HANDLE_SVG + '</button>' +
+        '<span class="rowText">' + text + '</span>';
+      list.appendChild(li);
+    });
+    bindHandles();
+  }
+
+  // 계산 겹: 포인터 Y 좌표를 각 행의 실측 경계(top/bottom)와 비교해 삽입 지점을 찾는다.
+  // 요소를 실시간으로 옮기지 않고, 삽입선 하나만 그 지점으로 옮긴다.
+  function gapIndexFor(pointerY, excludeIndex) {
+    var rows = Array.prototype.slice.call(list.querySelectorAll('.row'));
+    var visible = rows.filter(function (r) { return Number(r.dataset.index) !== excludeIndex; });
+    for (var i = 0; i < visible.length; i++) {
+      var rect = visible[i].getBoundingClientRect();
+      var mid = rect.top + rect.height / 2;
+      if (pointerY < mid) return i;
+    }
+    return visible.length;
+  }
+
+  function showLineAt(gapIndex, excludeIndex) {
+    var rows = Array.prototype.slice.call(list.querySelectorAll('.row'));
+    var visible = rows.filter(function (r) { return Number(r.dataset.index) !== excludeIndex; });
+    var listRect = list.getBoundingClientRect();
+    var y;
+    if (visible.length === 0) { y = 0; }
+    else if (gapIndex <= 0) { y = visible[0].getBoundingClientRect().top - listRect.top - 3; }
+    else if (gapIndex >= visible.length) { y = visible[visible.length - 1].getBoundingClientRect().bottom - listRect.top + 3; }
+    else {
+      var a = visible[gapIndex - 1].getBoundingClientRect();
+      var b = visible[gapIndex].getBoundingClientRect();
+      y = ((a.bottom + b.top) / 2) - listRect.top;
+    }
+    line.style.top = y + 'px';
+    if (!line.parentNode) list.appendChild(line);
+  }
+
+  function hideLine() {
+    if (line.parentNode) line.parentNode.removeChild(line);
+  }
+
+  function commitMove(fromIndex, gapIndex) {
+    var item = order[fromIndex];
+    var rest = order.slice(0, fromIndex).concat(order.slice(fromIndex + 1));
+    var insertAt = gapIndex;
+    rest.splice(insertAt, 0, item);
+    order = rest;
+    liveNote.textContent = '"' + item + '" moved to position  ' + (insertAt + 1) + '.';
+    render();
+  }
+
+  function bindHandles() {
+    var handles = list.querySelectorAll('.handle');
+    handles.forEach(function (h) {
+      var row = h.closest('.row');
+      h.addEventListener('pointerdown', function (e) {
+        human();
+        dragIndex = Number(row.dataset.index);
+        row.classList.add('dragging');
+        h.setPointerCapture(e.pointerId);
+      });
+      h.addEventListener('pointermove', function (e) {
+        if (dragIndex < 0) return;
+        var gap = gapIndexFor(e.clientY, dragIndex);
+        showLineAt(gap, dragIndex);
+      });
+      h.addEventListener('pointerup', function (e) {
+        if (dragIndex < 0) return;
+        var gap = gapIndexFor(e.clientY, dragIndex);
+        hideLine();
+        var from = dragIndex;
+        dragIndex = -1;
+        commitMove(from, gap);
+      });
+      h.addEventListener('keydown', function (e) {
+        human();
+        var i = Number(row.dataset.index);
+        if (e.key === 'ArrowUp' && i > 0) {
+          e.preventDefault();
+          var tmp = order[i - 1]; order[i - 1] = order[i]; order[i] = tmp;
+          render();
+          list.querySelectorAll('.handle')[i - 1].focus({ preventScroll: true });
+        } else if (e.key === 'ArrowDown' && i < order.length - 1) {
+          e.preventDefault();
+          var tmp2 = order[i + 1]; order[i + 1] = order[i]; order[i] = tmp2;
+          render();
+          list.querySelectorAll('.handle')[i + 1].focus({ preventScroll: true });
+        }
+      });
+    });
+  }
+
+  render();
+
+  var autoTimer;
+  function autoStep() {
+    var listRect = list.getBoundingClientRect();
+    var fromRow = list.querySelector('.row[data-index="0"]');
+    if (!fromRow) return;
+    var fromRect = fromRow.getBoundingClientRect();
+    var targetY = listRect.bottom - 8;
+    dragIndex = 0;
+    fromRow.classList.add('dragging');
+    var steps = 16;
+    var i = 0;
+    var iv = setInterval(function () {
+      i++;
+      var y = fromRect.top + (targetY - fromRect.top) * (i / steps);
+      var gap = gapIndexFor(y, dragIndex);
+      showLineAt(gap, dragIndex);
+      if (i >= steps) {
+        clearInterval(iv);
+        var gapFinal = gapIndexFor(targetY, dragIndex);
+        hideLine();
+        var from = dragIndex;
+        dragIndex = -1;
+        commitMove(from, gapFinal);
+      }
+    }, 60);
+  }
+  if (!reduce) { autoStep(); autoTimer = window.setInterval(autoStep, 1500); }
+})();
+</script>
+</body>
+</html>

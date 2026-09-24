@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hanging-angle swing — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bph is-demo" id="bph">
+  <div class="bph__field" id="bphField" role="application" aria-label="Hanging button swing test area" tabindex="0">
+    <span class="bph__pivot" aria-hidden="true"></span>
+    <div class="bph__arm" id="bphArm">
+      <span class="bph__rod" aria-hidden="true"></span>
+      <button class="bph__btn" id="bphBtn" type="button" aria-label="Notification button">3</button>
+    </div>
+  </div>
+  <p class="bph__hint">Pull the button sideways and release — it swings on its own</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bph');
+  var field = document.getElementById('bphField');
+  var arm = document.getElementById('bphArm');
+  var btn = document.getElementById('bphBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 각가속도 = -(GRAVITY/ARM_LEN)*sin(angle) - DAMPING*avel. 각도(angle)는 도(degree) 단위라
+  // sin() 에 넣기 전 라디안으로 바꾸고 결과를 다시 도로 되돌린다(RAD 변환 상수) — 단위를 안 맞추면
+  // 복원력이 57배 작아져 흔들림이 멈춘 것처럼 보인다.
+  var GRAVITY = 2000, ARM_LEN = 110, DAMPING = 0.42, RAD = 180 / Math.PI;
+  var angle = 0, avel = 0, dragging = false, last = 0, running = false;
+
+  function paint() { arm.style.transform = 'rotate(' + angle.toFixed(2) + 'deg)'; }
+  function tick(now) {
+    var dt = Math.min((now - last) / 1000, 0.032);
+    last = now;
+    avel += (-(GRAVITY / ARM_LEN) * Math.sin(angle / RAD) * RAD - DAMPING * avel) * dt;
+    angle += avel * dt;
+    paint();
+    if (Math.abs(angle) < 0.2 && Math.abs(avel) < 0.6) { angle = 0; avel = 0; paint(); running = false; return; }
+    raf = requestAnimationFrame(tick);
+  }
+  var raf = null;
+  function start() { if (!running) { running = true; last = performance.now(); raf = requestAnimationFrame(tick); } }
+
+  function angleFromClientX(clientX) {
+    var r = field.getBoundingClientRect();
+    var px = clientX - (r.left + r.width / 2);
+    var deg = Math.atan2(px, ARM_LEN) * RAD;
+    return Math.max(-70, Math.min(70, deg));
+  }
+  function onDown(clientX) {
+    dragging = true;
+    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+    running = false;
+    angle = angleFromClientX(clientX);
+    avel = 0;
+    paint();
+  }
+  function onMove(clientX) {
+    if (!dragging) { return; }
+    angle = angleFromClientX(clientX);
+    avel = 0;
+    paint();
+  }
+  function onUp() {
+    if (!dragging) { return; }
+    dragging = false;
+    if (reduce) { angle = 0; avel = 0; paint(); return; }
+    start();
+  }
+
+  function wireReal() {
+    btn.addEventListener('pointerdown', function (e) { root.classList.remove('is-demo'); stopAutoplay(); onDown(e.clientX); });
+    window.addEventListener('pointermove', function (e) { onMove(e.clientX); });
+    window.addEventListener('pointerup', onUp);
+  }
+  wireReal();
+  paint();
+
+  // 자동 루프: 실제 드래그 대신 각도를 한 번 밀어 두고 같은 감쇠 진동 경로를 반복 재현한다.
+  var autoTimer = null;
+  function autoTick() { angle = 30; avel = 0; running = false; start(); }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTick(); autoTimer = setInterval(autoTick, 1700); }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glass panel that ripples outward from where it's pressed — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">Press the panel and the background ripples outward from that point</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 누른 지점까지의 거리 d 와 누른 뒤 지난 시간 age 로 sin(d*주파수 - age*속도) 를
+  // 만들고, 시간·거리에 따라 감쇠(envelope)시켜 방사 방향(법선) 오프셋으로 배경을 샘플링한다
+  // — 원형 파동이 퍼지며 잦아드는 물결 굴절.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var scene = document.createElement('canvas');
+  scene.width = CALC_W; scene.height = CALC_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421071);
+    var sky = pctx.createLinearGradient(0, 0, 0, CALC_H);
+    sky.addColorStop(0, '#dfe8ff');
+    sky.addColorStop(1, '#c9f3e6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, CALC_W, CALC_H);
+    var cols = ['#2f6df6', '#4cd4a6', '#b9a0ff'];
+    for (var i = 0; i < cols.length; i += 1) {
+      pctx.beginPath();
+      pctx.arc(CALC_W * (0.2 + i * 0.3), CALC_H * (0.3 + (i % 2) * 0.4), CALC_H * 0.24, 0, Math.PI * 2);
+      pctx.fillStyle = cols[i];
+      pctx.globalAlpha = 0.4;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 50; k += 1) {
+      var px = rand() * CALC_W, py = rand() * CALC_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.1 + rand() * 0.18) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, CALC_W, CALC_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > CALC_W - 1 ? CALC_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * CALC_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var PANEL_X0 = 20, PANEL_Y0 = 16, PANEL_X1 = 140, PANEL_Y1 = 84;
+  var EDGE_BAND = 12;
+  var GLASS_EDGE_BEND = 4;
+  var RIPPLE_AMPLITUDE = 6;
+  var PERIOD_MS = 2000;
+  var PRESS_SCHEDULE = [40, 740, 1380];
+  var CENTER_X = (PANEL_X0 + PANEL_X1) / 2;
+  var CENTER_Y = (PANEL_Y0 + PANEL_Y1) / 2;
+
+  function boxEdgeSample(x, y, x0, y0, x1, y1, band) {
+    var dl = x - x0, dr = x1 - x, dt = y - y0, db = y1 - y;
+    var dmin = Math.min(dl, dr, dt, db);
+    if (dmin >= band || dmin < 0) return { f: 0, nx: 0, ny: 0 };
+    var nx = 0, ny = 0;
+    if (dl < band) nx -= (band - dl);
+    if (dr < band) nx += (band - dr);
+    if (dt < band) ny -= (band - dt);
+    if (db < band) ny += (band - db);
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len > 0.0001) { nx /= len; ny /= len; }
+    return { f: Math.max(0, (band - dmin) / band), nx: nx, ny: ny };
+  }
+
+  var pressT = -Infinity;
+  var pressX = CENTER_X, pressY = CENTER_Y;
+
+  function activePress(t) {
+    if (t - pressT < 900) return { t: pressT, x: pressX, y: pressY };
+    var cyc = t % PERIOD_MS;
+    var best = PRESS_SCHEDULE[0];
+    for (var i = 0; i < PRESS_SCHEDULE.length; i += 1) {
+      if (PRESS_SCHEDULE[i] <= cyc) best = PRESS_SCHEDULE[i];
+    }
+    var loopBase = t - cyc;
+    return { t: loopBase + best, x: CENTER_X, y: CENTER_Y };
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  function renderFrame(t) {
+    var press = activePress(t);
+    var age = Math.max(0, t - press.t);
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        if (x >= PANEL_X0 && x <= PANEL_X1 && y >= PANEL_Y0 && y <= PANEL_Y1) {
+          var e = boxEdgeSample(x, y, PANEL_X0, PANEL_Y0, PANEL_X1, PANEL_Y1, EDGE_BAND);
+          var dx = x - press.x, dy = y - press.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) + 0.0001;
+          var envelope = Math.exp(-age / 260) * Math.max(0, 1 - dist / 95);
+          var wave = Math.sin(dist * 0.3 - age * 0.02) * envelope * RIPPLE_AMPLITUDE;
+          var nx = dx / dist, ny = dy / dist;
+          var offX = e.nx * (e.f * GLASS_EDGE_BEND) + nx * wave;
+          var offY = e.ny * (e.f * GLASS_EDGE_BEND) + ny * wave;
+          rgb = sampleScene(x - offX, y - offY);
+          var shine = e.f * 16 + Math.max(0, wave) * 8;
+          rgb = [Math.min(255, rgb[0] + shine), Math.min(255, rgb[1] + shine), Math.min(255, rgb[2] + shine)];
+        } else {
+          rgb = sampleScene(x, y);
+        }
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function toGrid(e) {
+    var r = wrap.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) / r.width * CALC_W,
+      y: (e.clientY - r.top) / r.height * CALC_H
+    };
+  }
+  wrap.addEventListener('pointerdown', function (e) {
+    var g = toGrid(e);
+    pressX = Math.max(PANEL_X0, Math.min(PANEL_X1, g.x));
+    pressY = Math.max(PANEL_Y0, Math.min(PANEL_Y1, g.y));
+    pressT = lastElapsed;
+    if (reduce) draw(lastElapsed);
+  });
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    pressX = CENTER_X; pressY = CENTER_Y;
+    pressT = lastElapsed;
+    if (reduce) draw(lastElapsed);
+  });
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

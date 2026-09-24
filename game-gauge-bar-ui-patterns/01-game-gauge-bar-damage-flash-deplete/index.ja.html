@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ダメージフラッシュ減少切替 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gb is-demo" id="gb">
+  <div class="gb__head">
+    <span class="gb__label">HP</span>
+    <span class="gb__value" id="gbValue">100 / 100</span>
+  </div>
+  <div class="gb__track" role="progressbar" aria-label="HP" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" id="gbTrack">
+    <div class="gb__trail" id="gbTrail"></div>
+    <div class="gb__fill" id="gbFill"></div>
+    <div class="gb__flash" id="gbFlash"></div>
+  </div>
+  <button type="button" class="gb__hit" id="gbHit">ダメージを受ける</button>
+</div>
+<script>
+(function () {
+  var HP_MAX = 100;
+  // 계산 겹 상수: 시드 고정 전투 이벤트 배열 — [발생시각ms, 피해량]
+  var EVENTS = [[300, 24], [1100, 18], [2000, 28], [2900, 12]];
+  var CYCLE = 3800; // ms, 자동 루프 한 바퀴
+  var LERP_RATE = 0.006; // 계산 겹: 잔상이 본값을 따라가는 지수 평활 상수(프레임 독립)
+  var FLASH_TAU = 70; // ms, 플래시 감쇠 시간상수
+  var HIT_LIST = [24, 18, 28, 12, 20]; // 클릭(실사용자) 피해량 순환
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gb = document.getElementById('gb');
+  var track = document.getElementById('gbTrack');
+  var fill = document.getElementById('gbFill');
+  var trailEl = document.getElementById('gbTrail');
+  var flashEl = document.getElementById('gbFlash');
+  var valueEl = document.getElementById('gbValue');
+  var hitBtn = document.getElementById('gbHit');
+
+  var isDemo = true;
+  var mainHP = HP_MAX;
+  var trailHP = HP_MAX;
+  var flashStart = -9999;
+  var appliedIdx = 0;
+  var cycleStart = 0;
+  var lastTs = 0;
+  var hitIdx = 0;
+
+  function render() {
+    var mp = Math.max(0, Math.min(100, mainHP));
+    var tp = Math.max(0, Math.min(100, trailHP));
+    fill.style.width = mp.toFixed(2) + '%';
+    trailEl.style.width = tp.toFixed(2) + '%';
+    track.setAttribute('aria-valuenow', String(Math.round(mp)));
+    valueEl.textContent = Math.round(mp) + ' / ' + HP_MAX;
+  }
+
+  function applyHit(dmg, ts) {
+    trailHP = mainHP; // 잔상은 피해 직전 값에서 출발해 뒤늦게 따라간다
+    mainHP = Math.max(0, mainHP - dmg);
+    flashStart = ts;
+  }
+
+  function human() {
+    if (isDemo) { gb.classList.remove('is-demo'); isDemo = false; }
+  }
+
+  function onHit() {
+    human();
+    var now = performance.now();
+    if (mainHP <= 0) {
+      mainHP = HP_MAX; trailHP = HP_MAX; flashStart = -9999;
+    } else {
+      applyHit(HIT_LIST[hitIdx % HIT_LIST.length], now);
+      hitIdx++;
+    }
+    render();
+  }
+
+  hitBtn.addEventListener('click', onHit);
+  hitBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    onHit();
+  });
+
+  function loop(ts) {
+    if (!cycleStart) { cycleStart = ts; lastTs = ts; }
+    var dt = ts - lastTs;
+    lastTs = ts;
+    var elapsed = ts - cycleStart;
+
+    if (isDemo) {
+      if (elapsed >= CYCLE) {
+        cycleStart = ts;
+        elapsed = 0;
+        appliedIdx = 0;
+        mainHP = HP_MAX;
+        trailHP = HP_MAX;
+        flashStart = -9999;
+      }
+      while (appliedIdx < EVENTS.length && elapsed >= EVENTS[appliedIdx][0]) {
+        applyHit(EVENTS[appliedIdx][1], ts);
+        appliedIdx++;
+      }
+    }
+
+    // 계산 겹: 잔상 지수 평활 — dt(ms) 에 독립적으로 같은 반감기를 유지
+    trailHP += (mainHP - trailHP) * (1 - Math.exp(-LERP_RATE * dt));
+    var flash = Math.max(0, Math.exp(-(ts - flashStart) / FLASH_TAU));
+    flashEl.style.opacity = flash < 0.02 ? '0' : flash.toFixed(3);
+
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  if (!reduce) {
+    requestAnimationFrame(loop);
+  } else {
+    render();
+  }
+})();
+</script>
+</main>
+</body>
+</html>

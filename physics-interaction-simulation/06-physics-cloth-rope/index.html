@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>천 출렁이기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-hand" viewBox="0 0 256 256" fill="currentColor"><g><path d="M216 116v36a80 80 0 0 1-80 80c-44.18 0-55.81-24-93.32-90a20 20 0 0 1 34.64-20L96 152V44a20 20 0 0 1 40 0v56a20 20 0 0 1 40 0v16a20 20 0 0 1 40 0" opacity=".2"/><path d="M196 88a27.86 27.86 0 0 0-13.35 3.39A28 28 0 0 0 144 74.7V44a28 28 0 0 0-56 0v80l-3.82-6.13A28 28 0 0 0 35.73 146l4.67 8.23C74.81 214.89 89.05 240 136 240a88.1 88.1 0 0 0 88-88v-36a28 28 0 0 0-28-28m12 64a72.08 72.08 0 0 1-72 72c-37.63 0-47.84-18-81.68-77.68l-4.69-8.27V138A12 12 0 0 1 54 121.61a11.9 11.9 0 0 1 6-1.6a12 12 0 0 1 10.41 6a2 2 0 0 0 .14.23l18.67 30A8 8 0 0 0 104 152V44a12 12 0 0 1 24 0v68a8 8 0 0 0 16 0v-12a12 12 0 0 1 24 0v20a8 8 0 0 0 16 0v-4a12 12 0 0 1 24 0Z"/></g></symbol>
+    <symbol id="ico-reset" viewBox="0 0 256 256" fill="currentColor"><g><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="cl is-demo" id="cl">
+  <p class="cl__hint"><svg class="cl__ico" aria-hidden="true"><use href="#ico-hand"/></svg><span>판을 문지르면 점 격자가 출렁이고 이웃 점 끌림으로 파동이 퍼집니다</span></p>
+  <div class="cl__field" id="field" role="application" aria-label="천 격자판" tabindex="0">
+    <span class="cl__pin" aria-hidden="true"></span>
+    <span class="cl__cursor" id="cursor" aria-hidden="true"><svg class="cl__cursorIco"><use href="#ico-hand"/></svg></span>
+    <span class="cl__dots" id="dots" aria-hidden="true"></span>
+  </div>
+  <div class="cl__bar">
+    <button class="cl__reset" id="reset" type="button">
+      <svg class="cl__ico" aria-hidden="true"><use href="#ico-reset"/></svg><span>가만히 두기</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+var root = document.getElementById('cl');
+var field = document.getElementById('field');
+var dotsBox = document.getElementById('dots');
+var cursor = document.getElementById('cursor');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+// 점 격자 12×5 — 맨 윗줄은 고정점(핀). 나머지는 제자리 스프링 + 이웃 끌림으로 파동이 번진다
+var COLS = 12, ROWS = 5, dots = [];
+function homeXY(c, r) {
+  return {
+    x: (c + 0.5) * field.clientWidth / COLS,
+    y: 14 + r * (field.clientHeight - 22) / (ROWS - 1)
+  };
+}
+for (var r = 0; r < ROWS; r++) {
+  for (var c = 0; c < COLS; c++) {
+    var el = document.createElement('i');
+    var home = homeXY(c, r);
+    el.className = 'cl__dot' + (r === 0 ? ' cl__dot--pin' : '');
+    el.style.setProperty('--hx', home.x.toFixed(1) + 'px');
+    el.style.setProperty('--hy', home.y.toFixed(1) + 'px');
+    el.style.setProperty('--r', String(r));
+    dotsBox.appendChild(el);
+    dots.push({ el: el, c: c, r: r, hx: home.x, hy: home.y, ox: 0, oy: 0, vx: 0, vy: 0 });
+  }
+}
+var ptr = { x: -60, y: -60 }, last = 0, running = false, idleAt = 0;
+
+function paint() {
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    d.el.style.transform = 'translate(calc(var(--hx) + ' + d.ox.toFixed(1) + 'px), calc(var(--hy) + ' + d.oy.toFixed(1) + 'px))';
+  }
+  cursor.style.transform = 'translate(' + ptr.x + 'px, ' + ptr.y + 'px)';
+}
+function wake() {
+  root.classList.remove('is-demo');
+  if (reduce.matches) { paint(); return false; }
+  idleAt = performance.now();
+  if (!running) { running = true; last = performance.now(); requestAnimationFrame(step); }
+  return true;
+}
+function step(now) {
+  var dt = Math.min((now - last) / 1000, 0.033);
+  last = now;
+  var lively = now - idleAt < 1400, allCalm = true;
+  for (var i = 0; i < dots.length; i++) {
+    var d = dots[i];
+    if (d.r === 0) { continue; }   // 고정점은 안 흔든다
+    var x = d.hx + d.ox, y = d.hy + d.oy;
+    // 커서 반경 36px 안의 점을 밀어낸다 — 커서가 지나가는 길이 파동의 시작점이다
+    var dx = x - ptr.x, dy = y - ptr.y, dist2 = dx * dx + dy * dy;
+    if (dist2 < 1296 && dist2 > 0.01) {
+      var dist = Math.sqrt(dist2), push = (1 - dist / 36) * 900;
+      d.vx += (dx / dist) * push * dt;
+      d.vy += (dy / dist) * push * dt;
+      allCalm = false;
+    }
+    // 이웃 끌림 — 왼쪽·오른쪽·위 점의 현재 변위를 조금 따라간다 (천의 가로 실)
+    var L = dots[d.r * COLS + Math.max(0, d.c - 1)];
+    var R = dots[d.r * COLS + Math.min(COLS - 1, d.c + 1)];
+    var U = dots[Math.max(0, d.r - 1) * COLS + d.c];
+    d.vx += ((L.ox + R.ox) / 2 - d.ox) * 60 * dt;
+    d.vy += ((L.oy + R.oy + U.oy) / 3 - d.oy) * 60 * dt;
+    // 제자리 스프링 + 감쇠
+    d.vx += -d.ox * 90 * dt; d.vy += -d.oy * 90 * dt;
+    d.vx *= 0.9; d.vy *= 0.9;
+    d.ox += d.vx * dt; d.oy += d.vy * dt;
+    if (Math.abs(d.ox) + Math.abs(d.oy) > 0.25 || Math.abs(d.vx) + Math.abs(d.vy) > 2) { allCalm = false; }
+  }
+  paint();
+  if (!lively && allCalm) { running = false; return; }
+  requestAnimationFrame(step);
+}
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  ptr.x = e.clientX - r.left - 14; ptr.y = e.clientY - r.top - 14;
+  wake();
+});
+field.addEventListener('pointerleave', function () { ptr.x = -60; ptr.y = -60; paint(); });
+field.addEventListener('keydown', function (e) {
+  var JUMP = 24;
+  if (e.key === 'ArrowLeft') { ptr.x -= JUMP; }
+  else if (e.key === 'ArrowRight') { ptr.x += JUMP; }
+  else if (e.key === 'ArrowUp') { ptr.y -= JUMP; }
+  else if (e.key === 'ArrowDown') { ptr.y += JUMP; }
+  else { return; }
+  e.preventDefault();
+  wake();
+});
+document.getElementById('reset').addEventListener('click', function () {
+  for (var i = 0; i < dots.length; i++) {
+    dots[i].ox = 0; dots[i].oy = 0; dots[i].vx = 0; dots[i].vy = 0;
+  }
+  paint();
+});
+window.addEventListener('resize', function () {
+  for (var i = 0; i < dots.length; i++) {
+    var home = homeXY(dots[i].c, dots[i].r);
+    dots[i].hx = home.x; dots[i].hy = home.y;
+    dots[i].el.style.setProperty('--hx', home.x.toFixed(1) + 'px');
+    dots[i].el.style.setProperty('--hy', home.y.toFixed(1) + 'px');
+  }
+  paint();
+});
+paint();
+</script>
+</body>
+</html>

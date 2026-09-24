@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>결정 grid cells 채색 — 나이테 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><circle cx="128" cy="128" r="16" fill="none" stroke="currentColor" stroke-width="16"/><circle cx="128" cy="128" r="48" fill="none" stroke="currentColor" stroke-width="12" opacity=".75"/><circle cx="128" cy="128" r="80" fill="none" stroke="currentColor" stroke-width="10" opacity=".5"/><circle cx="128" cy="128" r="108" fill="none" stroke="currentColor" stroke-width="8" opacity=".3"/></svg>
+    <span>Record the moment each particle attaches as a number and color it by age, and the crystal's growth rings read like tree rings — pastel concentric circles</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Crystal Lattice Coloring Demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">growth rings <b class="cd__val" id="cdRings"></b> · aggregated <b class="cd__val" id="cdRate"></b>/sec</span>
+    <span class="cd__meta cd__meta--dim">Canvas · ImageData · putImageData</span>
+  </div>
+</div>
+</main>
+<script>
+// 결정 grid cells 채색(06). DLA 는 붙는 순간을 기록한다 — order 배열에 셀 인덱스를 stick 순서대로 쌓고,
+// 그려질 때 나이(order / 지금까지 총 응집)를 8단 파스텔 램프로 읽는다. 같은 시각에 붙은 셀은
+// 같은 나이 → 결정 안에 나무 나이테 같은 동심원이 새겨진다. 성장이 다 차면 반짝 회전 후 리셋.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N = 46;            // grid cells 반경(셀 수) — 커질수록 나이테가 촘촘해진다
+  var SPS = 300;         // 초당 응집 입자 수 — 변형 "응집 속도" 축(90 → 700)
+  var RINGS = 8;         // growth rings 단수 — 나이를 몇 개의 파스텔 띠로 나눌지(6 → 12)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  document.getElementById('cdRings').textContent = String(RINGS);
+  document.getElementById('cdRate').textContent = String(SPS);
+
+  var SEED = 0x3190406;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--flake-ink');
+  var C_DUSK = tokRGB('--flake-dusk');
+  var C_CORE = tokRGB('--flake-core');
+  var C_HALO = tokRGB('--flake-halo');
+  var C_MINT = tokRGB('--flake-mint');
+  var C_SKY  = tokRGB('--flake-sky');
+  var C_MIST = tokRGB('--flake-mist');
+
+  // ── grid cells — 중앙 씨앗 하나에서 자라는 방사 DLA ──
+  var GW = 2 * N + 8, GH = GW;              // 정사각 grid cells, 중심 = 씨앗
+  var CX = (GW / 2) | 0, CY = CX;
+  var occ = new Uint8Array(GW * GH);
+  var age = new Int32Array(GW * GH);        // 셀별 나이(stick 순서, 1부터 — 0=빈칸)
+  var order = [];                            // stick 순서대로 셀 인덱스를 쌓는다(나이테의 역사)
+  var walkers = [];
+  var WALKERS = 40;
+  var phase = 0, shineT = 0;
+
+  function idx(gx, gy) { return gy * GW + gx; }
+  function respawn(w) {   // 씨앗 근처 구름에서 출발 — 멀리서 오면 프레임 예산이 새는 곳으로 걸음 낭비
+    var a = rand() * 6.283, r = 6 + rand() * Math.min(10, N * 0.35);
+    w.gx = CX + Math.round(Math.cos(a) * r);
+    w.gy = CY + Math.round(Math.sin(a) * r);
+    if (w.gx < 1 || w.gx >= GW - 1 || w.gy < 1 || w.gy >= GH - 1) { w.gx = CX + 2; w.gy = CY; }
+  }
+  var DX = [1, -1, 0, 0], DY = [0, 0, 1, -1];
+  function stepWalker(w) {
+    var d = (rand() * 4) | 0;
+    var nx = w.gx + DX[d], ny = w.gy + DY[d];
+    var dx = nx - CX, dy = ny - CY;
+    if (dx * dx + dy * dy > N * N) { respawn(w); return false; }   // grid cells 밖 → 구름으로 되돌린다
+    w.gx = nx; w.gy = ny;
+    var i = idx(nx, ny);
+    if (occ[i]) return false;
+    var nc = (occ[idx(nx - 1, ny)] ? 1 : 0) + (occ[idx(nx + 1, ny)] ? 1 : 0) +
+              (occ[idx(nx, ny - 1)] ? 1 : 0) + (occ[idx(nx, ny + 1)] ? 1 : 0);
+    if (!nc) return false;
+    // 가지 확률 — 이웃이 적게 닿은 외곽일수록 잘 붙는다(DLA 수지상 편향)
+    var p = nc === 1 ? 1.0 : nc === 2 ? 0.62 : nc === 3 ? 0.22 : 0.10;
+    if (rand() >= p) return false;
+    occ[i] = 1;
+    order.push(i);
+    age[i] = order.length;                  // 나이 = 붙은 순번 — 색의 유일한 출처
+    respawn(w);
+    return true;
+  }
+  function resetSim() {
+    occ.fill(0); age.fill(0); order = [];
+    occ[idx(CX, CY)] = 1; order.push(idx(CX, CY)); age[idx(CX, CY)] = 1;
+    phase = 0; shineT = 0;
+    walkers = [];
+    for (var i = 0; i < WALKERS; i++) { var w = { gx: CX, gy: CY }; respawn(w); walkers.push(w); }
+  }
+  resetSim();
+
+  function sim(dt) {
+    if (phase === 1) {
+      shineT += dt;
+      if (shineT > 1200) resetSim();        // 완성 결정을 충분히 보여 준 다음 다음 세대
+      return;
+    }
+    var quota = SPS * dt / 1000;
+    var stuck = 0, steps = 0, maxSteps = 500000;
+    var t0 = performance.now(), budgetMs = 9;
+    while (stuck < quota && steps < maxSteps) {
+      for (var i = 0; i < walkers.length; i++) {
+        if (stepWalker(walkers[i])) stuck++;
+        steps++;
+        if (stuck >= quota) break;
+      }
+      if ((steps & 2047) === 0 && performance.now() - t0 > budgetMs) break;
+    }
+    if (order.length > SPS * 14) { phase = 1; shineT = 0; }   // 약 14초 치 결정이면 완성
+  }
+
+  var W = 0, H = 0, img = null, gimg = null, gctx = null, gcanvas = null;
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.max(2, Math.round(r.width));
+    H = Math.max(2, Math.round(r.height));
+    cv.width = W; cv.height = H;
+    img = ctx.createImageData(W, H);
+    var d = img.data;
+    for (var i = 3; i < d.length; i += 4) d[i] = 255;
+    gcanvas = document.createElement('canvas');
+    gcanvas.width = GW; gcanvas.height = GH;
+    gctx = gcanvas.getContext('2d');
+    gimg = gctx.createImageData(GW, GH);
+    var gd = gimg.data;
+    for (var j = 3; j < gd.length; j += 4) gd[j] = 255;
+    prngState = SEED >>> 0;
+    resetSim();
+  }
+
+  // 나이 → 파스텔 램프 LUT(256단계) — 나이테 RINGS 개의 띠를 지나며 색이 바뀐다
+  var lut = { r: new Uint8ClampedArray(256), g: new Uint8ClampedArray(256), b: new Uint8ClampedArray(256) };
+  function buildLUT() {
+    // 띠 경계마다 살짝 밝은 테(나이테 선) — 같은 나이끼리 묶여 동심원으로 보인다
+    var cs = [C_DUSK, C_DUSK, C_HALO, C_MINT, C_MIST, C_SKY, C_MINT, C_CORE];
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255;
+      var band = Math.min(cs.length - 1, 1 + Math.floor(t * (cs.length - 1)));
+      var c0 = cs[band - 1], c1 = cs[band];
+      var f = Math.min(1, t * (cs.length - 1) - (band - 1) * 2 + 1);   // 띠 안에서 부드럽게
+      var ring = t * (cs.length - 1) % 1;
+      var edge = ring < 0.16 ? 0.35 * (1 - ring / 0.16) : 0;           // 띠 시작 = 밝은 나이테 선
+      var r0 = c0[0] + (c1[0] - c0[0]) * f, g0 = c0[1] + (c1[1] - c0[1]) * f, b0 = c0[2] + (c1[2] - c0[2]) * f;
+      lut.r[i] = r0 + (C_CORE[0] - r0) * edge;
+      lut.g[i] = g0 + (C_CORE[1] - g0) * edge;
+      lut.b[i] = b0 + (C_CORE[2] - b0) * edge;
+    }
+  }
+  buildLUT();
+
+  // grid cells → 작은 캔버스 ImageData(나이 색) → 큰 캔버스에 확대
+  function drawGrid(pulse) {
+    var gd = gimg.data;
+    var total = Math.max(2, order.length);
+    for (var gy = 0; gy < GH; gy++) {
+      for (var gx = 0; gx < GW; gx++) {
+        var i = gy * GW + gx, j = i << 2;
+        var a = age[i];
+        if (!a) { gd[j] = C_INK[0]; gd[j + 1] = C_INK[1]; gd[j + 2] = C_INK[2]; continue; }
+        var t = a / total;                       // 나이 비율(0=첫 씨앗 → 1=방금 붙은 가장자리)
+        var li = Math.max(0, Math.min(255, (t * 255 * pulse) | 0));
+        gd[j] = lut.r[li]; gd[j + 1] = lut.g[li]; gd[j + 2] = lut.b[li];
+      }
+    }
+    gctx.putImageData(gimg, 0, 0);
+  }
+
+  var fr = 0;
+  function compose(now) {
+    var d = img.data;
+    // ① 무대 — 세로 그라디언트 + 중앙 성광(결정이 자라는 자리를 은은히 밝힌다)
+    var topR = C_INK[0] + 3, topG = C_INK[1] + 3, topB = C_INK[2] + 6;
+    var botR = C_INK[0] + (C_DUSK[0] - C_INK[0]) * 0.34, botG = C_INK[1] + (C_DUSK[1] - C_INK[1]) * 0.34, botB = C_INK[2] + (C_DUSK[2] - C_INK[2]) * 0.34;
+    var breathe = 0.5 + 0.5 * Math.sin(now * 0.0011);
+    var gx0 = 0.5 + 0.06 * Math.sin(now * 0.0007), gy0 = 0.5 + 0.05 * Math.cos(now * 0.0009);
+    for (var y = 0; y < H; y++) {
+      var ty = y / H;
+      var br = topR + (botR - topR) * ty, bg = topG + (botG - topG) * ty, bb = topB + (botB - topB) * ty;
+      var row = y * W, dy = (y / H - gy0) * H;
+      for (var x = 0; x < W; x++) {
+        var dx = (x / W - gx0) * W * 1.35;
+        var q = (dx * dx + dy * dy) / (H * H * 1.6);
+        var glow = Math.exp(-q) * (0.10 + 0.05 * breathe);
+        var j = (row + x) << 2;
+        d[j]     = br + (C_MIST[0] - br) * glow;
+        d[j + 1] = bg + (C_MIST[1] - bg) * glow;
+        d[j + 2] = bb + (C_MIST[2] - bb) * glow;
+      }
+    }
+    // ② 결정 나이테 — 나이 비율에 살짝 숨쉬는 맥(색 램프 인덱스를 조금씩 흔든다)
+    var pulse = 0.94 + 0.06 * Math.sin(now * 0.0023);
+    drawGrid(pulse);
+    var sx = W / GW, sy = H / GH;
+    var ox = ((W - GW * sx) / 2) | 0, oy = ((H - GH * sy) / 2) | 0;
+    for (var gy2 = 0; gy2 < GH; gy2++) {
+      var yA = oy + ((gy2 * sy) | 0), yB = oy + (((gy2 + 1) * sy) | 0);
+      for (var gx2 = 0; gx2 < GW; gx2++) {
+        var gi = (gy2 * GW + gx2) << 2;
+        if (gimg.data[gi] === C_INK[0] && gimg.data[gi + 1] === C_INK[1] && gimg.data[gi + 2] === C_INK[2]) continue;
+        var R = gimg.data[gi], G = gimg.data[gi + 1], B = gimg.data[gi + 2];
+        var xA = ox + ((gx2 * sx) | 0), xB = ox + (((gx2 + 1) * sx) | 0);
+        for (var yy = Math.max(0, yA); yy < Math.min(H, yB); yy++) {
+          var rowo = yy * W;
+          for (var xx = Math.max(0, xA); xx < Math.min(W, xB); xx++) {
+            var jj = (rowo + xx) << 2;
+            d[jj] = R; d[jj + 1] = G; d[jj + 2] = B;
+          }
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    // ③ 떠다니는 눈가루 — 결정 위를 파스텔 가루가 느리게 흘러 화면이 쉬지 않는다
+    for (var m = 0; m < 26; m++) {
+      var ph = (m / 26 + now * 0.00006 * (1 + (m % 3) * 0.4)) % 1;
+      var mx = (0.12 + 0.76 * ((m * 0.137 + now * 0.00004 * (1 + (m % 5) * 0.3)) % 1)) * W;
+      var my = ph * H;
+      var mr = 1 + (m % 3), ma = 0.24 + 0.16 * Math.sin(now * 0.003 + m);
+      ctx.fillStyle = 'rgba(' + C_MIST + ',' + ma.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(mx, my, mr, 0, 6.283);
+      ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, prev = 0;
+  function frame(now) {
+    var dt = Math.min(50, now - (prev || now));
+    prev = now;
+    sim(dt);
+    compose(now);
+    fr++;
+    raf = requestAnimationFrame(frame);
+  }
+  function stillDraw() {
+    fit();
+    for (var i = 0; i < 400; i++) sim(33);
+    compose(0);
+  }
+
+  window.addEventListener('resize', function () { if (reduce) stillDraw(); });
+
+  fit();
+  if (reduce) {
+    stillDraw();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

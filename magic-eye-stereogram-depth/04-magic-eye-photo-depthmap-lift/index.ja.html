@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>写真レリーフ — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>写真レリーフ</span>
+    <span class="me__desc">明るさを地形の高さとして読むと、写真全体がノイズの丘の上にレリーフのように浮かびます</span>
+  </p>
+  <div class="me__field" role="application" aria-label="写真レリーフ変換器" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <span class="me__meta">合成写真1枚 · 光源回転周期2秒 · 深さ12px</span>
+    <span class="me__meta me__meta--dim">明度 → 高さ 変換</span>
+  </div>
+</div>
+</main>
+<script>
+// 写真レリーフ(04) — 사진 한 장의 밝기를 지형 높이로 읽어 올린다.
+// 외부 이미지 없이 캔버스로 "사진"을 합성한다(구름 하늘 그라디언트 + 언덕 두 개 + 얼굴 실루엣 언덕).
+// 광원 방향이 주기마다 돌면 언덕의 음영이 바뀌고, 음영이 곧 높이(깊이)라서 부조 전체가 살아 움직인다.
+// 실 서비스에서는 드래그앤드롭된 임의 사진의 getImageData 를 같은 파이프라인에 넣으면 된다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var MAXSHIFT = 12;   // 부조 깊이(px)
+  var CYCLE = 2.0;     // 광원 회전 주기(초)
+  // ─────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = [];
+  for (var i = 0; i < 5; i++) PAL.push(tokRGB('--me-p' + i));
+
+  function baseIdx(x, y) {
+    var h = (Math.imul(x + 11, 374761393) + Math.imul(y + 7, 668265263)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return ((h % PAL.length) + PAL.length) % PAL.length;
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null;
+
+  // 합성 사진 — 회전 광원 아래 언덕 지형. 라스터를 읽어 밝기 → 깊이로 쓴다.
+  var phCv = document.createElement('canvas');
+  var phCtx = phCv.getContext('2d');
+
+  function paintPhoto(t) {
+    var ang = t / CYCLE * Math.PI * 2;
+    var lx = W * 0.5 + Math.cos(ang) * W * 0.4;   // 광원이 좌우로 돈다
+    var ly = H * 0.28 + Math.sin(ang) * H * 0.1;
+
+    // 하늘 — 세로 그라디언트(밝기가 위에서 아래로 낮아진다 = 뒤로 낮아지는 지형)
+    var sky = phCtx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#e8e2d4');
+    sky.addColorStop(0.7, '#c9c0ae');
+    sky.addColorStop(1, '#b3a894');
+    phCtx.fillStyle = sky;
+    phCtx.fillRect(0, 0, W, H);
+
+    // 광원 패치 — 하늘의 가장 밝은 점(가장 앞으로 나온 봉우리로 읽힌다)
+    var glow = phCtx.createRadialGradient(lx, ly, 2, lx, ly, W * 0.16);
+    glow.addColorStop(0, '#ffffff');
+    glow.addColorStop(1, 'rgba(255,255,255,0)');
+    phCtx.fillStyle = glow;
+    phCtx.fillRect(0, 0, W, H);
+
+    // 언덕 세 개 — 포물선 낙차. 광원 쪽이 밝다(높이 음영)
+    function hill(cx2, baseY, halfW, lift, hue) {
+      var g2 = phCtx.createLinearGradient(cx2 - halfW, 0, cx2 + halfW, 0);
+      var lit = Math.max(0, Math.min(1, 0.5 + (lx - cx2) / W));
+      var r = Math.round(hue[0] + (255 - hue[0]) * lit * lift);
+      var g3 = Math.round(hue[1] + (255 - hue[1]) * lit * lift);
+      var b2 = Math.round(hue[2] + (255 - hue[2]) * lit * lift);
+      var dk = 0.82;
+      g2.addColorStop(0, 'rgb(' + Math.round(r * dk) + ',' + Math.round(g3 * dk) + ',' + Math.round(b2 * dk) + ')');
+      g2.addColorStop(0.5, 'rgb(' + r + ',' + g3 + ',' + b2 + ')');
+      g2.addColorStop(1, 'rgb(' + Math.round(r * dk) + ',' + Math.round(g3 * dk) + ',' + Math.round(b2 * dk) + ')');
+      phCtx.fillStyle = g2;
+      phCtx.beginPath();
+      phCtx.moveTo(cx2 - halfW, H);
+      for (var sx = -halfW; sx <= halfW; sx += 4) {
+        phCtx.lineTo(cx2 + sx, baseY - Math.cos(sx / halfW * Math.PI / 2) * lift * H * 0.3);
+      }
+      phCtx.lineTo(cx2 + halfW, H);
+      phCtx.closePath();
+      phCtx.fill();
+    }
+    hill(W * 0.24, H * 0.66, W * 0.30, 0.55, [96, 104, 88]);
+    hill(W * 0.62, H * 0.78, W * 0.34, 0.40, [80, 90, 78]);
+    hill(W * 0.88, H * 0.60, W * 0.22, 0.66, [110, 112, 92]);
+
+    // 실루엣 초상 — 오른쪽 언덕 위 이마·코·턱 곡선(부조의 주인공)
+    phCtx.fillStyle = '#8d8474';
+    phCtx.beginPath();
+    phCtx.moveTo(W * 0.30, H);
+    phCtx.lineTo(W * 0.30, H * 0.52);
+    phCtx.quadraticCurveTo(W * 0.33, H * 0.30, W * 0.44, H * 0.34);   // 이마
+    phCtx.quadraticCurveTo(W * 0.50, H * 0.36, W * 0.50, H * 0.44);   // 콧등
+    phCtx.quadraticCurveTo(W * 0.53, H * 0.56, W * 0.47, H * 0.66);   // 입·턱
+    phCtx.quadraticCurveTo(W * 0.44, H * 0.78, W * 0.52, H);
+    phCtx.closePath();
+    phCtx.fill();
+  }
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    phCv.width = W; phCv.height = H;
+    img = ctx.createImageData(W, H);
+  }
+
+  function draw(t) {
+    paintPhoto(t);
+    var ph = phCtx.getImageData(0, 0, W, H).data;
+    var d = img.data, x, y, di;
+    var col = new Int32Array(W);
+    for (y = 0; y < H; y++) {
+      var rowOff = y * W;
+      for (x = 0; x < W; x++) {
+        var lum = ph[(rowOff + x) * 4];   // 밝기 0..255
+        var s = Math.round(lum / 255 * MAXSHIFT);
+        if (s <= 0) {
+          col[x] = baseIdx(x, y);
+        } else {
+          var from = x - s;
+          col[x] = from >= 0 ? col[from] : baseIdx(from + W, y);
+        }
+      }
+      for (x = 0; x < W; x++) {
+        var c = PAL[col[x]];
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.3);
+  });
+  fit();
+  if (reduce) {
+    draw(0.3);   // reduce — 광원이 오른쪽에 있는 부조 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

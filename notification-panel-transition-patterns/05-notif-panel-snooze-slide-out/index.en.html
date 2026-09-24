@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snooze notification that slides away on button press — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="sn is-demo" id="sn">
+    <div class="sn__head">
+      <span class="sn__headLabel">Notifications</span>
+      <span class="sn__tray" id="snTray">Snoozed 0</span>
+    </div>
+    <ul class="sn__list" id="snList" role="list"></ul>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var NOTIF_SNOOZE_SLIDE_PX = 40; // 버튼을 누른 순간 먼저 밀려나는 예비 이동 거리(그 뒤 실측 폭만큼 마저 나간다)
+
+  var DURATIONS = ["in 10 min", "in 30 min", "in 1 hour"];
+
+  var NAMES = [
+    "Payment approved", "New comment added", "Meeting starts in 10 minutes",
+    "Upload finished", "An invitation arrived"
+  ];
+
+  var CLOCK_IC =
+    '<svg class="sn__ic" viewBox="0 0 256 256" aria-hidden="true" focusable="false">' +
+    '<g fill="currentColor"><path opacity=".2" d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96"/>' +
+    '<path d="M232 136.66A104.12 104.12 0 1 1 119.34 24a8 8 0 0 1 1.32 16A88.12 88.12 0 1 0 216 135.34a8 8 0 0 1 16 1.32M120 72v56a8 8 0 0 0 8 8h56a8 8 0 0 0 0-16h-48V72a8 8 0 0 0-16 0m40-24a12 12 0 1 0-12-12a12 12 0 0 0 12 12m36 24a12 12 0 1 0-12-12a12 12 0 0 0 12 12m24 36a12 12 0 1 0-12-12a12 12 0 0 0 12 12"/></g></svg>';
+
+  var root = document.getElementById("sn");
+  var list = document.getElementById("snList");
+  var tray = document.getElementById("snTray");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var synthetic = false;
+  function human() {
+    if (synthetic) return;
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  var snoozed = 0;
+
+  function makeRow(name) {
+    var li = document.createElement("li");
+    li.className = "sn__item";
+    li.setAttribute("role", "listitem");
+
+    var row = document.createElement("div");
+    row.className = "sn__row";
+
+    var nameEl = document.createElement("span");
+    nameEl.className = "sn__name";
+    nameEl.textContent = name;
+
+    var label = document.createElement("span");
+    label.className = "sn__label";
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "sn__btn";
+    btn.setAttribute("aria-label", name + " snooze");
+    btn.innerHTML = CLOCK_IC;
+
+    row.appendChild(nameEl);
+    row.appendChild(label);
+    row.appendChild(btn);
+    li.appendChild(row);
+
+    // 계산 겹: 버튼을 누르면 먼저 NOTIF_SNOOZE_SLIDE_PX 만큼만 밀어 "눌렸다"는 반응을 준 뒤,
+    // 다음 단계에서 li 의 실제 폭(getBoundingClientRect)을 실측해 그 값만큼 마저 밀어 화면
+    // 밖으로 내보낸다 — 화면 폭이 얼마든 카드가 완전히 빠져나가는 거리를 그때그때 계산한다.
+    btn.addEventListener("click", function () {
+      human();
+      snoozeOut(li, row, label, name);
+    });
+
+    return li;
+  }
+
+  function snoozeOut(li, row, label, name) {
+    var durIdx = snoozed % DURATIONS.length;
+    label.textContent = DURATIONS[durIdx];
+    row.style.transform = "translateX(-" + NOTIF_SNOOZE_SLIDE_PX + "px)";
+    var width = li.getBoundingClientRect().width;
+    window.setTimeout(function () {
+      row.style.transform = "translateX(-" + (NOTIF_SNOOZE_SLIDE_PX + width) + "px)";
+      var h = li.getBoundingClientRect().height;
+      li.style.height = h + "px";
+      window.setTimeout(function () {
+        li.style.height = "0px";
+        li.style.marginBottom = "0px";
+      }, reduce ? 0 : 40);
+      window.setTimeout(function () {
+        if (li.parentNode) li.parentNode.removeChild(li);
+      }, reduce ? 0 : 320);
+    }, reduce ? 0 : 150);
+    snoozed++;
+    tray.textContent = "Snoozed " + snoozed + " · " + DURATIONS[durIdx];
+  }
+
+  var rows = [];
+  NAMES.forEach(function (name) {
+    var li = makeRow(name);
+    rows.push(li);
+    list.appendChild(li);
+  });
+
+  if (reduce) {
+    var first = list.querySelector(".sn__item");
+    if (first) {
+      var row0 = first.querySelector(".sn__row");
+      var label0 = first.querySelector(".sn__label");
+      snoozeOut(first, row0, label0, NAMES[0]);
+    }
+  } else {
+    var idx = 0;
+    function loop() {
+      if (!root.classList.contains("is-demo")) return;
+      var first = list.querySelector(".sn__item");
+      if (!first) {
+        NAMES.forEach(function (name) {
+          var li = makeRow(name);
+          list.appendChild(li);
+        });
+        snoozed = 0;
+        tray.textContent = "Snoozed 0";
+        window.setTimeout(loop, 900);
+        return;
+      }
+      synthetic = true;
+      var row = first.querySelector(".sn__row");
+      var label = first.querySelector(".sn__label");
+      var name = first.querySelector(".sn__name").textContent;
+      snoozeOut(first, row, label, name);
+      synthetic = false;
+      window.setTimeout(loop, 1200);
+    }
+    window.setTimeout(loop, 600);
+  }
+})();
+</script>
+</body>
+</html>

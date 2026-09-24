@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Summed-Sine Surface Demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gs" id="gs">
+  <p class="gs__hint">
+    <svg class="gs__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M16 120c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".25"/><path d="M16 168c24-32 48-32 72 0s48 32 72 0 48-32 72 0" opacity=".15"/><path d="M228.92 49.09a112 112 0 1 0 14 84.91a8 8 0 0 0-15.5-4a96 96 0 1 1-12-72.91A8 8 0 0 1 216 71.63V40a8 8 0 0 1-8-8h-31.63a8 8 0 0 1-5.65-13.09ZM64 104a12 12 0 1 1 12 12a12 12 0 0 1-12-12m40 64a12 12 0 1 1 12 12a12 12 0 0 1-12-12m72-16a16 16 0 1 1 16 16a16 16 0 0 1-16-16" opacity=".9"/></g></svg>
+    <span>Six sines are summed to compute the surface grid — drag and the wind pushes the waves</span>
+  </p>
+  <div class="gs__field" id="field" role="application" aria-label="Summed-sine surface test panel" tabindex="0">
+    <canvas class="gs__cv" id="cv"></canvas>
+    <b class="gs__badge" aria-hidden="true"><span class="gs__badgeNum" id="waveVal">6 waves</span><span class="gs__badgeUnit" id="windVal">wind 1.0</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 정현파 합성 수면 — Gerstner 근사 파도장. 파장·방향·진폭이 다른 정현파 여섯을
+// 저해상 수면 격자(COLS×ROWS) 위에 겹쳐 합하고, 파도가 높을 때 물꼭대기가 앞으로
+// 처지는 Gerstner 수평 처짐(dispX = Q·amp·cos)까지 넣어 꼭대기가 뾰족해지는 근사를 만든다.
+// 렌더는 격자 해상도 ImageData(STEP=3 버퍼) → putImageData → drawImage 확대.
+// 바람은 자동 모드(시드 고정 리사주 순환)와 포인터 실측(pointermove 이동 벡터 → lerp) 두 몸.
+var root = document.getElementById('gs');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var waveVal = document.getElementById('waveVal');
+var windVal = document.getElementById('windVal');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+function v(name) { return css.getPropertyValue(name).trim(); }
+var CREST = [v('--crest'), v('--crest-2')];   // 마루(높은 곳) 색 램프 — 민트 계열
+var TROUGH = [v('--trough'), v('--trough-2')]; // 골(낮은 곳) 색 램프 — 파랑 계열
+var INK = v('--ink');
+
+var COLS = 110;   // 수면 격자 가로 칸 수 — 세로는 판 비율. 칸 수 1만 이내로 60fps 예산
+var STEP = 3;     // 격자 한 칸이 렌더 버퍼에서 차지하는 픽셀
+var NW = 6;       // 겹칠 정현파 개수
+var Q = 0.42;     // Gerstner 처짐 계수 — 여섯 파의 Q·amp 합이 1을 넘지 않게 잡는다
+
+// 결정적 난수 mulberry32(7) — 시드가 같으면 파도 구성이 항상 같다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    var u = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((u ^ (u >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var rng = mulberry32(7);
+
+// 여섯 정현파 — 파장·방향·진폭·위상 전부 시드에서 파생.
+// 파장은 긴 것부터 절반씩(잔물결 계층), 진폭도 파장에 비례해 줄어든다.
+var WAVES = [];
+(function () {
+  var lam = 34;                       // 첫 파의 파장(격자 칸 수)
+  for (var i = 0; i < NW; i++) {
+    var ang = rng() * Math.PI * 2;    // 파도가 나아가는 방향
+    WAVES.push({
+      lam: lam,                                  // 파장
+      freq: (Math.PI * 2) / lam,                 // 공간 주파수(도메인 단위)
+      dirX: Math.cos(ang), dirY: Math.sin(ang),  // 진행 방향 단위벡터
+      amp: 0.58 / (i * 0.62 + 1),                 // 진폭 — 첫 파가 가장 크다 (총진폭 ↑ → 화면 전체가 흐른다)
+      spd: 0.55 + rng() * 0.25,                  // 속도 산수
+      ph: rng() * Math.PI * 2                    // 위상
+    });
+    lam *= 0.55;                       // 다음 파는 파장이 절반보다 조금 길게
+  }
+})();
+// ω — 파장 짧을수록 빠르게(ω ∝ sqrt(1/λ) 스케일, 보기 좋게 조정)
+for (var w = 0; w < NW; w++) {
+  WAVES[w].om = WAVES[w].spd * 3.6 * Math.sqrt(1 / WAVES[w].lam) * 6;
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, ROWS = 0;
+var hgt = null, disp = null;          // 격자 높이·수평 처짐(Float32Array, 프레임마다 재사용)
+var buf = null, bctx = null, out = null;
+var RW = 0, RH = 0;
+var raf = 0, auto = true, nowSec = 0;
+var wind = 1.0, windT = 1.0;          // wind 세기(실효 진폭에 곱한다) 현재·목표
+var windAng = 0.5, windAngT = 0.5;    // wind 방향(라디안) 현재·목표
+var lastPX = -1, lastPY = -1, lastPT = 0;
+
+function hex2rgb(s) {
+  // sass 가 mix() 값을 rgb(r%, g%, b%) 로 내보낸다 — 헥스와 둘 다 읽는다
+  var pm = /^\s*rgb\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)\s*$/.exec(s);
+  if (pm) return [Math.round(pm[1] * 2.55), Math.round(pm[2] * 2.55), Math.round(pm[3] * 2.55)];
+  s = s.replace('#', '');
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+  var n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+var C0 = hex2rgb(CREST[0]), C1 = hex2rgb(CREST[1]);
+var T0 = hex2rgb(TROUGH[0]), T1 = hex2rgb(TROUGH[1]);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROWS = Math.max(40, Math.round(COLS * H / W));
+  var n = COLS * ROWS;
+  hgt = new Float32Array(n);
+  disp = new Float32Array(n);
+  RW = COLS * STEP; RH = ROWS * STEP;
+  buf = document.createElement('canvas');
+  buf.width = RW; buf.height = RH;
+  bctx = buf.getContext('2d');
+  out = bctx.createImageData(RW, RH);
+}
+
+// 파도장 높이 합성 — height(x,y,t) = Σ amp·sin(dot(k·dir,(x,y)) + t·ω + φ)
+// Gerstner 처짐 dispX = Q·amp·cos(같은 위상)·dirX 도 같은 루프에서 쌓는다.
+// wind 세기는 실효 진폭에 곱하고, wind 방향은 각 파의 방향에 살짝 실린다.
+function fieldcalc(t, wstr, wang) {
+  var i = 0;
+  for (var y = 0; y < ROWS; y++) {
+    for (var x = 0; x < COLS; x++, i++) {
+      var h = 0, d = 0;
+      for (var w2 = 0; w2 < NW; w2++) {
+        var WV = WAVES[w2];
+        // wind 방향 반영 — 방향 벡터를 wind 각도 쪽으로 살짝 기울인다
+        var da = wang * 0.5;
+        var dx = WV.dirX * Math.cos(da) - WV.dirY * Math.sin(da);
+        var dy = WV.dirX * Math.sin(da) + WV.dirY * Math.cos(da);
+        var ph = (x * dx + y * dy) * WV.freq * 0.62 + t * WV.om + WV.ph;
+        var a = WV.amp * wstr;
+        h += a * Math.sin(ph);
+        d += Q * a * Math.cos(ph) * dx;
+      }
+      hgt[i] = h;
+      disp[i] = d;
+    }
+  }
+}
+
+// 렌더 — 격자 해상도 ImageData(STEP=3 업스케일 버퍼). 높이→색 램프(마루 민트·골 파랑).
+// 색이 픽셀 단위로 흘러야 누적면적이 크게 잡히므로, 램프를 부드럽게 두 단계 섞는다.
+function render() {
+  var o = out.data;
+  for (var y = 0; y < ROWS; y++) {
+    var row = y * COLS;
+    for (var x = 0; x < COLS; x++) {
+      var i = row + x;
+      var h = hgt[i];                              // 대략 -0.75 ~ +0.75
+      var u = h * 1.24 + 0.5;                       // 0..1 로 정규화(클램프) — 마루·골이 파렛트 끝까지 닿게
+      if (u < 0) u = 0; else if (u > 1) u = 1;
+      // 램프 — 골(T) → 마루(C). u 가 절반 넘으면 C0→C1 로, 이하면 T0→T1 로
+      var r, g, b;
+      if (u > 0.5) {
+        var k = (u - 0.5) * 2;
+        r = C1[0] + (C0[0] - C1[0]) * k;
+        g = C1[1] + (C0[1] - C1[1]) * k;
+        b = C1[2] + (C0[2] - C1[2]) * k;
+      } else {
+        var k2 = u * 2;
+        r = T0[0] + (T1[0] - T0[0]) * k2;
+        g = T0[1] + (T1[1] - T0[1]) * k2;
+        b = T0[2] + (T1[2] - T0[2]) * k2;
+      }
+      // Gerstner 처짐을 밝기로도 살짝 — 꼭대기 처진 칸이 더 밝다
+      var sp = disp[i] * 46;
+      r += sp; g += sp; b += sp;
+      // STEP×STEP 블록으로 펴 올린다 — 쓸 주소를 직접 계산한다(순차 누적 인덱스는 py 행 어긋남의 원인)
+      for (var sy = 0; sy < STEP; sy++) {
+        var base = ((y * STEP + sy) * RW + x * STEP) * 4;
+        for (var sx = 0; sx < STEP; sx++, base += 4) {
+          o[base] = r;
+          o[base + 1] = g;
+          o[base + 2] = b;
+          o[base + 3] = 255;
+        }
+      }
+    }
+  }
+  bctx.putImageData(out, 0, 0);
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+
+function frame(now) {
+  nowSec = now / 1000;
+  if (auto) {
+    // 자동 wind — 시드 고정 리사주로 방향·세기가 천천히 순환. 포인터 없는 headless 렌더에서도 화면이 산다
+    var th = nowSec * 0.31;
+    windT = 1.05 + Math.sin(th * 0.9 + 0.4) * 0.55 + Math.sin(th * 2.3) * 0.12;
+    windAngT = 0.5 + Math.sin(th * 0.42) * 0.85;
+  }
+  wind += (windT - wind) * 0.05;
+  windAng += (windAngT - windAng) * 0.05;
+  fieldcalc(nowSec, wind, windAng);
+  render();
+  windVal.textContent = 'wind ' + wind.toFixed(2);
+  raf = requestAnimationFrame(frame);
+}
+
+// 정지판 — 루프 없이 시드가 정한 한 시각의 파도장을 계산해 물결이 살아 있는 정적 한 장
+function still() {
+  fieldcalc(7.3, 1.35, 0.5);
+  render();
+}
+
+function localXY(e) {
+  var r = field.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+field.addEventListener('pointermove', function (e) {
+  var p = localXY(e);
+  var t = performance.now();
+  if (lastPX >= 0 && t > lastPT) {
+    // 이동 벡터 실측 → wind 방향·세기 목표 갱신(lerp 완화는 frame 에서)
+    var vx = p[0] - lastPX, vy = p[1] - lastPY;
+    var sp2 = Math.sqrt(vx * vx + vy * vy);
+    if (sp2 > 0.5) {
+      windT = Math.max(0.35, Math.min(2.1, 0.9 + sp2 * 0.02));
+      windAngT = Math.atan2(vy, vx) * 0.16;
+    }
+  }
+  lastPX = p[0]; lastPY = p[1]; lastPT = t;
+  auto = false;
+});
+field.addEventListener('pointerleave', function () {
+  auto = true;   // 떠나면 다음 텅에 자동 순환으로 돌아간다
+  lastPX = -1;
+});
+field.addEventListener('keydown', function (e) {
+  var d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  auto = false;
+  windT = Math.max(0.35, Math.min(2.1, windT + d[0] * 0.18));
+  windAngT = windAngT + d[1] * 0.1;
+  if (reduce) { fieldcalc(nowSec || 3.1, windT, windAngT); render(); }
+});
+window.addEventListener('resize', function () { fit(); if (reduce) still(); });
+
+fit();
+waveVal.textContent = 'wave ' + NW;
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 파도가 살아 있는 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  still();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

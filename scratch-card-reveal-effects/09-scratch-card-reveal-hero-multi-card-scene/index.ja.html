@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3枚のカードがピクセル閾値・破片の重力・紙吹雪の爆発を1つの場面で同時に計算する — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scv is-demo" id="scv">
+  <p class="scv__label">スクラッチカード3枚セット</p>
+  <div class="scv__grid" id="grid">
+    <div class="scv__card" data-idx="0">
+      <div class="scv__zone" id="zone0">
+        <div class="scv__prize"><p class="scv__prizeTitle">10%</p><p class="scv__prizeSub">割引クーポン</p></div>
+        <canvas class="scv__foil" id="foil0" width="150" height="120" aria-hidden="true"></canvas>
+        <canvas class="scv__fx" id="fx0" width="150" height="120" aria-hidden="true"></canvas>
+      </div>
+    </div>
+    <div class="scv__card" data-idx="1">
+      <div class="scv__zone" id="zone1">
+        <div class="scv__prize"><p class="scv__prizeTitle">送料無料</p><p class="scv__prizeSub">クーポン</p></div>
+        <canvas class="scv__foil" id="foil1" width="150" height="120" aria-hidden="true"></canvas>
+        <canvas class="scv__fx" id="fx1" width="150" height="120" aria-hidden="true"></canvas>
+      </div>
+    </div>
+    <div class="scv__card" data-idx="2">
+      <div class="scv__zone" id="zone2">
+        <div class="scv__prize"><p class="scv__prizeTitle">ポイント</p><p class="scv__prizeSub">2,000ウォン</p></div>
+        <canvas class="scv__foil" id="foil2" width="150" height="120" aria-hidden="true"></canvas>
+        <canvas class="scv__fx" id="fx2" width="150" height="120" aria-hidden="true"></canvas>
+      </div>
+    </div>
+  </div>
+  <button type="button" class="scv__reveal" id="revealBtn">全部一気に見る</button>
+  <p class="scv__live" id="live" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 01 의 픽셀 임계값 자동 벗김, 03 의 조각 중력, 07 의 색종이 폭발을 카드 3장에
+  // 각각 적용한다. 이름 충돌을 피하려 HERO_ 접두 상수를 새로 둔다(01/03/07 의 상수와는 별개 값).
+  var root = document.getElementById('scv');
+  var revealBtn = document.getElementById('revealBtn');
+  var live = document.getElementById('live');
+
+  var HERO_REVEAL_THRESHOLD_PCT = 55;
+  var HERO_FLAKE_GRAVITY_PX_S2 = 500;
+  var HERO_CONFETTI_COUNT = 16;
+  var SCRATCH_BRUSH_R = 12;
+  var FLAKE_LIFE_MS = 800;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var PRIZE_TEXT = ['10%割引クーポンが開きました', '送料無料クーポンが開きました', 'ポイント2,000ウォンクーポンが開きました'];
+  var COLORS = ['#0a4fe8', '#fff7e6', '#ff4d1f', '#ffd23f'];
+
+  function makeCard(idx) {
+    var foil = document.getElementById('foil' + idx);
+    var fxCanvas = document.getElementById('fx' + idx);
+    var zone = document.getElementById('zone' + idx);
+    var ctx = foil.getContext('2d');
+    var fctx = fxCanvas.getContext('2d');
+    var FW = foil.width, FH = foil.height;
+    var foilRand = seedRand(424091 + idx * 7);
+    var fxRand = seedRand(424092 + idx * 7);
+    var particles = [];
+    var opened = false, burst = false;
+
+    function paintFoil() {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.clearRect(0, 0, FW, FH);
+      var grad = ctx.createLinearGradient(0, 0, FW, FH);
+      var stops = idx === 0 ? ['#5b6cff', '#8f9bff'] : idx === 1 ? ['#e8c344', '#f6dd7c'] : ['#ff8a5c', '#ffb488'];
+      grad.addColorStop(0, stops[0]);
+      grad.addColorStop(1, stops[1]);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, FW, FH);
+      ctx.strokeStyle = 'rgba(23,20,26,.16)';
+      ctx.lineWidth = 1;
+      for (var i = 0; i < 12; i += 1) {
+        var x = foilRand() * FW, y = foilRand() * FH;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (foilRand() * 16 - 8), y + (foilRand() * 6 - 3));
+        ctx.stroke();
+      }
+    }
+
+    function spawnFlake(x, y) {
+      if (reduce) return;
+      particles.push({
+        kind: 'flake', x: x, y: y,
+        vx: (fxRand() - .5) * 60, vy: -40 - fxRand() * 30,
+        rot: fxRand() * Math.PI * 2, angVel: (fxRand() - .5) * 8,
+        born: 0, size: 3 + fxRand() * 2, color: 'rgba(255,255,255,.85)', bounces: 99
+      });
+    }
+    function burstConfetti() {
+      for (var i = 0; i < HERO_CONFETTI_COUNT; i += 1) {
+        particles.push({
+          kind: 'confetti', x: FW / 2, y: FH * 0.3,
+          vx: (fxRand() - .5) * 160, vy: -140 - fxRand() * 100,
+          rot: fxRand() * Math.PI * 2, angVel: (fxRand() - .5) * 7,
+          born: 0, size: 4 + fxRand() * 2, color: COLORS[i % COLORS.length], bounces: 0
+        });
+      }
+    }
+    function stepParticles(dtMs) {
+      var dtS = dtMs / 1000;
+      var alive = [];
+      for (var i = 0; i < particles.length; i += 1) {
+        var p = particles[i];
+        p.vy += HERO_FLAKE_GRAVITY_PX_S2 * dtS;
+        p.x += p.vx * dtS;
+        p.y += p.vy * dtS;
+        p.rot += p.angVel * dtS;
+        p.born += dtMs;
+        if (p.kind === 'confetti' && p.y > FH - 4 && p.vy > 0 && p.bounces < 2) {
+          p.y = FH - 4; p.vy *= -0.4; p.bounces += 1;
+        }
+        var keepFlake = p.kind === 'flake' && p.born < FLAKE_LIFE_MS && p.y < FH + 8;
+        var keepConfetti = p.kind === 'confetti' && p.born < 1300;
+        if (keepFlake || keepConfetti) alive.push(p);
+      }
+      particles = alive;
+    }
+    function drawParticles() {
+      fctx.clearRect(0, 0, FW, FH);
+      for (var i = 0; i < particles.length; i += 1) {
+        var p = particles[i];
+        var fade = p.kind === 'flake' ? Math.max(0, 1 - p.born / FLAKE_LIFE_MS) : 1;
+        fctx.save();
+        fctx.translate(p.x, p.y);
+        fctx.rotate(p.rot);
+        fctx.globalAlpha = fade;
+        fctx.fillStyle = p.color;
+        fctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+        fctx.restore();
+      }
+    }
+
+    function clearedRatio() {
+      var data = ctx.getImageData(0, 0, FW, FH).data;
+      var clear = 0, total = data.length / 4;
+      for (var i = 3; i < data.length; i += 4) { if (data[i] < 40) clear += 1; }
+      return clear / total;
+    }
+
+    function scratchAt(x, y) {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.arc(x, y, SCRATCH_BRUSH_R, 0, Math.PI * 2);
+      ctx.fill();
+      spawnFlake(x, y);
+    }
+
+    function openCard() {
+      if (opened) return;
+      opened = true;
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillRect(0, 0, FW, FH);
+      zone.classList.add('is-open');
+      if (!burst) { burst = true; burstConfetti(); }
+      live.textContent = PRIZE_TEXT[idx];
+    }
+    function checkThreshold() {
+      var ratio = clearedRatio();
+      if (ratio * 100 >= HERO_REVEAL_THRESHOLD_PCT) openCard();
+    }
+    function pos(e) {
+      var r = foil.getBoundingClientRect();
+      return { x: (e.clientX - r.left) * (FW / r.width), y: (e.clientY - r.top) * (FH / r.height) };
+    }
+
+    paintFoil();
+    var dragging = false;
+    zone.addEventListener('pointerdown', function (e) {
+      if (opened) return;
+      root.classList.remove('is-demo');
+      dragging = true;
+      var p = pos(e);
+      scratchAt(p.x, p.y);
+      checkThreshold();
+      if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+    });
+    zone.addEventListener('pointermove', function (e) {
+      if (!dragging || opened) return;
+      var p = pos(e);
+      scratchAt(p.x, p.y);
+      checkThreshold();
+    });
+    window.addEventListener('pointerup', function () { dragging = false; });
+
+    var demoRand = seedRand(424093 + idx * 7);
+    var demoPath = [];
+    var pointCount = 14;
+    for (var i = 0; i < pointCount; i += 1) {
+      demoPath.push({
+        t: 220 + idx * 260 + i * 92,
+        x: (FW * 0.14) + (i % 4) * (FW * 0.22) + (demoRand() - .5) * 5,
+        y: (FH * 0.2) + Math.floor(i / 4) * (FH * 0.28) + (demoRand() - .5) * 5
+      });
+    }
+    var demoStep = 0;
+
+    return {
+      reset: function () {
+        opened = false; burst = false;
+        zone.classList.remove('is-open');
+        paintFoil();
+        particles = [];
+        demoStep = 0;
+      },
+      runDemo: function (tMod) {
+        while (demoStep < demoPath.length && demoPath[demoStep].t <= tMod) {
+          var p = demoPath[demoStep];
+          scratchAt(p.x, p.y);
+          demoStep += 1;
+          checkThreshold();
+        }
+      },
+      step: function (dt) { if (!reduce) stepParticles(dt); drawParticles(); },
+      revealAll: function () { scratchAt(FW / 2, FH / 2); openCard(); }
+    };
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var cards = [makeCard(0), makeCard(1), makeCard(2)];
+
+  revealBtn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    for (var i = 0; i < cards.length; i += 1) cards[i].revealAll();
+  });
+
+  var DEMO_LOOP_MS = 4600;
+  if (reduce) root.classList.remove('is-demo');
+  var elapsed = 0, lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce && root.classList.contains('is-demo')) {
+      elapsed += dt;
+      var tMod = elapsed % DEMO_LOOP_MS;
+      if (tMod < dt) { for (var i = 0; i < cards.length; i += 1) cards[i].reset(); }
+      for (var j = 0; j < cards.length; j += 1) cards[j].runDemo(tMod);
+    }
+    for (var k = 0; k < cards.length; k += 1) cards[k].step(dt);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

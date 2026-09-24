@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>글리프 재집합 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gr" id="gr">
+  <p class="gr__hint">
+    <svg class="gr__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"><path d="M104 64l72 64-72 64" opacity=".9"/><path d="M64 64l72 64-72 64" opacity=".5"/></g></svg>
+    <span>Move your finger across the board and the particles scatter, then gather again</span>
+  </p>
+  <div class="gr__field" id="field" role="application" aria-label="Reassemble playground" tabindex="0">
+    <canvas class="gr__cv" id="cv"></canvas>
+    <b class="gr__badge" aria-hidden="true" id="badge">0 pts</b>
+  </div>
+  <div class="gr__bar">
+    <label class="gr__dial">Word
+      <input type="text" id="word" value="TOUCH" maxlength="12" spellcheck="false" aria-label="Word">
+    </label>
+    <label class="gr__dial">Seed
+      <input type="number" id="seed" min="1" max="9999" value="7" aria-label="Seed">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 재집합 — 글자를 픽셀로 뜯어 포인터가 헤치면 밀리고 제자리로 되돌아오게 한다.
+// 1) 오프스크린 캔버스에 fillText 로 단어를 그려 getImageData 로 알파 마스크를 뽑는다
+// 2) 격자 간격 STEP 로 걸어 알파>128 인 칸의 (x,y) 를 목표점 목록으로 만든다
+// 3) 입자마다 목표로 돌아가는 복원 스프링(속도 감쇠 0.86 · 복원 0.012)을 두고,
+//    포인터(마우스·터치) 반경 RADIUS 안에서는 밀어내는 힘이 이긴다.
+//    포인터가 없을 때는 가상 포인터가 사인으로 흘러 판이 항상 살아 움직인다(자동 모드).
+//    실제 포인터가 들어오면 즉시 그 위치를 따라간다.
+// Seed(mulberry32) 가 입자의 시작 위치·반경·색을 정하므로 같은 시드는 같은 그림이 나온다.
+var root = document.getElementById('gr');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var wordIn = document.getElementById('word');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+
+var SW = 252, SH = 108;          // 샘플 해상도 — 판 비율과 같다
+var STEP = 2;                    // 샘플 간격(px) — 좁힐수록 입자 수가 늘어난다
+var RADIUS = 46;                 // 포인터 반발 반경(샘플 px)
+var PUSH = 2.9;                  // 반발 가속 — 복원보다 세게
+var DAMP = 0.86;                 // 속도 감쇠 — 스프링의 점성
+var SPRING = 0.012;              // 목표 복원 계수
+var AUTO_R = 62;                 // 자동 모드 가상 포인터 반경(샘플 px) — 글자를 가로질러 흐른다
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0;
+var parts = [];
+var t0 = 0, raf = 0;
+var ptr = { x: -999, y: -999, on: false };   // 실제 포인터(샘플 좌표계)
+
+// 색 — scss 가 파스텔 커스텀 프로퍼티(--g0..--g3)로 내려준 넉 색을 읽어 쓴다
+var css = getComputedStyle(root);
+function hexOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return '#' + v;
+}
+var cols = [hexOf('--g0'), hexOf('--g1'), hexOf('--g2'), hexOf('--g3')];
+
+// 결정적 난수 — Seed 하나가 입자의 크기·색 전부를 정한다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── 1) 글자 → 알파 마스크 ────────────────────────────────────────
+function buildMask(word) {
+  var off = document.createElement('canvas');
+  off.width = SW; off.height = SH;
+  var oc = off.getContext('2d', { willReadFrequently: true });
+  oc.textAlign = 'center'; oc.textBaseline = 'middle';
+  var fs = 200;
+  oc.font = '900 ' + fs + 'px Arial';
+  var w = oc.measureText(word).width || 1;
+  fs = Math.min(fs * ((SW - 8) / w), SH - 6);       // 폭·높이 안에서 제일 큰 글자
+  oc.font = '900 ' + Math.round(fs) + 'px Arial';
+  oc.fillStyle = '#fff';
+  oc.fillText(word, SW / 2, SH / 2);
+  return oc.getImageData(0, 0, SW, SH).data;
+}
+
+// ── 2) 마스크 → 목표점 목록 ─────────────────────────────────────
+function samplePoints(data) {
+  var pts = [];
+  for (var y = 0; y < SH; y += STEP) {
+    for (var x = 0; x < SW; x += STEP) {
+      if (data[(y * SW + x) * 4 + 3] > 128) pts.push({ x: x, y: y });
+    }
+  }
+  return pts;
+}
+
+function pickColor(r) {
+  if (r < 0.55) return 0;   // 잉크 다수
+  if (r < 0.73) return 1;   // 하늘
+  if (r < 0.88) return 2;   // 민트
+  return 3;                 // 복숭아
+}
+
+// ── 3) Word·시드가 바뀌면 목표와 입자 수가 다시 계산된다 ──────────
+var word = 'TOUCH', seed = 7;
+function resample(nextWord, nextSeed) {
+  var w = String(nextWord == null ? word : nextWord).trim().toUpperCase();
+  if (w) word = w;                                   // 빈 문자열이면 직전 값을 유지
+  var s = Math.floor(Number(nextSeed));
+  if (s >= 1) seed = s;
+  var pts = samplePoints(buildMask(word));
+  var rnd = mulberry32(seed);
+  parts = [];
+  for (var i = 0; i < pts.length; i++) {
+    var a = rnd() * 6.2832, rr = rnd();
+    // 시작 위치 = 판 가장자리 링 — 흩어진 상태에서 모여드는 등장 시퀀스
+    var edge = 0.5 + 0.5 * Math.sin(a * 3.0 + rr * 6.2832);
+    parts.push({
+      x: pts[i].x + Math.cos(a) * (46 + rr * 58) * edge,   // 흩어짐 출발
+      y: pts[i].y + Math.sin(a) * (30 + rr * 38) * edge,
+      vx: 0, vy: 0,
+      ox: pts[i].x, oy: pts[i].y,                   // 목표 = 샘플 픽셀 (복원 기준점)
+      sz: 2.4 + rr * 2.1, ci: pickColor(rnd())
+    });
+  }
+  window.__sampleInfo = { targets: pts.length, particles: parts.length };
+  badge.textContent = pts.length + ' pts';
+  if (reduce) {
+    step(0);                                         // t=0 — 스프링 몇 걸음만 둔 포즈
+    for (var k = 0; k < 90; k++) step(1 / 60);       // 안정 상태로 수렴시킨 한 장
+    draw();                                           // 수렴한 위치·색을 즉시 화면에 반영한다
+  } else {
+    t0 = performance.now();
+  }
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  var d = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+
+// 물리 한 걸음 — 포인터(실제 또는 가상) 반발 + 목표 복원 스프링
+function step(dt) {
+  // 가상 포인터 — 실제 포인터가 없을 때 사인으로 판을 가로질러 흐른다(자동 모드)
+  var px, py;
+  if (ptr.on) {
+    px = ptr.x; py = ptr.y;
+  } else {
+    var w = tNow * 0.9;                              // 자동 흐름 위상
+    px = SW / 2 + Math.sin(w) * (SW * 0.36);
+    py = SH / 2 + Math.sin(w * 2.3 + 1.2) * (SH * 0.30);
+  }
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var dx = p.x - px, dy = p.y - py;
+    var d2 = dx * dx + dy * dy;
+    var R = ptr.on ? RADIUS : AUTO_R;                // 자동 모드는 더 넓게 훑는다
+    if (d2 < R * R && d2 > 0.01) {
+      var d = Math.sqrt(d2);
+      var f = (1 - d / R) * PUSH;                    // 가까울수록 세게 민다
+      p.vx += (dx / d) * f;
+      p.vy += (dy / d) * f;
+    }
+    p.vx += (p.ox - p.x) * SPRING;                   // 목표 복원
+    p.vy += (p.oy - p.y) * SPRING;
+    p.vx *= DAMP; p.vy *= DAMP;
+    p.x += p.vx; p.y += p.vy;
+  }
+}
+
+var tNow = 0;
+function paint(now) {
+  tNow = now;
+  step(1 / 60);
+  ctx.clearRect(0, 0, W, H);
+  var sx = W / SW, sy = H / SH;
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    ctx.fillStyle = cols[p.ci];
+    ctx.beginPath();
+    ctx.arc(p.x * sx, p.y * sy, p.sz * sx * 0.85, 0, 6.2832);
+    ctx.fill();
+  }
+}
+
+function frame(now) {
+  paint((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+// 실제 포인터 — 마우스·터치. 들어오면 자동 모드를 즉시 내어준다
+function toSample(e) {
+  var r = cv.getBoundingClientRect();
+  var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+  var cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+  return { x: cx / r.width * SW, y: cy / r.height * SH };
+}
+field.addEventListener('pointermove', function (e) {
+  var s = toSample(e); ptr.x = s.x; ptr.y = s.y; ptr.on = true;
+});
+field.addEventListener('pointerleave', function () { ptr.on = false; });
+field.addEventListener('pointerdown', function (e) {
+  var s = toSample(e); ptr.x = s.x; ptr.y = s.y; ptr.on = true;
+});
+field.addEventListener('pointerup', function () { ptr.on = false; });
+
+wordIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+seedIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+window.addEventListener('resize', function () { fit(); if (reduce) { for (var k = 0; k < 90; k++) step(1 / 60); draw(); } });
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  var sx = W / SW, sy = H / SH;
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    ctx.fillStyle = cols[p.ci];
+    ctx.beginPath();
+    ctx.arc(p.x * sx, p.y * sy, p.sz * sx * 0.85, 0, 6.2832);
+    ctx.fill();
+  }
+}
+
+fit();
+resample(wordIn.value, seedIn.value);
+if (reduce) {
+  root.classList.add('is-still');                    // 루프 없이 수렴 포즈 한 장
+  draw();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

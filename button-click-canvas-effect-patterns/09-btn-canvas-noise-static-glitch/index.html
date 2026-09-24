@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오류 값이 뒤집히면 정적처럼 흔들리는 노이즈 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ns is-demo" id="root">
+  <canvas class="ns__cv" id="cv" width="480" height="300"></canvas>
+  <button class="ns__btn" id="btn" type="button">다시 시도</button>
+  <p class="ns__hint">오류 값이 뒤집히는 순간 정적 노이즈가 짧게 덮입니다</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function hashNoise(x, y, seed) {
+    var v = Math.sin(x * 12.9898 + y * 78.233 + seed * 0.0013) * 43758.5453;
+    return v - Math.floor(v);
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  var W = 480, H = 300;
+  var SEED = 90909;
+
+  var BW = 300, BH = 140;
+  var BX = (W - BW) / 2, BY = (H - BH) / 2;
+
+  var NOISE_CELL = 3;             // px — 노이즈 블록 한 칸
+  var BTN_CANVAS_STATIC_BURST_MS = 650; // 정적이 덮였다가 가라앉는 데 걸리는 시간
+  var TICK_MS = 40;               // 이 간격마다 노이즈 패턴을 다시 계산한다 (깜빡임 속도)
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  var errorOn = false;
+  var burstT0 = null;
+
+  function drawPanel(errored) {
+    roundRect(ctx, BX, BY, BW, BH, 16);
+    ctx.fillStyle = '#17141a';
+    ctx.fill();
+    ctx.fillStyle = errored ? '#ff8a6b' : '#fff7e6';
+    ctx.font = '700 18px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('다시 시도', BX + BW / 2, BY + BH / 2);
+    if (errored) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#ff8a6b';
+      roundRect(ctx, BX + 1.5, BY + 1.5, BW - 3, BH - 3, 15);
+      ctx.stroke();
+    }
+  }
+
+  function drawNoise(envelope, tick) {
+    ctx.save();
+    roundRect(ctx, BX, BY, BW, BH, 16);
+    ctx.clip();
+    ctx.globalAlpha = envelope;
+    for (var y = BY; y < BY + BH; y += NOISE_CELL) {
+      for (var x = BX; x < BX + BW; x += NOISE_CELL) {
+        var n = hashNoise(x / NOISE_CELL, y / NOISE_CELL, SEED + tick);
+        var v = Math.floor(n * 255);
+        ctx.fillStyle = 'rgb(' + v + ',' + v + ',' + v + ')';
+        ctx.fillRect(x, y, NOISE_CELL, NOISE_CELL);
+      }
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function render(now) {
+    ctx.clearRect(0, 0, W, H);
+    drawPanel(errorOn);
+
+    if (burstT0 !== null) {
+      var elapsed = now - burstT0;
+      if (elapsed >= BTN_CANVAS_STATIC_BURST_MS) {
+        burstT0 = null;
+      } else {
+        var envelope = 1 - elapsed / BTN_CANVAS_STATIC_BURST_MS;
+        var tick = Math.floor(elapsed / TICK_MS);
+        drawNoise(envelope, tick);
+      }
+    }
+  }
+
+  function trigger() {
+    root.classList.remove('is-demo');
+    errorOn = !errorOn;
+    if (errorOn) burstT0 = performance.now();
+    if (reduceMQ.matches) render(performance.now());
+  }
+
+  btn.addEventListener('click', trigger);
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    trigger();
+  });
+  cv.addEventListener('pointerdown', function () { trigger(); });
+  window.addEventListener('resize', function () { render(performance.now()); });
+
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      if (root.classList.contains('is-demo')) {
+        // 데모 재생 중엔 정적이 끊기지 않도록 번짐이 끝나는 즉시 다음 번짐을 이어 붙인다.
+        errorOn = true;
+        if (burstT0 === null || now - burstT0 >= BTN_CANVAS_STATIC_BURST_MS) burstT0 = now;
+      }
+      render(now);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    errorOn = true;
+    burstT0 = performance.now() - BTN_CANVAS_STATIC_BURST_MS * 0.4;
+    render(performance.now());
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクロール慣性コースティング — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mic is-demo" id="mic">
+  <div class="mic__viewport" id="micViewport" role="application" aria-label="慣性スクロールリスト">
+    <ul class="mic__track" id="micTrack">
+      <li class="mic__row">項目01</li>
+      <li class="mic__row">項目02</li>
+      <li class="mic__row">項目03</li>
+      <li class="mic__row">項目04</li>
+      <li class="mic__row">項目05</li>
+      <li class="mic__row">項目06</li>
+      <li class="mic__row">項目07</li>
+      <li class="mic__row">項目08</li>
+      <li class="mic__row">項目09</li>
+      <li class="mic__row">項目10</li>
+    </ul>
+  </div>
+  <p class="mic__hint">ホイールやドラッグでスクロールして離すと、慣性で滑り続けます</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mic');
+  var viewport = document.getElementById('micViewport');
+  var track = document.getElementById('micTrack');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 계산 겹: 손을 뗀 순간의 속도 값(vel)이 매 프레임 FRICTION 배씩 줄어들며 이동 값(pos)에
+  // 더해진다 — vel *= FRICTION; pos += vel. MIN_VELOCITY 밑으로 떨어지면 코스팅을 멈춘다.
+  var FRICTION = 0.93;
+  var MIN_VELOCITY = 0.04;
+  var WHEEL_SCALE = 0.55;
+
+  var pos = 0, vel = 0, raf = null, maxScroll = 0;
+
+  function measure() {
+    maxScroll = Math.max(0, track.scrollHeight - viewport.clientHeight);
+  }
+  function clamp(v) { return Math.max(-maxScroll, Math.min(0, v)); }
+  function paint() { track.style.transform = 'translateY(' + pos.toFixed(1) + 'px)'; }
+
+  function stopCoast() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } }
+  function coastTick() {
+    vel *= FRICTION;
+    pos = clamp(pos + vel);
+    if (pos === 0 || pos === -maxScroll) { vel = 0; }
+    paint();
+    if (Math.abs(vel) < MIN_VELOCITY) { raf = null; return; }
+    raf = requestAnimationFrame(coastTick);
+  }
+  function startCoast(v) {
+    vel = v;
+    if (reduce) { pos = clamp(pos + vel * 6); vel = 0; paint(); return; }
+    stopCoast();
+    raf = requestAnimationFrame(coastTick);
+  }
+
+  function wireReal() {
+    viewport.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      root.classList.remove('is-demo'); stopAutoplay();
+      stopCoast();
+      pos = clamp(pos - e.deltaY * WHEEL_SCALE);
+      paint();
+      startCoast(-e.deltaY * WHEEL_SCALE * 0.4);
+    }, { passive: false });
+
+    var dragging = false, startY = 0, startPos = 0, lastY = 0, lastT = 0, dragVel = 0;
+    viewport.addEventListener('pointerdown', function (e) {
+      root.classList.remove('is-demo'); stopAutoplay(); stopCoast();
+      dragging = true; startY = lastY = e.clientY; startPos = pos; lastT = performance.now(); dragVel = 0;
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', function (e) {
+      if (!dragging) { return; }
+      var t = performance.now();
+      var dt = Math.max(1, t - lastT);
+      dragVel = (e.clientY - lastY) / dt * 16.6;
+      pos = clamp(startPos + (e.clientY - startY));
+      paint();
+      lastY = e.clientY; lastT = t;
+    });
+    viewport.addEventListener('pointerup', function () {
+      if (!dragging) { return; }
+      dragging = false;
+      startCoast(dragVel);
+    });
+  }
+  wireReal();
+  measure();
+  window.addEventListener('resize', measure);
+
+  // 자동 루프: 번갈아 방향을 바꿔 세게 튕겨 같은 관성 코스팅 경로를 반복 재현한다.
+  var autoTimer = null, phase = 0;
+  function autoTick() {
+    measure();
+    if (maxScroll <= 0) { return; }
+    phase += 1;
+    var dir = (phase % 2 === 0) ? -1 : 1;
+    pos = clamp(dir > 0 ? 0 : -maxScroll);
+    paint();
+    startCoast(dir * -9.5);
+  }
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  if (!reduce) { autoTimer = setInterval(autoTick, 1500); autoTick(); }
+})();
+</script>
+</body>
+</html>

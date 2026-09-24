@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kaleidoscope brush — one stroke reflected into 16 branches — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kb" id="kb">
+  <p class="kb__hint">Draw one stroke and reflection matrices fill every remaining wedge</p>
+  <div class="kb__row">
+    <div class="kb__field" id="field" role="application" aria-label="Kaleidoscope brush lab" tabindex="0">
+      <canvas class="kb__cv" id="cv"></canvas>
+    </div>
+    <div class="kb__side">
+      <b class="kb__num" id="parts">16</b>
+      <span class="kb__unit">reflected strokes 2n</span>
+      <p class="kb__meta">Order n = 8</p>
+      <p class="kb__meta"><b class="kb__count" id="cnt">0</b><span class="kb__metaUnit">strokes</span></p>
+      <p class="kb__meta">Draw it yourself with mouse or finger</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 만화경 붓 — 반사 행렬이 핵심이다. k번째 부채꼴의 변환은 회전 R(a) 와 y축 반사의 곱
+// [[cos a, sin a], [sin a, -cos a]] (a = k · 2π/n). 선분 하나를 이 행렬로 n번 찍으면
+// 좌우 반사까지 합쳐 2n 갈래의 대칭 무늬가 그린 순간에 생긴다. 경로는 파라미터 함수라
+// 시드 난수 없이도 항상 같은 데모가 반복된다.
+(function () {
+  var root = document.getElementById('kb');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var parts = document.getElementById('parts');
+  var cnt = document.getElementById('cnt');
+  if (!root || !field || !cv || !parts || !cnt) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var COLS = [css.getPropertyValue('--c1').trim(), css.getPropertyValue('--c2').trim(), css.getPropertyValue('--c3').trim()];
+  var N = 8;                       // 차수 n — 반사까지 합치면 2N = 16 갈래
+  parts.textContent = String(2 * N);
+  var strokes = 0;
+  var W = 0, H = 0, dpr = 1, cx = 0, cy = 0, R = 0;
+
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cx = W / 2; cy = H / 2; R = Math.min(W, H) / 2 - 6;
+  }
+
+  // 반사 행렬 스트로크 — 선분 하나를 2N 위치에 찍는다. setTransform 의 여섯 인수는
+  // (a, b, c, d, e, f) = 행렬 2×2 + 이동. 여기 곱한 행렬이 곧 회전×반사다
+  function mirroredSeg(x0, y0, x1, y1, ci) {
+    for (var k = 0; k < N; k++) {
+      var a = k * 2 * Math.PI / N, c = Math.cos(a), s = Math.sin(a);
+      ctx.setTransform(dpr * c, dpr * s, dpr * s, -dpr * c, cx * dpr, cy * dpr);
+      ctx.strokeStyle = COLS[ci % 3];
+      ctx.lineWidth = 6;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    strokes += 1;
+    cnt.textContent = String(strokes);
+  }
+
+  // 시드 고정 자동 strokes — 붓 세 자루가 위상을 달리해 함께 돈다
+  function pathAt(t, ph) {
+    var ang = t * 1.55 + ph + 0.9 * Math.sin(t * 0.31 + ph);
+    var r = R * (0.30 + 0.34 * Math.sin(t * 0.47 + ph * 2) + 0.20 * Math.sin(t * 0.13 + ph));
+    if (r < R * 0.07) r = R * 0.07;
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t = 0, lastInput = -9, pen = false, penPt = null;
+  var PH = [0, 2.09, 4.19];        // 붓 세 자루의 위상 (2π/3 간격)
+  var prev = [null, null, null];
+
+  function toLocal(e) {
+    var b = field.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  }
+  field.addEventListener('pointerdown', function (e) {
+    pen = true; penPt = toLocal(e);
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 그리기에 영향 없다 */ }
+    }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!pen) return;
+    var p = toLocal(e);
+    mirroredSeg(penPt[0], penPt[1], p[0], p[1], strokes);
+    penPt = p; lastInput = t;
+  });
+  field.addEventListener('pointerup', function () { pen = false; lastInput = t; });
+  field.addEventListener('pointercancel', function () { pen = false; lastInput = t; });
+
+  var last = 0;
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!pen && t - lastInput > 1.6) {
+      t += dt;
+      for (var i = 0; i < PH.length; i++) {
+        var p = pathAt(t, PH[i]);
+        if (prev[i]) mirroredSeg(prev[i][0], prev[i][1], p[0], p[1], Math.floor(t * 0.9 + i));
+        prev[i] = p;
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 시간 4초 분의 붓질을 미리 그려 둔다. 루프는 돌지 않는다
+    for (var j = 1; j <= 200; j++) {
+      var tt = j * 0.02;
+      for (var i2 = 0; i2 < PH.length; i2++) {
+        var a0 = pathAt(tt - 0.02, PH[i2]), a1 = pathAt(tt, PH[i2]);
+        mirroredSeg(a0[0], a0[1], a1[0], a1[1], Math.floor(tt * 0.9 + i2));
+      }
+    }
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

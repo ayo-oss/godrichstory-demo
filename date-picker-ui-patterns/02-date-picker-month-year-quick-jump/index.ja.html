@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>月・年クイックジャンプ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mj is-demo" id="mj">
+  <div class="mj__bar">
+    <button type="button" class="mj__nav" id="mjPrev" aria-label="前の月">‹</button>
+    <button type="button" class="mj__head" id="mjHead">2026年3月</button>
+    <button type="button" class="mj__nav" id="mjNext" aria-label="次の月">›</button>
+  </div>
+  <div class="mj__weekday" aria-hidden="true">
+    <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+  </div>
+  <div class="mj__viewport" id="mjViewport">
+    <div class="mj__grid" id="mjMonthGrid"></div>
+  </div>
+  <div class="mj__yearGrid" id="mjYearGrid"></div>
+</div>
+<script>
+(function () {
+  var YEAR = 2026; // 계산 겹 상수: 연도 고정, new Date() 미사용
+  var MONTH_LABEL = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
+  var HEADER_LABEL = [
+    '2026年1月', '2026年2月', '2026年3月', '2026年4月', '2026年5月', '2026年6月',
+    '2026年7月', '2026年8月', '2026年9月', '2026年10月', '2026年11月', '2026年12月'
+  ];
+  var AUTO_SEQ = [3, 7, 11, 3]; // 계산 겹: 자동재생이 도는 목표 月 순서, 오프셋 부호로 슬라이드 방향을 정한다
+  var CELL_TOTAL = 42; // 계산 겹: 6행 고정 — 월마다 칸 수가 달라도 뷰포트 높이가 흔들리지 않는다
+
+  function isLeap(y) { return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
+  function daysInMonth(y, m) {
+    var t = [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return t[m - 1];
+  }
+  function dow(y, m, d) { // Zeller 합동식 — 0=日 ~ 6=土
+    var yy = y, mm = m;
+    if (mm < 3) { yy -= 1; mm += 12; }
+    var K = yy % 100, J = Math.floor(yy / 100);
+    var h = (d + Math.floor(13 * (mm + 1) / 5) + K + Math.floor(K / 4) + Math.floor(J / 4) - 2 * J) % 7;
+    h = ((h % 7) + 7) % 7;
+    return (h + 6) % 7;
+  }
+
+  var root = document.getElementById('mj');
+  var head = document.getElementById('mjHead');
+  var prevBtn = document.getElementById('mjPrev');
+  var nextBtn = document.getElementById('mjNext');
+  var viewport = document.getElementById('mjViewport');
+  var monthGrid = document.getElementById('mjMonthGrid');
+  var yearGrid = document.getElementById('mjYearGrid');
+
+  var current = 3;
+  var mode = 'month';
+
+  function renderMonth(m) {
+    monthGrid.innerHTML = '';
+    var n = daysInMonth(YEAR, m);
+    var lead = dow(YEAR, m, 1);
+    var trail = CELL_TOTAL - lead - n;
+    var i, cell;
+    for (i = 0; i < lead; i++) {
+      cell = document.createElement('span');
+      cell.className = 'mj__cell mj__cell--out';
+      monthGrid.appendChild(cell);
+    }
+    for (var d = 1; d <= n; d++) {
+      cell = document.createElement('span');
+      cell.className = 'mj__cell';
+      cell.textContent = String(d);
+      monthGrid.appendChild(cell);
+    }
+    for (i = 0; i < trail; i++) {
+      cell = document.createElement('span');
+      cell.className = 'mj__cell mj__cell--out';
+      monthGrid.appendChild(cell);
+    }
+  }
+
+  function renderYear(highlight) {
+    yearGrid.innerHTML = '';
+    for (var i = 0; i < 12; i++) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mj__ycell' + (i + 1 === highlight ? ' mj__ycell--now' : '');
+      btn.textContent = MONTH_LABEL[i];
+      btn.dataset.m = String(i + 1);
+      btn.addEventListener('click', function (e) {
+        human();
+        slideTo(parseInt(e.currentTarget.dataset.m, 10));
+      });
+      yearGrid.appendChild(btn);
+    }
+  }
+
+  function setHead(m) { head.textContent = HEADER_LABEL[m - 1]; }
+
+  function slideTo(target) {
+    // 계산 겹: 뷰포트 실측 폭을 슬라이드 거리로, 목표-현재 오프셋 부호를 슬라이드 방향으로 쓴다
+    var dist = viewport.getBoundingClientRect().width;
+    var dir = target >= current ? 1 : -1;
+    current = target;
+    renderMonth(current);
+    setHead(current);
+    root.classList.remove('mj--year');
+    mode = 'month';
+    monthGrid.style.transition = 'none';
+    monthGrid.style.transform = 'translateX(' + (dir * dist) + 'px)';
+    void monthGrid.offsetWidth;
+    monthGrid.style.transition = '';
+    monthGrid.style.transform = 'translateX(0)';
+  }
+
+  function stepMonth(delta) {
+    var target = current + delta;
+    if (target < 1) target = 12;
+    if (target > 12) target = 1;
+    slideTo(target);
+  }
+
+  function toggleYear() {
+    mode = mode === 'year' ? 'month' : 'year';
+    root.classList.toggle('mj--year', mode === 'year');
+    if (mode === 'year') renderYear(current);
+  }
+
+  function human() {
+    root.classList.remove('is-demo');
+    stopAutoplay();
+  }
+  head.addEventListener('click', function () { human(); toggleYear(); });
+  prevBtn.addEventListener('click', function () { human(); stepMonth(-1); });
+  nextBtn.addEventListener('click', function () { human(); stepMonth(1); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') { human(); stepMonth(-1); }
+    if (e.key === 'ArrowRight') { human(); stepMonth(1); }
+  });
+
+  var seqIdx = 0;
+  var autoTimer = null;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  function tick() {
+    // 자동재생은 슬라이드(transform 트랜지션)만 반복한다 — 연·月 전환 자체는
+    // display 즉시 전환이라 캡처 프레임에 순간 컷으로만 찍혀 움직인 프레임이 안 는다.
+    seqIdx = (seqIdx + 1) % AUTO_SEQ.length;
+    slideTo(AUTO_SEQ[seqIdx]);
+  }
+
+  renderMonth(current);
+  setHead(current);
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) { autoTimer = setInterval(tick, 480); }
+})();
+</script>
+</main>
+</body>
+</html>

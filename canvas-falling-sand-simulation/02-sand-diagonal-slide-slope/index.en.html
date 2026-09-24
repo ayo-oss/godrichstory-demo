@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사면 미끄짐 — 셀 오토마타 모래 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>Diagonal attempts spread the sand sideways, forming an angle of repose</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Sand Slope Slide cellular automaton demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">100</b>% diagonal attempts 100%</span>
+    <span class="cd__meta cd__meta--dim">canvas · fillRect · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 사면 미끄짐(02). 01 의 낙하 규칙에 대각선 규칙을 얹는다 —
+// 아래칸이 막혀 있으면 좌하 → 우하 순서로 SLIDE_P 확률로 시도.
+// 중앙 단일 스포너(4칸 폭)에서 쏟아지는 모래가 원뿔 무더기(안식각)를 이룬다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var SLIDE_P = 1.0;   // 대각 시도 확률 — 1.0 은 항상 미끄짐(완만), 낮추면 뾰족
+  var SPAWN_P = 0.75;  // 스포너 칸별 매 틱 생성 확률
+  var ZONE_W = 56;     // 스포너 폭(칸) — 원뿔이 화면 폭을 넉넉히 쓰도록 확대(면적 보정)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A02);
+
+  // 색은 CSS 커스텀 프로퍼티(--sand-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_NIGHT = tokRGB('--sand-night');
+  var C_GLOW  = tokRGB('--sand-glow');
+  var C_GRAIN = tokRGB('--sand-grain');
+  var C_GOLD  = tokRGB('--sand-gold');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var W = 0, H = 0, cols = 0, rows = 0;
+  var grid = null, shade = null;
+  var zoneX = 0;
+  var raf = 0, t0 = -1, acc = 0;
+  var STEP = 1 / 60;
+
+  function idx(x, y) { return y * cols + x; }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    cols = Math.max(1, Math.floor(W / CELL));
+    rows = Math.max(1, Math.floor(H / CELL));
+    grid = new Uint8Array(cols * rows);
+    shade = new Uint8Array(cols * rows);
+    zoneX = Math.max(0, Math.round(cols / 2 - ZONE_W / 2));
+  }
+
+  function spawnStep() {
+    for (var k = 0; k < ZONE_W; k++) {
+      var x = zoneX + k;
+      if (x < 0 || x >= cols) continue;
+      if (rand() < SPAWN_P) {
+        var i = idx(x, 0);
+        if (grid[i] === 0) { grid[i] = 1; shade[i] = rand() < 0.5 ? 0 : 1; }
+      }
+    }
+  }
+
+  function update() {
+    for (var y = rows - 2; y >= 0; y--) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (grid[i] !== 1) continue;
+        // 1) 아래로
+        var bi = idx(x, y + 1);
+        if (grid[bi] === 0) {
+          grid[bi] = 1; shade[bi] = shade[i]; grid[i] = 0;
+          continue;
+        }
+        // 2) 대각선 — 좌하 → 우하 순서, SLIDE_P 확률
+        if (rand() < SLIDE_P) {
+          var dir = rand() < 0.5 ? -1 : 1;
+          var try1 = (x + dir >= 0 && x + dir < cols && grid[idx(x + dir, y + 1)] === 0 && grid[idx(x + dir, y)] === 0);
+          var try2 = false;
+          if (!try1) {
+            var d2 = -dir;
+            try2 = (x + d2 >= 0 && x + d2 < cols && grid[idx(x + d2, y + 1)] === 0 && grid[idx(x + d2, y)] === 0);
+          }
+          if (try1 || try2) {
+            var dx = try1 ? dir : -dir;
+            var di = idx(x + dx, y + 1);
+            grid[di] = 1; shade[di] = shade[i]; grid[i] = 0;
+          }
+        }
+      }
+    }
+  }
+
+  function draw(t) {
+    ctx.fillStyle = 'rgb(' + C_NIGHT.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 느린 잔광 — 중심이 sin/cos 로 천천히 도는 radial gradient(안개, 알파 0.06 내외)
+    var gx = W * (0.5 + 0.36 * Math.sin(t * 0.17));
+    var gy = H * (0.5 + 0.30 * Math.cos(t * 0.13));
+    var gr = Math.max(W, H) * 0.7;
+    var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+    g.addColorStop(0, 'rgba(' + C_GLOW.join(',') + ',0.07)');
+    g.addColorStop(1, 'rgba(' + C_GLOW.join(',') + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (grid[i] !== 1) continue;
+        ctx.fillStyle = shade[i] ? 'rgb(' + C_GOLD.join(',') + ')' : 'rgb(' + C_GRAIN.join(',') + ')';
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+  }
+
+  function stillFrame() {
+    for (var k = 0; k < 40; k++) { spawnStep(); update(); }
+    draw(0.6);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    acc += dt;
+    while (acc >= STEP) { spawnStep(); update(); acc -= STEP; }
+    draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  nOut.textContent = String(Math.round(SLIDE_P * 100));
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

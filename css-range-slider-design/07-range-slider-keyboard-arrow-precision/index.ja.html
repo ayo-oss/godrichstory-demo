@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>キーボード矢印微調整 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ka" id="ka">
+  <p class="ka__hint">矢印キーは0.1秒単位、Shift+矢印キーは1秒単位でaria-valuetextも一緒に更新します</p>
+  <div class="ka__wrap" id="kaWrap" role="img" aria-label="矢印キーで時間の値を精密に調整する場面">
+    <input class="ka__range" id="kaRange" type="range" min="0" max="100" step="1" value="35" aria-label="再生開始時間">
+  </div>
+  <p class="ka__meta"><b class="ka__tag" id="kaTime">3.5秒</b><span class="ka__unit" id="kaStep">矢印キー0.1秒</span></p>
+</div>
+</main>
+<script>
+// 키보드 방향키 정밀 조정(07) — 실제 값(0~100, 0.1秒 단위)과 사람이 읽는 valuetext
+// ("3.5秒") 를 같은 프레임에서 맞춘다. 방향키는 step=1(0.1秒), Shift+방향키는
+// step=10(1秒) 로 keydown 에서 직접 처리해 네이티브 step 보다 촘촘한 미세조정을
+// 보여준다. 이동은 스프링(-k·거리-c·속도)으로 가볍게 뒤쫓게 해 위치가 목표로
+// 부드럽게 붙는다 — 02 번보다 가벼운 상수(오버슈트가 거의 없음).
+(function () {
+  var root = document.getElementById('ka');
+  var wrap = document.getElementById('kaWrap');
+  var range = document.getElementById('kaRange');
+  var timeEl = document.getElementById('kaTime');
+  var stepEl = document.getElementById('kaStep');
+  if (!root || !wrap || !range || !timeEl || !stepEl) return;
+
+  var MIN = 0, MAX = 100;
+  var K = 120, C = 16; // 가벼운 스프링 — 오버슈트 최소
+  var TAU = 0.12;
+
+  function fmt(v) { return (v / 10).toFixed(1) + '秒'; }
+
+  var target = 35, pos = 35, vel = 0;
+
+  function paint() {
+    var pct = (pos - MIN) / (MAX - MIN) * 100;
+    wrap.style.setProperty('--pct', pct.toFixed(2));
+    timeEl.textContent = fmt(pos);
+    range.setAttribute('aria-valuetext', fmt(Math.round(pos)));
+    range.setAttribute('aria-valuenow', String(Math.round(pos)));
+  }
+  paint();
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var playing = true;
+  function stop() { playing = false; }
+
+  range.addEventListener('pointerdown', stop);
+  range.addEventListener('input', function () {
+    stop();
+    target = Number(range.value);
+    pos = target; vel = 0;
+    paint();
+  });
+  range.addEventListener('keydown', function (e) {
+    var fine = 1, coarse = 10;
+    var delta = 0;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') delta = e.shiftKey ? coarse : fine;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') delta = e.shiftKey ? -coarse : -fine;
+    else return;
+    e.preventDefault();
+    stop();
+    stepEl.textContent = e.shiftKey ? 'Shift+矢印キー1秒' : '矢印キー0.1秒';
+    target = Math.max(MIN, Math.min(MAX, target + delta));
+    range.value = String(target);
+    paint();
+  });
+
+  var segTargets = [35, 82, 6, 60, 95, 35];
+  var seg = 0, segFrom = target;
+  var SEG_MS = 420;
+  var segStart = performance.now();
+  var last = segStart;
+
+  if (reduce) {
+    target = segTargets[0]; pos = target;
+    range.value = String(target);
+    paint();
+  } else {
+    (function step(now) {
+      var dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      if (playing) {
+        var elapsed = now - segStart;
+        if (elapsed >= SEG_MS) {
+          seg = (seg + 1) % segTargets.length;
+          segStart = now; elapsed = 0; segFrom = target;
+        }
+        var t = elapsed / 1000;
+        var k = 1 - Math.exp(-t / TAU);
+        target = segFrom + (segTargets[seg] - segFrom) * k;
+      }
+      var acc = -K * (pos - target) - C * vel;
+      vel += acc * dt;
+      pos += vel * dt;
+      range.value = String(Math.round(pos));
+      paint();
+      requestAnimationFrame(step);
+    })(last);
+  }
+})();
+</script>
+</body>
+</html>

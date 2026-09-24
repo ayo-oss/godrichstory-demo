@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long Press Where Variants Fan Out Once Hold Time Crosses a Threshold — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lp is-demo" id="lp">
+  <div class="lp__wrap">
+    <div class="lp__fan" id="lpFan" role="menu" aria-label="Reaction variants" hidden></div>
+    <button class="lp__main" id="lpMain" type="button" aria-label="Like">
+      <span class="lp__mainCh" id="lpMainCh">&#128077;</span>
+      <span class="lp__ring" aria-hidden="true"><span class="lp__ringFill" id="lpRingFill"></span></span>
+    </button>
+  </div>
+  <p class="lp__sr" role="status" aria-live="polite" id="lpLive"></p>
+</div>
+<script>
+(function () {
+  var EMOJI_LONGPRESS_THRESHOLD_MS = 550;
+  var VARIANTS = [
+    { ch: '\u{1F44D}', label: 'Like' }, { ch: '\u{2764}\u{FE0F}', label: 'Love' },
+    { ch: '\u{1F602}', label: 'Haha' }, { ch: '\u{1F62E}', label: 'Wow' },
+    { ch: '\u{1F622}', label: 'Sad' }
+  ];
+
+  var root = document.getElementById('lp');
+  var main = document.getElementById('lpMain');
+  var mainCh = document.getElementById('lpMainCh');
+  var ringFill = document.getElementById('lpRingFill');
+  var fan = document.getElementById('lpFan');
+  var live = document.getElementById('lpLive');
+
+  var synthetic = false;
+  function human() { if (synthetic) return; if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  var variantEls = [];
+  VARIANTS.forEach(function (v, i) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'lp__variant'; b.dataset.i = String(i);
+    b.setAttribute('role', 'menuitem'); b.setAttribute('aria-label', v.label);
+    b.style.setProperty('--i', String(i));
+    b.textContent = v.ch;
+    fan.appendChild(b);
+    variantEls.push(b);
+  });
+
+  // 계산 겹: pointerdown 시각을 performance.now() 로 저장해 두고 매 프레임 지금 시각과의 차(누른
+  // 시간 값)를 문턱과 비교한다 — 그 값을 그대로 링 채움 비율로 써서 문턱까지 남은 거리를 보여주고,
+  // 값이 문턱을 넘는 순간에만 변형이 펼쳐진다.
+  var pressing = false, pressStart = 0, fanOpened = false, rafId = 0, hoverIndex = -1;
+
+  function tick() {
+    if (!pressing) return;
+    var elapsed = performance.now() - pressStart;
+    var pct = Math.min(1, elapsed / EMOJI_LONGPRESS_THRESHOLD_MS);
+    ringFill.style.transform = 'scaleX(' + pct + ')';
+    if (pct >= 1 && !fanOpened) openFan();
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function openFan() {
+    fanOpened = true;
+    fan.hidden = false;
+    requestAnimationFrame(function () { fan.classList.add('lp__fan--open'); });
+    live.textContent = 'Variants  ' + VARIANTS.length + ' opened';
+  }
+
+  function closeFan() {
+    fan.classList.remove('lp__fan--open');
+    variantEls.forEach(function (b) { b.classList.remove('lp__variant--hover'); });
+    hoverIndex = -1;
+    window.setTimeout(function () { if (!fanOpened) fan.hidden = true; }, 220);
+  }
+
+  function selectDefault() {
+    mainCh.classList.remove('lp__mainCh--pop'); void mainCh.offsetWidth; mainCh.classList.add('lp__mainCh--pop');
+    live.textContent = VARIANTS[0].label + '  selected';
+  }
+
+  function selectVariant(i) {
+    mainCh.textContent = VARIANTS[i].ch;
+    mainCh.classList.remove('lp__mainCh--pop'); void mainCh.offsetWidth; mainCh.classList.add('lp__mainCh--pop');
+    live.textContent = VARIANTS[i].label + '  selected';
+  }
+
+  function setHover(i) {
+    if (hoverIndex === i) return;
+    if (hoverIndex >= 0) variantEls[hoverIndex].classList.remove('lp__variant--hover');
+    hoverIndex = i;
+    if (i >= 0) variantEls[i].classList.add('lp__variant--hover');
+  }
+
+  function press() {
+    pressing = true; pressStart = performance.now(); fanOpened = false; hoverIndex = -1;
+    ringFill.style.transform = 'scaleX(0)';
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function release() {
+    if (!pressing) return;
+    pressing = false;
+    cancelAnimationFrame(rafId);
+    ringFill.style.transform = 'scaleX(0)';
+    if (fanOpened) {
+      if (hoverIndex >= 0) selectVariant(hoverIndex); else live.textContent = 'Closed';
+      closeFan();
+    } else {
+      selectDefault();
+    }
+  }
+
+  main.addEventListener('pointerdown', function () { human(); press(); });
+  window.addEventListener('pointerup', function () { release(); });
+  main.addEventListener('pointercancel', function () { release(); });
+
+  var mounted = false;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var steps = [
+    { hold: 240, hover: -1 },
+    { hold: 780, hover: 1 },
+    { hold: 240, hover: -1 },
+    { hold: 900, hover: 3 }
+  ];
+  var si = 0, loopTimer = 0;
+  function runStep() {
+    if (!root.classList.contains('is-demo')) return;
+    var s = steps[si % steps.length];
+    synthetic = true; main.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })); synthetic = false;
+    var mid = Math.round(s.hold * .78);
+    window.setTimeout(function () {
+      if (s.hover >= 0 && fanOpened) setHover(s.hover);
+    }, mid);
+    window.setTimeout(function () {
+      synthetic = true; window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })); synthetic = false;
+      si++;
+      loopTimer = window.setTimeout(runStep, 520);
+    }, s.hold);
+  }
+  if (!reduce) { loopTimer = window.setTimeout(runStep, 400); }
+  else { root.classList.remove('is-demo'); }
+  mounted = true;
+})();
+</script>
+</main>
+</body>
+</html>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>순위가 오르면 스프링으로 튀어 오르는 행 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbs is-demo" id="lbs">
+  <ul class="lbs__list" id="lbsList" role="list"></ul>
+  <p class="lbs__sr" id="lbsSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_RANKUP_OVERSHOOT_PERCENT = 15;
+  var LEADERBOARD_RANKUP_POP_MS = 620;
+  var LEADERBOARD_RANKUP_TICK_MS = 820;
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  // 계산 겹: 목표 오버슛 비율(OS)로부터 감쇠비 zeta 를 역산해(제어이론의 2차계 스텝응답 공식)
+  // 그 zeta 로 스프링 곡선을 직접 적분하지 않고 닫힌 해로 계산한다 — 오버슛 % 를 바꾸면
+  // zeta 가 달라지고 튀어 오르는 정도가 그만큼 정확히 달라진다.
+  function springScale(t, overshootPercent) {
+    var os = Math.max(0.001, Math.min(0.9, overshootPercent / 100));
+    var lnOs = Math.log(os);
+    var zeta = -lnOs / Math.sqrt(Math.PI * Math.PI + lnOs * lnOs);
+    var wn = 11.5;
+    var wd = wn * Math.sqrt(Math.max(0.0001, 1 - zeta * zeta));
+    var tt = Math.min(1, t) * (LEADERBOARD_RANKUP_POP_MS / 1000);
+    return 1 - Math.exp(-zeta * wn * tt) * (Math.cos(wd * tt) + (zeta * wn / wd) * Math.sin(wd * tt));
+  }
+
+  var root = document.getElementById("lbs");
+  var list = document.getElementById("lbsList");
+  var sr = document.getElementById("lbsSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "PULSE_7", score: 970 },
+    { id: "p2", name: "VERA_X", score: 935 },
+    { id: "p3", name: "KITE_3", score: 900 },
+    { id: "p4", name: "ONYX_S", score: 865 },
+    { id: "p5", name: "DRIFT9", score: 830 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function sortedPlayers() {
+    return players.slice().sort(function (a, b) { return b.score - a.score; });
+  }
+
+  function relayout() {
+    var order = sortedPlayers();
+    order.forEach(function (p, i) {
+      list.appendChild(nodes[p.id].li);
+      nodes[p.id].rank.textContent = String(i + 1);
+      nodes[p.id].score.textContent = String(p.score);
+    });
+    return order;
+  }
+
+  function popRow(id) {
+    var el = nodes[id].li;
+    if (reduce) return;
+    var start = null;
+    function frame(now) {
+      if (start === null) start = now;
+      var t = (now - start) / LEADERBOARD_RANKUP_POP_MS;
+      var s = springScale(t, LEADERBOARD_RANKUP_OVERSHOOT_PERCENT);
+      el.style.transform = "scale(" + s.toFixed(4) + ")";
+      if (t < 1) requestAnimationFrame(frame);
+      else el.style.transform = "scale(1)";
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function bump(id) {
+    var order = sortedPlayers();
+    var oldRank = order.indexOf(players.filter(function (x) { return x.id === id; })[0]);
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    p.score += 25 + Math.floor(rand() * 25);
+    var newOrder = relayout();
+    var newRank = newOrder.indexOf(p);
+    if (newRank < oldRank) {
+      popRow(id);
+      sr.textContent = p.name + " 이(가) " + (newRank + 1) + "위로 올랐습니다";
+    }
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbs__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var rank = document.createElement("span");
+    rank.className = "lbs__rank";
+    var name = document.createElement("span");
+    name.className = "lbs__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbs__score";
+
+    li.appendChild(rank);
+    li.appendChild(name);
+    li.appendChild(score);
+
+    nodes[p.id] = { li: li, rank: rank, score: score };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+  });
+
+  relayout();
+
+  if (reduce) {
+    // reduce 에서도 클릭 입력은 relayout() 이 즉시 반영한다 (팝 애니메이션만 생략)
+  } else {
+    (function loop() {
+      if (root.classList.contains("is-demo")) {
+        var order = sortedPlayers();
+        var idx = 1 + Math.floor(rand() * (order.length - 1));
+        var target = order[idx];
+        var oldRank = idx;
+        target.score += 35 + Math.floor(rand() * 20);
+        var newOrder = relayout();
+        var newRank = newOrder.indexOf(target);
+        if (newRank < oldRank) popRow(target.id);
+      }
+      window.setTimeout(loop, LEADERBOARD_RANKUP_TICK_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

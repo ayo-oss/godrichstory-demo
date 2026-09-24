@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同点が検出されると一緒に点滅するランキング行 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lbt is-demo" id="lbt">
+  <ul class="lbt__list" id="lbtList" role="list"></ul>
+  <p class="lbt__sr" id="lbtSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var LEADERBOARD_TIE_STEP = 10;
+  var LEADERBOARD_TIE_TICK_MS = 780;
+
+  function seedRand(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  var rand = seedRand(418);
+
+  var root = document.getElementById("lbt");
+  var list = document.getElementById("lbtList");
+  var sr = document.getElementById("lbtSr");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var players = [
+    { id: "p1", name: "ORCA_6", score: 680 },
+    { id: "p2", name: "FINCH3", score: 660 },
+    { id: "p3", name: "CROW_8", score: 640 },
+    { id: "p4", name: "HARE_2", score: 620 },
+    { id: "p5", name: "WREN_5", score: 600 }
+  ];
+
+  var nodes = {};
+
+  function human() {
+    if (root.classList.contains("is-demo")) root.classList.remove("is-demo");
+  }
+
+  function sortedPlayers() {
+    return players.slice().sort(function (a, b) { return b.score - a.score; });
+  }
+
+  // 계산 겹: 표준 공동순위 규칙 — 정렬된 점수를 훑어 바로 앞 선수와 점수가 같으면 같은 순위를
+  // 물려받고(공동 1위처럼), 다르면 "지금까지 본 인원 수 + 1" 로 순위가 그 자리만큼 건너뛴다.
+  function computeRanks(order) {
+    var ranks = [];
+    for (var i = 0; i < order.length; i++) {
+      if (i > 0 && order[i].score === order[i - 1].score) ranks.push(ranks[i - 1]);
+      else ranks.push(i + 1);
+    }
+    return ranks;
+  }
+
+  function relayout(announce) {
+    var order = sortedPlayers();
+    var ranks = computeRanks(order);
+    var tieRanks = {};
+    ranks.forEach(function (r, i) {
+      tieRanks[r] = (tieRanks[r] || 0) + 1;
+    });
+    order.forEach(function (p, i) {
+      list.appendChild(nodes[p.id].li);
+      nodes[p.id].rank.textContent = String(ranks[i]);
+      nodes[p.id].score.textContent = String(p.score);
+      var isTie = tieRanks[ranks[i]] > 1;
+      nodes[p.id].li.classList.toggle("lbt__row--tie", isTie && !reduce);
+      nodes[p.id].li.classList.toggle("lbt__row--tie-static", isTie && reduce);
+    });
+    if (announce) {
+      var tieNames = order.filter(function (p, i) { return tieRanks[ranks[i]] > 1; }).map(function (p) { return p.name; });
+      sr.textContent = tieNames.length ? tieNames.join(", ") + " が同順位" : order[0].name + " が1位";
+    }
+  }
+
+  function bump(id) {
+    var p = players.filter(function (x) { return x.id === id; })[0];
+    var steps = 1 + Math.floor(rand() * 3);
+    p.score += steps * LEADERBOARD_TIE_STEP;
+    relayout(true);
+  }
+
+  players.forEach(function (p) {
+    var li = document.createElement("li");
+    li.className = "lbt__row";
+    li.setAttribute("role", "listitem");
+    li.tabIndex = 0;
+
+    var rank = document.createElement("span");
+    rank.className = "lbt__rank";
+    var name = document.createElement("span");
+    name.className = "lbt__name";
+    name.textContent = p.name;
+    var score = document.createElement("span");
+    score.className = "lbt__score";
+
+    li.appendChild(rank);
+    li.appendChild(name);
+    li.appendChild(score);
+
+    nodes[p.id] = { li: li, rank: rank, score: score };
+
+    li.addEventListener("click", function () { human(); bump(p.id); });
+    li.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); human(); bump(p.id); }
+    });
+
+    list.appendChild(li);
+  });
+
+  relayout(false);
+
+  if (!reduce) {
+    (function loop() {
+      if (root.classList.contains("is-demo")) {
+        var idx = Math.floor(rand() * players.length);
+        var steps = 1 + Math.floor(rand() * 3);
+        players[idx].score += steps * LEADERBOARD_TIE_STEP;
+        relayout(true);
+      }
+      window.setTimeout(loop, LEADERBOARD_TIE_TICK_MS);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

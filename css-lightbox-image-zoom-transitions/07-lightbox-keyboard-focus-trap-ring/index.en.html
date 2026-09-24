@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightbox With a Focus Ring That Glides Inside a Trap — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog"><span class="thumbImg"></span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Lightbox moved by keyboard only">
+    <span class="fullImg" id="fullImg"></span>
+    <div class="toolbar" id="toolbar">
+      <button class="ctrlBtn" id="prevBtn" type="button">Previous</button>
+      <button class="ctrlBtn" id="infoBtn" type="button">Info</button>
+      <button class="ctrlBtn ctrlBtn--primary" id="nextBtn" type="button">Next</button>
+    </div>
+    <button class="closeBtn" id="closeBtn" type="button">Close</button>
+    <span class="focusRing" id="focusRing" aria-hidden="true"></span>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var LIGHTBOX_FOCUS_RING_MS = 220; // 포커스 링이 Next 요소로 미끄러지는 시간
+  var STEP_HOLD_MS = 260;
+  var LOOP_MS = 2000;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var closeBtn = document.getElementById('closeBtn');
+  var prevBtn = document.getElementById('prevBtn');
+  var infoBtn = document.getElementById('infoBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var focusRing = document.getElementById('focusRing');
+  var thumb = document.getElementById('thumb0');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 실제 tab 순서 — 이 배열이 곧 트랩의 앞뒤 경계다
+  var order = [closeBtn, prevBtn, infoBtn, nextBtn];
+
+  var open = false;
+  var timers = [];
+  var lastRingRect = null;
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // FLIP: 링의 지금 실제 위치와 목표 요소의 실제 위치를 측정해 그 차만큼 되돌렸다가 0 으로 애니메이션한다
+  function glideRingTo(el) {
+    var boxRect = lightbox.getBoundingClientRect();
+    var toRect = el.getBoundingClientRect();
+    var toX = toRect.left - boxRect.left;
+    var toY = toRect.top - boxRect.top;
+    var toW = toRect.width;
+    var toH = toRect.height;
+    var fromRect = lastRingRect || { x: toX, y: toY, w: toW, h: toH };
+    focusRing.style.width = toW + 'px';
+    focusRing.style.height = toH + 'px';
+    focusRing.style.transform = 'translate(' + toX + 'px,' + toY + 'px)';
+    var dx = fromRect.x - toX;
+    var dy = fromRect.y - toY;
+    var sx = fromRect.w / toW;
+    var sy = fromRect.h / toH;
+    focusRing.style.opacity = '1';
+    animate(LIGHTBOX_FOCUS_RING_MS, function (e) {
+      var ix = dx * (1 - e);
+      var iy = dy * (1 - e);
+      var isx = sx + (1 - sx) * e;
+      var isy = sy + (1 - sy) * e;
+      focusRing.style.transform = 'translate(' + (toX + ix).toFixed(2) + 'px,' + (toY + iy).toFixed(2) + 'px) scale(' + isx.toFixed(4) + ',' + isy.toFixed(4) + ')';
+    }, function () {
+      lastRingRect = { x: toX, y: toY, w: toW, h: toH };
+    });
+  }
+
+  order.forEach(function (el) {
+    el.addEventListener('focus', function () { glideRingTo(el); });
+  });
+
+  function openFrom() {
+    if (open) return;
+    open = true;
+    lastRingRect = null;
+    focusRing.style.opacity = '0';
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    animate(220, function (e) { backdrop.style.opacity = (e * 0.78).toFixed(3); }, function () {
+      closeBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox() {
+    if (!open) return;
+    animate(200, function (e) { backdrop.style.opacity = (0.78 * (1 - e)).toFixed(3); }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      focusRing.style.opacity = '0';
+      open = false;
+      thumb.focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumb.addEventListener('click', function () { human(); openFrom(); });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(); });
+
+  // 진짜 포커스 트랩: 끝에서 Tab 하면 처음으로, 처음에서 Shift+Tab 하면 끝으로 감긴다
+  lightbox.addEventListener('keydown', function (e) {
+    if (!open) return;
+    if (e.key === 'Escape') { human(); closeLightbox(); return; }
+    if (e.key !== 'Tab') return;
+    var i = order.indexOf(document.activeElement);
+    if (i === -1) return;
+    if (e.shiftKey && i === 0) {
+      e.preventDefault();
+      human();
+      order[order.length - 1].focus({ preventScroll: true });
+    } else if (!e.shiftKey && i === order.length - 1) {
+      e.preventDefault();
+      human();
+      order[0].focus({ preventScroll: true });
+    }
+  });
+
+  function cycle() {
+    openFrom();
+    var i = 0;
+    function step() {
+      if (i >= order.length) {
+        // 끝에서 다시 처음으로 — 실제 트랩과 같은 감김을 시연
+        order[0].focus({ preventScroll: true });
+        timers.push(setTimeout(closeLightbox, STEP_HOLD_MS));
+        return;
+      }
+      order[i].focus({ preventScroll: true });
+      i += 1;
+      timers.push(setTimeout(step, STEP_HOLD_MS));
+    }
+    timers.push(setTimeout(step, 260));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

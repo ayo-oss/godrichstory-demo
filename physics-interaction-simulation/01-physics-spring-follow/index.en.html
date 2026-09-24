@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스프링 따라오기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-target" viewBox="0 0 256 256" fill="currentColor"><g><path d="M213.66 201L201 213.66a8 8 0 0 1-11.31 0l-51.31-51.31a8 8 0 0 0-13 2.46l-17.82 46.41a8 8 0 0 1-14.85-.71L40.41 50.44a8 8 0 0 1 10-10l160.1 52.24a8 8 0 0 1 .71 14.85l-46.41 17.82a8 8 0 0 0-2.46 13l51.31 51.31a8 8 0 0 1 0 11.34" opacity=".2"/><path d="M88 24v-8a8 8 0 0 1 16 0v8a8 8 0 0 1-16 0m-72 80h8a8 8 0 0 0 0-16h-8a8 8 0 0 0 0 16m108.42-64.84a8 8 0 0 0 10.74-3.58l8-16a8 8 0 0 0-14.31-7.16l-8 16a8 8 0 0 0 3.57 10.74m-96 81.69l-16 8a8 8 0 0 0 7.16 14.31l16-8a8 8 0 1 0-7.16-14.31M219.31 184a16 16 0 0 1 0 22.63l-12.68 12.68a16 16 0 0 1-22.63 0L132.7 168L115 214.09c0 .1-.08.21-.14.32a8 8 0 0 1-14.68-1.6L40.41 50.44a8 8 0 0 1 10-10l160.1 52.24c.1 0 .21.08.32.14a8 8 0 0 1-1.21 15.27l-46.41 17.82Z"/></g></symbol>
+    <symbol id="ico-reset" viewBox="0 0 256 256" fill="currentColor"><g><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="sf is-demo" id="sf">
+  <p class="sf__hint"><svg class="sf__ico" aria-hidden="true"><use href="#ico-target"/></svg><span>Click the board or move the target with arrow keys and the chip follows like a spring</span></p>
+  <div class="sf__field" id="field" role="application" aria-label="Spring test board" tabindex="0">
+    <span class="sf__ring sf__ring--home" aria-hidden="true"></span>
+    <span class="sf__ring sf__ring--away" aria-hidden="true"></span>
+    <span class="sf__ghost" style="--g:0" aria-hidden="true"></span>
+    <span class="sf__ghost" style="--g:1" aria-hidden="true"></span>
+    <span class="sf__ghost" style="--g:2" aria-hidden="true"></span>
+    <span class="sf__chip" id="chip" aria-hidden="true"><svg class="sf__chipIco" aria-hidden="true"><use href="#ico-target"/></svg></span>
+  </div>
+  <div class="sf__bar">
+    <label class="sf__dial">Stiffness
+      <input type="range" id="stiff" min="1" max="6" step="1" value="3" aria-label="Stiffness">
+      <b class="sf__val" id="stiffVal">3</b>
+    </label>
+    <label class="sf__dial">Damping
+      <input type="range" id="damp" min="4" max="12" step="1" value="8" aria-label="Damping">
+      <b class="sf__val" id="dampVal">8</b>
+    </label>
+    <button class="sf__reset" id="reset" type="button">
+      <svg class="sf__ico" aria-hidden="true"><use href="#ico-reset"/></svg><span>Reset</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+var root = document.getElementById('sf');
+var field = document.getElementById('field');
+var chip = document.getElementById('chip');
+var ghosts = Array.prototype.slice.call(root.querySelectorAll('.sf__ghost'));
+var rings = { home: root.querySelector('.sf__ring--home'), away: root.querySelector('.sf__ring--away') };
+var stiffIn = document.getElementById('stiff');
+var dampIn = document.getElementById('damp');
+var stiffVal = document.getElementById('stiffVal');
+var dampVal = document.getElementById('dampVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+var SIZE = 40, HOME = { x: 24, y: 24 };
+
+var pos = { x: HOME.x, y: HOME.y };
+var vel = { x: 0, y: 0 };
+var target = { x: HOME.x, y: HOME.y };
+var last = 0, frame = 0, running = false;
+var trail = [ { x: HOME.x, y: HOME.y }, { x: HOME.x, y: HOME.y }, { x: HOME.x, y: HOME.y } ];
+
+function clampTarget(t) {
+  var w = field.clientWidth - SIZE, h = field.clientHeight - SIZE;
+  t.x = Math.max(0, Math.min(w, t.x));
+  t.y = Math.max(0, Math.min(h, t.y));
+}
+function paint() {
+  chip.style.transform = 'translate(' + pos.x + 'px, ' + pos.y + 'px)';
+  for (var i = 0; i < ghosts.length; i++) {
+    ghosts[i].style.transform = 'translate(' + trail[i].x + 'px, ' + trail[i].y + 'px)';
+  }
+  rings.home.style.transform = 'translate(' + HOME.x + 'px, ' + HOME.y + 'px)';
+  rings.away.style.transform = 'translate(' + target.x + 'px, ' + target.y + 'px)';
+  rings.home.classList.toggle('is-on', target.x === HOME.x && target.y === HOME.y);
+  rings.away.classList.toggle('is-on', target.x !== HOME.x || target.y !== HOME.y);
+}
+function step(now) {
+  // 준암시적 오일러: 가속을 먼저 반영하고 위치를 옮긴다. dt 는 프레임 간격(초)이다.
+  var dt = Math.min((now - last) / 1000, 0.033);
+  last = now;
+  var k = Number(stiffIn.value) * 60;
+  var c = Number(dampIn.value) * 1.5;
+  vel.x += (k * (target.x - pos.x) - c * vel.x) * dt;
+  vel.y += (k * (target.y - pos.y) - c * vel.y) * dt;
+  pos.x += vel.x * dt;
+  pos.y += vel.y * dt;
+  frame++;
+  if (frame % 2 === 0) {
+    trail[2] = trail[1]; trail[1] = trail[0]; trail[0] = { x: pos.x, y: pos.y };
+  }
+  paint();
+  var settled = Math.abs(target.x - pos.x) < 0.5 && Math.abs(target.y - pos.y) < 0.5
+    && Math.abs(vel.x) < 4 && Math.abs(vel.y) < 4;
+  if (settled) {
+    pos.x = target.x; pos.y = target.y; vel.x = 0; vel.y = 0;
+    trail = [ { x: pos.x, y: pos.y }, { x: pos.x, y: pos.y }, { x: pos.x, y: pos.y } ];
+    paint(); running = false; return;
+  }
+  requestAnimationFrame(step);
+}
+function go(t) {
+  clampTarget(t);
+  target.x = t.x; target.y = t.y;
+  root.classList.remove('is-demo');
+  if (reduce.matches) {
+    // 사용자가 움직임을 줄였을 때는 진동 없이 목표에 바로 붙인다
+    pos.x = target.x; pos.y = target.y; vel.x = 0; vel.y = 0;
+    trail = [ { x: pos.x, y: pos.y }, { x: pos.x, y: pos.y }, { x: pos.x, y: pos.y } ];
+    paint(); return;
+  }
+  if (!running) { running = true; last = performance.now(); requestAnimationFrame(step); }
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  go({ x: e.clientX - r.left - SIZE / 2, y: e.clientY - r.top - SIZE / 2 });
+});
+field.addEventListener('keydown', function (e) {
+  var JUMP = 24;
+  var next = { x: target.x, y: target.y };
+  if (e.key === 'ArrowLeft') { next.x -= JUMP; }
+  else if (e.key === 'ArrowRight') { next.x += JUMP; }
+  else if (e.key === 'ArrowUp') { next.y -= JUMP; }
+  else if (e.key === 'ArrowDown') { next.y += JUMP; }
+  else { return; }
+  e.preventDefault();
+  go(next);
+});
+document.getElementById('reset').addEventListener('click', function () { go({ x: HOME.x, y: HOME.y }); });
+stiffIn.addEventListener('input', function () { stiffVal.textContent = stiffIn.value; });
+dampIn.addEventListener('input', function () { dampVal.textContent = dampIn.value; });
+window.addEventListener('resize', function () { clampTarget(target); paint(); });
+paint();
+</script>
+</body>
+</html>

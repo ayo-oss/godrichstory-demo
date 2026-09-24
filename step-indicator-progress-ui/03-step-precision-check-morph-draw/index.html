@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>숫자가 체크 표시로 모양이 바뀌며 그려지는 완료 단계 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cm is-demo" id="cm">
+  <ol class="cm__row" id="cmRow" role="list" aria-label="신청서 제출 단계">
+    <li class="cm__node" data-i="0">
+      <span class="cm__circle" id="n0">
+        <span class="cm__digit" id="d0">1</span>
+        <svg class="cm__check" id="v0" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path class="cm__checkPath" id="p0" d="M5 12.5 L10 17.5 L19 6.5" />
+        </svg>
+      </span>
+      <span class="cm__label">본인확인</span>
+    </li>
+    <li class="cm__connector"></li>
+    <li class="cm__node" data-i="1">
+      <span class="cm__circle" id="n1">
+        <span class="cm__digit" id="d1">2</span>
+        <svg class="cm__check" id="v1" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path class="cm__checkPath" id="p1" d="M5 12.5 L10 17.5 L19 6.5" />
+        </svg>
+      </span>
+      <span class="cm__label">서류작성</span>
+    </li>
+    <li class="cm__connector"></li>
+    <li class="cm__node" data-i="2">
+      <span class="cm__circle" id="n2">
+        <span class="cm__digit" id="d2">3</span>
+        <svg class="cm__check" id="v2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path class="cm__checkPath" id="p2" d="M5 12.5 L10 17.5 L19 6.5" />
+        </svg>
+      </span>
+      <span class="cm__label">제출완료</span>
+    </li>
+  </ol>
+  <p class="cm__status" id="cmStatus" aria-live="polite">본인확인 진행 중</p>
+  <div class="cm__controls">
+    <button type="button" class="cm__btn" id="cmPrev">이전</button>
+    <button type="button" class="cm__btn cm__btn--primary" id="cmNext">완료</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_CHECK_DRAW_MS = 640;
+  var STEP_COUNT = 3;
+  var LABELS = ['본인확인', '서류작성', '제출완료'];
+  var STATUS_TEXTS = ['본인확인 진행 중', '서류작성 진행 중', '제출완료 진행 중'];
+
+  var root = document.getElementById('cm');
+  var status = document.getElementById('cmStatus');
+  var prevBtn = document.getElementById('cmPrev');
+  var nextBtn = document.getElementById('cmNext');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var paths = [0, 1, 2].map(function (i) { return document.getElementById('p' + i); });
+  var lengths = paths.map(function (p) { return p.getTotalLength(); });
+  paths.forEach(function (p, i) { p.style.strokeDasharray = String(lengths[i]); p.style.strokeDashoffset = String(lengths[i]); });
+  var digits = [0, 1, 2].map(function (i) { return document.getElementById('d' + i); });
+  var circles = [0, 1, 2].map(function (i) { return document.getElementById('n' + i); });
+
+  var current = 0;
+  var done = [false, false, false];
+  var anims = [null, null, null];
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  var progressState = [0, 0, 0];
+  function setDrawProgress(i, progress) {
+    var len = lengths[i];
+    paths[i].style.strokeDashoffset = String(len * (1 - progress));
+    digits[i].style.opacity = String(1 - progress);
+    paths[i].style.opacity = String(progress);
+    // 드로우 진행률을 노드 채움 색·링 글로우·카드 배경 톤에 같은 값으로 전파
+    circles[i].style.setProperty('--drawGlow', progress.toFixed(3));
+    progressState[i] = progress;
+    root.style.setProperty('--cmGlow', Math.max(progressState[0], progressState[1], progressState[2]).toFixed(3));
+  }
+
+  function animateDraw(i, forward) {
+    var startFrom = forward ? 0 : 1;
+    var startTo = forward ? 1 : 0;
+    if (reduce) { setDrawProgress(i, startTo); return; }
+    var start = null;
+    function step(now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / STEP_CHECK_DRAW_MS, 0, 1);
+      var eased = easeOutCubic(t);
+      var progress = startFrom + (startTo - startFrom) * eased;
+      setDrawProgress(i, progress);
+      if (t < 1) { anims[i] = requestAnimationFrame(step); } else { anims[i] = null; }
+    }
+    if (anims[i]) cancelAnimationFrame(anims[i]);
+    anims[i] = requestAnimationFrame(step);
+  }
+
+  function render() {
+    circles.forEach(function (el, i) {
+      el.classList.toggle('is-active', i === current && !done[i]);
+      el.classList.toggle('is-done', done[i]);
+    });
+    status.textContent = done[current] || current >= STEP_COUNT - 1 && done[STEP_COUNT - 1]
+      ? '모든 단계 완료'
+      : STATUS_TEXTS[current];
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = done[STEP_COUNT - 1];
+  }
+
+  function complete() {
+    if (done[current]) return;
+    done[current] = true;
+    animateDraw(current, true);
+    if (current < STEP_COUNT - 1) current += 1;
+    render();
+  }
+
+  function back() {
+    var target = done[current] ? current : current - 1;
+    target = clamp(target, 0, STEP_COUNT - 1);
+    if (done[target]) { done[target] = false; animateDraw(target, false); }
+    current = target;
+    render();
+  }
+
+  nextBtn.addEventListener('click', function () { root.classList.remove('is-demo'); complete(); });
+  prevBtn.addEventListener('click', function () { root.classList.remove('is-demo'); back(); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); complete(); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { root.classList.remove('is-demo'); back(); e.preventDefault(); }
+  });
+
+  var startTime = null;
+  var phase = 0;
+  function loopTick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2;
+    if (root.classList.contains('is-demo')) {
+      if (t < 0.05 && phase !== 0) phase = 0;
+      if (phase === 0 && t > 0.2) { complete(); phase = 1; }
+      if (phase === 1 && t > 0.85) { complete(); phase = 2; }
+      if (phase === 2 && t > 1.5) { complete(); phase = 3; }
+      if (phase === 3 && t > 1.9) {
+        [0, 1, 2].forEach(function (i) { if (anims[i]) { cancelAnimationFrame(anims[i]); anims[i] = null; } });
+        done = [false, false, false]; current = 0;
+        [0, 1, 2].forEach(function (i) { setDrawProgress(i, 0); });
+        render(); phase = 4;
+      }
+    }
+    requestAnimationFrame(loopTick);
+  }
+
+  render();
+  requestAnimationFrame(loopTick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>확산 번짐 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage stage--paper">
+<div class="fa" id="fa">
+  <p class="fa__hint">
+    <svg class="fa__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M208 144a80 80 0 0 1-160 0c0-72 80-128 80-128s80 56 80 128" opacity=".2"/><path d="M174 47.75a254.2 254.2 0 0 0-41.45-38.3a8 8 0 0 0-9.18 0A254.2 254.2 0 0 0 82 47.75C54.51 79.32 40 112.6 40 144a88 88 0 0 0 176 0c0-31.4-14.51-64.68-42-96.25M128 216a72.08 72.08 0 0 1-72-72c0-57.23 55.47-105 72-118c16.53 13 72 60.75 72 118a72.08 72.08 0 0 1-72 72m55.89-62.66a57.6 57.6 0 0 1-46.56 46.55a9 9 0 0 1-1.33.11a8 8 0 0 1-1.32-15.89c16.57-2.79 30.63-16.85 33.44-33.45a8 8 0 0 1 15.78 2.68Z"/></g></svg>
+    <span>Diffusion blends each cell with its four neighbors every step, spreading ink across the paper — press to drop a bead</span>
+  </p>
+  <div class="fa__field" id="field" role="application" aria-label="Diffusion blur board" tabindex="0">
+    <canvas class="fa__cv" id="cv"></canvas>
+    <b class="fa__badge" aria-hidden="true">6<span class="fa__badgeUnit">relax</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 확산(diffuse) — 이류처럼 값을 옮기지 않는다. 셀 하나가 이웃 네 칸과 값을 조금씩 섞는 일을
+// 매 걸음 반복하면(가우스-사이델 relax), 진한 점 하나가 몇 걸음 만에 부드러운 얼룩으로 퍼진다.
+// 속도장 없이 밀도(d) 하나만으로 돌아간다 — 이류 비중을 없애 확산 자체가 움직임의 전부가 되게 한다.
+var root = document.getElementById('fa');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { willReadFrequently: true });
+
+var css = getComputedStyle(root);
+var PAL0 = css.getPropertyValue('--dye-0').trim();
+var PAL1 = css.getPropertyValue('--dye-1').trim();
+var PAL2 = css.getPropertyValue('--dye-2').trim();
+
+// N — grid 한 변 칸 수. 480px 무대에 32칸이면 한 칸 15px, relax 6회를 60fps 예산 안에 담는다
+var N = 32;
+var SIZE = (N + 2) * (N + 2);
+var IX = function (x, y) { return x + (N + 2) * y; };
+var d = new Float32Array(SIZE), d0 = new Float32Array(SIZE);
+
+var ITER = 6;     // 가우스-사이델 relax 반복 횟수 — 4~10회 권장, 6회면 한 걸음에 충분히 번진다
+var DIFF = 0.02;  // 확산 계수 — 클수록 데칼코마니처럼 빨리 퍼지고, 0 에 가까우면 선명한 경계가 남는다
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, raf = 0, seedT = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  W = r.width; H = r.height;
+  cv.width = Math.round(W); cv.height = Math.round(H);
+}
+
+// 경계 — 종이 가장자리에서 잉크가 반사돼 옅게 남는다
+function bounds() {
+  for (var i = 1; i <= N; i++) {
+    d[IX(i, 0)] = d[IX(i, 1)] * 0.5; d[IX(i, N + 1)] = d[IX(i, N)] * 0.5;
+  }
+  for (var j = 1; j <= N; j++) {
+    d[IX(0, j)] = d[IX(1, j)] * 0.5; d[IX(N + 1, j)] = d[IX(N, j)] * 0.5;
+  }
+}
+
+// 확산 한 걸음 — x0(방금 주입한 소스)를 목표로, x(이전 값)를 이웃 네 칸과 섞어가며 완화한다.
+// a 가 클수록 이웃의 영향이 커져 한 걸음에 더 멀리 번진다. 경계는 반복마다 다시 잡는다.
+function diffuse(dt) {
+  var a = dt * DIFF * N * N;
+  for (var k = 0; k < ITER; k++) {
+    for (var j = 1; j <= N; j++) {
+      for (var i = 1; i <= N; i++) {
+        d[IX(i, j)] = (d0[IX(i, j)] + a * (d[IX(i - 1, j)] + d[IX(i + 1, j)] + d[IX(i, j - 1)] + d[IX(i, j + 1)])) / (1 + 4 * a);
+      }
+    }
+    bounds();
+  }
+}
+
+// 미리보기 주입원 — 시드 고정. 종이 위를 천천히 오가는 붓끝이 방울을 떨어뜨린다.
+// seedT 로 결정적: 같은 편의 gif·poster 는 언제나 같은 번짐이 담긴다.
+function inject(t) {
+  var cx = N * 0.5 + Math.sin(t * 0.55) * N * 0.28;
+  var cy = N * 0.5 + Math.cos(t * 0.4) * N * 0.24;
+  var r = 2.2;
+  var amt = 0.85 + Math.sin(t * 2.3) * 0.15;
+  for (var j = -r; j <= r; j++) {
+    for (var i = -r; i <= r; i++) {
+      var q = (i * i + j * j) / (r * r);
+      if (q > 1) continue;
+      var f = Math.exp(-q * 3) * amt;
+      var idx = IX(Math.round(cx + i), Math.round(cy + j));
+      d0[idx] = Math.min(2, d0[idx] + f);
+    }
+  }
+}
+
+function step(dt) {
+  d0.set(d);
+  inject(seedT);
+  diffuse(dt);
+  for (var k = 0; k < SIZE; k++) d[k] *= 0.992;   // 아주 천천히 마른다 — 화면이 꽉 찬 채 굳지 않게
+  seedT += dt;
+}
+
+function render() {
+  var img = ctx.createImageData(cv.width, cv.height);
+  var px = img.data;
+  var cellW = cv.width / N, cellH = cv.height / N;
+  var pal = [PAL0, PAL1, PAL2];
+  for (var py = 0; py < cv.height; py++) {
+    var gy = Math.min(N - 1, (py / cellH) | 0);
+    for (var pxx = 0; pxx < cv.width; pxx++) {
+      var gx = Math.min(N - 1, (pxx / cellW) | 0);
+      var q = d[IX(gx + 1, gy + 1)];
+      var o = (py * cv.width + pxx) * 4;
+      if (q <= 0.002) { px[o] = 255; px[o + 1] = 255; px[o + 2] = 255; px[o + 3] = 255; continue; }
+      var band = q > 0.62 ? 2 : (q > 0.28 ? 1 : 0);
+      var c = pal[band];
+      var rr = parseInt(c.slice(1, 3), 16), gg = parseInt(c.slice(3, 5), 16), bb = parseInt(c.slice(5, 7), 16);
+      var a = Math.min(1, q);
+      px[o] = 255 + (rr - 255) * a; px[o + 1] = 255 + (gg - 255) * a; px[o + 2] = 255 + (bb - 255) * a; px[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function frame() {
+  step(1 / 30);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+// 사람이 찍기 — 눌러 둔 자리에 방울을 계속 떨어뜨린다. 확산은 다음 걸음부터 저절로 번진다.
+function splat(gx, gy, amt) {
+  var r = 3;
+  for (var j = -r; j <= r; j++) {
+    for (var i = -r; i <= r; i++) {
+      var q = (i * i + j * j) / (r * r);
+      if (q > 1) continue;
+      if (gx + i < 1 || gx + i > N || gy + j < 1 || gy + j > N) continue;
+      var f = Math.exp(-q * 3) * amt;
+      var idx = IX(gx + i, gy + j);
+      d[idx] = Math.min(2.2, d[idx] + f);
+    }
+  }
+}
+var down = false;
+function pointAt(e) {
+  var r = field.getBoundingClientRect();
+  var gx = 1 + Math.round((e.clientX - r.left) / r.width * (N - 1));
+  var gy = 1 + Math.round((e.clientY - r.top) / r.height * (N - 1));
+  splat(gx, gy, 0.9);
+  if (reduce) render();
+}
+field.addEventListener('pointerdown', function (e) { down = true; pointAt(e); });
+field.addEventListener('pointermove', function (e) { if (down) pointAt(e); });
+window.addEventListener('pointerup', function () { down = false; });
+field.addEventListener('pointerleave', function () { down = false; });
+field.addEventListener('keydown', function (e) {
+  var dir = { ArrowLeft: [-2, 0], ArrowRight: [2, 0], ArrowUp: [0, -2], ArrowDown: [0, 2] }[e.key];
+  if (!dir) return;
+  e.preventDefault();
+  splat((N >> 1) + dir[0], (N >> 1) + dir[1], 1.1);
+  if (reduce) render();
+});
+window.addEventListener('resize', function () { fit(); if (reduce) render(); });
+
+fit();
+if (reduce) {
+  // reduce — 시뮬레이션을 40 걸음만 앞으로 감아 번짐이 자리잡은 한 장을 그린다(빈 화면이 아니다)
+  for (var k = 0; k < 40; k++) step(1 / 30);
+  render();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>길이 값이 두 눈금을 함께 미는 단위 스케일 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lu is-demo" id="lu">
+  <div class="lu__fields">
+    <label class="lu__field">
+      <span class="lu__cap">센티미터</span>
+      <input class="lu__cm" id="luCm" type="number" inputmode="decimal" step="0.5" min="0" max="60" value="30" aria-label="센티미터 값을 입력하면 인치로 함께 계산해 두 눈금 위 위치를 옮깁니다" aria-describedby="luReadout">
+    </label>
+    <label class="lu__field">
+      <span class="lu__cap">인치</span>
+      <input class="lu__in" id="luIn" type="number" inputmode="decimal" step="0.1" min="0" max="24" value="11.8" aria-label="인치 값을 입력하면 센티미터로 함께 계산해 두 눈금 위 위치를 옮깁니다" aria-describedby="luReadout">
+    </label>
+  </div>
+  <div class="lu__rulers" aria-hidden="true">
+    <div class="lu__ruler lu__ruler--cm">
+      <div class="lu__track"></div>
+      <div class="lu__marker" id="luMarkCm"></div>
+    </div>
+    <div class="lu__ruler lu__ruler--in">
+      <div class="lu__track"></div>
+      <div class="lu__marker" id="luMarkIn"></div>
+    </div>
+  </div>
+  <p class="lu__readout" id="luReadout" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('lu');
+  var cmInput = document.getElementById('luCm');
+  var inInput = document.getElementById('luIn');
+  var markCm = document.getElementById('luMarkCm');
+  var markIn = document.getElementById('luMarkIn');
+  var readout = document.getElementById('luReadout');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var CM_MAX = 60, IN_MAX = 24;
+  // 계산 한 겹 — cm<->inch 상호 변환, 각 눈금 위 위치(0~1)
+  function cmToInch(cm) { return cm / 2.54; }
+  function inchToCm(inch) { return inch * 2.54; }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  var SENT_PREFIX = '센티미터 ', SENT_MID = '는 인치 ', SENT_SUFFIX = '입니다';
+
+  var targetCm = 0, renderedCm = 0, targetIn = 0, renderedIn = 0;
+  var LERP_RATE = 0.15;
+
+  function readSentence(cm, inch) {
+    readout.textContent = SENT_PREFIX + cm.toFixed(1) + SENT_MID + inch.toFixed(2) + SENT_SUFFIX;
+  }
+
+  function applyFromCm() {
+    var cm = parseFloat(cmInput.value); if (isNaN(cm) || cm < 0) cm = 0;
+    var inch = cmToInch(cm);
+    inInput.value = inch.toFixed(2);
+    targetCm = clamp01(cm / CM_MAX);
+    targetIn = clamp01(inch / IN_MAX);
+    readSentence(cm, inch);
+    if (reduce) { renderedCm = targetCm; renderedIn = targetIn; paint(); }
+  }
+
+  function applyFromIn() {
+    var inch = parseFloat(inInput.value); if (isNaN(inch) || inch < 0) inch = 0;
+    var cm = inchToCm(inch);
+    cmInput.value = cm.toFixed(1);
+    targetCm = clamp01(cm / CM_MAX);
+    targetIn = clamp01(inch / IN_MAX);
+    readSentence(cm, inch);
+    if (reduce) { renderedCm = targetCm; renderedIn = targetIn; paint(); }
+  }
+
+  function paint() {
+    var trackCmW = markCm.parentElement.clientWidth - markCm.offsetWidth;
+    var trackInW = markIn.parentElement.clientWidth - markIn.offsetWidth;
+    markCm.style.transform = 'translateX(' + (renderedCm * trackCmW).toFixed(1) + 'px)';
+    markIn.style.transform = 'translateX(' + (renderedIn * trackInW).toFixed(1) + 'px)';
+  }
+
+  function onCmInput() { human(); applyFromCm(); }
+  function onInInput() { human(); applyFromIn(); }
+  cmInput.addEventListener('input', onCmInput);
+  cmInput.addEventListener('change', onCmInput);
+  inInput.addEventListener('input', onInInput);
+  inInput.addEventListener('change', onInInput);
+
+  var DEMO_VALUES = [8, 15, 30, 45.5, 52, 22.5];
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0, lastIdx = -1;
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var idx = Math.floor(frac * DEMO_VALUES.length);
+      if (idx !== lastIdx) {
+        lastIdx = idx;
+        cmInput.value = DEMO_VALUES[idx];
+        applyFromCm();
+      }
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  function frame() {
+    renderedCm += (targetCm - renderedCm) * LERP_RATE;
+    renderedIn += (targetIn - renderedIn) * LERP_RATE;
+    paint();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', paint);
+  applyFromCm();
+
+  if (!reduce) {
+    requestAnimationFrame(driveTick);
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

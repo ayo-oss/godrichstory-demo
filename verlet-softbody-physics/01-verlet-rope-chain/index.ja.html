@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>체인 로프 흔들기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rp" id="rp">
+  <p class="rp__hint">
+    <svg class="rp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224,128a96,96,0,0,1-96,96c-11.4,0-20-8.6-20-20s8.9-20,20-20a56,56,0,0,0,0-112c-11.1,0-20-8.9-20-20s8.6-20,20-20A96,96,0,0,1,224,128Z" opacity=".2"/><path d="M128,24A104,104,0,0,0,128,232c-15.8,0-28-12.3-28-28s12.4-28,28-28a48,48,0,0,0,0-96c-15.6,0-28-12.4-28-28S112.2,24,128,24Zm0,16c-6.9,0-12,5.2-12,12s5.3,12,12,12a64,64,0,0,1,0,128c-6.7,0-12,5.4-12,12s5.1,12,12,12a88,88,0,0,0,0-176Z"/></g></svg>
+    <span>端をつかんで引っ張ると、距離制約を繰り返し解きながらロープ全体がついてきます</span>
+  </p>
+  <div class="rp__field" id="field" role="application" aria-label="ロープ実験盤" tabindex="0">
+    <canvas class="rp__cv" id="cv"></canvas>
+    <b class="rp__badge" aria-hidden="true"><span class="rp__badgeNum" id="iterVal">4</span><span class="rp__badgeUnit">制約反復</span></b>
+  </div>
+  <div class="rp__bar">
+    <label class="rp__dial">反復
+      <input type="range" id="iter" min="1" max="8" step="1" value="4" aria-label="制約反復数">
+    </label>
+    <button class="rp__reset" id="reset" type="button">最初から</button>
+  </div>
+</div>
+</main>
+<script>
+// 체인 로프 — 위치 기반 Verlet 적분. 속도 변수를 두지 않고 "이전 위치와의 차이"가 곧 속도다.
+//   next = pos + (pos - prev) * damping + gravity * dt^2
+// 그 다음 거리 제약(N 개 점을 이웃끼리 목표 간격으로 못 박기)을 여러 번 반복해 푼다.
+// 反復 수가 로프의 강도다 — 1번이면 축 늘어나고 8번이면 팽팽한 사슬이 된다.
+var root = document.getElementById('rp');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var iterIn = document.getElementById('iter');
+var iterVal = document.getElementById('iterVal');
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+var ctx = cv.getContext('2d');
+var css = getComputedStyle(root);
+var INK = css.getPropertyValue('--ink').trim();
+var BG = css.getPropertyValue('--bg').trim();
+var KNOT = css.getPropertyValue('--knot').trim();
+var HAND = css.getPropertyValue('--hand').trim();
+var PIVOT = css.getPropertyValue('--pivot').trim();
+var FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+
+var N = 14;                  // 로프를 이루는 점의 수
+var SEG = 0;                 // 마디 간 목표 거리(판 크기에 맞춰 초기화에서 정한다)
+var GRAV = 1500;             // 중력 가속도(px/s^2) — Verlet 은 위치에 dt^2 를 곱해 더한다
+var DAMP = 0.995;            // 속도 보존률(공기 저항)
+var LOOP = 2;                // 자동 시연 한 바퀴(초) — 캡처 창과 같아 gif 가 이어진다
+
+var pts = [];                // 점: {x, y, px, py, pinned}
+var dragging = -1;           // 잡고 있는 점 번호
+var W = 0, H = 0, dpr = 1;
+var t0 = performance.now();
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  build();
+}
+function build() {
+  pts = [];
+  SEG = Math.min(26, (H - 60) / (N - 1));
+  var x0 = W * 0.5, y0 = 30;
+  for (var i = 0; i < N; i++) {
+    pts.push({ x: x0, y: y0 + i * SEG, px: x0, py: y0 + i * SEG, pinned: i === 0 });
+  }
+  dragging = -1;
+}
+
+// 한 프레임 — 적분 → 制約反復
+function step(now) {
+  var dt = Math.min((now - t0) / 1000, 0.033);
+  t0 = now;
+  var iters = Number(iterIn.value);
+
+  // (1) 관성: 이전 위치와의 차이가 곧 속도다
+  for (var i = 0; i < N; i++) {
+    var p = pts[i];
+    if (p.pinned || i === dragging) continue;
+    var vx = (p.x - p.px) * DAMP;
+    var vy = (p.y - p.py) * DAMP;
+    p.px = p.x; p.py = p.y;
+    p.x += vx;
+    p.y += vy + GRAV * dt * dt;
+  }
+  // (2) 제약: 이웃끼리 목표 간격으로 당긴다. 한 번으로는 안 풀린다 — 반복할수록 팽팽해진다
+  for (var k = 0; k < iters; k++) {
+    for (var j = 0; j < N - 1; j++) {
+      var a = pts[j], b = pts[j + 1];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      var off = (d - SEG) / d * 0.5;
+      var ax = dx * off, ay = dy * off;
+      if (!a.pinned && j !== dragging || k === 0 && j !== dragging && !a.pinned) { /* no-op */ }
+      var aFree = !a.pinned && j !== dragging;
+      var bFree = !b.pinned && j + 1 !== dragging;
+      if (aFree && bFree) { a.x += ax; a.y += ay; b.x -= ax; b.y -= ay; }
+      else if (aFree) { a.x += ax * 2; a.y += ay * 2; }
+      else if (bFree) { b.x -= ax * 2; b.y -= ay * 2; }
+    }
+  }
+  if (dragging >= 0) { pts[dragging].x = dragX; pts[dragging].y = dragY; }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 로프 — 마디마다 두 겹(굵은 밝은 + 가는 어두운)으로 사슬 결을 낸다
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (var i = 1; i < N; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.stroke();
+  ctx.strokeStyle = HAND;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (var i2 = 1; i2 < N; i2++) ctx.lineTo(pts[i2].x, pts[i2].y);
+  ctx.stroke();
+  // 고정점 핀
+  ctx.fillStyle = PIVOT;
+  ctx.beginPath();
+  ctx.arc(pts[0].x, pts[0].y, 6, 0, Math.PI * 2);
+  ctx.fill();
+  // 매듭 점 — 점의 개수만큼 사슬임을 눈으로 보여준다
+  for (var m = 1; m < N; m++) {
+    ctx.fillStyle = KNOT;
+    ctx.beginPath();
+    ctx.arc(pts[m].x, pts[m].y, 3.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 끝 손잡이
+  var e = pts[N - 1];
+  ctx.fillStyle = HAND;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = INK;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// 사람이 안 만졌을 때 도는 자동 시연 — 시드 고정 가상 포인터가 끝단을 8자로 끈다.
+// 실제 손 조작(pointerdown)이 오면 이 루프를 끄고 진짜 포인터를 따라간다.
+var manual = false;
+function demoTarget(now) {
+  var ph = (now / 1000) / LOOP * Math.PI * 2;
+  return {
+    x: W * 0.5 + Math.sin(ph) * W * 0.3,
+    y: 70 + Math.sin(ph * 2) * 34
+  };
+}
+function frame(now) {
+  if (!manual) {
+    var t = demoTarget(now);
+    pts[N - 1].x = t.x; pts[N - 1].y = t.y;
+  }
+  step(now);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// 조작 — 끝단(또는 아무 매듭)을 잡아 끈다. 잡은 점은 제약에서 손으로 고정된 취급
+var dragX = 0, dragY = 0;
+function pick(x, y) {
+  var best = -1, bd = 26;
+  for (var i = 1; i < N; i++) {
+    var d = Math.hypot(pts[i].x - x, pts[i].y - y);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var x = e.clientX - r.left, y = e.clientY - r.top;
+  dragging = pick(x, y);
+  if (dragging < 0) return;
+  manual = true;
+  dragX = x; dragY = y;
+  field.setPointerCapture(e.pointerId);
+  if (reduce.matches) {
+    // 줄인 모드에서는 관성 없이 잡은 점만 옮기고 나머지는 제약이 즉시 따라온다
+    pts[dragging].x = x; pts[dragging].y = y;
+    pts[dragging].px = x; pts[dragging].py = y;
+  }
+});
+field.addEventListener('pointermove', function (e) {
+  if (dragging < 0) return;
+  var r = field.getBoundingClientRect();
+  dragX = Math.max(4, Math.min(W - 4, e.clientX - r.left));
+  dragY = Math.max(4, Math.min(H - 4, e.clientY - r.top));
+  if (reduce.matches) { pts[dragging].x = dragX; pts[dragging].y = dragY; pts[dragging].px = dragX; pts[dragging].py = dragY; }
+});
+window.addEventListener('pointerup', function () { dragging = -1; });
+document.getElementById('reset').addEventListener('click', function () { manual = false; build(); });
+iterIn.addEventListener('input', function () { iterVal.textContent = iterIn.value; });
+window.addEventListener('resize', fit);
+
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

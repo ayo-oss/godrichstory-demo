@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entry editor — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ed" id="ed">
+  <p class="ed__hint">Edit a name and sector angles and font size recompute together — measureText binary search</p>
+  <div class="ed__row">
+    <div class="ed__field" id="field" role="application" aria-label="Entry editor lab" tabindex="0">
+      <canvas class="ed__cv" id="cv"></canvas>
+    </div>
+    <div class="ed__side">
+      <div class="ed__inputs" id="inputs"></div>
+      <button class="ed__btn" id="btn" type="button">Add a sector</button>
+      <p class="ed__meta">Now <b class="ed__count" id="cnt">4</b><span class="ed__metaUnit">sectors</span></p>
+      <p class="ed__meta">Drag to spin and release</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 항목 편집기(07) — 이름을 치면 measureText 로 폭을 재고 sectors 호 길이에 맞게 글자 크기를
+// 이분 탐색으로 줄인다. 줄이 늘고 줄어들 때마다 각도 분할과 배치를 전부 다시 계산해
+// 판이 편집 내용을 그대로 따라간다.
+(function () {
+  var root = document.getElementById('ed');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var inputsEl = document.getElementById('inputs');
+  var btnEl = document.getElementById('btn');
+  var cntEl = document.getElementById('cnt');
+  if (!root || !field || !cv || !inputsEl || !btnEl || !cntEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 5; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var entries = ['Haneul Kim', 'Junho Lee', 'Seoyeon Park', 'Doyun Choi'];
+  var MAXN = 7;
+
+  var ang = -0.4, vel = 0;
+  var FRICTION = 0.32, STOP = 0.5;
+  var settle = -1, pulse = -1, dpr = 1;
+  var flicks = [8, -10, 6.5];
+  var fi = 1, idle = 0;
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  function norm(a) { a %= TAU; return a < 0 ? a + TAU : a; }
+
+  // 호 길이에 맞는 글자 크기 — 이분 탐색. measureText 로 폭을 재며 경계를 좁힌다
+  function fitFont(text, arcLen) {
+    var lo = 6, hi = 15, best = 6;
+    for (var it = 0; it < 7; it++) {
+      var mid = (lo + hi) / 2;
+      ctx.font = '700 ' + mid + 'px sans-serif';
+      if (ctx.measureText(text).width <= arcLen) { best = mid; lo = mid; } else { hi = mid; }
+    }
+    return best;
+  }
+
+  function draw() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var n = entries.length, seg = TAU / n;
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 10;
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    for (var k = 0; k < n; k++) {
+      var a0 = k * seg, a1 = a0 + seg;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a1); ctx.closePath();
+      ctx.fillStyle = PAL[k % PAL.length]; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.20)'; ctx.lineWidth = 1; ctx.stroke();
+      // Name — 호 길이(반지름 × 중심각, 여유 .78)에 맞게 이분 탐색한 크기로 적는다
+      var mid = (a0 + a1) / 2;
+      var fs = fitFont(entries[k], R * seg * 0.78);
+      ctx.save(); ctx.rotate(mid);
+      ctx.fillStyle = INK;
+      ctx.font = '700 ' + fs + 'px sans-serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(entries[k], R - 12, 0);
+      ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 12, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill(); ctx.strokeStyle = 'rgba(23,20,26,.35)'; ctx.stroke();
+    if (pulse >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 12 + pulse * 18, 0, TAU);
+      ctx.strokeStyle = 'rgba(23,20,26,' + (1 - pulse) * 0.5 + ')';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy - R - 8); ctx.lineTo(cx + 6, cy - R - 8); ctx.lineTo(cx, cy - R + 7);
+    ctx.closePath(); ctx.fillStyle = INK; ctx.fill();
+  }
+
+  // 입력칸 — 값이 바뀌면(change) 판이 같이 다시 그려진다
+  function renderInputs() {
+    inputsEl.textContent = '';
+    for (var k = 0; k < entries.length; k++) {
+      (function (idx) {
+        var lab = document.createElement('label');
+        lab.className = 'ed__lab';
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'ed__inp';
+        inp.value = entries[idx];
+        inp.maxLength = 8;
+        inp.setAttribute('aria-label', (idx + 1) + 'entry name');
+        inp.addEventListener('change', function () {
+          entries[idx] = inp.value || 'Name';
+          idle = 1.2;
+          draw();
+        });
+        lab.appendChild(inp);
+        inputsEl.appendChild(lab);
+      })(k);
+    }
+    cntEl.textContent = String(entries.length);
+    btnEl.disabled = entries.length >= MAXN;
+  }
+  btnEl.addEventListener('click', function () {
+    if (entries.length >= MAXN) return;
+    entries.push('New entry');
+    renderInputs();
+    idle = 1.2;
+    draw();
+  });
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+    idle = 0;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-20, Math.min(20, drag.v));
+    settle = -1; pulse = -1;
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); vel = flicks[fi++ % flicks.length]; settle = -1; pulse = -1; idle = 0; }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt;
+        vel *= Math.pow(FRICTION, dt);
+        if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; }
+      } else if (idle > 0) { idle -= dt; }
+      else if (settle >= 0) {
+        settle += dt; pulse = Math.min(1, settle / 0.3);
+        if (settle > 0.34) { vel = flicks[fi++ % flicks.length]; settle = -1; pulse = -1; }
+      }
+    }
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  renderInputs();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 7칸까지 늘어난 상태로 고정하고 루프는 돌지 않는다
+    entries = ['Haneul Kim', 'Junho Lee', 'Seoyeon Park', 'Doyun Choi', 'Minjun Jung', 'Sua Han', 'New entry'];
+    renderInputs();
+    pulse = 0.4; settle = 0;
+    draw();
+    root.classList.add('is-still');
+  } else {
+    vel = flicks[0];
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

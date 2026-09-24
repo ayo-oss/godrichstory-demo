@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>잘못된 날짜 흔들기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kd is-demo" id="kd">
+  <div class="kd__head"><span class="kd__label">2026년 3월</span></div>
+  <div class="kd__weekday" aria-hidden="true">
+    <span>일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span>
+  </div>
+  <div class="kd__grid" id="kdGrid"></div>
+  <div class="kd__banner" id="kdBanner">주말은 선택할 수 없어요</div>
+</div>
+<script>
+(function () {
+  var BASE = { y: 2026, m: 3, d: 14 }; // 계산 겹 상수: 고정 오늘, new Date() 미사용
+  var CELL_TOTAL = 42;
+  var SHAKE_DUR = 420; // ms, 계산 겹: 감쇠 진동이 잦아드는 데 걸리는 시간
+  var SHAKE_FREQ = 2 * Math.PI * 3.4 / SHAKE_DUR; // 계산 겹: 흔들림 각속도
+  var SHAKE_ZETA = 6.5; // 계산 겹: 감쇠 상수
+  var SHAKE_AMP = 8; // px, 흔들림 최대 진폭
+  var BANNER_MS = 900; // ms, 거부 배너가 떠 있는 시간
+
+  function isLeap(y) { return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
+  function daysInMonth(y, m) {
+    var t = [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return t[m - 1];
+  }
+  function dow(y, m, d) { // Zeller 합동식 — 0=일 ~ 6=토
+    var yy = y, mm = m;
+    if (mm < 3) { yy -= 1; mm += 12; }
+    var K = yy % 100, J = Math.floor(yy / 100);
+    var h = (d + Math.floor(13 * (mm + 1) / 5) + K + Math.floor(K / 4) + Math.floor(J / 4) - 2 * J) % 7;
+    h = ((h % 7) + 7) % 7;
+    return (h + 6) % 7;
+  }
+  function isWeekend(y, m, d) {
+    var w = dow(y, m, d);
+    return w === 0 || w === 6;
+  }
+
+  var kd = document.getElementById('kd');
+  var grid = document.getElementById('kdGrid');
+  var banner = document.getElementById('kdBanner');
+  var n = daysInMonth(BASE.y, BASE.m);
+  var lead = dow(BASE.y, BASE.m, 1);
+  var trail = CELL_TOTAL - lead - n;
+  var cellByDay = {};
+  var invalidDays = [];
+  var i, cell;
+
+  for (i = 0; i < lead; i++) {
+    cell = document.createElement('span');
+    cell.className = 'kd__cell kd__cell--out';
+    grid.appendChild(cell);
+  }
+  for (var d = 1; d <= n; d++) {
+    var invalid = isWeekend(BASE.y, BASE.m, d);
+    cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'kd__cell' + (invalid ? ' kd__cell--invalid' : '');
+    cell.textContent = String(d);
+    cell.dataset.day = String(d);
+    if (invalid) { cell.dataset.invalid = '1'; invalidDays.push(d); }
+    grid.appendChild(cell);
+    cellByDay[d] = cell;
+  }
+  for (i = 0; i < trail; i++) {
+    cell = document.createElement('span');
+    cell.className = 'kd__cell kd__cell--out';
+    grid.appendChild(cell);
+  }
+
+  var selected = null;
+  var shakeTarget = null;
+  var shakeStart = 0;
+  var bannerTimer = null;
+  var rafId = null;
+
+  function shakeAt(t) {
+    // 계산 겹: 지수 감쇠 x 코사인 진동을 픽셀 오프셋으로 바꾼다
+    if (t < 0 || t > SHAKE_DUR) return 0;
+    var x = t / SHAKE_DUR;
+    var amp = Math.exp(-SHAKE_ZETA * x);
+    return SHAKE_AMP * amp * Math.cos(SHAKE_FREQ * t);
+  }
+
+  function loop(ts) {
+    if (shakeTarget) {
+      var elapsed = ts - shakeStart;
+      if (elapsed > SHAKE_DUR) {
+        shakeTarget.style.transform = '';
+        shakeTarget = null;
+      } else {
+        shakeTarget.style.transform = 'translateX(' + shakeAt(elapsed).toFixed(2) + 'px)';
+      }
+    }
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function showBanner() {
+    banner.classList.add('kd__banner--show');
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(function () { banner.classList.remove('kd__banner--show'); }, BANNER_MS);
+  }
+
+  function reject(day, ts) {
+    shakeTarget = cellByDay[day];
+    shakeStart = ts;
+    showBanner();
+  }
+
+  function selectDay(day) {
+    if (selected) cellByDay[selected].classList.remove('kd__cell--selected');
+    selected = day;
+    cellByDay[day].classList.add('kd__cell--selected');
+  }
+
+  function human() {
+    kd.classList.remove('is-demo');
+    stopAutoplay();
+  }
+
+  grid.addEventListener('click', function (e) {
+    var cellEl = e.target.closest('.kd__cell');
+    if (!cellEl || !cellEl.dataset.day) return;
+    human();
+    var day = parseInt(cellEl.dataset.day, 10);
+    if (cellEl.dataset.invalid) {
+      reject(day, performance.now());
+    } else {
+      selectDay(day);
+    }
+  });
+
+  var seqIdx = -1;
+  var autoTimer = null;
+  function stopAutoplay() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+  function tick(ts) {
+    seqIdx = (seqIdx + 1) % invalidDays.length;
+    reject(invalidDays[seqIdx], ts);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    rafId = requestAnimationFrame(loop);
+    autoTimer = setInterval(function () { tick(performance.now()); }, 480);
+  }
+})();
+</script>
+</main>
+</body>
+</html>

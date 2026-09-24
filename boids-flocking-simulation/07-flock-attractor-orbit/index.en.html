@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Flock in Orbit — A Central Attractor's Vortex — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <svg class="cd__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="14"><ellipse cx="128" cy="128" rx="96" ry="40"/><ellipse cx="128" cy="128" rx="40" ry="96" transform="rotate(45 128 128)"/></g><circle cx="128" cy="128" r="20" fill="currentColor"/></svg>
+    <span>A single central attractor holds 110 agents in a slow vortex — pointer x controls rotation, y controls pull strength</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Orbit vortex test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">110</b>agents · attractor vortex orbit</span>
+    <span class="cd__meta cd__meta--dim">createRadialGradient · 3 neighbor vectors · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 궤도를 도는 무리(07). 캔버스 중앙에 고정된 인력점 하나가 개체 110마리를 붙잡아
+// 방사형 감쇠 인력 + 접선(소용돌이) 힘으로 느린 궤도를 돌게 한다. 그 위에 표준 군집
+// 3벡터(분리·정렬·결합)를 약하게 얹어 개체가 서로 부딪히지 않고 무리 결을 유지한다.
+// 포인터 x 는 소용돌이 회전 배율, y 는 인력 세기 배율 — 인력점 위치 자체는 항상 중앙 고정.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var N = 220;            // 개체 수 — 화면을 더 넓게 훑도록 110→220
+  var MAX_SPEED = 1.6;    // 최대 속도(정규화) — 0.9→1.6, 넓은 궤도를 더 활발히 돈다
+  var ATTRACT = 26;       // 인력 세기 — 변형 "인력 세기" 축(16 → 40). 낮게 잡아 궤도가 넓게 퍼진다
+  var SWIRL = 40;         // 소용돌이(접선) 힘
+  var TRAIL = 0.08;       // 잔상 덮개 알파 — 낮을수록 궤적이 길게 남아 누적면적이 커진다
+  // ────────────────────────────────────────────────────
+  var SPEED_UNIT = 140;                 // px/s 환산 — MAX_SPEED 를 실제 속도로
+  var MAXSPD_PXS = MAX_SPEED * SPEED_UNIT;
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32
+  var SEED = 0x07f10c1;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--flock-*)에서 getComputedStyle 로 읽는다
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--flock-ink');
+  var C_DUSK  = tokRGB('--flock-dusk');
+  var C_GLOW  = tokRGB('--flock-glow');
+  var C_BIRD  = tokRGB('--flock-bird');
+  var C_LILAC = tokRGB('--flock-lilac');
+  var C_MIST  = tokRGB('--flock-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var px01 = 0.5, py01 = 0.5;
+  var manual = false;
+  var firstFrame = true;   // 리사이즈마다 잔상 캔버스를 다시 깔아야 한다
+
+  // ── 이웃 반경 안 3벡터 파라미터(군집 코어 공통 뼈대) ──
+  var NEI_R = 26, NEI_R2 = NEI_R * NEI_R, SEP_R = 11;
+  var W_SEP = 20, W_ALI = 7, W_COH = 4.2;
+
+  var boids = [];
+  function spawn(b) {
+    var ang = rand() * TAU;
+    var rad = 30 + rand() * 260;         // 넓게 흩어진 시작 — 안쪽 띠부터 화면 가장자리 궤도까지
+    b.x = rad * Math.cos(ang);
+    b.y = rad * Math.sin(ang);
+    b.vx = (rand() - 0.5) * 20;
+    b.vy = (rand() - 0.5) * 20;
+    b.orbBias = 0.55 + rand() * 1.65;    // 개체마다 다른 목표 궤도 반경(0.55~2.2배) — 화면 전역을 훑는다
+  }
+  for (var i = 0; i < N; i++) { var b = {}; spawn(b); boids.push(b); }
+
+  // 표준 군집 3벡터 — 토러스 최단거리 보정, 분리·정렬·결합
+  function flockForce(idx, cx0, cy0) {
+    var p = boids[idx];
+    var sepX = 0, sepY = 0, aliX = 0, aliY = 0, cohX = 0, cohY = 0, cnt = 0;
+    for (var j = 0; j < N; j++) {
+      if (j === idx) continue;
+      var q = boids[j];
+      var dx = q.x - p.x, dy = q.y - p.y;
+      if (dx > cx0) dx -= cx0 * 2; else if (dx < -cx0) dx += cx0 * 2;
+      if (dy > cy0) dy -= cy0 * 2; else if (dy < -cy0) dy += cy0 * 2;
+      var d2 = dx * dx + dy * dy;
+      if (d2 > NEI_R2) continue;
+      var d = Math.sqrt(d2) || 0.0001;
+      if (d < SEP_R) { sepX -= dx / d; sepY -= dy / d; }
+      aliX += q.vx; aliY += q.vy;
+      cohX += dx; cohY += dy;
+      cnt++;
+    }
+    var fx = sepX * W_SEP, fy = sepY * W_SEP;
+    if (cnt > 0) {
+      fx += (aliX / cnt - p.vx) * (W_ALI / 10);
+      fy += (aliY / cnt - p.vy) * (W_ALI / 10);
+      fx += (cohX / cnt) * (W_COH / 40);
+      fy += (cohY / cnt) * (W_COH / 40);
+    }
+    return [fx, fy];
+  }
+
+  var STILL_T = 1.2;
+
+  function draw(tSec, dt) {
+    // 잔상 덮개 — 첫 프레임은 불투명 full, 이후 반투명 TRAIL 로 궤적을 남겨 누적면적을 넓힌다
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ',' + (firstFrame ? 1 : TRAIL).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+    firstFrame = false;
+
+    var cx = W * 0.5, cy = H * 0.5;
+    var spinMul = 0.5 + px01 * 1.1;    // 포인터 x — 소용돌이 배율
+    var pullMul = 0.5 + py01 * 1.1;    // 포인터 y — 인력 세기 배율
+
+    // ── 배경 슬레이트 층 — 완만한 명도 파동으로 화면 넓은 영역이 실제로 변한다 ──
+    var skyA = 0.16 + 0.08 * Math.sin(tSec * 0.7);
+    ctx.fillStyle = 'rgba(' + C_DUSK[0] + ',' + C_DUSK[1] + ',' + C_DUSK[2] + ',' + skyA.toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // ── 인력점 미광 링 — breathe 로 반경·알파가 매 프레임 재계산된다 ──
+    var breathe = 0.86 + 0.14 * Math.sin(tSec * 1.6);
+    var R0 = Math.min(W, H) * 0.10 * breathe;
+    var RMAX = Math.min(W, H) * 0.46 * breathe;
+    var A0 = 0.62 * (0.7 + 0.3 * Math.sin(tSec * 2.1 + 0.4)) * (0.5 + 0.5 * pullMul);
+    ctx.globalCompositeOperation = 'lighter';
+    var LAYERS = 8;
+    for (var L = 0; L < LAYERS; L++) {
+      var Lt = L / (LAYERS - 1);
+      var R = R0 + (RMAX - R0) * Math.pow(Lt, 0.8);
+      var a = Math.max(0.02, A0 * Math.pow(R0 / R, 0.9));
+      var rg = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R);
+      rg.addColorStop(0, 'rgba(' + C_GLOW[0] + ',' + C_GLOW[1] + ',' + C_GLOW[2] + ',' + a.toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+    }
+
+    // ── 궤도 안내 원 — 얇은 결(장식, 시청 방향 유도) ──
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = 'rgba(' + C_DUSK[0] + ',' + C_DUSK[1] + ',' + C_DUSK[2] + ',0.35)';
+    ctx.lineWidth = 1;
+    for (var ring = 1; ring <= 3; ring++) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 26 * ring, 26 * ring * 0.62, 0, 0, TAU);
+      ctx.stroke();
+    }
+
+    // ── 개체 갱신·묘화 ──
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i2 = 0; i2 < N; i2++) {
+      var p = boids[i2];
+      var dx = p.x, dy = p.y;
+      var d = Math.hypot(dx, dy) || 0.0001;
+      var nx = dx / d, ny = dy / d;
+      var orbR = 270 * p.orbBias;                     // 개체별 목표 궤도 반경 — 화면 전역에 궤도가 퍼진다
+      var decay = Math.exp(-(d * d) / (orbR * orbR));  // 가우시안 감쇠 — 중심 근처만 강히 당기고 바깥은 자유 궤도
+      var pull = -ATTRACT * pullMul * decay;
+      var tx = -ny, ty = nx;
+      var swirlR = 300 * p.orbBias;
+      var swirl = SWIRL * spinMul * (0.58 + 0.42 * Math.exp(-(d * d) / (swirlR * swirlR)));
+      var ff = flockForce(i2, cx, cy);
+      var ax = nx * pull + tx * swirl + ff[0];
+      var ay = ny * pull + ty * swirl + ff[1];
+      p.vx += ax * dt; p.vy += ay * dt;
+      var damp = Math.pow(0.94, dt * 60);
+      p.vx *= damp; p.vy *= damp;
+      var sp = Math.hypot(p.vx, p.vy);
+      if (sp > MAXSPD_PXS) { p.vx = p.vx / sp * MAXSPD_PXS; p.vy = p.vy / sp * MAXSPD_PXS; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      // 토러스 랩 — 화면 밖으로 크게 벗어나면 반대편으로
+      if (p.x > cx) p.x -= cx * 2; else if (p.x < -cx) p.x += cx * 2;
+      if (p.y > cy) p.y -= cy * 2; else if (p.y < -cy) p.y += cy * 2;
+
+      var fx2 = cx + p.x, fy2 = cy + p.y;
+      var mix = Math.min(1, d / 120);
+      var rC = C_GLOW[0] + (C_LILAC[0] - C_GLOW[0]) * mix;
+      var gC = C_GLOW[1] + (C_LILAC[1] - C_GLOW[1]) * mix;
+      var bC = C_GLOW[2] + (C_LILAC[2] - C_GLOW[2]) * mix;
+      var rad = 2.1 + 1.1 * (1 - mix);
+      ctx.fillStyle = 'rgba(' + (rC | 0) + ',' + (gC | 0) + ',' + (bC | 0) + ',0.55)';
+      ctx.fillRect(fx2 - rad, fy2 - rad, rad * 2, rad * 2);
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(' + C_MIST[0] + ',' + C_MIST[1] + ',' + C_MIST[2] + ',0.9)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 2.4, 0, TAU);
+    ctx.fill();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    nOut.textContent = String(N);
+    firstFrame = true;   // 리사이즈마다 잔상 캔버스를 다시 깔아야 한다
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    if (!manual) {
+      var ph = t * TAU / 5.4;
+      px01 = 0.5 + 0.36 * Math.sin(ph + 0.3);
+      py01 = 0.5 + 0.30 * Math.sin(1.7 * ph + 1.1);
+    }
+    draw(t, dt);
+    raf = requestAnimationFrame(frame);
+  }
+
+  field.addEventListener('pointermove', function (e) {
+    var r = field.getBoundingClientRect();
+    px01 = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    py01 = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  field.addEventListener('pointerleave', function () {
+    if (manual) { px01 = 0.5; py01 = 0.5; }
+  });
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.07, 0], ArrowRight: [0.07, 0], ArrowUp: [0, -0.06], ArrowDown: [0, 0.06] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    if (!manual) { manual = true; root.classList.remove('is-demo'); }
+    px01 = Math.max(0, Math.min(1, px01 + d[0]));
+    py01 = Math.max(0, Math.min(1, py01 + d[1]));
+    if (reduce) draw(STILL_T, 0.016);
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(STILL_T, 0.016); });
+
+  fit();
+  if (reduce) {
+    draw(STILL_T, 0);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

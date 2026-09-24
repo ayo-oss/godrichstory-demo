@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winner judging — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="jd" id="jd">
+  <p class="jd__hint">Normalize the resting angle against −π/2 and divide by the sector angle — the winning index falls out</p>
+  <div class="jd__row">
+    <div class="jd__field" id="field" role="application" aria-label="Winner judging lab" tabindex="0">
+      <canvas class="jd__cv" id="cv"></canvas>
+    </div>
+    <div class="jd__side">
+      <b class="jd__win" id="win">-</b>
+      <span class="jd__unit" id="winName">Spin the wheel and the result lands here</span>
+      <p class="jd__meta">Resting angle <b class="jd__count" id="rest">0</b><span class="jd__metaUnit">°</span></p>
+      <p class="jd__meta">Rounds <b class="jd__count" id="round">0</b><span class="jd__metaUnit">rounds in a row</span></p>
+      <p class="jd__sr" id="live" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// Winner 판정(06) — 포인터는 12시 방향 고정이므로 정지 각도를 −π/2 기준으로 정규화한
+// 뒤 sectors 각도로 나누면 Winner 인덱스가 나온다. 결과는 aria-live 로 읽어주고, 판정·표시·
+// 재도전을 한 흐름으로 묶어 화면을 켠 채로 몇 번이든 돌린다.
+(function () {
+  var root = document.getElementById('jd');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var winEl = document.getElementById('win');
+  var nameEl = document.getElementById('winName');
+  var restEl = document.getElementById('rest');
+  var roundEl = document.getElementById('round');
+  var liveEl = document.getElementById('live');
+  if (!root || !field || !cv || !winEl || !nameEl || !restEl || !roundEl || !liveEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 6; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  var NAMES = ['Coffee gift card', 'Zilch, next round', 'Triangle kimbap', 'Cookie', 'Americano', 'Penalty hit'];
+  var N = 6, SEG = TAU / N;
+
+  var ang = -0.7, vel = 0, round = 0, lastWin = -1;
+  var FRICTION = 0.28, STOP = 0.5;
+  var settle = -1, pulse = -1, dpr = 1, announced = false;
+  var flicks = [10.5, -12.5, 9];
+  var fi = 1, idle = 0;
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  function norm(a) { a %= TAU; return a < 0 ? a + TAU : a; }
+  function idxAt(a) { return Math.floor(norm(-Math.PI / 2 - a) / SEG) % N; }
+
+  function draw() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 12;
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    for (var k = 0; k < N; k++) {
+      var a0 = k * SEG;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a0 + SEG); ctx.closePath();
+      // Winner 칸은 한 levels 진하게 — settle 중일때만
+      var isWin = settle >= 0 && k === lastWin;
+      ctx.fillStyle = isWin ? PAL[k] : PAL[k];
+      ctx.fill();
+      if (isWin) {
+        ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(23,20,26,.20)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+      // Name — sectors 가운데 각도에 세로로 눕혀 적는다
+      ctx.save(); ctx.rotate(a0 + SEG / 2);
+      ctx.fillStyle = INK;
+      ctx.font = '700 11px sans-serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(NAMES[k], R - 12, 0);
+      ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill(); ctx.strokeStyle = 'rgba(23,20,26,.35)'; ctx.stroke();
+    if (pulse >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 13 + pulse * 24, 0, TAU);
+      ctx.strokeStyle = 'rgba(23,20,26,' + (1 - pulse) * 0.55 + ')';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - R - 9); ctx.lineTo(cx + 7, cy - R - 9); ctx.lineTo(cx, cy - R + 8);
+    ctx.closePath(); ctx.fillStyle = INK; ctx.fill();
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+    idle = 0;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-24, Math.min(24, drag.v));
+    if (Math.abs(vel) < 1.5) vel = flicks[0];
+    settle = -1; pulse = -1; announced = false;
+    round++; roundEl.textContent = String(round);
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      vel = flicks[fi++ % flicks.length];
+      settle = -1; pulse = -1; announced = false;
+      round++; roundEl.textContent = String(round);
+    }
+  });
+
+  function judge() {
+    var deg = Math.round(norm(ang) * 180 / Math.PI);
+    restEl.textContent = String(deg);
+    var idx = idxAt(ang);
+    lastWin = idx;
+    winEl.textContent = String(idx + 1) + 'No.';
+    nameEl.textContent = NAMES[idx];
+    liveEl.textContent = idx + 1 + 'No. ' + NAMES[idx];
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt;
+        vel *= Math.pow(FRICTION, dt);
+        if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; judge(); }
+      } else if (idle > 0) { idle -= dt; }
+      else if (settle >= 0) {
+        settle += dt; pulse = Math.min(1, settle / 0.3);
+        if (settle > 0.85) {
+          vel = flicks[fi++ % flicks.length];
+          settle = -1; pulse = -1; announced = false;
+          round++; roundEl.textContent = String(round);
+        }
+      }
+    }
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 판정까지 끝난 상태로 고정하고 루프는 돌지 않는다
+    ang = -Math.PI / 2 - 2.1 * SEG;
+    lastWin = idxAt(ang);
+    pulse = 0.4; settle = 0;
+    draw();
+    judge();
+    roundEl.textContent = '1'; round = 1;
+    root.classList.add('is-still');
+  } else {
+    vel = flicks[0];
+    round = 1; roundEl.textContent = '1';
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ルーレット ヒーローシーン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hr" id="hr">
+  <p class="hr__hint">停止判定の直後に紙吹雪が弾け結果が上がります — 保存ボタンは盤をtoDataURLで書き出します</p>
+  <div class="hr__row">
+    <div class="hr__field" id="field" role="application" aria-label="ルーレットヒーロー" tabindex="0">
+      <canvas class="hr__cv" id="cv"></canvas>
+    </div>
+    <div class="hr__side">
+      <b class="hr__win" id="win">READY</b>
+      <span class="hr__unit">止まると結果が大きく上がります</span>
+      <a class="hr__save" id="save" href="#" download="roulette.png">盤を保存</a>
+      <p class="hr__meta">摩擦・ティック・重み・脱落を1画面に</p>
+      <p class="hr__sr" id="live" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 히어로 씬(09) — 정지 판정 직후 파티클 폭죽을 터뜨리고 당첨명을 크게 올린 뒤 판 전체를
+// toDataURL 로 내보낸다. 마찰·틱(스프링)·가중치·탈락 모드를 한 화면에 얹은 히어로다.
+// 파티클은 시드 고정 mulberry32 로 뽑는다 — 데모 재현성.
+(function () {
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var root = document.getElementById('hr');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var winEl = document.getElementById('win');
+  var saveEl = document.getElementById('save');
+  var liveEl = document.getElementById('live');
+  if (!root || !field || !cv || !winEl || !saveEl || !liveEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  var PAL = [];
+  for (var i = 1; i <= 8; i++) PAL.push(css.getPropertyValue('--w' + i).trim());
+  var INK = css.getPropertyValue('--ink').trim();
+  var CREAM = css.getPropertyValue('--cream').trim();
+  var TAU = Math.PI * 2;
+  // 가중치 — 큰 상품은 칸이 넓다
+  var PRIZES = [
+    { name: 'はずれ', w: 3 },
+    { name: 'クッキー', w: 3 },
+    { name: 'アメリカーノ', w: 2 },
+    { name: 'コーヒーギフト', w: 1 },
+    { name: '三角おにぎり', w: 2 },
+    { name: '罰ゲーム', w: 2 },
+    { name: 'チョコレート', w: 3 },
+    { name: '1000ウォン', w: 2 }
+  ];
+  var TOT = PRIZES.reduce(function (s, p) { return s + p.w; }, 0);
+  var bounds = [], acc = 0;
+  for (var q = 0; q < PRIZES.length; q++) { bounds.push(acc / TOT); acc += PRIZES[q].w; }
+  bounds.push(1);
+
+  var ang = 0, vel = 0;
+  var FRICTION = 0.20, STOP = 0.4;      // 낮은 마찰 — 히어로는 길게 돈다
+  var pk = 340, pc = 14, pX = 0, pV = 0;
+  var lastQ = 0, ticks = 0;
+  var settle = -1, pulse = -1, dpr = 1;
+  var burst = [];                        // 폭죽 파티클
+  var winShow = 0;                       // 결과 표시 애니메이션 (0~1)
+  var winner = -1;
+  var rnd = mulberry32(90210);
+  var flicks = [16, -13, 18];
+  var fi = 1, idle = 0;
+
+  function fit() {
+    var w = field.clientWidth, h = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  function norm(a) { a %= TAU; return a < 0 ? a + TAU : a; }
+  function idxAt(a) {
+    var u = norm(-Math.PI / 2 - a);
+    for (var k = 0; k < PRIZES.length; k++) if (u >= bounds[k] && u < bounds[k + 1]) return k;
+    return PRIZES.length - 1;
+  }
+
+  function spawnBurst(cx, cy) {
+    for (var i = 0; i < 42; i++) {
+      var a = rnd() * TAU, sp = 60 + rnd() * 170;
+      burst.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+        rot: rnd() * TAU, vr: (rnd() - 0.5) * 10,
+        s: 3 + rnd() * 4,
+        col: PAL[Math.floor(rnd() * PAL.length)],
+        life: 1
+      });
+    }
+  }
+
+  function draw() {
+    var w = cv.width / dpr, h = cv.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 12;
+    // 외곽 후프 — 히어로 판의 테두리
+    ctx.beginPath(); ctx.arc(cx, cy, R + 7, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,247,230,.25)'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    for (var k = 0; k < PRIZES.length; k++) {
+      var a0 = bounds[k] * TAU, a1 = bounds[k + 1] * TAU;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a1); ctx.closePath();
+      ctx.fillStyle = PAL[k]; ctx.fill();
+      ctx.strokeStyle = 'rgba(23,20,26,.22)'; ctx.lineWidth = 1; ctx.stroke();
+      var mid = (a0 + a1) / 2;
+      var arcLen = R * (a1 - a0);
+      ctx.save(); ctx.rotate(mid);
+      ctx.fillStyle = INK;
+      var fs = 9;
+      ctx.font = '700 ' + fs + 'px sans-serif';
+      while (ctx.measureText(PRIZES[k].name).width > arcLen * 0.82 && fs > 5) {
+        fs -= 1; ctx.font = '700 ' + fs + 'px sans-serif';
+      }
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(PRIZES[k].name, R - 11, 0);
+      ctx.restore();
+    }
+    for (var p = 0; p < PRIZES.length; p++) {
+      var pa = bounds[p] * TAU;
+      ctx.beginPath();
+      ctx.arc(Math.cos(pa) * (R - 3), Math.sin(pa) * (R - 3), 2.4, 0, TAU);
+      ctx.fillStyle = CREAM; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, TAU);
+    ctx.fillStyle = CREAM; ctx.fill(); ctx.strokeStyle = 'rgba(23,20,26,.4)'; ctx.stroke();
+    if (pulse >= 0) {
+      ctx.beginPath(); ctx.arc(0, 0, 14 + pulse * 26, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,247,230,' + (1 - pulse) * 0.8 + ')';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+    // 12시 포인터 — 스프링 변위
+    var tipY = cy - R + 7;
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - R - 9); ctx.lineTo(cx + 7, cy - R - 9); ctx.lineTo(cx + pX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = CREAM; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.stroke();
+    // 폭죽 파티클
+    for (var b = burst.length - 1; b >= 0; b--) {
+      var P = burst[b];
+      if (P.life <= 0) { burst.splice(b, 1); continue; }
+      ctx.save();
+      ctx.translate(P.x, P.y);
+      ctx.rotate(P.rot);
+      ctx.globalAlpha = Math.max(0, P.life);
+      ctx.fillStyle = P.col;
+      ctx.fillRect(-P.s / 2, -P.s / 4, P.s, P.s / 2);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+    // 결과 리본 — 허브 아래에서 올라온다 (winShow 0→1)
+    if (winShow > 0 && winner >= 0) {
+      var lift = (1 - winShow) * 18;
+      ctx.save();
+      ctx.translate(cx, Math.min(h - 12, cy + R * 0.62) + lift);
+      ctx.globalAlpha = Math.min(1, winShow * 1.4);
+      var label = winner + 1 + '番 ' + PRIZES[winner].name;
+      ctx.font = '800 15px sans-serif';
+      var tw = ctx.measureText(label).width;
+      ctx.beginPath();
+      ctx.roundRect(-tw / 2 - 10, -12, tw + 20, 24, 8);
+      ctx.fillStyle = CREAM; ctx.fill();
+      ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = INK;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, 0, 0);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function tickCheck() {
+    var q2 = Math.floor(ang / (TAU / PRIZES.length));
+    if (q2 !== lastQ) {
+      var d = q2 - lastQ;
+      ticks += Math.abs(d);
+      pV += (d > 0 ? 1 : -1) * Math.abs(vel) * 22;
+      lastQ = q2;
+    }
+  }
+
+  function judge() {
+    winner = idxAt(ang);
+    winEl.textContent = PRIZES[winner].name;
+    liveEl.textContent = '当選 ' + PRIZES[winner].name;
+    var w = cv.width / dpr, h = cv.height / dpr;
+    spawnBurst(w / 2, h / 2);
+    winShow = 0.001;
+  }
+
+  var drag = { on: false, lastA: 0, lastT: 0, v: 0 };
+  function angleAt(e) {
+    var b = field.getBoundingClientRect();
+    return Math.atan2(e.clientY - (b.top + b.height / 2), e.clientX - (b.left + b.width / 2));
+  }
+  field.addEventListener('pointerdown', function (e) {
+    drag.on = true; drag.lastA = angleAt(e); drag.lastT = performance.now(); drag.v = 0;
+    if (field.setPointerCapture) { try { field.setPointerCapture(e.pointerId); } catch (err) { /* 캡처 실패는 회전에 영향 없다 */ } }
+  });
+  field.addEventListener('pointermove', function (e) {
+    if (!drag.on) return;
+    var a = angleAt(e), now = performance.now();
+    var dA = a - drag.lastA;
+    if (dA > Math.PI) dA -= TAU;
+    if (dA < -Math.PI) dA += TAU;
+    ang += dA;
+    var dt = Math.max(1, now - drag.lastT) / 1000;
+    drag.v = 0.65 * drag.v + 0.35 * (dA / dt);
+    drag.lastA = a; drag.lastT = now;
+    tickCheck();
+    idle = 0;
+  });
+  function endDrag() {
+    if (!drag.on) return;
+    drag.on = false;
+    vel = Math.max(-26, Math.min(26, drag.v));
+    if (Math.abs(vel) < 1.5) vel = flicks[0];
+    settle = -1; pulse = -1; winShow = 0;
+  }
+  field.addEventListener('pointerup', endDrag);
+  field.addEventListener('pointercancel', endDrag);
+  field.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      vel = flicks[fi++ % flicks.length];
+      settle = -1; pulse = -1; winShow = 0; idle = 0;
+    }
+  });
+
+  saveEl.addEventListener('click', function (e) {
+    e.preventDefault();
+    try {
+      saveEl.href = cv.toDataURL('image/png');
+    } catch (err) { /* 데이터 URL 실패 시 기본 링크 유지 */ }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now();
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    // 포인터 스프링 적분
+    var acc = -pk * pX - pc * pV;
+    pV += acc * dt; pX += pV * dt;
+    if (Math.abs(pX) < 0.02 && Math.abs(pV) < 1) { pX = 0; pV = 0; }
+    // 파티클 물리 — 중력 + 감쇠
+    for (var i = 0; i < burst.length; i++) {
+      var P = burst[i];
+      P.vy += 220 * dt;
+      P.x += P.vx * dt; P.y += P.vy * dt;
+      P.rot += P.vr * dt;
+      P.life -= dt * 0.75;
+    }
+    if (winShow > 0 && winShow < 1) winShow = Math.min(1, winShow + dt * 3.2);
+    if (!drag.on) {
+      if (vel !== 0) {
+        ang += vel * dt;
+        vel *= Math.pow(FRICTION, dt);
+        tickCheck();
+        if (Math.abs(vel) < STOP) { vel = 0; settle = 0; pulse = 0; judge(); }
+      } else if (idle > 0) { idle -= dt; }
+      else if (settle >= 0) {
+        settle += dt; pulse = Math.min(1, settle / 0.3);
+        if (settle > 1.3) {
+          vel = flicks[fi++ % flicks.length];
+          settle = -1; pulse = -1; winShow = 0;
+        }
+      }
+    }
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  fit();
+  window.addEventListener('resize', fit);
+  if (reduce) {
+    // 정지 한 장 — 판정·폭죽이 끝난 상태로 고정하고 루프는 돌지 않는다
+    ang = -Math.PI / 2 - 1.32;
+    winner = idxAt(ang);
+    winEl.textContent = PRIZES[winner].name;
+    liveEl.textContent = '当選 ' + PRIZES[winner].name;
+    winShow = 1;
+    // 파티클은 정지 위치에 흩어진 한 장으로 미리 계산
+    for (var r2 = 0; r2 < 26; r2++) {
+      var a2 = rnd() * TAU, dd = 20 + rnd() * 34;
+      burst.push({ x: cv.width / dpr / 2 + Math.cos(a2) * dd, y: cv.height / dpr / 2 + Math.sin(a2) * dd - 10,
+        vx: 0, vy: 0, rot: rnd() * TAU, vr: 0, s: 3 + rnd() * 4, col: PAL[Math.floor(rnd() * PAL.length)], life: 1 });
+    }
+    pulse = 0.35;
+    draw();
+    root.classList.add('is-still');
+  } else {
+    vel = flicks[0];
+    requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

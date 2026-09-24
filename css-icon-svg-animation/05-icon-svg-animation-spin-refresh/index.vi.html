@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refresh spin — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <button class="iconbtn is-demo" type="button" aria-label="Làm mới">
+    <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+      <g class="refresh-ghost">
+        <path d="M4 12a8 8 0 0 1 13.9-5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M20 12a8 8 0 0 1-13.9 5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M17.5 3.2v4.4h-4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6.5 20.8v-4.4h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <g class="refresh">
+        <path d="M4 12a8 8 0 0 1 13.9-5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M20 12a8 8 0 0 1-13.9 5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M17.5 3.2v4.4h-4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6.5 20.8v-4.4h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <circle class="refresh-spark" r="0.9" cx="17.9" cy="3.2"/>
+      <circle class="refresh-bit" r=".5" cx="17.9" cy="3.2" style="--dx:0px;--dy:-2.6px"/>
+      <circle class="refresh-bit" r=".45" cx="17.9" cy="3.2" style="--dx:2.1px;--dy:-1.4px"/>
+      <circle class="refresh-bit" r=".45" cx="6.1" cy="20.8" style="--dx:-2.1px;--dy:1.4px"/>
+      <circle class="refresh-bit" r=".5" cx="6.1" cy="20.8" style="--dx:0px;--dy:2.6px"/>
+    </svg>
+  </button>
+</main>
+<script>
+// 실제 클릭 한 번 = 한 바퀴. 데모(.is-demo)는 계속 돈다
+document.querySelectorAll(".iconbtn").forEach(function (b) {
+  b.addEventListener("click", function () {
+    b.classList.remove("is-demo");
+    b.classList.remove("is-spinning");
+    void b.offsetWidth;
+    b.classList.add("is-spinning");
+  });
+  b.addEventListener("animationend", function (e) {
+    if (e.animationName === "spin-once") b.classList.remove("is-spinning");
+  });
+});
+
+// ── 한 겹: 화살촉 스파크 + 미광 잔상 ──────────────────────
+// 회전은 stroke-dashoffset 이 아니라 transform 이다 — 펜 끝 좌표를 getPointAtLength 로 얻는
+// 01 과 달리, 실측 transform 행렬에서 각도를 읽어 화살촉 두 개(뷰박스 좌표 17.9,3.2 · 6.1,20.8)를
+// 도형 중심(12,12) 기준 회전으로 직접 계산한다. 잔상은 ghost 레이어가 지연 회전으로 흉내 낸다.
+(function () {
+  var icon = document.querySelector('.iconbtn svg');
+  if (!icon) return;
+  var g = icon.querySelector('.refresh');
+  var spark = icon.querySelector('.refresh-spark');
+  var bits = [].slice.call(icon.querySelectorAll('.refresh-bit'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !spark || !g) { if (spark) spark.style.display = 'none'; return; }
+
+  var CX = 12, CY = 12;                                    // 회전축 (fill-box 중심과 일치)
+  var TIP_A = { x: 17.9, y: 3.2 };                          // 오른쪽 위 화살촉 끝
+  var TIP_B = { x: 6.1, y: 20.8 };                          // 왼쪽 아래 화살촉 끝
+
+  function angle() {
+    // getComputedStyle transform 은 px 단위 행렬로 온다: matrix(a,b,c,d,e,f)
+    var tr = getComputedStyle(g).transform;
+    if (!tr || tr === 'none') return 0;
+    var m = new DOMMatrixReadOnly(tr);
+    return Math.atan2(m.b, m.a);                            // 라디안
+  }
+  function rot(p, rad) {
+    var cos = Math.cos(rad), sin = Math.sin(rad), dx = p.x - CX, dy = p.y - CY;
+    return { x: CX + dx * cos - dy * sin, y: CY + dx * sin + dy * cos };
+  }
+
+  var prev = null, lastEmit = 0, emitIdx = 0;
+  function frame(t) {
+    var rad = angle();
+    var moved = prev !== null && Math.abs(rad - prev) > .002;
+    var a = rot(TIP_A, rad);
+    // 스파크는 진행 앞쪽 화살촉에 붙인다 — 도는 동안만 켜진다
+    spark.setAttribute('cx', a.x);
+    spark.setAttribute('cy', a.y);
+    spark.style.opacity = moved ? 1 : 0;
+    if (moved) {
+      // 회전 접선의 뒤쪽으로 찌꺼기 방출 (초당 최대 ~14개)
+      if (t - lastEmit > 70) {
+        lastEmit = t;
+        var up = Math.random() < .7;                        // 위 화살촉이 더 자주
+        var p = up ? a : rot(TIP_B, rad);
+        var tang = rad + (up ? Math.PI / 2 : -Math.PI / 2); // 접선 방향
+        var back = tang + Math.PI + (Math.random() - .5) * 1.2;
+        var sp = .4 + Math.random() * .5;
+        var b = bits[emitIdx++ % bits.length];
+        b.setAttribute('cx', p.x);
+        b.setAttribute('cy', p.y);
+        b.style.setProperty('--dx', (Math.cos(back) * sp * 6).toFixed(2) + 'px');
+        b.style.setProperty('--dy', (Math.sin(back) * sp * 6).toFixed(2) + 'px');
+        b.style.animation = 'none';
+        void b.getBoundingClientRect();
+        b.style.animation = '';
+        b.style.animationName = 'bit-fly';
+      }
+    }
+    prev = rad;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

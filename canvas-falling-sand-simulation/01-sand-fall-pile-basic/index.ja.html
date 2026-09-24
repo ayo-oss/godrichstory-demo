@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>기본 낙하 — 셀 오토마타 모래 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>上から注がれた砂は、下のマスが空いているときだけ落ちます</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="砂落下 セル・オートマトン デモ" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">1</b>マス落下 1マス/フレーム</span>
+    <span class="cd__meta cd__meta--dim">canvas · fillRect · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 기본 낙하(01). 격자를 Uint8Array 로 두고 매 틱 아래→위 스캔하며
+// "아래칸이 비었으면 스왑" 규칙 하나만 적용한다 — 대각선 이동 없음.
+// 상단 세 스포너(좌·중·우, 각 10칸 폭)에서 매 틱 확률로 모래(grain/gold 섞임)를 흘려
+// 세로 기둥이 쌓이는 셀 오토마타의 첫 장면을 만든다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var FALL = 1;       // 낙하 칸수/프레임 — 1 은 기본, 2~3 은 빠른 폭포
+  var SPAWN_P = 0.35; // 스포너 칸별 매 틱 생성 확률
+  var ZONE_W = 20;     // 스포너 폭(칸)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x318A01);
+
+  // 색은 CSS 커스텀 프로퍼티(--sand-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_NIGHT = tokRGB('--sand-night');
+  var C_GLOW  = tokRGB('--sand-glow');
+  var C_GRAIN = tokRGB('--sand-grain');
+  var C_GOLD  = tokRGB('--sand-gold');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CELL = 4;
+  var W = 0, H = 0, cols = 0, rows = 0;
+  var grid = null, shade = null;
+  var zones = [];
+  var raf = 0, t0 = -1, acc = 0;
+  var STEP = 1 / 60;
+
+  function idx(x, y) { return y * cols + x; }
+
+  function buildZones() {
+    var lz = Math.max(0, Math.round(cols * 0.06));
+    var cz = Math.max(0, Math.round(cols / 2 - ZONE_W / 2));
+    var rz = Math.max(0, Math.round(cols * 0.94 - ZONE_W));
+    zones = [lz, cz, rz];
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    cols = Math.max(1, Math.floor(W / CELL));
+    rows = Math.max(1, Math.floor(H / CELL));
+    grid = new Uint8Array(cols * rows);
+    shade = new Uint8Array(cols * rows);
+    buildZones();
+  }
+
+  function spawnStep() {
+    for (var z = 0; z < zones.length; z++) {
+      var x0 = zones[z];
+      for (var k = 0; k < ZONE_W; k++) {
+        var x = x0 + k;
+        if (x < 0 || x >= cols) continue;
+        if (rand() < SPAWN_P) {
+          var i = idx(x, 0);
+          if (grid[i] === 0) { grid[i] = 1; shade[i] = rand() < 0.5 ? 0 : 1; }
+        }
+      }
+    }
+  }
+
+  function update() {
+    for (var y = rows - 2; y >= 0; y--) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (grid[i] !== 1) continue;
+        var destY = y;
+        for (var s = 1; s <= FALL; s++) {
+          var yy = y + s;
+          if (yy >= rows) break;
+          if (grid[idx(x, yy)] === 0) destY = yy; else break;
+        }
+        if (destY !== y) {
+          var di = idx(x, destY);
+          grid[di] = 1; shade[di] = shade[i];
+          grid[i] = 0;
+        }
+      }
+    }
+  }
+
+  function draw(t) {
+    ctx.fillStyle = 'rgb(' + C_NIGHT.join(',') + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 느린 잔광 — 중심이 sin/cos 로 천천히 도는 radial gradient(안개, 알파 0.06 내외)
+    var gx = W * (0.5 + 0.36 * Math.sin(t * 0.17));
+    var gy = H * (0.5 + 0.30 * Math.cos(t * 0.13));
+    var gr = Math.max(W, H) * 0.7;
+    var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+    g.addColorStop(0, 'rgba(' + C_GLOW.join(',') + ',0.07)');
+    g.addColorStop(1, 'rgba(' + C_GLOW.join(',') + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var i = idx(x, y);
+        if (grid[i] !== 1) continue;
+        ctx.fillStyle = shade[i] ? 'rgb(' + C_GOLD.join(',') + ')' : 'rgb(' + C_GRAIN.join(',') + ')';
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+  }
+
+  function stillFrame() {
+    for (var k = 0; k < 40; k++) { spawnStep(); update(); }
+    draw(0.6);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    acc += dt;
+    while (acc >= STEP) { spawnStep(); update(); acc -= STEP; }
+    draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  nOut.textContent = String(FALL);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

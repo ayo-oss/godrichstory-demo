@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>風に揺れる木 — Lシステム フラクタルツリー 9種 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ls is-demo" id="lsRoot">
+  <p class="ls__hint">
+    <span>文字列 F→F[+F]F[-F] はそのままに、亀が一歩進むたびに曲げる角度へ世代の深さに比例して大きくなる正弦波を足すと、根元はほぼ動かず枝先だけが大きく揺れる風になります</span>
+  </p>
+  <div class="ls__field" role="application" aria-label="風に揺れる木ラボ" tabindex="0">
+    <canvas class="ls__cv" id="lsCv"></canvas>
+  </div>
+  <div class="ls__bar">
+    <span class="ls__meta">規則 F→F[+F]F[-F] · 風の強さ <b id="lsWind">0</b></span>
+    <span class="ls__meta ls__meta--dim">canvas · globalAlpha</span>
+  </div>
+</div>
+</main>
+<script>
+// 바람 흔들림 木(08) — 문자열 자체(F→F[+F]F[-F])는 고정. 거북이 걸을 때 방향각에
+// "깊이(世代)에 비례하는 사인파"를 더해서, 같은 문자열이 매 프레임 다른 모양으로 보인다.
+// 뿌리는 위상이 0 이라 거의 안 흔들리고, 잎 끝은 깊이가 깊어 크게 흔들린다(자연스러운 바람 감쇠).
+(function () {
+  // ── 변형 상수 블록 ──
+  var ANGLE    = 24;
+  var MAXGEN   = 5;
+  var WIND_AMP = 30;   // 잎 끝 최대 흔들림(도)
+  var WIND_HZ  = 1.6;  // 바람 진동수(회/루프)
+  var CYCLE    = 2.0;
+  // ─────────────────
+
+  var root = document.getElementById('lsRoot');
+  var field = document.getElementById('lsCv').parentElement;
+  var cv = document.getElementById('lsCv');
+  var windEl = document.getElementById('lsWind');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_BARK = tokRGB('--ls-bark');
+  var C_LEAF = tokRGB('--ls-leaf');
+  var C_INK  = tokRGB('--ls-ink');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0;
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+  }
+
+  var RULE = { 'F': 'F[+F]F[-F]' };
+  function expand(axiom, gen) {
+    var s = axiom;
+    for (var g = 0; g < gen; g++) {
+      var out = '';
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        out += RULE[ch] !== undefined ? RULE[ch] : ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+  var STR = expand('F', MAXGEN);
+
+  function rgb(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+
+  // 거북 렌더러 — 매 F 걸음마다 깊이 비례 사인파를 각도에 더해(바람) 그린다.
+  function drawWind(ctx, str, x0, y0, stepLen, ox, oy, sc, windPhase, windAmp, windGust) {
+    var x = x0, y = y0, a = -Math.PI / 2;
+    var stack = [];
+    var depth = 0, maxDepth = MAXGEN;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === 'F') {
+        var depthT = depth / maxDepth;
+        // 世代 깊이에 비례(선형)해 커지는 사인파 — 잔가지뿐 아니라 중간 가지도 함께 휘어야
+        // 프레임마다 바뀌는 픽셀 면적이 뿌리 근처 몇 개 선분에만 갇히지 않는다.
+        var sway = windAmp * depthT * Math.sin(windPhase + depth * 0.8) * Math.PI / 180;
+        a += sway;
+        var segLen = stepLen * Math.pow(0.78, depth);
+        var nx = x + Math.cos(a) * segLen;
+        var ny = y + Math.sin(a) * segLen;
+        var cr = C_BARK[0] + (C_LEAF[0] - C_BARK[0]) * depthT;
+        var cg = C_BARK[1] + (C_LEAF[1] - C_BARK[1]) * depthT;
+        var cb = C_BARK[2] + (C_LEAF[2] - C_BARK[2]) * depthT;
+        ctx.globalAlpha = 0.6 + 0.4 * depthT;
+        ctx.strokeStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+        ctx.lineWidth = Math.max(1.5, 5.2 * Math.pow(0.66, depth));
+        ctx.beginPath();
+        ctx.moveTo(ox + x * sc, oy + y * sc);
+        ctx.lineTo(ox + nx * sc, oy + ny * sc);
+        ctx.stroke();
+        if (depth >= maxDepth - 1) {
+          // 잎 끝 무리 — 반경 자체도 돌풍 세기를 따라 커지고 작아져 정지 상태로 겹치지 않는다.
+          var glowR = 7 + 5 * windGust;
+          var coreR = 3 + 2 * windGust;
+          ctx.fillStyle = 'rgb(' + (cr | 0) + ',' + (cg | 0) + ',' + (cb | 0) + ')';
+          ctx.globalAlpha = 0.2;
+          ctx.beginPath();
+          ctx.arc(ox + nx * sc, oy + ny * sc, glowR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 0.62;
+          ctx.beginPath();
+          ctx.arc(ox + nx * sc, oy + ny * sc, coreR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        x = nx; y = ny;
+      } else if (ch === '[') {
+        stack.push({ x: x, y: y, a: a, d: depth });
+        depth++;
+      } else if (ch === ']') {
+        var st = stack.pop();
+        if (st) { x = st.x; y = st.y; a = st.a; depth = st.d; }
+      } else if (ch === '+') {
+        a += ANGLE * Math.PI / 180;
+      } else if (ch === '-') {
+        a -= ANGLE * Math.PI / 180;
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function render(loop) {
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = rgb(C_INK, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var sc = Math.min(W, H) * 0.24;
+    var ox = W * 0.5, oy = H * 0.95;
+    var windPhase = loop * Math.PI * 2 * WIND_HZ;
+    var windGust = 0.55 + 0.45 * Math.sin(loop * Math.PI * 2 * 0.5);   // 돌풍 세기 자체도 서서히 오르내린다
+    var windAmp = WIND_AMP * windGust;
+
+    if (windEl) windEl.textContent = String(Math.round(windGust * 10));
+
+    drawWind(ctx, STR, 0, 0, 1, ox, oy, sc, windPhase, windAmp, windGust);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    render(loop);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    render(0.3);
+  });
+
+  fit();
+  if (reduce) {
+    render(0.3);
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

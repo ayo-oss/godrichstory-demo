@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>패들 튕기기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-ball" viewBox="0 0 256 256" fill="currentColor"><g><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88"/></g></symbol>
+    <symbol id="ico-reset" viewBox="0 0 256 256" fill="currentColor"><g><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="pb is-demo" id="pb">
+  <p class="pb__hint"><svg class="pb__ico" aria-hidden="true"><use href="#ico-ball"/></svg><span>The paddle follows the mouse and the score rises with every brick the ball hits</span></p>
+  <div class="pb__field" id="field" role="application" aria-label="Brick game board" tabindex="0">
+    <p class="pb__score" aria-live="polite"><span class="pb__scoreVal" id="scoreText">Score 0</span><span class="pb__scoreLoop" aria-hidden="true"><i>Score 0</i><i>Score 1</i><i>Score 2</i></span></p>
+    <div class="pb__bricks" id="bricks" aria-hidden="true"></div>
+    <span class="pb__ball" id="ball" aria-hidden="true"></span>
+    <span class="pb__paddle" id="paddle" aria-hidden="true"></span>
+  </div>
+  <div class="pb__bar">
+    <button class="pb__launch" id="launch" type="button">
+      <svg class="pb__ico" aria-hidden="true"><use href="#ico-ball"/></svg><span>Launch ball</span>
+    </button>
+    <button class="pb__reset" id="reset" type="button">
+      <svg class="pb__ico" aria-hidden="true"><use href="#ico-reset"/></svg><span>Reset</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+var root = document.getElementById('pb');
+var field = document.getElementById('field');
+var bricksBox = document.getElementById('bricks');
+var ball = document.getElementById('ball');
+var paddle = document.getElementById('paddle');
+var scoreText = document.getElementById('scoreText');
+var SCORE_LABEL = 'Score';
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+// 벽돌 3×6 — Left 여백 22, 위 여백 24, 칸 60×14, 간격 4. 행 색은 CSS 클래스가 정한다.
+// 격자의 원점은 여기 한 곳뿐이다 — 그리는 자리(laid)와 충돌 판정(step)이 같은 BX·BY 를 본다.
+// 두 곳에 따로 적으면 위 여백만 옮기는 순간 공이 보이지 않는 띠에서 튕긴다
+var COLS = 6, ROWS = 3, BX = 22, BY = 24, BW = 60, BH = 14, GAP = 4;
+var bricks = [];
+for (var r = 0; r < ROWS; r++) {
+  for (var c = 0; c < COLS; c++) {
+    var el = document.createElement('i');
+    el.className = 'pb__brick pb__brick--r' + r + ' pb__brick--r' + r + 'c' + c;
+    el.style.transform = 'translate(0, 0)';  // 실제 위치는 laid() 가 판 폭에 맞춰 넣는다
+    bricksBox.appendChild(el);
+    bricks.push({ el: el, r: r, c: c, alive: true });
+  }
+}
+var PW = 68, PH = 10, SPEED = 240;
+function padY() { return field.clientHeight - 18; }
+var px = 176, bx = 210, by = 150, vx = SPEED * 0.66, vy = -SPEED * 0.75;
+var stuck = true, score = 0, last = 0, running = false;
+
+function scaled(n) { return n * field.clientWidth / 424; }
+function laid() {
+  for (var i = 0; i < bricks.length; i++) {
+    var b = bricks[i];
+    b.el.style.transform = 'translate(' + scaled(BX + b.c * (BW + GAP)) + 'px, ' + (BY + b.r * (BH + GAP)) + 'px)';
+  }
+}
+function paint() {
+  paddle.style.transform = 'translate(' + px + 'px, ' + padY() + 'px)';
+  ball.style.transform = 'translate(' + bx + 'px, ' + by + 'px)';
+}
+function paintScore() {
+  // 라벨을 낱말로 떼어 둬야 문구 사전(demo/문구.json)이 en·ja 로 바꿔 준다 — 붙여 쓴 'Score ' 는 사전 키가 못 된다
+  scoreText.textContent = SCORE_LABEL + ' ' + score;
+}
+function step(now) {
+  var dt = Math.min((now - last) / 1000, 0.033);
+  last = now;
+  var w = field.clientWidth, h = field.clientHeight;
+  if (stuck) { bx = px + PW / 2 - 6; by = padY() - 14; paint(); requestAnimationFrame(step); return; }
+  bx += vx * dt; by += vy * dt;
+  // 벽 반사 — 좌우와 천장
+  if (bx < 0) { bx = 0; vx = Math.abs(vx); }
+  if (bx > w - 12) { bx = w - 12; vx = -Math.abs(vx); }
+  if (by < 0) { by = 0; vy = Math.abs(vy); }
+  // 패들 반사 — 맞은 칸에 따라 수평 성분이 꺾인다 (법선 반사의 게임판 버전)
+  var pyNow = padY();
+  if (vy > 0 && by + 12 >= pyNow && by + 12 <= pyNow + PH && bx + 12 > px && bx < px + PW) {
+    var off = (bx + 6 - (px + PW / 2)) / (PW / 2);
+    vx = SPEED * off * 0.9;
+    vy = -Math.abs(vy);
+    by = pyNow - 12;
+  }
+  // 벽돌 충돌 — 겹친 칸을 끄고 뚫은 변으로 반사한다
+  for (var i = 0; i < bricks.length; i++) {
+    var b = bricks[i];
+    if (!b.alive) { continue; }
+    var bxx = scaled(BX + b.c * (BW + GAP)), byy = BY + b.r * (BH + GAP);
+    if (bx + 12 > bxx && bx < bxx + scaled(BW) && by + 12 > byy && by < byy + BH) {
+      b.alive = false;
+      b.el.classList.add('is-hit');
+      score += 1; paintScore();
+      var overX = bx + 6 - (bxx + scaled(BW) / 2), overY = by + 6 - (byy + BH / 2);
+      if (Math.abs(overX) > Math.abs(overY)) { vx = overX > 0 ? Math.abs(vx) : -Math.abs(vx); }
+      else { vy = overY > 0 ? Math.abs(vy) : -Math.abs(vy); }
+      break;
+    }
+  }
+  // 공을 놓쳤으면 패들 위에 다시 얹는다
+  if (by > h + 8) { stuck = true; bx = px + PW / 2 - 6; by = padY() - 14; }
+  paint();
+  requestAnimationFrame(step);
+}
+function wake() {
+  root.classList.remove('is-demo');
+  if (reduce.matches) {
+    px = 176; stuck = true; bx = px + PW / 2 - 6; by = padY() - 14;
+    paint(); paintScore(); return false;
+  }
+  if (!running) { running = true; last = performance.now(); requestAnimationFrame(step); }
+  return true;
+}
+function movePaddle(x) {
+  px = Math.max(0, Math.min(field.clientWidth - PW, x));
+  if (!running) { wake(); }
+}
+field.addEventListener('pointermove', function (e) {
+  var r = field.getBoundingClientRect();
+  movePaddle(e.clientX - r.left - PW / 2);
+});
+field.addEventListener('keydown', function (e) {
+  var JUMP = 30;
+  if (e.key === 'ArrowLeft') { movePaddle(px - JUMP); }
+  else if (e.key === 'ArrowRight') { movePaddle(px + JUMP); }
+  else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); launchBall(); }
+  else { return; }
+  e.preventDefault();
+});
+function launchBall() {
+  wake();
+  stuck = false;
+  vx = SPEED * 0.66; vy = -SPEED * 0.75;
+}
+document.getElementById('launch').addEventListener('click', launchBall);
+document.getElementById('reset').addEventListener('click', function () {
+  for (var i = 0; i < bricks.length; i++) {
+    bricks[i].alive = true; bricks[i].el.classList.remove('is-hit');
+  }
+  score = 0; paintScore(); stuck = true; px = 176;
+  wake();
+});
+laid();
+window.addEventListener('resize', laid);
+paint(); paintScore();
+</script>
+</body>
+</html>

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Living bulge — 매직아이 스테레오그램 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="me is-demo" id="meRoot">
+  <p class="me__hint">
+    <span>Living bulge</span>
+    <span class="me__desc">Run a time-driven sine wave through the depth map and mountains trade places with holes</span>
+  </p>
+  <div class="me__field" role="application" aria-label="Depth wave board" tabindex="0">
+    <canvas class="me__cv" id="meCv"></canvas>
+  </div>
+  <div class="me__bar">
+    <span class="me__meta">sine period 2s · wavelength 130px · amplitude 12px</span>
+    <span class="me__meta me__meta--dim">ImageData · Math.sin</span>
+  </div>
+</div>
+</main>
+<script>
+// Living bulge(08) — 깊이 지도에 시간 사인 파동을 흘린다.
+// 기저 부풀음(중앙 돔) 위로 파장 130px 사인 파동이 대각선으로 지나가면
+// 산과 구멍이 서로 바뀌며 표면이 숨쉰다 — 정지 화면이 전부였던 매직아이의
+// 애니메이션 국면. 파동의 봉우리가 최대 시프트(12px)를 만들고 골은 0으로
+// 눌러 시프트가 없는 칸과 있는 칸이 행마다 번갈아 흐른다.
+(function () {
+  // ── 변형 상수 블록 ──
+  var CYCLE   = 2.0;   // 사인 주기(초)
+  var WAVELEN = 130;   // 파장(px) — 이만큼 이동할 때마다 한 주기
+  var AMP     = 12;    // 최대 시프트(px) — 파동 진폭이자 최대 깊이
+  // ─────────────────
+
+  var root = document.getElementById('meRoot');
+  var cvEl = document.getElementById('meCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var PAL = [];
+  for (var i = 0; i < 5; i++) PAL.push(tokRGB('--me-p' + i));
+
+  function baseIdx(x, y) {
+    var h = (Math.imul(x + 11, 374761393) + Math.imul(y + 7, 668265263)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 1274126177) >>> 0;
+    h ^= h >>> 16;
+    return ((h % PAL.length) + PAL.length) % PAL.length;
+  }
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0, img = null;
+
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    img = ctx.createImageData(W, H);
+  }
+
+  // 깊이 — 기저 돔 × 사인 파동. 파동이 대각선으로 흐르고 위상이 시간에 따라 진행한다.
+  function depthAt(x, y, t) {
+    var ph = t / CYCLE * Math.PI * 2;
+    // 기저 — 중앙 돔(화면 가장자리는 0). 중심이 천천히 수직으로 bob 한다.
+    var cx = W * 0.5, cy = H * 0.5 + Math.sin(ph) * H * 0.06;
+    var rad = Math.min(W, H) * 0.74;
+    var dx = (x - cx) / rad, dy = (y - cy) / rad;
+    var d2 = dx * dx + dy * dy;
+    if (d2 >= 1) return 0;
+    var dome = Math.sqrt(1 - d2) * 0.60;
+    // 파동 — 대각선 사인 + 직교 사인(파동면이 비틀린다), 파장 WAVELEN
+    var wpos = (x + y * 0.6) / WAVELEN * Math.PI * 2;
+    var wpos2 = (x * 0.4 - y) / (WAVELEN * 1.4) * Math.PI * 2;
+    var wave = Math.sin(wpos - ph) * 0.5 + 0.5;
+    var wave2 = Math.sin(wpos2 - ph * 0.7 + 2.1) * 0.5 + 0.5;
+    var v = dome * (0.28 + 0.44 * wave + 0.28 * wave2);
+    // 숨쉬기 — 전체 진폭이 주기의 절반 위상으로 느리게 부풀고 가라앉는다
+    var breathe = 0.68 + 0.32 * Math.sin(ph * 0.5);
+    return v * breathe;
+  }
+
+  function draw(t) {
+    var d = img.data, x, y, di;
+    var col = new Int32Array(W);
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        var s = Math.round(depthAt(x, y, t) * AMP);
+        if (s <= 0) {
+          col[x] = baseIdx(x, y);
+        } else {
+          var from = x - s;
+          col[x] = from >= 0 ? col[from] : baseIdx(from + W, y);
+        }
+      }
+      for (x = 0; x < W; x++) {
+        var c = PAL[col[x]];
+        di = (y * W + x) * 4;
+        d[di] = c[0]; d[di + 1] = c[1]; d[di + 2] = c[2]; d[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    draw((now - t0) / 1000);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0);
+  });
+  fit();
+  if (reduce) {
+    draw(0);   // reduce — 파동 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

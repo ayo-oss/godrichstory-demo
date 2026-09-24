@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>클라드니 모래무늬 패턴 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ch" id="ch">
+  <p class="ch__hint">
+    <svg class="ch__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="72" cy="72" r="10"/><circle cx="184" cy="72" r="10"/><circle cx="128" cy="128" r="10"/><circle cx="72" cy="184" r="10"/><circle cx="184" cy="184" r="10"/><path d="M40 128h176M128 40v176" stroke="currentColor" stroke-width="8" opacity=".35"/></g></svg>
+    <span>Sand aligns itself along the plate nodal lines</span>
+  </p>
+  <div class="ch__field" id="field" role="application" aria-label="Chladni plate playground">
+    <canvas class="ch__cv" id="cv"></canvas>
+    <b class="ch__badge" aria-hidden="true"><span class="ch__badgeNum">3,4</span><span class="ch__badgeUnit">mode</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 클라드니 모래무늬 패턴 — 진동판의 정상파 방정식 sin(nπx)·sin(mπy) − sin(mπx)·sin(nπy) 값이
+// 0에 가까운(마디) 픽셀만 모래 입자로 남긴다. createImageData 로 프레임을 새로 만들고,
+// Math.random 으로 입자 흩뿌림(잔떨림)을 더해 진짜 모래처럼 보이게 한다.
+var root = document.getElementById('ch');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+var css = getComputedStyle(root);
+var SAND = css.getPropertyValue('--sand').trim();
+var GLOW = css.getPropertyValue('--glow').trim();
+var PLATE = css.getPropertyValue('--plate').trim();
+
+var LOOP = 2;                 // mode 전환 한 사이클(초)
+var MODES = [[2, 3], [3, 4], [4, 2], [5, 3]];   // (n, m) 하모닉 쌍 — 순서대로 지나간다
+var numEl = document.querySelector('.ch__badgeNum');
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var img = null, buf = null;
+
+function parse(c) {
+  var m = c.match(/^#([0-9a-f]{6})$/i);
+  if (!m) return [255, 247, 230];
+  return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+}
+var SANDC = parse(SAND);
+var GLOWC = parse(GLOW);
+var PLATEC = parse(PLATE);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = Math.round(r.width); H = Math.round(r.height);
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  img = ctx.createImageData(W, H);
+  buf = img.data;
+}
+
+// 지금 시각의 (n, m) 쌍과 그 안에서의 진행률(0..1) — 진행률로 두 mode 사이를 부드럽게 섞는다
+function modeAt(sec) {
+  var total = MODES.length * LOOP;
+  var u = (sec % total) / LOOP;
+  var idx = Math.floor(u) % MODES.length;
+  var next = (idx + 1) % MODES.length;
+  var f = u - Math.floor(u);
+  return { a: MODES[idx], b: MODES[next], f: f };
+}
+
+function chladni(x, y, n, m) {
+  return Math.sin(n * Math.PI * x) * Math.sin(m * Math.PI * y) -
+         Math.sin(m * Math.PI * x) * Math.sin(n * Math.PI * y);
+}
+
+function draw(sec) {
+  var mode = modeAt(sec);
+  var n = mode.a[0] + (mode.b[0] - mode.a[0]) * mode.f;
+  var m = mode.a[1] + (mode.b[1] - mode.a[1]) * mode.f;
+
+  for (var y = 0; y < H; y++) {
+    var ny = y / H;
+    for (var x = 0; x < W; x++) {
+      var nx = x / W;
+      var v = Math.abs(chladni(nx, ny, n, m));
+      var i = (y * W + x) * 4;
+      if (v < 0.05) {
+        // 마디에 가까울수록 모래가 진하다 — Math.random 으로 알갱이 흩뿌림을 더한다
+        var jitter = Math.random() * 0.35;
+        var t = Math.min(1, (0.05 - v) / 0.05 + jitter);
+        buf[i]     = Math.round(PLATEC[0] + (SANDC[0] - PLATEC[0]) * t);
+        buf[i + 1] = Math.round(PLATEC[1] + (SANDC[1] - PLATEC[1]) * t);
+        buf[i + 2] = Math.round(PLATEC[2] + (SANDC[2] - PLATEC[2]) * t);
+      } else if (v < 0.12 && Math.random() < 0.06) {
+        // 마디 바깥으로 튄 낱알 몇 개 — 정적인 그림이 아니라 실제로 흩어지는 느낌을 준다
+        buf[i]     = GLOWC[0]; buf[i + 1] = GLOWC[1]; buf[i + 2] = GLOWC[2];
+      } else {
+        buf[i]     = PLATEC[0]; buf[i + 1] = PLATEC[1]; buf[i + 2] = PLATEC[2];
+      }
+      buf[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  var label = Math.round(mode.a[0]) + ',' + Math.round(mode.a[1]);
+  if (numEl && numEl.textContent !== label) numEl.textContent = label;
+}
+
+function frame(now) {
+  draw(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+fit();
+window.addEventListener('resize', function () { fit(); if (reduce) draw(0.2); });
+if (reduce) {
+  // reduce — 루프 없이 첫 mode 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  draw(0.2);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>引っ張って離すと弾性で戻るガラス板 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lg is-demo" id="lgRoot" tabindex="0">
+  <canvas class="lg__canvas" id="lgCanvas" width="480" height="300"></canvas>
+  <p class="lg__caption">板を引っ張ると伸びながらついてきて、手を離すと弾性で元の位置に戻る</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 드래그 오프셋만큼 판(사각형) 자체를 옮기고 이동 방향으로 살짝 늘린 뒤,
+  // boxEdgeSample 로 그 판의 가장자리 굴절을 다시 계산한다. 손을 떼면 오프셋을
+  // GLASS_ELASTIC_RETURN_MS 를 시정수로 하고 GLASS_ELASTIC_OSC_MS 를 진동 주기로 한
+  // 언더댐프 스프링(exp(-t/τ) * cos(ωt))으로 2~3 회 오버슛하며 0 까지 되돌린다.
+  var root = document.getElementById('lgRoot');
+  var canvas = document.getElementById('lgCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_W = 160, CALC_H = 100;
+  var SCENE_W = 160;
+  var scene = document.createElement('canvas');
+  scene.width = SCENE_W; scene.height = CALC_H;
+  (function drawScene() {
+    var pctx = scene.getContext('2d');
+    var rand = seedRand(421041);
+    var sky = pctx.createLinearGradient(0, 0, SCENE_W, CALC_H);
+    sky.addColorStop(0, '#e8f6ff');
+    sky.addColorStop(1, '#fff0e6');
+    pctx.fillStyle = sky;
+    pctx.fillRect(0, 0, SCENE_W, CALC_H);
+    var cols = ['#6ec8ff', '#ff9ebb', '#4cd4a6'];
+    for (var i = 0; i < cols.length; i += 1) {
+      pctx.beginPath();
+      pctx.arc(SCENE_W * (0.2 + i * 0.3), CALC_H * (0.3 + (i % 2) * 0.4), CALC_H * 0.26, 0, Math.PI * 2);
+      pctx.fillStyle = cols[i];
+      pctx.globalAlpha = 0.6;
+      pctx.fill();
+    }
+    pctx.globalAlpha = 1;
+    for (var k = 0; k < 46; k += 1) {
+      var px = rand() * SCENE_W, py = rand() * CALC_H, r = rand() * 1 + 0.3;
+      pctx.beginPath();
+      pctx.arc(px, py, r, 0, Math.PI * 2);
+      pctx.fillStyle = 'rgba(255,255,255,' + (0.12 + rand() * 0.18) + ')';
+      pctx.fill();
+    }
+  }());
+  var sceneCtx = scene.getContext('2d');
+  var sceneImg = sceneCtx.getImageData(0, 0, SCENE_W, CALC_H);
+  var sceneBuf = sceneImg.data;
+
+  function sampleScene(sx, sy) {
+    sx = sx < 0 ? 0 : (sx > SCENE_W - 1 ? SCENE_W - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > CALC_H - 1 ? CALC_H - 1 : sy);
+    var i = (Math.round(sy) * SCENE_W + Math.round(sx)) * 4;
+    return [sceneBuf[i], sceneBuf[i + 1], sceneBuf[i + 2]];
+  }
+
+  var BASE_X0 = 40, BASE_Y0 = 25, BASE_X1 = 120, BASE_Y1 = 75;
+  var EDGE_BAND = 12;
+  var GLASS_EDGE_BEND = 5;
+  var GLASS_ELASTIC_RETURN_MS = 180;
+  var GLASS_ELASTIC_OSC_MS = 130;
+  var DRAG_MAX_X = 26, DRAG_MAX_Y = 14;
+  var PERIOD_MS = 2000;
+  var DRAG_PHASE_MS = 550;
+
+  function boxEdgeSample(x, y, x0, y0, x1, y1, band) {
+    var dl = x - x0, dr = x1 - x, dt = y - y0, db = y1 - y;
+    var dmin = Math.min(dl, dr, dt, db);
+    if (dmin >= band || dmin < 0) return { f: 0, nx: 0, ny: 0 };
+    var nx = 0, ny = 0;
+    if (dl < band) nx -= (band - dl);
+    if (dr < band) nx += (band - dr);
+    if (dt < band) ny -= (band - dt);
+    if (db < band) ny += (band - db);
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len > 0.0001) { nx /= len; ny /= len; }
+    return { f: Math.max(0, (band - dmin) / band), nx: nx, ny: ny };
+  }
+
+  function elasticSpring(rt) {
+    var decay = Math.exp(-rt / GLASS_ELASTIC_RETURN_MS);
+    var osc = Math.cos((2 * Math.PI / GLASS_ELASTIC_OSC_MS) * rt);
+    return decay * osc;
+  }
+
+  function virtualOffset(t) {
+    var cyc = t % PERIOD_MS;
+    if (cyc < DRAG_PHASE_MS) {
+      var p = cyc / DRAG_PHASE_MS;
+      var e = 1 - Math.pow(1 - p, 3);
+      return { x: e * DRAG_MAX_X, y: e * DRAG_MAX_Y };
+    }
+    var rt = cyc - DRAG_PHASE_MS;
+    var k = elasticSpring(rt);
+    return { x: DRAG_MAX_X * k, y: DRAG_MAX_Y * k };
+  }
+
+  var out = document.createElement('canvas');
+  out.width = CALC_W; out.height = CALC_H;
+  var outCtx = out.getContext('2d');
+  var outImg = outCtx.createImageData(CALC_W, CALC_H);
+  var outBuf = outImg.data;
+
+  var dragging = false;
+  var dragStartPt = { x: 0, y: 0 };
+  var dragOffset = { x: 0, y: 0 };
+  var releaseAt = -Infinity;
+  var releasedOffset = { x: 0, y: 0 };
+
+  function currentOffset(t) {
+    if (dragging) return dragOffset;
+    var rt = t - releaseAt;
+    if (rt < GLASS_ELASTIC_RETURN_MS * 5) {
+      var k = elasticSpring(rt);
+      return { x: releasedOffset.x * k, y: releasedOffset.y * k };
+    }
+    return virtualOffset(t);
+  }
+
+  function renderFrame(t) {
+    var off = currentOffset(t);
+    var mag = Math.sqrt(off.x * off.x + off.y * off.y);
+    var stretch = Math.min(0.35, mag / 44);
+    var ux = mag > 0.001 ? off.x / mag : 0;
+    var uy = mag > 0.001 ? off.y / mag : 0;
+    var cx = (BASE_X0 + BASE_X1) / 2 + off.x;
+    var cy = (BASE_Y0 + BASE_Y1) / 2 + off.y;
+    var halfW = ((BASE_X1 - BASE_X0) / 2) * (1 + stretch * Math.abs(ux));
+    var halfH = ((BASE_Y1 - BASE_Y0) / 2) * (1 + stretch * Math.abs(uy));
+    var x0 = cx - halfW, x1 = cx + halfW, y0 = cy - halfH, y1 = cy + halfH;
+    var idx = 0;
+    for (var y = 0; y < CALC_H; y += 1) {
+      for (var x = 0; x < CALC_W; x += 1) {
+        var rgb;
+        if (x >= x0 && x <= x1 && y >= y0 && y <= y1) {
+          var e = boxEdgeSample(x, y, x0, y0, x1, y1, EDGE_BAND);
+          var bendMag = e.f * GLASS_EDGE_BEND;
+          var sx = (x - off.x * 0.35) - e.nx * bendMag;
+          var sy = (y - off.y * 0.35) - e.ny * bendMag;
+          rgb = sampleScene(sx, sy);
+          var shine = e.f * 20;
+          rgb = [Math.min(255, rgb[0] + shine), Math.min(255, rgb[1] + shine), Math.min(255, rgb[2] + shine)];
+        } else {
+          rgb = sampleScene(x, y);
+        }
+        outBuf[idx] = rgb[0]; outBuf[idx + 1] = rgb[1]; outBuf[idx + 2] = rgb[2]; outBuf[idx + 3] = 255;
+        idx += 4;
+      }
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(t) {
+    lastElapsed = t;
+    renderFrame(t);
+    outCtx.putImageData(outImg, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(out, 0, 0, CALC_W, CALC_H, 0, 0, cw, ch);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) { root.classList.remove('is-demo'); }
+
+  function toGrid(e) {
+    var r = wrap.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) / r.width * CALC_W,
+      y: (e.clientY - r.top) / r.height * CALC_H
+    };
+  }
+
+  wrap.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    dragStartPt = toGrid(e);
+    dragOffset = { x: 0, y: 0 };
+    wrap.setPointerCapture(e.pointerId);
+    if (reduce) draw(lastElapsed);
+  });
+  wrap.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var g = toGrid(e);
+    dragOffset = {
+      x: Math.max(-DRAG_MAX_X * 1.4, Math.min(DRAG_MAX_X * 1.4, g.x - dragStartPt.x)),
+      y: Math.max(-DRAG_MAX_Y * 1.4, Math.min(DRAG_MAX_Y * 1.4, g.y - dragStartPt.y))
+    };
+    if (reduce) draw(lastElapsed);
+  });
+  function release(t) {
+    if (!dragging) return;
+    dragging = false;
+    releasedOffset = dragOffset;
+    releaseAt = t;
+    if (reduce) draw(t);
+  }
+  wrap.addEventListener('pointerup', function () { release(lastElapsed); });
+  wrap.addEventListener('pointerleave', function () { release(lastElapsed); });
+  wrap.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowLeft') dragOffset = { x: -DRAG_MAX_X, y: 0 };
+    else if (e.key === 'ArrowRight') dragOffset = { x: DRAG_MAX_X, y: 0 };
+    else if (e.key === 'ArrowUp') dragOffset = { x: 0, y: -DRAG_MAX_Y };
+    else if (e.key === 'ArrowDown') dragOffset = { x: 0, y: DRAG_MAX_Y };
+    else moved = false;
+    if (moved) {
+      e.preventDefault();
+      dragging = true;
+      release(lastElapsed);
+    }
+  });
+
+  var lastTs = null;
+  var elapsed = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    elapsed += dt;
+    draw(elapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  if (!reduce) requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

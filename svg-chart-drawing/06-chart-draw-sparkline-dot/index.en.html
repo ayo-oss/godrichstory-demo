@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스파크라인과 종가  pts — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cs is-demo" id="cs">
+  <div class="cs__card">
+    <div class="cs__head">
+      <p class="cs__title">14-Day Visits</p>
+      <div class="cs__row">
+        <!-- 큰 숫자 두 장 — 미리보기에서 반값과 최종값을 steps 컷으로 바꾼다. 실사용은 최종값만 -->
+        <div class="cs__numWrap">
+          <span class="cs__num cs__num--half">554</span>
+          <span class="cs__num cs__num--full">1,108</span>
+        </div>
+        <span class="cs__chip">+12%</span>
+      </div>
+    </div>
+    <div class="cs__plot" id="plot">
+      <svg class="cs__svg" id="chart" viewBox="0 0 320 88" role="img" aria-label="14-day visit sparkline, rising to 1,108 on the last day">
+        <!-- 스파크라인 라인. pathLength=100 이라 dashoffset 애니메이션이 길이와 무관하게 0~100으로 돈다 -->
+        <path class="cs__line" id="line" pathLength="100" d=""></path>
+        <!-- 종가  pts — 실사용(정적)에서는 항상 보인다 -->
+        <circle class="cs__dot" id="endDot" r="4" cx="0" cy="0"></circle>
+      </svg>
+      <!-- 툴팁 — plot 안에서 절대 배치, 가까운  pts 위에 뜬다 -->
+      <div class="cs__tip" id="tip" aria-hidden="true"><span class="cs__tipDay" id="tipDay">Day 14</span><strong class="cs__tipVal" id="tipVal">1,108 visits</strong></div>
+      <!-- 스크린리더용 데이터 표 — 화면에 안 보인다 -->
+      <table class="cs__sr">
+        <caption>14-Day Visits</caption>
+        <thead><tr><th>Day</th><th>Visits (people)</th></tr></thead>
+        <tbody id="srBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+var DATA = [990, 1005, 982, 1018, 1036, 1024, 1052, 1078, 1066, 1092, 1080, 1102, 1094, 1108];
+var NTH_LABEL = 'Day {n}';     // 표의 행 머리 — 언어마다 숫자 자리가 다르다 (en 은 Day 1)
+var DAY_LABEL = 'Day {n}';     // 툴팁의 날짜
+var VW = 320, VH = 88;                       // viewBox 크기
+var PAD_L = 4, PAD_R = 316, TOP = 8, BASE = 78;
+var MIN = 970, MAX = 1120;                   // y 스케일 하한·상한 — 값 범위보다 넉넉히
+var cs = document.getElementById('cs');
+var svg = document.getElementById('chart');
+var line = document.getElementById('line');
+var endDot = document.getElementById('endDot');
+var tip = document.getElementById('tip');
+var tipDay = document.getElementById('tipDay');
+var tipVal = document.getElementById('tipVal');
+
+// 스케일 함수 — 데이터 값 → viewBox 좌표
+function scaleX(i) { return PAD_L + (PAD_R - PAD_L) * i / (DATA.length - 1); }
+function scaleY(v) { return BASE - (BASE - TOP) * (v - MIN) / (MAX - MIN); }
+
+// 스파크라인은 꺾은선 그대로 — 부드러운 곡선보다 추세의 생김새가 먼저 읽힌다
+function buildPath() {
+  return DATA.map(function (v, i) {
+    return (i ? 'L' : 'M') + scaleX(i).toFixed(1) + ',' + scaleY(v).toFixed(1);
+  }).join(' ');
+}
+line.setAttribute('d', buildPath());
+
+// 종가  pts — Day 14 값
+var last = DATA.length - 1;
+endDot.setAttribute('cx', scaleX(last).toFixed(1));
+endDot.setAttribute('cy', scaleY(DATA[last]).toFixed(1));
+
+// 스크린리더용 표 채우기
+var srBody = document.getElementById('srBody');
+DATA.forEach(function (v, i) {
+  var tr = document.createElement('tr');
+  var th = document.createElement('th'); th.setAttribute('scope', 'row'); th.textContent = NTH_LABEL.replace('{n}', i + 1);
+  var td = document.createElement('td'); td.textContent = v;
+  tr.appendChild(th); tr.appendChild(td); srBody.appendChild(tr);
+});
+
+// 툴팁을 i번  pts 위에 놓는다 — viewBox 좌표를 plot 비율로 바꿔 % 로.
+// 오른쪽 끝 점에서 툴팁이 카드 밖으로 나가지 않게 left 는 85% 로 상한
+function placeTip(i) {
+  tip.style.left = Math.min(scaleX(i) / VW * 100, 85) + '%';
+  tip.style.top = (scaleY(DATA[i]) / VH * 100) + '%';
+  tipDay.textContent = DAY_LABEL.replace('{n}', i + 1);
+  tipVal.textContent = DATA[i].toLocaleString() + ' visits';
+}
+placeTip(last);   // 미리보기 툴팁은 종가 위에 떠 있다
+
+// 사람이 조작하면 미리보기 루프를 끄고 가까운 점의 툴팁이 따라온다
+svg.addEventListener('pointermove', function (e) {
+  if (cs.classList.contains('is-demo')) { cs.classList.remove('is-demo'); }
+  var r = svg.getBoundingClientRect();
+  var vx = (e.clientX - r.left) / r.width * VW;   // 화면 좌표 → viewBox 좌표
+  var i = Math.round((vx - PAD_L) / ((PAD_R - PAD_L) / last));
+  i = Math.max(0, Math.min(last, i));
+  placeTip(i);
+  tip.classList.add('is-on');
+});
+svg.addEventListener('pointerleave', function () {
+  tip.classList.remove('is-on');
+  placeTip(last);   // 종가로 돌아간다
+});
+</script>
+</body>
+</html>

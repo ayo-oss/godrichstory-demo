@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>글리프 글리치 조각 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gg" id="gg">
+  <p class="gg__hint">
+    <svg class="gg__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M28 40h84v20H28zM116 40h20v20h-20zM28 76h16v20H28zM64 76h84v20H64zM160 76h40v20h-40zM28 112h56v20H28zM100 112h20v20h-20zM136 112h92v20h-92zM28 148h40v20H28zM80 148h16v20H80zM108 148h80v20h-80zM28 184h120v20H28zM160 184h36v20h-36zM208 184h28v20h-28z"/></g></svg>
+    <span>Change the word and the shards re-cut</span>
+  </p>
+  <div class="gg__field" id="field" role="application" aria-label="Glitch shard playground" tabindex="0">
+    <canvas class="gg__cv" id="cv"></canvas>
+    <b class="gg__badge" aria-hidden="true" id="badge">0 pts</b>
+  </div>
+  <div class="gg__bar">
+    <label class="gg__dial">Word
+      <input type="text" id="word" value="SIGNAL" maxlength="12" spellcheck="false" aria-label="Word">
+    </label>
+    <label class="gg__dial">Seed
+      <input type="number" id="seed" min="1" max="9999" value="7" aria-label="Seed">
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 글리치 조각 — 글자를 픽셀로 뜯어 가로 띠 조각으로 재조립한다.
+// 1) 오프스크린 캔버스에 fillText 로 단어를 그려 getImageData 로 알파 마스크를 뽑는다
+//    (이 데모는 마스크를 다시 오프스크린 '잉크 판'에 그려 띠 단위로 뜯어 쓴다)
+// 2) 잉크 판을 BH개의 가로 띠로 자르고, 매 프레임 띠마다 drawImage 로 제 갈지길 옮겨 붙인다
+//    오프셋 = 사인 흐름 + 행별 Seed 잡음 + 주기마다 크게 튀는 킥
+// 3) RGB 채널 어긋남(같은 띠를 빨강·청록으로 ±2px)을 얹어 찢어지는 순간을 강조한다
+// Seed(mulberry32) 가 행 잡음을 정하므로 같은 Word+같은 시드는 같은 흐름이 나온다.
+var root = document.getElementById('gg');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var wordIn = document.getElementById('word');
+var seedIn = document.getElementById('seed');
+var badge = document.getElementById('badge');
+
+var SW = 252, SH = 108;          // 샘플 해상도 — 판 비율과 같다
+var BH = 3;                       // 띠 높이(px) — 행 단위 조각
+var KICK = 0.8;                   // 크게 튀는 주기(초)
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0;
+var ink = null;                   // 단어를 그린 잉크 판(오프스크린) — 띠의 원본
+var bands = 0;
+var rowNoise = [];
+var targets = 0;
+var t0 = 0, raf = 0;
+
+// 색 — scss 가 파스텔 커스텀 프로퍼티(--g0..--g3)로 내려준 넉 색을 읽어 쓴다
+var css = getComputedStyle(root);
+function hexOf(name) {
+  var v = css.getPropertyValue(name).trim().replace('#', '');
+  if (v.length === 3) v = v.charAt(0) + v.charAt(0) + v.charAt(1) + v.charAt(1) + v.charAt(2) + v.charAt(2);
+  return '#' + v;
+}
+var cols = [hexOf('--g0'), hexOf('--g1'), hexOf('--g2'), hexOf('--g3')];
+
+// 결정적 난수 — Seed 하나가 행 잡음·위상 전부를 정한다
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── 1) 글자 → 알파 마스크 → 잉크 판 ────────────────────────────
+// 잉크 판은 단어를 원하는 파스텔색으로 그려둔 오프스크린 캔버스다. 띠는 여기서 잘린다.
+function buildInk(word) {
+  var off = document.createElement('canvas');
+  off.width = SW; off.height = SH;
+  var oc = off.getContext('2d', { willReadFrequently: true });
+  oc.textAlign = 'center'; oc.textBaseline = 'middle';
+  var fs = 200;
+  oc.font = '900 ' + fs + 'px Arial';
+  var w = oc.measureText(word).width || 1;
+  fs = Math.min(fs * ((SW - 8) / w), SH - 6);       // 폭·높이 안에서 제일 큰 글자
+  oc.font = '900 ' + Math.round(fs) + 'px Arial';
+  oc.fillStyle = '#fff';
+  oc.fillText(word, SW / 2, SH / 2);
+  var data = oc.getImageData(0, 0, SW, SH).data;
+
+  // 잉크 픽셀 수(=목표점) — probe 계약 노출용
+  targets = 0;
+  for (var i = 3; i < data.length; i += 4) if (data[i] > 128) targets++;
+
+  // 알파를 그대로 옮겨 잉크 판을 다시 그린다 — 마스크가 색의 모양을 정한다
+  var plate = document.createElement('canvas');
+  plate.width = SW; plate.height = SH;
+  var pc = plate.getContext('2d');
+  var img = pc.createImageData(SW, SH);
+  var col = [cols[0], cols[1], cols[2], cols[3]];
+  for (var p = 0; p < SW * SH; p++) {
+    var a = data[p * 4 + 3];
+    if (a <= 128) continue;
+    // 세로 위치로 부드럽게 섞인 두 파스텔 — 잉크(아래) → 하늘(위)
+    var mixT = p / SW / SH;
+    img.data[p * 4]     = Math.round(parseInt(col[1].slice(1, 3), 16) * mixT + parseInt(col[0].slice(1, 3), 16) * (1 - mixT));
+    img.data[p * 4 + 1] = Math.round(parseInt(col[1].slice(3, 5), 16) * mixT + parseInt(col[0].slice(3, 5), 16) * (1 - mixT));
+    img.data[p * 4 + 2] = Math.round(parseInt(col[1].slice(5, 7), 16) * mixT + parseInt(col[0].slice(5, 7), 16) * (1 - mixT));
+    img.data[p * 4 + 3] = a;
+  }
+  pc.putImageData(img, 0, 0);
+  return plate;
+}
+
+// ── 2)+(3) Word·시드가 바뀌면 잉크 판과 행 잡음을 다시 만든다 ──
+var word = 'SIGNAL', seed = 7;
+function resample(nextWord, nextSeed) {
+  var w = String(nextWord == null ? word : nextWord).trim().toUpperCase();
+  if (w) word = w;                                  // 빈 문자열이면 직전 값을 유지
+  var s = Math.floor(Number(nextSeed));
+  if (s >= 1) seed = s;
+  ink = buildInk(word);
+  bands = Math.ceil(SH / BH);
+  var rnd = mulberry32(seed);
+  rowNoise = [];
+  for (var y = 0; y < bands; y++) rowNoise.push({ n1: rnd() * 6.2832, n2: rnd() * 6.2832, sp: 0.6 + rnd() * 0.9 });
+  window.__sampleInfo = { targets: targets, particles: bands };
+  badge.textContent = targets + ' pts';
+  if (reduce) {
+    paint(0);                                       // 어긋남 없는 정합 한 장
+  } else {
+    t0 = performance.now();
+  }
+}
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  var d = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+
+// 띠 하나의 x-오프셋 — 사인 흐름(행별 주파수)에 주기 KICK 초마다 샤프한 킥을 섞는다
+function offsetAt(row, t) {
+  var nz = rowNoise[row];
+  var o = Math.sin(t * 2.1 * nz.sp + nz.n1) * 4.6 + Math.sin(t * 3.7 * nz.sp + nz.n2) * 2.2;
+  // 킥 — KICK 초 주기의 좁은 창(0.09s)에서 행 절반이 크게 튄다(시드가 행을 가른다)
+  var ph = (t % KICK) / KICK;
+  if (ph < 0.09) {
+    var kq = Math.sin((ph / 0.09) * Math.PI);
+    if ((row * 2654435761 + seed) % 2 === 0) o += (nz.n1 > 3.14 ? 1 : -1) * 16 * kq;
+  }
+  return o;
+}
+
+// 킥이 얼마나 임박했는지(0~1) — 잡음 대시가 킥 직전 밝아진다
+function kickNear(t) {
+  var ph = (t % KICK) / KICK;
+  return ph < 0.09 ? Math.sin((ph / 0.09) * Math.PI) : 0;
+}
+
+function paint(t) {
+  ctx.clearRect(0, 0, W, H);
+  if (!ink) return;
+  var sx = W / SW, sy = H / SH;
+  var kn = kickNear(t);
+  ctx.imageSmoothingEnabled = false;
+  // CRT 스윕 — 주사선 하나가 판을 1.33초에 한 번 훑고 지나간다(위→아래, 두 번째는 아래→위).
+  // 잉크를 옅게 깐 그라디언트 띠라 화면 전체가 2초 안에 최소 한 번은 숨쉰다.
+  var sw1 = ((t * 0.75) % 1) * (SH + 36) - 18;
+  var sw2 = SH - (((t * 0.55) + 0.37) % 1) * (SH + 36) - 18;
+  var gr = ctx.createLinearGradient(0, (sw1 - 9) * sy, 0, (sw1 + 9) * sy);
+  gr.addColorStop(0, 'rgba(23,20,26,0)');
+  gr.addColorStop(0.5, 'rgba(23,20,26,' + (0.07 + 0.03 * kn) + ')');
+  gr.addColorStop(1, 'rgba(23,20,26,0)');
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, (sw1 - 9) * sy, W, 18 * sy);
+  var gr2 = ctx.createLinearGradient(0, (sw2 - 7) * sy, 0, (sw2 + 7) * sy);
+  gr2.addColorStop(0, 'rgba(23,20,26,0)');
+  gr2.addColorStop(0.5, 'rgba(23,20,26,0.05)');
+  gr2.addColorStop(1, 'rgba(23,20,26,0)');
+  ctx.fillStyle = gr2;
+  ctx.fillRect(0, (sw2 - 7) * sy, W, 14 * sy);
+  // 잡음 대시 — 띠마다 시드가 정한 자리·속도로 흐르는 짧은 신호 표시. 띠와 같은 오프셋으로 밀린다
+  for (var d = 0; d < bands; d++) {
+    var dnz = rowNoise[d];
+    var oD = offsetAt(d, t) * 0.5;
+    var dx1 = ((dnz.n1 / 6.2832) * SW + t * (6 + dnz.sp * 10)) % (SW + 8) - 4;
+    var dx2 = ((dnz.n2 / 6.2832) * SW + t * (4 + dnz.sp * 6)) % (SW + 8) - 4;
+    ctx.globalAlpha = 0.16 + 0.16 * kn;
+    ctx.fillStyle = cols[0];
+    ctx.fillRect((dx1 + oD) * sx, (d * BH) * sy, 5.5 * sx, BH * sy * 0.7);
+    ctx.globalAlpha = 0.10 + 0.12 * kn;
+    ctx.fillStyle = cols[1];
+    ctx.fillRect((dx2 + oD) * sx, (d * BH + BH * 0.4) * sy, 3.4 * sx, BH * sy * 0.5);
+  }
+  ctx.globalAlpha = 1;
+  for (var row = 0; row < bands; row++) {
+    var o = offsetAt(row, t);
+    var y = row * BH;
+    var drawY = y + Math.sin(t * 1.6 + row * 0.35) * 1.2;   // 띠가 위아래로도 흔들린다
+    // 본띠 — 잉크 판의 이 행을 오프셋에 그대로 찍는다 (drawImage)
+    ctx.drawImage(ink, 0, y, SW, BH, (o * 1.0) * sx, drawY * sy, SW * sx, BH * sy + 0.5);
+    // RGB 어긋남 — 크게 튀는 순간만 복숭아·민트 고스트를 ±2.2px 에 깔아댄다
+    var aa = Math.abs(o);
+    if (aa > 4.5) {
+      var g = Math.min((aa - 4.5) / 8, 1) * 0.6;
+      ctx.globalAlpha = g;
+      ctx.drawImage(ink, 0, y, SW, BH, (o * 1.0 - 2.2) * sx, drawY * sy, SW * sx, BH * sy + 0.5);
+      ctx.drawImage(ink, 0, y, SW, BH, (o * 1.0 + 2.2) * sx, drawY * sy, SW * sx, BH * sy + 0.5);
+      ctx.globalAlpha = 1;
+    }
+  }
+  ctx.imageSmoothingEnabled = true;
+}
+
+function frame(now) {
+  paint((now - t0) / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+wordIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+seedIn.addEventListener('input', function () { resample(wordIn.value, seedIn.value); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(0); });
+
+fit();
+resample(wordIn.value, seedIn.value);
+if (reduce) {
+  root.classList.add('is-still');                    // 루프 없이 정합 한 장
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

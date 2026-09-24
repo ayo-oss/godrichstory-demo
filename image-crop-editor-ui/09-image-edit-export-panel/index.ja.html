@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>保存オプション — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ep is-demo" id="ep">
+  <div class="ep__frame">
+    <canvas class="ep__view" id="view" width="320" height="200" role="img" aria-label="書き出す写真"></canvas>
+  </div>
+  <div class="ep__panel">
+    <div class="ep__fmts" id="fmts">
+      <span class="ep__ring" aria-hidden="true"></span>
+      <button type="button" class="ep__f" data-m="image/jpeg" aria-pressed="true">JPG</button>
+      <button type="button" class="ep__f" data-m="image/png" aria-pressed="false">PNG</button>
+      <button type="button" class="ep__f" data-m="image/webp" aria-pressed="false">WEBP</button>
+    </div>
+    <div class="ep__q">
+      <span class="ep__lab" id="qLab">画質</span>
+      <span class="ep__track" id="track" role="slider" tabindex="0" aria-labelledby="qLab" aria-valuemin="0.3" aria-valuemax="1" aria-valuenow="0.8"><span class="ep__thumb" id="thumb"></span></span>
+    </div>
+    <p class="ep__size">
+      <span class="ep__lab">予想容量</span>
+      <span class="ep__num">
+        <span class="ep__real" id="size">— KB</span>
+        <span class="ep__demo ep__demo--a" aria-hidden="true">5.8 KB</span>
+        <span class="ep__demo ep__demo--b" aria-hidden="true">12.4 KB</span>
+        <span class="ep__demo ep__demo--c" aria-hidden="true">3.3 KB</span>
+        <span class="ep__demo ep__demo--d" aria-hidden="true">2.4 KB</span>
+      </span>
+    </p>
+    <button type="button" class="ep__go" id="goBtn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" class="ep__ico" aria-hidden="true"><g fill="currentColor"><path d="M216 48v160H40V48a16 16 0 0 1 16-16h144a16 16 0 0 1 16 16" opacity=".2"/><path d="M224 144v64a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8v-64a8 8 0 0 1 16 0v56h160v-56a8 8 0 0 1 16 0m-101.66 5.66a8 8 0 0 0 11.32 0l40-40a8 8 0 0 0-11.32-11.32L136 124.69V32a8 8 0 0 0-16 0v92.69L93.66 98.34a8 8 0 0 0-11.32 11.32Z"/></g></svg><span>書き出す</span></button>
+    <p class="ep__done" id="done">ファイルの準備ができました</p>
+  </div>
+</div>
+</main>
+<script>
+var ep = document.getElementById('ep');
+var view = document.getElementById('view');
+var track = document.getElementById('track');
+var thumb = document.getElementById('thumb');
+var sizeEl = document.getElementById('size');
+var doneEl = document.getElementById('done');
+var ring = document.querySelector('.ep__ring');
+var formats = document.querySelectorAll('.ep__f');
+var mime = 'image/jpeg', quality = 0.8;
+
+// 가짜 사진 — 외부 파일 없이 그라디언트와 도형으로 합성한다. 필터·히스토그램이 보이도록 대비를 세게 준다
+function paintPhoto(c, w, h) {
+  var sky = c.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#2f6df6'); sky.addColorStop(0.55, '#ff9ebb'); sky.addColorStop(1, '#ffd23f');
+  c.fillStyle = sky; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#fff7e6';
+  c.beginPath(); c.arc(w * 0.74, h * 0.28, h * 0.13, 0, Math.PI * 2); c.fill();
+  // 곧은 수평선 하나 — 기울기 보정이 눈에 보이려면 비교할 직선이 있어야 한다
+  c.fillStyle = 'rgba(23, 20, 26, 0.5)'; c.fillRect(0, Math.round(h * 0.66), w, 2);
+  c.fillStyle = '#17141a';
+  c.beginPath(); c.moveTo(0, h); c.lineTo(w * 0.34, h * 0.36); c.lineTo(w * 0.62, h); c.closePath(); c.fill();
+  c.fillStyle = '#c2361a';
+  c.beginPath(); c.moveTo(w * 0.46, h); c.lineTo(w * 0.78, h * 0.52); c.lineTo(w, h); c.closePath(); c.fill();
+  for (var i = 0; i < 6; i++) { c.fillStyle = i % 2 ? '#fff7e6' : '#17141a'; c.fillRect(w * (0.08 + i * 0.07), h * (0.14 + (i % 3) * 0.06), 7, 7); }
+}
+
+// 용량은 짐작하지 않는다 — 실제로 파일을 만들어 보고 그 길이를 읽는다.
+// PNG 는 무손실이라 quality 인자를 아예 무시한다. 이 사진 320x200 기준 실측:
+// JPG 0.8 은 5.8 KB, PNG 는 12.4 KB, WEBP 0.8 은 3.3 KB, WEBP 0.5 는 2.4 KB
+// 고른 형식을 브라우저가 모르면 규격상 조용히 PNG 가 나온다 — image/webp 는 Safari 에 아직 없다
+// (caniuse 81.11%). blob.type 을 견줘 다르면 실제로 나온 형식을 같이 적는다
+function label(blob) {
+  if (!blob) { return '— KB'; }
+  return (blob.size / 1024).toFixed(1) + ' KB' + (blob.type === mime ? '' : ' · ' + blob.type);
+}
+
+function estimate() {
+  view.toBlob(function (blob) { sizeEl.textContent = label(blob); }, mime, quality);
+}
+
+function refresh() {
+  thumb.style.left = ((quality - 0.3) / 0.7 * 100) + '%';
+  track.setAttribute('aria-valuenow', quality.toFixed(2));
+  track.setAttribute('aria-valuetext', quality.toFixed(2));
+  track.setAttribute('aria-disabled', mime === 'image/png' ? 'true' : 'false');
+  estimate();
+}
+
+for (var i = 0; i < formats.length; i++) {
+  (function (index) {
+    formats[index].addEventListener('click', function () {
+      mime = formats[index].getAttribute('data-m');
+      for (var j = 0; j < formats.length; j++) { formats[j].setAttribute('aria-pressed', j === index ? 'true' : 'false'); }
+      ring.style.transform = 'translateX(' + index * 100 + '%)';
+      ep.classList.remove('is-demo');
+      doneEl.hidden = true;
+      refresh();
+    });
+  })(i);
+}
+
+function setQuality(next) {
+  quality = Math.max(0.3, Math.min(1, Math.round(next * 100) / 100));
+  ep.classList.remove('is-demo');
+  doneEl.hidden = true;
+  refresh();
+}
+function fromPointer(e) {
+  var r = track.getBoundingClientRect();
+  setQuality((e.clientX - r.left) / r.width * 0.7 + 0.3);
+}
+track.addEventListener('pointerdown', function (e) { track.setPointerCapture(e.pointerId); fromPointer(e); });
+track.addEventListener('pointermove', function (e) { if (e.buttons) { fromPointer(e); } });
+// 화살표 0.05, Shift 와 함께면 0.2
+track.addEventListener('keydown', function (e) {
+  var step = e.shiftKey ? 0.2 : 0.05;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); setQuality(quality - step); }
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); setQuality(quality + step); }
+});
+
+// 데모에서는 내려받기 대신 만들어진 파일의 길이만 보여준다
+document.getElementById('goBtn').addEventListener('click', function () {
+  ep.classList.remove('is-demo');
+  view.toBlob(function (blob) {
+    sizeEl.textContent = label(blob);
+    doneEl.hidden = false;
+  }, mime, quality);
+});
+
+doneEl.hidden = true;
+paintPhoto(view.getContext('2d'), view.width, view.height);
+refresh();
+</script>
+</body>
+</html>

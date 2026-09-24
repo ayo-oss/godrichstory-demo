@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>昼夜ヒーロー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dn" id="dn">
+  <p class="dn__hint">ポインターの縦位置が昼夜の進行度(t)を決めます — 空と窓はtで毎フレーム補間、太陽→月はtransitionで切り替わります</p>
+  <div class="dn__field" role="application" tabindex="0" aria-label="ポインターを上下に動かすと等角の街が昼から夜に変わる場面" id="field">
+    <div class="dn__sky" id="sky">
+      <div class="dn__orb dn__orb--sun" id="sun"></div>
+      <div class="dn__orb dn__orb--moon" id="moon"></div>
+    </div>
+    <div class="dn__world" id="world"></div>
+  </div>
+  <p class="dn__meta">夜の進行度  <b id="pct">0</b>%</p>
+</div>
+</main>
+<script>
+// 낮밤 히어로(09) — 포인터 세로 위치 → 낮밤 진행도 t(0~1). 하늘색·창문 밝기는 t 로
+// 매 프레임 직접 보간(JS lerp, transition 없이 매끄럽다). 해↔달 교체만 t=0.5 문턱에서
+// 클래스를 토글해 진짜 CSS transition(opacity)으로 크로스페이드한다. 입력이 없으면
+// requestAnimationFrame 루프가 자체 경로로 낮밤을 순환시킨다(자동 시연).
+(function () {
+  var root = document.getElementById('dn');
+  var field = document.getElementById('field');
+  var sky = document.getElementById('sky');
+  var world = document.getElementById('world');
+  var sun = document.getElementById('sun');
+  var moon = document.getElementById('moon');
+  var pctEl = document.getElementById('pct');
+  if (!root || !field || !sky || !world || !sun || !moon || !pctEl) return;
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function mat4RotateX(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  }
+  function mat4RotateZ(deg) {
+    var r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+  function mat4Mul(a, b) {
+    var out = new Array(16);
+    for (var col = 0; col < 4; col++) {
+      for (var row = 0; row < 4; row++) {
+        var sum = 0;
+        for (var k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+  function mat4ToCss(m) {
+    var s = '';
+    for (var i = 0; i < m.length; i++) s += (i ? ',' : '') + m[i].toFixed(6);
+    return 'matrix3d(' + s + ')';
+  }
+
+  world.style.transform = mat4ToCss(mat4Mul(mat4RotateX(-35.264), mat4RotateZ(45)));
+
+  var mm = window.matchMedia('(max-width: 340px)').matches;
+  var N = 2;
+  var TILE_W = mm ? 32 : 40, TILE_H = mm ? 16 : 20;
+  var wins = [];
+  for (var row = 0; row < N; row++) {
+    for (var col = 0; col < N; col++) {
+      var x = (col - row) * TILE_W / 2;
+      var y = (col + row) * TILE_H / 2;
+      var bld = document.createElement('div');
+      bld.className = 'dn__bld';
+      bld.style.setProperty('--tx', x.toFixed(2) + 'px');
+      bld.style.setProperty('--ty', y.toFixed(2) + 'px');
+      bld.style.zIndex = String(Math.round((col + row) * 10));
+      var win = document.createElement('div');
+      win.className = 'dn__win';
+      bld.appendChild(win);
+      world.appendChild(bld);
+      wins.push(win);
+    }
+  }
+
+  // 낮 하늘색 → 밤 하늘색 (RGB 보간, day.length === night.length)
+  var DAY = [91, 140, 248];     // $subject-blue-light 근사
+  var NIGHT = [23, 20, 26];     // $stage-ink
+
+  var targetT = 0, curT = 0;
+  var lastInput = -Infinity;
+  var IDLE_MS = 1100;
+
+  field.addEventListener('pointermove', function (ev) {
+    var rect = field.getBoundingClientRect();
+    var ny = (ev.clientY - rect.top) / rect.height;
+    targetT = clamp(ny, 0, 1);
+    lastInput = performance.now();
+  });
+  field.addEventListener('pointerleave', function () { lastInput = -Infinity; });
+
+  var wasNight = false;
+
+  function paint(now, t) {
+    if (now - lastInput > IDLE_MS) targetT = (1 - Math.cos(t * 3)) / 2;
+    curT += (targetT - curT) * 0.14;
+
+    var r = Math.round(lerp(DAY[0], NIGHT[0], curT));
+    var g = Math.round(lerp(DAY[1], NIGHT[1], curT));
+    var b = Math.round(lerp(DAY[2], NIGHT[2], curT));
+    sky.style.backgroundColor = 'rgb(' + r + ',' + g + ',' + b + ')';
+
+    for (var i = 0; i < wins.length; i++) {
+      wins[i].style.opacity = String((0.15 + curT * 0.85).toFixed(2));
+    }
+
+    var isNight = curT > 0.5;
+    if (isNight !== wasNight) {
+      field.classList.toggle('is-night', isNight);
+      wasNight = isNight;
+    }
+
+    var orbY = mm ? 60 : 76;
+    var ox = (curT - 0.5) * (mm ? 120 : 150);
+    var oy = -Math.cos(curT * Math.PI) * orbY;
+    sun.style.transform = 'translate3d(' + ox.toFixed(1) + 'px,' + oy.toFixed(1) + 'px,0)';
+    moon.style.transform = 'translate3d(' + ox.toFixed(1) + 'px,' + oy.toFixed(1) + 'px,0)';
+
+    pctEl.textContent = String(Math.round(curT * 100));
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    targetT = 0.6; curT = 0.6;
+    paint(0, 0.3);
+    root.classList.add('is-still');
+  } else {
+    var start = performance.now();
+    (function step(now) {
+      paint(now, (now - start) / 1000);
+      requestAnimationFrame(step);
+    })(start);
+  }
+})();
+</script>
+</body>
+</html>

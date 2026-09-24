@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カンバンカード — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kb">
+  <p class="kb__hint">ポインターYをカードの中点と比較して挿入位置を逆算し、カラムが変わる瞬間だけ移動します</p>
+  <div class="kb__board" id="kbBoard">
+    <section class="kb__col" id="kbColA" aria-label="未着手">
+      <h2 class="kb__title">未着手 <b class="kb__count" id="kbCountA">3</b></h2>
+      <ul class="kb__cards" id="kbListA">
+        <li class="kb__card"><span class="kb__tag kb__tag--b">設計</span><span class="kb__txt">リスト構造の設計</span></li>
+        <li class="kb__card"><span class="kb__tag kb__tag--b">設計</span><span class="kb__txt">トークン整理</span></li>
+        <li class="kb__card"><span class="kb__tag kb__tag--m">作業</span><span class="kb__txt">ドラッグの実装</span></li>
+      </ul>
+    </section>
+    <section class="kb__col" id="kbColB" aria-label="進行中">
+      <h2 class="kb__title">進行中 <b class="kb__count" id="kbCountB">2</b></h2>
+      <ul class="kb__cards" id="kbListB">
+        <li class="kb__card"><span class="kb__tag kb__tag--m">作業</span><span class="kb__txt">インデックス計算</span></li>
+        <li class="kb__card"><span class="kb__tag kb__tag--o">検収</span><span class="kb__txt">計測値の確認</span></li>
+      </ul>
+    </section>
+  </div>
+  <p class="kb__meta"><b class="kb__state" id="kbState">insert 2</b><span class="kb__unit" id="kbCol">未着手カラム</span></p>
+</div>
+</main>
+<script>
+// 칸반 카드(02) — 포인터가 어느 컬럼의 getBoundingClientRect 안에 있는지로 대상 컬럼을 찾고(findColumn),
+// 그 カラム 안 카드들의 y 중점과 포인터 y 를 비교해 삽입 인덱스를 역산한다(insertIndex). 컬럼이 실제로
+// 바뀌는 순간에만 appendChild 로 카드를 옮기고, 같은 カラム 안에서는 미리보기 삽입선만 움직인다.
+// 자동 시연은 고정 시나리오: 카드를 뽑아 다른 컬럼의 계산된 위치에 놓기를 2초 주기로 반복한다.
+(function () {
+  var colA = document.getElementById('kbColA');
+  var colB = document.getElementById('kbColB');
+  var listA = document.getElementById('kbListA');
+  var listB = document.getElementById('kbListB');
+  var countA = document.getElementById('kbCountA');
+  var countB = document.getElementById('kbCountB');
+  var stateEl = document.getElementById('kbState');
+  var colEl = document.getElementById('kbCol');
+  if (!colA || !colB || !listA || !listB || !countA || !countB || !stateEl || !colEl) return;
+
+  var COLS = [colA, colB];
+  var NAMES = ['未着手', '進行中'];
+
+  // カラム rects 캐시 — 시연 시나리오마다 재측정
+  function findColumn(x) {
+    for (var i = 0; i < COLS.length; i++) {
+      var r = COLS[i].getBoundingClientRect();
+      if (x >= r.left && x <= r.right) return i;
+    }
+    return -1;
+  }
+
+  // 삽입 인덱스 역산 — 카드 y 중점과 포인터 y 비교
+  function insertIndex(colList, y) {
+    var cards = colList.children;
+    for (var i = 0; i < cards.length; i++) {
+      var r = cards[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) return i;
+    }
+    return cards.length;
+  }
+
+  function refreshCounts() {
+    countA.textContent = String(listA.children.length);
+    countB.textContent = String(listB.children.length);
+  }
+
+  // 실제 이동 — 컬럼이 바뀔 때만 호출. FLIP: 이동 전 모든 카드 좌표를 재고 이동 후 차를 되돌렸다가 푼다
+  function moveCard(card, fromList, toList, index) {
+    var all = Array.prototype.slice.call(document.querySelectorAll('.kb__card'));
+    var first = all.map(function (c) { return c.getBoundingClientRect(); });
+    var target = toList.children[index] || null;
+    toList.insertBefore(card, target);
+    refreshCounts();
+    all.forEach(function (c, i) {
+      var r = c.getBoundingClientRect();
+      var dx = first[i].left - r.left, dy = first[i].top - r.top;
+      if (dx !== 0 || dy !== 0) {
+        c.style.transition = 'none';
+        c.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        requestAnimationFrame(function () {
+          c.style.transition = 'transform 260ms cubic-bezier(.2,.8,.2,1)';
+          c.style.transform = 'translate(0,0)';
+        });
+      }
+    });
+  }
+
+  // 미리보기 삽입선 — 같은 カラム 안에서 포인터 y 가 가리키는 칸
+  function previewLine(card, y) {
+    var list = card.parentElement;
+    if (!list) return;
+    var idx = insertIndex(list, y);
+    stateEl.textContent = 'insert ' + idx;
+    colEl.textContent = (list === listA ? NAMES[0] : NAMES[1]) + ' カラム';
+    var old = list.querySelector('.kb__line');
+    if (old) old.parentElement.removeChild(old);
+    var line = document.createElement('li');
+    line.className = 'kb__line';
+    var target = list.children[idx] || null;
+    list.insertBefore(line, target);
+  }
+
+  // 사람 조작 — 실제 포인터 ドラッグ: pointerdown 으로 캡처, pointermove 로 삽입선을 따라가고,
+  // pointerup 에서 findColumn+insertIndex 로 역산한 자리에 moveCard 를 부른다(같은 계산 경로).
+  var dragCard = null;
+  function onPointerDown(e) {
+    var card = e.target.closest('.kb__card');
+    if (!card) return;
+    stop();
+    dragCard = card;
+    card.setPointerCapture(e.pointerId);
+    card.classList.add('kb__card--drag');
+  }
+  function onPointerMove(e) {
+    if (!dragCard) return;
+    var ci = findColumn(e.clientX);
+    var list = ci === 1 ? listB : listA;
+    previewLine(dragCard, e.clientY);
+    if (list !== dragCard.parentElement) {
+      var idx = insertIndex(list, e.clientY);
+      var target = list.children[idx] || null;
+      list.insertBefore(dragCard, target);
+      refreshCounts();
+    }
+  }
+  function onPointerUp(e) {
+    if (!dragCard) return;
+    var card = dragCard;
+    dragCard = null;
+    card.classList.remove('kb__card--drag');
+    var list = card.parentElement;
+    var idx = insertIndex(list, e.clientY);
+    moveCard(card, list, list, Math.min(idx, list.children.length - 1));
+    clearLines();
+  }
+  colA.addEventListener('pointerdown', onPointerDown);
+  colB.addEventListener('pointerdown', onPointerDown);
+  colA.addEventListener('pointermove', onPointerMove);
+  colB.addEventListener('pointermove', onPointerMove);
+  colA.addEventListener('pointerup', onPointerUp);
+  colB.addEventListener('pointerup', onPointerUp);
+  colA.addEventListener('pointercancel', onPointerUp);
+  colB.addEventListener('pointercancel', onPointerUp);
+
+  // 클릭(탭)도 반대 컬럼의 중점 위치로 옮기는 대체 경로로 남긴다(포인터 없는 환경 대비)
+  function onCardClick(e) {
+    if (dragCard) return;
+    stop();
+    var card = e.target.closest('.kb__card');
+    if (!card) return;
+    var r = card.getBoundingClientRect();
+    var toOther = card.parentElement === listA ? listB : listA;
+    var idx = insertIndex(toOther, r.top + r.height / 2);
+    moveCard(card, card.parentElement, toOther, idx);
+  }
+  colA.addEventListener('click', onCardClick);
+  colB.addEventListener('click', onCardClick);
+
+  // 자동 시연 — 시나리오: A2 를 뽑아 B 의 계산 인덱스에, B1 을 A 로, 되돌리기. 2초 루프.
+  var playing = true;
+  function stop() { playing = false; }
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function step1() {
+    var card = listA.children[1];
+    if (!card) return;
+    // カラム rect 를 다시 재서 목표 y 는 B カラム 세로 중간
+    var rb = colB.getBoundingClientRect();
+    var y = rb.top + rb.height / 2;
+    previewLine(card, y);
+    var idx = insertIndex(listB, y);
+    moveCard(card, listA, listB, idx);
+  }
+  function step2() {
+    var card = listB.children[0];
+    if (!card) return;
+    var ra = colA.getBoundingClientRect();
+    var y = ra.top + ra.height / 2;
+    previewLine(card, y);
+    var idx = insertIndex(listA, y);
+    moveCard(card, listB, listA, idx);
+  }
+  function clearLines() {
+    document.querySelectorAll('.kb__line').forEach(function (l) {
+      l.parentElement.removeChild(l);
+    });
+  }
+
+  if (reduce) {
+    step1();
+    clearLines();
+  } else {
+    var seq = [
+      { at: 0, fn: step1 },
+      { at: 660, fn: clearLines },
+      { at: 1000, fn: step2 },
+      { at: 1660, fn: clearLines }
+    ];
+    var loopStart = performance.now();
+    (function tick(now) {
+      var t = (now - loopStart) % 2000;
+      seq.forEach(function (s) {
+        if (t >= s.at && t < s.at + 90 && !s.done) { s.fn(); s.done = true; }
+        if (t < s.at) s.done = false;
+      });
+      requestAnimationFrame(tick);
+    })(loopStart);
+  }
+})();
+</script>
+</body>
+</html>

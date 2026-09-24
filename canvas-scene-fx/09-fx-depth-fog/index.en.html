@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depth fog scene demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="df" id="df">
+  <p class="df__hint">
+    <svg class="df__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 100a68 68 0 0 1-68 68H76a44 44 0 1 1 14.2-85.66v.11A68.06 68.06 0 0 1 224 100" opacity=".2"/><path d="M120 208H72a8 8 0 0 1 0-16h48a8 8 0 0 1 0 16m64-16h-24a8 8 0 0 0 0 16h24a8 8 0 0 0 0-16m-24 32h-56a8 8 0 0 0 0 16h56a8 8 0 0 0 0-16m72-124a76.08 76.08 0 0 1-76 76H76a52 52 0 0 1 0-104a53 53 0 0 1 8.92.76A76.08 76.08 0 0 1 232 100m-16 0a60.06 60.06 0 0 0-120-3.54a8 8 0 0 1-16-.92q.21-3.66.77-7.23A38 38 0 0 0 76 88a36 36 0 0 0 0 72h80a60.07 60.07 0 0 0 60-60"/></g></svg>
+    <span>Raise the fog density and the far ridges melt into the sky</span>
+  </p>
+  <div class="df__field">
+    <canvas class="df__cv" id="cv"></canvas>
+  </div>
+  <div class="df__bar">
+    <label class="df__dial">Fog density
+      <input type="range" id="fog" min="10" max="60" step="1" value="24" aria-label="Fog density">
+      <b class="df__val" id="fogVal">×2.4</b>
+    </label>
+  </div>
+</div>
+</main>
+<script>
+// 깊이 안개 씬 — 능선 실루엣 여섯 겹을 거리순으로 뒤에서 앞으로 그린다. 각 능선은 시드 고정
+// 노이즈로 미리 계산한 봉우리 점렬(Path2D)이고, 거리별 안개는 지수 혼합이다:
+// 그 층이 남길 대비 t = exp(-거리/밀도). 멀수록 하늘색에 녹아 대비가 사라지고, 앞쪽은 어둡고
+// 대비가 강하며 서로 다른 속도로 가로 흘러(시차) 같은 색 도형 여섯 개가 깊이로 읽힌다.
+var root = document.getElementById('df');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var fogIn = document.getElementById('fog');
+var fogOut = document.getElementById('fogVal');
+
+var css = getComputedStyle(root);
+function v(n) { return css.getPropertyValue(n).trim(); }
+var SKY0 = v('--sky-0'), SKY1 = v('--sky-1');
+var SUN0 = v('--sun-0'), SUN1 = v('--sun-1');
+var BIRD = v('--bird');
+var INK = hex3(v('--ink'));
+var SKY1C = hex3(SKY1);   // 안개가 희석해 가는 목표색 — 지평선 근처 하늘색
+
+// '#rrggbb' → [r, g, b]. 토큰 mix 값은 컴파일 타임에 hex 로 굳는다
+function hex3(s) {
+  var m = /^#([0-9a-f]{6})$/i.exec(s);
+  return m ? [parseInt(s.substr(1, 2), 16), parseInt(s.substr(3, 2), 16), parseInt(s.substr(5, 2), 16)] : [0, 0, 0];
+}
+function mix3(a, b, t) {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+function css3(c) {
+  return 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')';
+}
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var LAYERS = 6;
+var density = 2.4;      // Fog density(지수 혼합의 분모) — 슬라이더로 바뀐다
+var STILL_T = 3;        // reduce 정지판을 찍는 시각(초) — 새가 하늘에 떠 있는 순간
+var raf = 0, W = 0, H = 0, dpr = 1;
+var paths = [];         // 능선별 Path2D — fit() 에서 한 번만 만든다
+var meta = [];          // 능선별 기준선·진폭·흐름 속도
+
+// 시드 고정 난수와 능선 점렬 — 08 빛 산란과 같은 방식(조절점 사이 코사인 보간, 양 끝 이어짐)
+function rng(seed) {
+  return function () { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+}
+function ridgePts(seed, bumps) {
+  var rr = rng(seed);
+  var cp = [];
+  for (var i = 0; i < bumps; i++) cp.push(rr());
+  cp.push(cp[0]);
+  var pts = [];
+  var n = bumps * 12;
+  for (var k = 0; k <= n; k++) {
+    var t = k / n * bumps;
+    var i0 = Math.floor(t), f = t - i0;
+    var s = (1 - Math.cos(f * Math.PI)) * 0.5;
+    pts.push(cp[i0] + (cp[i0 + 1] - cp[i0]) * s);
+  }
+  return pts;
+}
+var ridgeData = [];
+for (var li = 0; li < LAYERS; li++) {
+  ridgeData.push(ridgePts(31 + li * 17, 3 + li));   // 앞으로 올수록 봉우리가 촘촘해진다
+  meta.push({
+    base: 0.40 + li * 0.082,   // 능선 기준선(정규) — 뒤가 높고 앞이 낮게 내려온다
+    amp: 0.045 + li * 0.026,   // 진폭 — 앞으로 올수록 산이 크다
+    speed: 4 + li * 6          // 흐름 속도(px/초) — 앞이 빠르다(시차)
+  });
+}
+
+// 새 두 마리 — 하늘을 가로지르는 작은 v 자. 날개각이 떨린다
+var BIRDS = [
+  { y: 0.15, speed: 0.11, phase: 0.1, size: 9 },
+  { y: 0.23, speed: 0.07, phase: 0.62, size: 7 }
+];
+
+function fit() {
+  var r = cv.parentElement.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  paths = [];
+  for (var i = 0; i < LAYERS; i++) {
+    var pts = ridgeData[i], m = meta[i];
+    var p = new Path2D();
+    p.moveTo(-2, H + 2);
+    for (var k = 0; k < pts.length; k++) {
+      p.lineTo(k / (pts.length - 1) * W, H * (m.base - m.amp * pts[k]));
+    }
+    p.lineTo(W + 2, H + 2);
+    p.closePath();
+    paths.push(p);
+  }
+}
+
+function birds(sec) {
+  ctx.strokeStyle = BIRD;
+  ctx.lineCap = 'round';
+  ctx.globalAlpha = 0.8;
+  for (var i = 0; i < BIRDS.length; i++) {
+    var b = BIRDS[i];
+    var span = W + 80;
+    var x = -40 + ((sec * b.speed * W + b.phase * span) % span);
+    var y = H * (b.y + Math.sin(sec * 0.8 + b.phase * 6) * 0.02);
+    var wing = 0.18 + (Math.sin(sec * 6.5 + b.phase * 9) * 0.5 + 0.5) * 0.62;  // 날개각(라디안, 0.18~0.8)
+    var dy = Math.sin(wing) * b.size;
+    var dx = Math.cos(wing) * b.size;
+    ctx.lineWidth = Math.max(1, b.size * 0.14);
+    ctx.beginPath();
+    ctx.moveTo(x - dx, y - dy);
+    ctx.quadraticCurveTo(x - dx * 0.3, y - dy * 0.2, x, y);
+    ctx.quadraticCurveTo(x + dx * 0.3, y - dy * 0.2, x + dx, y - dy);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function paint(sec) {
+  // 하늘 — 위가 진하고 지평선으로 갈수록 옅어지는 세로 그라디언트
+  var sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, SKY0);
+  sky.addColorStop(1, SKY1);
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  // 옅은 해 — 거리 감각을 잡아 주는 반점 하나(빛줄기는 없다. 그건 08 의 소재다)
+  var sun = ctx.createRadialGradient(W * 0.74, H * 0.2, 1, W * 0.74, H * 0.2, H * 0.3);
+  sun.addColorStop(0, SUN0);
+  sun.addColorStop(1, SUN1);
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, W, H);
+  birds(sec);
+  // 능선 — 뒤에서 앞으로. 거리마다 안개 색을 지수로 섞는다: t = exp(-거리/밀도)
+  for (var i = 0; i < LAYERS; i++) {
+    var d = LAYERS - i;              // 거리 — 앞층이 1
+    var t = Math.exp(-d / density);  // 그 층이 남길 대비
+    var off = (sec * meta[i].speed) % W;
+    ctx.fillStyle = css3(mix3(SKY1C, INK, t));
+    ctx.save();
+    ctx.translate(-off, 0);
+    ctx.fill(paths[i]);
+    ctx.translate(W, 0);
+    ctx.fill(paths[i]);
+    ctx.restore();
+  }
+}
+
+function frame(now) {
+  paint(now / 1000);
+  raf = requestAnimationFrame(frame);
+}
+
+function setFog(val) {
+  density = Number(val) / 10;
+  fogOut.textContent = '×' + density.toFixed(1);
+}
+
+fogIn.addEventListener('input', function () { setFog(fogIn.value); if (reduce) paint(STILL_T); });
+window.addEventListener('resize', function () { fit(); if (reduce) paint(STILL_T); });
+
+fit();
+setFog(fogIn.value);
+if (reduce) {
+  // reduce — 루프를 시작하지 않고 여섯 층 깊이가 다 보이는 정적 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  paint(STILL_T);
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

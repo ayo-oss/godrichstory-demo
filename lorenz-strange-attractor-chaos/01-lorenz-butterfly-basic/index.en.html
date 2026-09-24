@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>나비 기본 — 로렌츠 어트랙터 카오스 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lz is-demo" id="lzRoot">
+  <p class="lz__hint">
+    <span>Move the position a little each frame from three velocity equations, connect the dots, and the two-lobed butterfly orbit piles up by itself</span>
+  </p>
+  <div class="lz__field" role="application" aria-label="Butterfly basics playground" tabindex="0">
+    <canvas class="lz__cv" id="lzCv"></canvas>
+  </div>
+  <div class="lz__bar">
+    <span class="lz__meta">sigma 10 · rho 28 · beta 8/3 · Euler dt 0.01</span>
+    <span class="lz__meta lz__meta--dim">canvas · 3,000 steps · 2s cycle</span>
+  </div>
+</div>
+</main>
+<script>
+// 나비 기본(01) — 로렌츠 어트랙터의 첫 장면.
+// dx = σ(y−x), dy = x(ρ−z)−y, dz = xy−βz 세 속도를 오일러로 한 걸음씩 적분해
+// 위치를 옮기고 선을 잇는다. 미리 계산한 3,000걸음을 주기 안에 순서대로 드러내고
+// 마지막 18% 구간에서 서서히 지워 루프가 이어진다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var DT    = 0.01;   // 오일러 걸음 — 0.005 로 줄이면 같은 거리에 두 배 걸음(변형 1)
+  var STEPS = 3000;   // 사전 계산 걸음 수 — 공개 구간에 전부 드러난다
+  var CYCLE = 2.0;    // 공개 주기(초) — 설정 초(2s)와 같아 한 바퀴가 한 루프
+  // ────────────────────────────────────────────────────
+  var SIG = 10, RHO = 28, BETA = 8 / 3;
+
+  var root = document.getElementById('lzRoot');
+  var cvEl = document.getElementById('lzCv');
+  if (!root || !cvEl) return;
+  var fieldEl = cvEl.parentElement;
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C0    = tokRGB('--lz-c0');    // 꼬리 색 — 얼음 파스텔
+  var C1    = tokRGB('--lz-c1');    // 머리 색 — 복숭아 파스텔
+  var HEAD  = tokRGB('--lz-head');  // 머리 점 — 크림(토큰)
+  var PANEL = tokRGB('--lz-panel'); // 관측창 바닥
+  var GUIDE = tokRGB('--lz-mid');   // 안내선 — 저채도 청색
+  function rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+  function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+
+  // 로렌츠 속도 — 반환 순서 dx, dy, dz (단위: 무차원)
+  function deriv(x, y, z) {
+    return [SIG * (y - x), x * (RHO - z) - y, x * y - BETA * z];
+  }
+
+  // 궤적 사전 계산 — 과도기 200걸음을 건너뛰어 어트랙터 위에서 시작한다
+  var xs = new Float32Array(STEPS), ys = new Float32Array(STEPS), zs = new Float32Array(STEPS);
+  var x = 0.6, y = 0.7, z = 21, i;
+  for (i = 0; i < 200; i++) {
+    var d0 = deriv(x, y, z);
+    x += d0[0] * DT; y += d0[1] * DT; z += d0[2] * DT;
+  }
+  for (i = 0; i < STEPS; i++) {
+    xs[i] = x; ys[i] = y; zs[i] = z;
+    var d1 = deriv(x, y, z);
+    x += d1[0] * DT; y += d1[1] * DT; z += d1[2] * DT;
+  }
+
+  // 조각별 평균 깊이 — y 는 관찰 방향이라 멀/가까이가 색 농도와 두께가 된다
+  var CH = 24;
+  var chunkNy = new Float32Array(CH);
+  (function () {
+    var k, a, b, sum, cnt, ci, v;
+    for (k = 0; k < CH; k++) {
+      a = Math.floor(k * STEPS / CH); b = Math.floor((k + 1) * STEPS / CH);
+      sum = 0; cnt = 0;
+      for (ci = a; ci < b; ci++) { sum += ys[ci]; cnt++; }
+      v = cnt ? (sum / cnt + 27) / 57 : 0.5;
+      chunkNy[k] = Math.max(0, Math.min(1, v));
+    }
+  })();
+
+  var ctx = cvEl.getContext('2d');
+  var W = 0, H = 0;
+  function fit() {
+    var r = fieldEl.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cvEl.width = W; cvEl.height = H;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  }
+
+  var REVEAL_END = 0.82;   // 걸음 공개가 끝나는 위상 — 이후 지우기
+  function draw(phase) {
+    ctx.fillStyle = rgba(PANEL, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    var s = Math.min(W / 44, H / 52);
+    var ox = W / 2, oy = H / 2;
+
+    // 안내선 — 날개 경계 x = 0
+    ctx.strokeStyle = rgba(GUIDE, 0.22);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ox, 0); ctx.lineTo(ox, H);
+    ctx.stroke();
+
+    var upto = Math.min(1, phase / REVEAL_END);
+    var n = Math.floor(upto * STEPS);
+    if (n < 2) return;
+    var fade = phase > REVEAL_END ? Math.max(0, 1 - (phase - REVEAL_END) / (1 - REVEAL_END)) : 1;
+
+    // 두 번의 stroke — 뒤네루게(넓고 옅게) + 알맹이(가늘고 진하게)
+    var passes = [[3.2, 0.14], [1.4, 0.85]];
+    var pass, k, a, b, ci, t, col, ny;
+    for (pass = 0; pass < 2; pass++) {
+      var wMul = passes[pass][0], aMul = passes[pass][1];
+      for (k = 0; k < CH; k++) {
+        a = Math.floor(k * STEPS / CH);
+        b = Math.min(n, Math.floor((k + 1) * STEPS / CH));
+        if (b - a < 2) continue;
+        t = (k + 0.5) / CH;
+        ny = chunkNy[k];
+        col = mix(C0, C1, t);
+        ctx.strokeStyle = rgba(col, aMul * (0.45 + 0.55 * ny) * fade);
+        ctx.lineWidth = wMul * (0.8 + 0.9 * ny);
+        ctx.beginPath();
+        ctx.moveTo(ox + xs[a] * s, oy - (zs[a] - 25) * s);
+        for (ci = a + 1; ci < b; ci++) ctx.lineTo(ox + xs[ci] * s, oy - (zs[ci] - 25) * s);
+        ctx.stroke();
+      }
+    }
+
+    // 머리 — 현재 걸음 위치에 크림 점과 옅은 광원
+    var hx = ox + xs[n - 1] * s, hy = oy - (zs[n - 1] - 25) * s;
+    ctx.fillStyle = rgba(HEAD, 0.22 * fade);
+    ctx.beginPath(); ctx.arc(hx, hy, 6, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = rgba(HEAD, fade);
+    ctx.beginPath(); ctx.arc(hx, hy, 2.2, 0, 6.2832); ctx.fill();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var t0 = -1;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var phase = (((now - t0) / 1000) % CYCLE) / CYCLE;
+    draw(phase);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) draw(0.62);
+  });
+  fit();
+  if (reduce) {
+    draw(0.62);                                // reduce — 드러난 궤적 한 장만 고정
+    root.classList.add('is-still');
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

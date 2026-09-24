@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>멤브레인 진동판 마이크 입력 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mb" id="mb">
+  <p class="mb__hint">
+    <svg class="mb__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><circle cx="128" cy="128" r="24"/><path d="M80 128a48 48 0 0 1 96 0" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" opacity=".55"/><path d="M56 128a72 72 0 0 1 144 0" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" opacity=".35"/><path d="M32 128a96 96 0 0 1 192 0" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" opacity=".2"/><rect x="120" y="168" width="16" height="48" rx="8"/></g></svg>
+    <span>マイクをオンにすると振動板が音に反応 — 拒否時は合成信号で回転</span>
+  </p>
+  <div class="mb__field" id="field" role="application" aria-label="メンブレン振動板の実験盤">
+    <canvas class="mb__cv" id="cv"></canvas>
+    <b class="mb__badge" aria-hidden="true"><span class="mb__badgeNum">0.32</span><span class="mb__badgeUnit">RMS</span></b>
+  </div>
+  <p class="mb__ctrl">
+    <button class="mb__btn" id="micBtn" type="button">マイク入力をオン</button>
+    <span class="mb__state" id="state" role="status">合成信号で再生中</span>
+  </p>
+</div>
+</main>
+<script>
+// 멤브레인 진동판 + 마이크 입력 — 원形 진동판(멤브레인)을 극좌표 격자로 나누고
+// 반경 방향으로 서로 다른 モード(주파수)의 사인파를 더해 변위를 만든다. 기본은 시드 고정
+// 합성 신호(미리보기·측정용 — getUserMedia 는 헤드리스 렌더에서 권한 대화상자로 막히므로),
+// 마이크 버튼을 누르면 getUserMedia + AnalyserNode 로 실제 소리 진폭을 읽어 モード 진폭에 얹는다.
+// 권한을 거부하거나 오디오 입력이 없으면 안전하게 합성 신호로 되돌아간다(폴백).
+var root = document.getElementById('mb');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { willReadFrequently: false });
+var micBtn = document.getElementById('micBtn');
+var stateEl = document.getElementById('state');
+var numEl = document.querySelector('.mb__badgeNum');
+
+var css = getComputedStyle(root);
+var MEM = css.getPropertyValue('--mem').trim();
+var RIM = css.getPropertyValue('--rim').trim();
+var RING = css.getPropertyValue('--ring').trim();
+var BGN = css.getPropertyValue('--plate-bg').trim();
+
+var SEED = 7;                // 합성 신호 시드 — 고정해야 24프레임 촬영이 매번 같은 무늬를 준다
+var LOOP = 2;                // 합성 루프 한 바퀴(초) — 캡처 창(2초)과 같아 gif 가 이어진다
+var MODES = [                // (주파수 배수, 반경 방향 마디 수) — 클라드니 진동판의 낮은 모드들
+  { f: 1.0, nodes: 1, amp: 1.00 },
+  { f: 1.6, nodes: 2, amp: 0.55 },
+  { f: 2.3, nodes: 3, amp: 0.30 }
+];
+var RG = 24, AG = 64;        // 격자 — 반경 24칸 · 원주 64칸 (픽셀 계산은 여기서 한 번)
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1, raf = 0;
+var micOn = false, analyser = null, audioBuf = null, micStream = null, audioCtx = null;
+
+// 시드 고정 난수 — Math.random 을 쓰면 프레임마다 무늬가 달라져 측정이 흔들린다
+function seeded(i) {
+  var x = Math.sin(i * 127.1 + SEED * 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+var PHASE = [];
+for (var i = 0; i < MODES.length; i++) PHASE.push(seeded(i + 1) * Math.PI * 2);
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// 합성 진폭(0~1) — 마이크가 켜져 있으면 실측 RMS 로 대체된다
+function synthLevel(sec) {
+  var u = (sec % LOOP) / LOOP * Math.PI * 2;
+  return 0.38 + 0.30 * Math.sin(u) * Math.sin(u * 0.5 + 0.7) + 0.10 * Math.sin(u * 3.1);
+}
+
+function micLevel() {
+  if (!analyser || !audioBuf) return null;
+  analyser.getByteTimeDomainData(audioBuf);
+  var sum = 0;
+  for (var i = 0; i < audioBuf.length; i++) {
+    var v = (audioBuf[i] - 128) / 128;
+    sum += v * v;
+  }
+  var rms = Math.sqrt(sum / audioBuf.length);
+  return Math.min(1, rms * 3.2);   // 조용한 방 기준으로 게인을 올려 놓는다
+}
+
+// 진동판 그리기 — 반경 좌표를 미리 계산해 두고 매 프레임 격자 점의 변위만 다시 잰다
+function draw(level, sec) {
+  ctx.clearRect(0, 0, W, H);
+  var cx = W * 0.5, cy = H * 0.5;
+  var R = Math.min(W, H) * 0.42;
+
+  // 접시 배경
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
+  ctx.fillStyle = BGN;
+  ctx.fill();
+
+  // 모드별 진폭 — 합성은 시간으로, 마이크는 실측 레벨로
+  var t = sec;
+  var amps = [];
+  for (var m = 0; m < MODES.length; m++) {
+    var a = MODES[m].amp * level * Math.sin(t * Math.PI * 2 * MODES[m].f + PHASE[m]);
+    amps.push(a);
+  }
+
+  // 반경 방향 링들 — 클라드니식 마디. 바깥쪽 링일수록 변위가 커 진동판이 살아 있는 것처럼 보인다
+  for (var rg = RG; rg >= 2; rg -= 2) {
+    var rr = R * (rg / RG);
+    var wobble = 0;
+    for (m = 0; m < MODES.length; m++) {
+      wobble += amps[m] * Math.sin((rg / RG) * Math.PI * MODES[m].nodes);
+    }
+    ctx.beginPath();
+    for (var ag = 0; ag <= AG; ag++) {
+      var th = (ag / AG) * Math.PI * 2;
+      // 각도 방향 물결 — 모드가 섞이며 꽃잎 무늬가 생긴다
+      var petal = 0;
+      for (m = 0; m < MODES.length; m++) {
+        petal += amps[m] * Math.sin(MODES[m].nodes * th + PHASE[m]);
+      }
+      var rad = rr + wobble * 10 + petal * 7;
+      var x = cx + Math.cos(th) * rad;
+      var y = cy + Math.sin(th) * rad;
+      if (ag === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    var depth = rg / RG;                      // 안쪽 링은 옅게 — 입체감
+    ctx.strokeStyle = depth > 0.86 ? RIM : MEM;
+    ctx.globalAlpha = 0.22 + depth * 0.78;
+    ctx.lineWidth = rg > RG - 3 ? 2.5 : 1.25;
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // 중앙 허브 — 진폭에 따라 살짝 커진다(자기 중심에서)
+  ctx.beginPath();
+  ctx.arc(cx, cy, 7 + level * 5, 0, Math.PI * 2);
+  ctx.fillStyle = RING;
+  ctx.fill();
+}
+
+var t0 = 0;
+function frame(ts) {
+  if (!t0) t0 = ts;
+  var sec = (ts - t0) / 1000;
+  var lv = micOn ? (micLevel() || 0.3) : synthLevel(sec);
+  if (numEl) numEl.textContent = lv.toFixed(2);
+  draw(lv, sec);
+  raf = requestAnimationFrame(frame);
+}
+
+// 마이크 — getUserMedia 로 실제 소리를 얻는다. 거부·오류·미지원 전부 합성 폴백.
+function enableMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    stateEl.textContent = 'このブラウザはマイク入力に対応していないため合成信号で再生します';
+    return;
+  }
+  stateEl.textContent = 'マイクの許可を待っています';
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+    micStream = stream;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+    var src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    audioBuf = new Uint8Array(analyser.fftSize);
+    src.connect(analyser);         // 분석만 — 스피커로 재생하지 않는다(하울링 방지)
+    micOn = true;
+    micBtn.disabled = true;
+    micBtn.textContent = 'マイクオン';
+    stateEl.textContent = 'マイク入力が反応中 — 音を出してみてください';
+  }).catch(function () {
+    micOn = false;
+    stateEl.textContent = '許可が拒否されました — 合成信号で再生します';
+  });
+}
+
+micBtn.addEventListener('click', enableMic);
+
+fit();
+window.addEventListener('resize', function () { fit(); if (reduce) draw(0.5, 0.3); });
+if (reduce) {
+  // reduce — 루프 없이 level 0.5 의 한 장만 그린다(빈 화면이 아니다)
+  root.classList.add('is-still');
+  draw(0.5, 0.3);
+  if (numEl) numEl.textContent = '0.50';
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>전체 진행률 숫자가 굴러 올라가는 단계 표시 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dr is-demo" id="dr">
+  <span class="dr__halo" id="drHalo"></span>
+  <div class="dr__odometer" id="drOdometer" aria-hidden="true">
+    <span class="dr__digit"><span class="dr__reel" id="reel0"><i>0</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i><i>7</i><i>8</i><i>9</i></span></span>
+    <span class="dr__digit"><span class="dr__reel" id="reel1"><i>0</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i><i>7</i><i>8</i><i>9</i></span></span>
+    <span class="dr__digit"><span class="dr__reel" id="reel2"><i>0</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i><i>7</i><i>8</i><i>9</i></span></span>
+    <span class="dr__percentSign">%</span>
+  </div>
+  <div class="dr__track"><div class="dr__fill" id="drFill"></div></div>
+  <p class="dr__status" id="drStatus" aria-live="polite">전체 진행률 0%</p>
+  <ol class="dr__row" id="drRow" role="list" aria-label="온보딩 진행 단계">
+    <li class="dr__node is-active" id="n0">1</li>
+    <li class="dr__node" id="n1">2</li>
+    <li class="dr__node" id="n2">3</li>
+    <li class="dr__node" id="n3">4</li>
+    <li class="dr__node" id="n4">5</li>
+  </ol>
+  <div class="dr__controls">
+    <button type="button" class="dr__btn" id="drPrev">이전</button>
+    <button type="button" class="dr__btn dr__btn--primary" id="drNext">다음</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_PROGRESS_DIGIT_ROLL_STAGGER_MS = 30;
+  var DIGIT_ROLL_DURATION_MS = 380;
+  var STEP_COUNT = 5;
+  var ROW_HEIGHT_EM = 1;
+  var HALO_MAX_PX = 190;
+
+  var root = document.getElementById('dr');
+  var status = document.getElementById('drStatus');
+  var prevBtn = document.getElementById('drPrev');
+  var nextBtn = document.getElementById('drNext');
+  var reels = [0, 1, 2].map(function (i) { return document.getElementById('reel' + i); });
+  var nodes = [0, 1, 2, 3, 4].map(function (i) { return document.getElementById('n' + i); });
+  var digitEls = Array.prototype.slice.call(document.querySelectorAll('.dr__digit'));
+  var drHalo = document.getElementById('drHalo');
+  var drFill = document.getElementById('drFill');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var current = 0;
+  var shownDigits = [0, 0, 0];
+  var shownPct = 0;
+  var anims = [null, null, null];
+  var haloAnim = null;
+  var barAnim = null;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  function percentOf(step) { return Math.round(step / (STEP_COUNT - 1) * 100); }
+
+  function digitsOf(n) {
+    var s = String(clamp(n, 0, 100)).padStart(3, '0');
+    return [s.charCodeAt(0) - 48, s.charCodeAt(1) - 48, s.charCodeAt(2) - 48];
+  }
+
+  function setReel(i, digit, animate) {
+    var el = reels[i];
+    var y = -digit * ROW_HEIGHT_EM;
+    if (!animate || reduce) {
+      el.style.transition = 'none';
+      el.style.transform = 'translateY(' + y + 'em)';
+      return;
+    }
+    var delay = i * STEP_PROGRESS_DIGIT_ROLL_STAGGER_MS;
+    var fromDigit = shownDigits[i];
+    var start = null;
+    if (anims[i]) cancelAnimationFrame(anims[i]);
+    function step(now) {
+      if (start === null) start = now;
+      var elapsed = now - start - delay;
+      if (elapsed < 0) { anims[i] = requestAnimationFrame(step); return; }
+      var t = clamp(elapsed / DIGIT_ROLL_DURATION_MS, 0, 1);
+      var eased = easeInOutCubic(t);
+      var cur = fromDigit + (digit - fromDigit) * eased;
+      el.style.transform = 'translateY(' + (-cur * ROW_HEIGHT_EM) + 'em)';
+      if (t < 1) { anims[i] = requestAnimationFrame(step); } else { anims[i] = null; }
+    }
+    anims[i] = requestAnimationFrame(step);
+  }
+
+  // 계산된 시각 레이어: 롤 진행을 0→1→0 으로 잡아 오도미터 배경 하이라이트 · 아우라 · 진행 바에 같은 값으로 전파
+  function pulseHalo() {
+    if (haloAnim) cancelAnimationFrame(haloAnim);
+    if (reduce) { applyHalo(0); return; }
+    var start = null;
+    var total = DIGIT_ROLL_DURATION_MS + STEP_PROGRESS_DIGIT_ROLL_STAGGER_MS * 2 + 80;
+    function step(now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / total, 0, 1);
+      var ratio = Math.sin(Math.PI * t);
+      applyHalo(ratio);
+      if (t < 1) { haloAnim = requestAnimationFrame(step); } else { haloAnim = null; applyHalo(0); }
+    }
+    haloAnim = requestAnimationFrame(step);
+  }
+
+  function applyHalo(ratio) {
+    var small = window.innerWidth < 340;
+    var haloMax = small ? HALO_MAX_PX * 0.32 : HALO_MAX_PX;
+    var size = haloMax * ratio;
+    drHalo.style.width = size.toFixed(1) + 'px';
+    drHalo.style.height = size.toFixed(1) + 'px';
+    drHalo.style.opacity = (0.42 * ratio).toFixed(3);
+    digitEls.forEach(function (el) { el.style.backgroundColor = 'rgba(23, 20, 26, ' + (0.06 + 0.30 * ratio).toFixed(3) + ')'; });
+  }
+
+  function setBarWidth(pct) {
+    drFill.style.width = clamp(pct, 0, 100).toFixed(1) + '%';
+  }
+
+  function tweenBar(fromPct, toPct) {
+    if (barAnim) cancelAnimationFrame(barAnim);
+    if (reduce) { setBarWidth(toPct); shownPct = toPct; return; }
+    var start = null;
+    function step(now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / DIGIT_ROLL_DURATION_MS, 0, 1);
+      var v = fromPct + (toPct - fromPct) * easeInOutCubic(t);
+      setBarWidth(v);
+      if (t < 1) { barAnim = requestAnimationFrame(step); } else { barAnim = null; shownPct = toPct; }
+    }
+    barAnim = requestAnimationFrame(step);
+  }
+
+  function paint(step, animate) {
+    var pct = percentOf(step);
+    var d = digitsOf(pct);
+    d.forEach(function (digit, i) { setReel(i, digit, animate); });
+    shownDigits = d;
+    status.textContent = '전체 진행률 ' + pct + '%';
+    nodes.forEach(function (el, i) {
+      el.classList.toggle('is-active', i === step);
+      el.classList.toggle('is-done', i < step);
+    });
+    prevBtn.disabled = step === 0;
+    nextBtn.disabled = step === STEP_COUNT - 1;
+    if (animate) { tweenBar(shownPct, pct); pulseHalo(); } else { setBarWidth(pct); shownPct = pct; }
+  }
+
+  function goTo(step) {
+    step = clamp(step, 0, STEP_COUNT - 1);
+    if (step === current) return;
+    current = step;
+    paint(current, true);
+  }
+
+  prevBtn.addEventListener('click', function () { root.classList.remove('is-demo'); goTo(current - 1); });
+  nextBtn.addEventListener('click', function () { root.classList.remove('is-demo'); goTo(current + 1); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); goTo(current + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { root.classList.remove('is-demo'); goTo(current - 1); e.preventDefault(); }
+  });
+  nodes.forEach(function (el, i) { el.addEventListener('click', function () { root.classList.remove('is-demo'); goTo(i); }); });
+
+  var startTime = null;
+  var phase = 0;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2.0;
+    if (root.classList.contains('is-demo')) {
+      if (t < 0.05 && phase !== 0) phase = 0;
+      if (phase === 0 && t > 0.22) { goTo(2); phase = 1; }
+      if (phase === 1 && t > 0.75) { goTo(4); phase = 2; }
+      if (phase === 2 && t > 1.25) { goTo(1); phase = 3; }
+      if (phase === 3 && t > 1.7) { goTo(0); phase = 4; }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  paint(0, false);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

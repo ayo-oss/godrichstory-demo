@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>最小間隔を守るために弾性で押される範囲スライダー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ds is-demo" id="ds">
+  <div class="ds__track" id="track">
+    <div class="ds__fill" id="fill"></div>
+    <button type="button" class="ds__thumb ds__thumb--lo" id="thumbLo" role="slider"
+      aria-label="最小値" aria-valuemin="0" aria-valuemax="100" aria-valuenow="20" aria-valuetext="20" tabindex="0"></button>
+    <button type="button" class="ds__thumb ds__thumb--hi" id="thumbHi" role="slider"
+      aria-label="最大値" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70" aria-valuetext="70" tabindex="0"></button>
+  </div>
+  <p class="ds__readout"><span id="loOut">20</span> – <span id="hiOut">70</span></p>
+  <p class="ds__caption">間隔を12以下に狭めると反対側が弾性で押される</p>
+</div>
+</main>
+<script>
+(function () {
+  var MIN = 0, MAX = 100, MIN_GAP = 12, K = 210, DAMP = 18;
+  var root = document.getElementById('ds');
+  var track = document.getElementById('track');
+  var fill = document.getElementById('fill');
+  var lo = document.getElementById('thumbLo');
+  var hi = document.getElementById('thumbHi');
+  var loOut = document.getElementById('loOut');
+  var hiOut = document.getElementById('hiOut');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var target = { lo: 20, hi: 70 };
+  var pos = { lo: { v: 20, vel: 0 }, hi: { v: 70, vel: 0 } };
+
+  function paintAria() {
+    lo.setAttribute('aria-valuenow', String(target.lo)); hi.setAttribute('aria-valuenow', String(target.hi));
+    lo.setAttribute('aria-valuetext', String(target.lo)); hi.setAttribute('aria-valuetext', String(target.hi));
+    loOut.textContent = String(target.lo); hiOut.textContent = String(target.hi);
+  }
+  function paintVisual() {
+    lo.style.left = pos.lo.v + '%'; hi.style.left = pos.hi.v + '%';
+    fill.style.left = pos.lo.v + '%'; fill.style.width = Math.max(0, pos.hi.v - pos.lo.v) + '%';
+  }
+  // 계산 겹: 간격이 MIN_GAP 아래로 좁혀지면 반대쪽 목표값을 함께 밀어내고, 시각 위치는 스프링(질량-감쇠) 물리로 목표를 뒤쫓아 오버슈트한다.
+  function syncReduced() {
+    if (!reduce) return;
+    pos.lo.v = target.lo; pos.hi.v = target.hi; paintVisual();
+  }
+  function setLo(n) {
+    var nlo = Math.max(MIN, Math.min(n, MAX));
+    if (nlo > target.hi - MIN_GAP) {
+      target.hi = Math.min(MAX, nlo + MIN_GAP);
+      nlo = Math.min(nlo, target.hi - MIN_GAP);
+    }
+    target.lo = nlo; paintAria(); syncReduced();
+  }
+  function setHi(n) {
+    var nhi = Math.min(MAX, Math.max(n, MIN));
+    if (nhi < target.lo + MIN_GAP) {
+      target.lo = Math.max(MIN, nhi - MIN_GAP);
+      nhi = Math.max(nhi, target.lo + MIN_GAP);
+    }
+    target.hi = nhi; paintAria(); syncReduced();
+  }
+  function pctFromX(x) {
+    var r = track.getBoundingClientRect();
+    return Math.round(Math.max(0, Math.min(100, ((x - r.left) / r.width) * 100)));
+  }
+  function human() { root.classList.remove('is-demo'); clearInterval(timer); }
+  function drag(thumb, setter, isLo) {
+    thumb.addEventListener('pointerdown', function (e) {
+      human(); thumb.setPointerCapture(e.pointerId);
+      function move(ev) { setter(pctFromX(ev.clientX)); }
+      function up() { thumb.removeEventListener('pointermove', move); thumb.removeEventListener('pointerup', up); }
+      thumb.addEventListener('pointermove', move); thumb.addEventListener('pointerup', up);
+    });
+    thumb.addEventListener('keydown', function (e) {
+      var step = { ArrowRight: 1, ArrowLeft: -1, ArrowUp: 1, ArrowDown: -1 }[e.key];
+      if (step !== undefined) { e.preventDefault(); human(); setter((isLo ? target.lo : target.hi) + step); }
+      else if (e.key === 'Home') { e.preventDefault(); human(); setter(isLo ? MIN : target.lo + MIN_GAP); }
+      else if (e.key === 'End') { e.preventDefault(); human(); setter(isLo ? target.hi - MIN_GAP : MAX); }
+    });
+  }
+  drag(lo, setLo, true); drag(hi, setHi, false);
+
+  var last = null;
+  function springFrame(ts) {
+    if (reduce) { pos.lo.v = target.lo; pos.hi.v = target.hi; paintVisual(); return; }
+    if (last === null) last = ts;
+    var dt = Math.min(0.032, (ts - last) / 1000); last = ts;
+    ['lo', 'hi'].forEach(function (k) {
+      var s = pos[k], t = target[k];
+      var force = -K * (s.v - t) - DAMP * s.vel;
+      s.vel += force * dt; s.v += s.vel * dt;
+    });
+    paintVisual();
+    requestAnimationFrame(springFrame);
+  }
+  if (!reduce) requestAnimationFrame(springFrame);
+
+  var seq = [
+    { who: 'lo', to: 62 },
+    { who: 'hi', to: 25 },
+    { who: 'lo', to: 55 },
+    { who: 'hi', to: 15 },
+    { who: 'lo', to: 20 }
+  ];
+  var si = 0;
+  function tick() {
+    var step = seq[si % seq.length]; si++;
+    if (step.who === 'lo') setLo(step.to); else setHi(step.to);
+  }
+  var timer = reduce ? null : setInterval(tick, 480);
+  paintAria(); paintVisual();
+}());
+</script>
+</body>
+</html>

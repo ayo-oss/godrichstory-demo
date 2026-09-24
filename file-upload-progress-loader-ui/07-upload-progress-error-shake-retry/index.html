@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>실패 흔들림과 재시도 — 파일 업로드 진행률 로더 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="es is-demo" id="esRoot">
+  <div class="es__row">
+    <span class="es__label" id="esLabel">
+      <b class="es__label-run">전송 중</b>
+      <b class="es__label-err">전송 실패</b>
+    </span>
+    <span class="es__warn" aria-hidden="true">
+      <svg viewBox="0 0 256 256" width="14" height="14"><g fill="currentColor"><path d="M236 128a108 108 0 1 1-108-108a108 108 0 0 1 108 108" opacity=".2"/><path d="M128 24a104 104 0 1 0 104 104A104.11 104.11 0 0 0 128 24m0 192a88 88 0 1 1 88-88a88.1 88.1 0 0 1-88 88m-8-80V80a8 8 0 0 1 16 0v56a8 8 0 0 1-16 0m20 36a12 12 0 1 1-12-12a12 12 0 0 1 12 12"/></g></svg>
+    </span>
+    <button class="es__retry" id="esRetry" type="button" aria-label="업로드 재시도">
+      <svg viewBox="0 0 256 256" width="14" height="14"><g fill="currentColor"><path d="M197.67 186.37a94.06 94.06 0 0 1-66.79 27.66a93 93 0 0 1-11-.65a94.19 94.19 0 0 1-82.14-71.71a8 8 0 0 1 15.53-3.8a78.19 78.19 0 0 0 68.17 59.63a78 78 0 0 0 64.16-26.4a8 8 0 0 1 12.07 10.5Zm38.24-66.14a8 8 0 0 0-9.6 6.06a78 78 0 0 1-27.68 41.72a8 8 0 1 0 9.66 12.76a94.06 94.06 0 0 0 33.31-50.24a94.19 94.19 0 0 0-52.71-98.86a8 8 0 0 0-6.9 14.44a78 78 0 0 1 44 66.6a94.6 94.6 0 0 0-9 7.52Z" opacity=".2"/><path d="M136 24a103.8 103.8 0 0 0-73 30a8 8 0 0 0 11.3 11.32A88 88 0 1 1 63.06 190a8 8 0 0 0-12.12 10.44A104 104 0 1 0 136 24m59.32 55.72a8 8 0 0 0-11.32 11.32L192 99H160a8 8 0 0 0 0 16h48a8 8 0 0 0 8-8V59a8 8 0 0 0-16 0v10.34Z"/></g></svg>
+    </button>
+  </div>
+  <div class="es__track">
+    <span class="es__fill" id="esFill"></span>
+  </div>
+  <div class="es__bar">
+    <span class="es__meta">ProgressEvent · AbortController</span>
+  </div>
+</div>
+</main>
+<script>
+// 실패 흔들림과 재시도 — error 이벤트가 오면 그 시점의 loaded 값을 남긴 채 바가 흔들리고,
+// 재시도는 AbortController 로 이전 시도를 끊은 뒤 처음부터가 아니라 남은 바이트만 이어 보낸다.
+(function () {
+  var SEED = 0x44c1e0;
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = mulberry32(SEED);
+  var FAIL_AT = 58;
+
+  var root  = document.getElementById('esRoot');
+  var fill  = document.getElementById('esFill');
+  var label = document.getElementById('esLabel');
+  var retry = document.getElementById('esRetry');
+  if (!root || !fill || !label || !retry) return;
+
+  var bus = new EventTarget();
+  var loaded = 0, failedOnce = false, controller = new AbortController(), timer = null;
+
+  bus.addEventListener('progress', function (e) {
+    fill.style.transform = 'scaleX(' + (e.loaded / 100) + ')';
+  });
+  bus.addEventListener('error', function (e) {
+    root.classList.add('is-error');
+  });
+
+  function run(startAt) {
+    loaded = startAt;
+    controller = new AbortController();
+    timer = setInterval(function () {
+      if (controller.signal.aborted) return;
+      loaded = Math.min(100, loaded + 4 + rand() * 8);
+      if (!failedOnce && loaded >= FAIL_AT) {
+        failedOnce = true;
+        clearInterval(timer);
+        bus.dispatchEvent(new ProgressEvent('error', { lengthComputable: true, loaded: loaded, total: 100 }));
+        return;
+      }
+      bus.dispatchEvent(new ProgressEvent('progress', { lengthComputable: true, loaded: loaded, total: 100 }));
+      if (loaded >= 100) clearInterval(timer);
+    }, 220);
+  }
+
+  retry.addEventListener('click', function () {
+    controller.abort();
+    root.classList.remove('is-error');
+    run(loaded);
+  });
+  function live() {
+    if (!root.classList.contains('is-demo')) return;
+    root.classList.remove('is-demo');
+    run(0);
+  }
+  ['pointerdown', 'focusin'].forEach(function (ev) { root.addEventListener(ev, live); });
+})();
+</script>
+</body>
+</html>

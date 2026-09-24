@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>하트 그리기 — 푸리에 에피사이클 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fe is-demo" id="feRoot">
+  <p class="fe__hint">
+    <span>Re-synthesize just the heart curve's coefficients and the chain of circles starts at the cusp, retraces even the concave dip — showing the geometry of love compressed into a handful of numbers</span>
+  </p>
+  <div class="fe__field" id="feField" role="application" aria-label="Heart-Drawing Epicycle Demo" tabindex="0">
+    <canvas class="fe__cv" id="feCv"></canvas>
+  </div>
+  <div class="fe__bar">
+    <span class="fe__meta"><b class="fe__val" id="feN">0</b><span id="feUnit"> closed curve · top 60 circles</span></span>
+    <span class="fe__meta fe__meta--dim">canvas · DFT · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 하트 그리기(04). 03 의 DFT 파이프라인을 닫힌 매개변수 곡선에 다시 적용 —
+//   ① 하트 곡선 x=16sin³t, y=13cos t−5cos2t−2cos3t−cos4t 를 256 점 샘플링.
+//   ② 같은 DFT 로 전체 계수를 구하고 크기 순 정렬, 상위 60개만 그린다(압축의 예고편, 08 슬라이더로 이어진다).
+//   ③ 재합성 시 체인이 꼬리(뾰족한 아래 끝)에서 출발해 양쪽 볼록·중앙 오목까지 정확히 되짚는다.
+// 붓끝이 하트를 다 그리면 트레일이 잠시 머물다 옅어지고 다시 그린다(루프).
+//
+// 화면이 사는 장치 — 077 기준:
+//  · 밑바탕 극격자(방사 스윕 + 스포크)가 매 프레임 재계산되어 화면 전면이 살아 있다.
+//  · 트레일은 투명 누적 캔버스에 쌓인다(절대 clear 없음).
+//  · 원 체인(상위 60개)·링크·붓끝 절정 점이 매 프레임 계산된다(23/23).
+(function () {
+  // ── 변형 상수 블록 ──
+  var N = 256;         // 경로 샘플 점 수
+  var SHOW = 60;       // 화면에 그리는 circles
+  var HOLD = 0.4;      // 완성 후 머무는 비율
+  // ──────────────────
+  var TAU = Math.PI * 2;
+
+  var root = document.getElementById('feRoot');
+  var field = document.getElementById('feField');
+  var cv = document.getElementById('feCv');
+  var nOut = document.getElementById('feN');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--fe-ink');
+  var C_GLOW = tokRGB('--fe-glow');
+  var C_HOT  = tokRGB('--fe-hot');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var trailCv, trailCtx;
+
+  // ── ① 하트 매개변수 곡선 ──
+  function heartPath(u) {
+    var t = u * TAU;
+    var x = 16 * Math.pow(Math.sin(t), 3);
+    var y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+    return { x: x / 17, y: y / 17 };
+  }
+
+  // ── ② DFT ──
+  function dft(path) {
+    var M = path.length;
+    var out = [];
+    for (var k = 0; k < M; k++) {
+      var freq = (k <= M / 2) ? k : k - M;
+      var re = 0, im = 0;
+      for (var n = 0; n < M; n++) {
+        var a = -TAU * k * n / M;
+        var c = Math.cos(a), s = Math.sin(a);
+        re += path[n].x * c - path[n].y * s;
+        im += path[n].x * s + path[n].y * c;
+      }
+      re /= M; im /= M;
+      out.push({ freq: freq, re: re, im: im, amp: Math.sqrt(re * re + im * im) });
+    }
+    out.sort(function (a, b) { return b.amp - a.amp; });
+    return out;
+  }
+
+  var PATH = [], COEF = [];
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    trailCv = document.createElement('canvas');
+    trailCv.width = W * dpr; trailCv.height = H * dpr;
+    trailCtx = trailCv.getContext('2d');
+    trailCtx.scale(dpr, dpr);
+    if (!PATH.length) {
+      for (var i = 0; i < N; i++) PATH.push(heartPath(i / N));
+      COEF = dft(PATH);
+    }
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function chainAt(u, show) {
+    var base = Math.min(W, H) * 0.42;
+    var cx = W * 0.5, cy = H * 0.48;
+    var pts = [{ x: cx, y: cy }];
+    var n = show || COEF.length;
+    for (var i = 0; i < n && i < COEF.length; i++) {
+      var c = COEF[i];
+      var a = c.freq * u * TAU;
+      var ph = Math.atan2(c.im, c.re);
+      var ang = a + ph;
+      var px = pts[i].x + Math.cos(ang) * c.amp * base;
+      var py = pts[i].y + Math.sin(ang) * c.amp * base;
+      pts.push({ x: px, y: py });
+    }
+    return pts;
+  }
+
+  // 밑바탕 — 방사 스윕(계단 밴드) + 스포크. 하트의 대칭축과 어긋나게 돈다
+  function drawGrid(t) {
+    var ctx = cv.getContext('2d');
+    var cx = W * 0.5, cy = H * 0.48;
+    var maxR = Math.sqrt(W * W + H * H) * 0.5;
+    var sweep = t * 0.8;
+    for (var b = 0; b < 18; b++) {
+      ctx.fillStyle = rgba(C_GLOW, 0.09 * (1 - b / 18));
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, maxR, sweep - (b + 1) * 0.055, sweep - b * 0.055);
+      ctx.closePath();
+      ctx.fill();
+    }
+    var spin = t * 0.24;
+    for (var i = 0; i < 18; i++) {
+      var a = spin + (i / 18) * TAU;
+      ctx.strokeStyle = rgba(C_GLOW, i % 2 === 0 ? 0.08 : 0.05);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+      ctx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+      ctx.stroke();
+    }
+    for (var k = 1; k <= 3; k++) {
+      var rr = (Math.min(W, H) * 0.18) * k * (1 + 0.014 * Math.sin(t * 1.2 + k * 2));
+      ctx.strokeStyle = rgba(C_GLOW, 0.06);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr, 0, TAU);
+      ctx.stroke();
+    }
+  }
+
+  function draw(u, pulse, show, gt) {
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    drawGrid(gt);
+    ctx.drawImage(trailCv, 0, 0, W, H);
+    var base = Math.min(W, H) * 0.42;
+
+    var pts = chainAt(u, show);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var r = COEF[i].amp * base;
+      if (r > 2) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.09 + 0.012 * i);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, r, 0, TAU);
+        ctx.stroke();
+      }
+      if (i < 4 || r > 3) {
+        ctx.strokeStyle = rgba(C_GLOW, 0.48);
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+        ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+        ctx.stroke();
+      }
+    }
+    var pen = pts[pts.length - 1];
+    var pr = 2.4 + pulse * 2.2;
+    ctx.fillStyle = rgba(C_HOT, 0.3);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr * 2.3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1);
+    ctx.beginPath();
+    ctx.arc(pen.x, pen.y, pr, 0, TAU);
+    ctx.fill();
+    return pen;
+  }
+
+  var prevPen = null;
+
+  function stampTrail(pen) {
+    if (!prevPen) { prevPen = pen; return; }
+    trailCtx.strokeStyle = rgba(C_HOT, 0.85);
+    trailCtx.lineWidth = 1.9;
+    trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(prevPen.x, prevPen.y);
+    trailCtx.lineTo(pen.x, pen.y);
+    trailCtx.stroke();
+    trailCtx.strokeStyle = rgba(C_HOT, 0.12);
+    trailCtx.lineWidth = 5;
+    trailCtx.stroke();
+    prevPen = pen;
+  }
+
+  function decayTrail() {
+    trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = 'rgba(0,0,0,0.03)';
+    trailCtx.fillRect(0, 0, W * dpr, H * dpr);
+    trailCtx.globalCompositeOperation = 'source-over';
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var PHASE_DRAW = 1 - HOLD, wasHold = false;
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var lt = ((now - t0) / 1000) * 0.45;
+    var u = lt % 1;
+    var pulse = 0.5 + 0.5 * Math.sin(lt * 8.0);
+    var inHold = u >= PHASE_DRAW;
+
+    if (wasHold && !inHold) prevPen = null;
+    wasHold = inHold;
+
+    decayTrail();
+    var pen = draw(inHold ? 1 : u / PHASE_DRAW, pulse, SHOW, lt * TAU);
+    if (!inHold) stampTrail(pen);
+    if (nOut) nOut.textContent = String(SHOW);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    var prev = chainAt(0)[SHOW];
+    for (var i = 1; i <= 200; i++) {
+      var pen = chainAt(i / 200, SHOW)[SHOW];
+      stampTrail(pen);
+      prev = pen;
+    }
+    draw(1, 0.5, SHOW, 2.1);
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); prevPen = null;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>백스페이스 두 번으로 지우는 칩 입력 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tb is-demo" id="tb">
+  <div class="tb__row" id="tbRow">
+    <span class="tb__chip" id="tbChip0" data-text="임시"><span class="tb__chipText">임시</span></span>
+    <span class="tb__chip" id="tbChip1" data-text="보류"><span class="tb__chipText">보류</span></span>
+    <span class="tb__chip" id="tbChip2" data-text="완료"><span class="tb__chipText">완료</span></span>
+    <input type="text" class="tb__input" id="tbInput" aria-label="태그 입력, 빈 칸에서 백스페이스를 두 번 누르면 마지막 칩이 지워진다" placeholder="태그 입력">
+  </div>
+  <p class="tb__meta" id="tbHint">빈 칸에서 백스페이스 — 첫 번째는 고른다</p>
+  <p class="tb__sr" role="status" aria-live="polite" id="tbLive"></p>
+</div>
+<script>
+(function () {
+  var HOLD_MS = 620, GAP_MS = 420, PAUSE_MS = 900;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var root = document.getElementById('tb');
+  var row = document.getElementById('tbRow');
+  var input = document.getElementById('tbInput');
+  var hint = document.getElementById('tbHint');
+  var live = document.getElementById('tbLive');
+  var selectedId = null;
+  var refillSeq = 0;
+
+  function chips() { return Array.prototype.slice.call(row.querySelectorAll('.tb__chip')); }
+  function lastChip() { var l = chips(); return l.length ? l[l.length - 1] : null; }
+  function human() { if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  function clearSelect() {
+    if (selectedId) {
+      var el = document.getElementById(selectedId);
+      if (el) el.classList.remove('tb__chip--selected');
+      selectedId = null;
+      hint.textContent = '빈 칸에서 백스페이스 — 첫 번째는 고른다';
+    }
+  }
+
+  function select(chip) {
+    // 계산 겹 1단: 선택은 지우기 전 단계 — 어떤 칩이 지워질지 눈에 보이게 표시만 한다
+    clearSelect();
+    chip.classList.add('tb__chip--selected');
+    selectedId = chip.id;
+    hint.textContent = '한 번 더 백스페이스 — "' + chip.dataset.text + '" 를 지운다';
+    live.textContent = chip.dataset.text + ' 선택됨';
+  }
+
+  function remove(chip) {
+    // 계산 겹 2단: 선택된 칩에만 퇴장 애니메이션(회전+수축)을 걸고 끝난 뒤 DOM 에서 뗀다
+    selectedId = null;
+    chip.classList.add('tb__chip--exit');
+    var text = chip.dataset.text;
+    window.setTimeout(function () {
+      chip.remove();
+      hint.textContent = '빈 칸에서 백스페이스 — 첫 번째는 고른다';
+      live.textContent = text + ' 삭제됨 · 태그 ' + chips().length + '개';
+    }, reduce ? 0 : 320);
+  }
+
+  function backspaceStep() {
+    // 계산 겹: 입력칸이 비어 있을 때만 반응한다 — 글자가 있으면 브라우저 기본 지우기에 맡긴다
+    if (input.value) return;
+    var last = lastChip();
+    if (!last) return;
+    if (selectedId === last.id) { remove(last); }
+    else { select(last); }
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Backspace') { human(); backspaceStep(); }
+    else if (selectedId) { clearSelect(); }
+  });
+  input.addEventListener('input', function () { human(); if (input.value) clearSelect(); });
+
+  var timer = 0;
+  function schedule(fn, ms) { timer = window.setTimeout(fn, ms); }
+
+  function loop() {
+    if (!root.classList.contains('is-demo')) return;
+    if (lastChip()) {
+      backspaceStep();
+      schedule(function () {
+        if (!root.classList.contains('is-demo')) return;
+        if (lastChip() && selectedId) { backspaceStep(); }
+        schedule(loop, GAP_MS);
+      }, HOLD_MS);
+    } else {
+      schedule(function () {
+        var seed = ['임시', '보류', '완료'];
+        seed.forEach(function (t, i) {
+          var chip = document.createElement('span');
+          chip.className = 'tb__chip';
+          chip.id = 'tbChip' + (++refillSeq);
+          chip.dataset.text = t;
+          chip.innerHTML = '<span class="tb__chipText"></span>';
+          chip.querySelector('.tb__chipText').textContent = t;
+          row.insertBefore(chip, input);
+        });
+        schedule(loop, GAP_MS);
+      }, PAUSE_MS);
+    }
+  }
+
+  if (!reduce) {
+    schedule(loop, 280);
+  } else {
+    root.classList.remove('is-demo');
+  }
+})();
+</script>
+</main>
+</body>
+</html>

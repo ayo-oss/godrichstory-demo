@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>중점변위 기본 낙뢰 — 번개 줄기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>시작 점과 끝 점을 잇는 선분을 반으로 쪼개 중점을 수직으로 밀기를 6 단계 반복하면 직선이 번개가 됩니다. 낙뢰는 화면을 골고루 오가며 칠 때마다 경로를 다시 뽑아 깜빡입니다</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="중점변위 기본 낙뢰 실험판" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">6</b>단계 중점변위 · 기본 낙뢰</span>
+    <span class="cd__meta cd__meta--dim">canvas · moveTo lineTo · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 중점변위 기본 낙뢰(01). 선분 (a, b) 를 반으로 나눠 중점을 선분에 수직인 방향으로 무작위 오프셋만큼 밀고
+// 이 쪼개기를 깊이 DEPTH 까지 재귀로 반복하면 직선이 들쭉날쭉한 번개 줄기가 된다.
+// 낙뢰는 정해진 순서로 화면을 골고루 오가고(누적 면적), 살아 있는 동안 60 밀리초마다 경로를 다시 뽑아
+// 깜빡인다(실제 번개의 재점등). 낙뢰 순간 하늘 전체가 잠깐 밝아지는 플래시와 지면 착지 블룸이 붙는다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var DEPTH = 6;     // 재귀 분할 깊이 — 5 는 굵직한 굴곡, 7 은 잔잔한 지그재그
+  var ROUGH = 0.42;  // 중점변위 거칠기 — 중점을 선분 길이의 몇 배까지 미는지
+  var FLASH = 0.85;  // 하늘 플래시 비율 — 낙뢰 순간 하늘이 밝아지는 정도(전면 라이팅)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 낙뢰 순서로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x316A01);
+
+  // 색은 CSS 커스텀 프로퍼티(--bolt-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--bolt-ink');
+  var C_DUSK = tokRGB('--bolt-dusk');
+  var C_CORE = tokRGB('--bolt-core');
+  var C_LILA = tokRGB('--bolt-lilac');
+  var C_MINT = tokRGB('--bolt-mint');
+  var C_PINK = tokRGB('--bolt-pink');
+  var C_MIST = tokRGB('--bolt-mist');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+  var GROUND_H = 14;
+
+  // ── 중점변위 — 번개의 전부 ──
+  function displace(ax, ay, bx, by, depth, out) {
+    if (depth === 0) { out.push([bx, by]); return; }
+    var mx = (ax + bx) / 2, my = (ay + by) / 2;
+    var dx = bx - ax, dy = by - ay;
+    var len = Math.hypot(dx, dy) || 1;
+    var nx = -dy / len, ny = dx / len;              // 선분에 수직인 법선
+    var off = (rand() * 2 - 1) * len * ROUGH * 0.5; // 선분 길이에 비례하는 무작위 변위
+    mx += nx * off; my += ny * off;
+    displace(ax, ay, mx, my, depth - 1, out);
+    displace(mx, my, bx, by, depth - 1, out);
+  }
+  function makePath(sx, ex) {
+    var pts = [[sx, -8]];
+    displace(sx, -8, ex, H + 6, DEPTH, pts);
+    return pts;
+  }
+
+  // ── 낙뢰 스케줄 — 화면을 골고루 쓸는 정해진 순서 ──
+  var strikes = [];
+  var nextAt = 0.08;
+  var cycle = 0;
+  var flash = 0.3;
+  var ANCHORS = [0.18, 0.55, 0.86, 0.34, 0.7, 0.1, 0.92, 0.46];
+
+  // 밤하늘 먼지 — 낙뢰 사이 구간에도 명도가 흔들리는 안전판
+  var specks = [];
+  function buildSpecks() {
+    specks = [];
+    for (var i = 0; i < 22; i++) {
+      specks.push({ rx: rand(), ry: rand() * 0.82, ph: rand() * TAU, spd: 1.1 + rand() * 1.7 });
+    }
+  }
+
+  function spawn(t) {
+    var ax = ANCHORS[cycle % ANCHORS.length] + (rand() - 0.5) * 0.1;
+    cycle++;
+    var sx = Math.max(0.05, Math.min(0.95, ax)) * W;
+    var ex = sx + (rand() - 0.5) * W * 0.26;
+    strikes.push({ sx: sx, ex: ex, pts: makePath(sx, ex), born: t, life: 0.62, flickAt: t });
+    flash = Math.min(1, flash + 0.95);
+  }
+
+  // 낙뢰 밝기 포락선 — 감쇠하다 두 번 다시 밝아지는 실제 번개의 재점등
+  function env(s, t) {
+    var u = (t - s.born) / s.life;
+    if (u >= 1 || u < 0) return 0;
+    var b = Math.pow(1 - u, 1.5);
+    if (u > 0.3 && u < 0.37) b = Math.max(b, 0.82);
+    if (u > 0.55 && u < 0.61) b = Math.max(b, 0.5);
+    return b;
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  function mix(c1, c2, k) {
+    return [c1[0] + (c2[0] - c1[0]) * k, c1[1] + (c2[1] - c1[1]) * k, c1[2] + (c2[2] - c1[2]) * k];
+  }
+  function strokePath(pts, col, wdt, alpha) {
+    ctx.strokeStyle = rgba(col, alpha);
+    ctx.lineWidth = wdt;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+
+  function draw(t) {
+    var f = flash * FLASH;
+    // 하늘 — 잉크에서 지평선 쪽 슬레이트로. 플래시만큼 전체가 띄어오른다
+    // 잔광 확산: 하늘을 매 프레임 완전히 덮어쓰지 않고 FADE 만큼만 섞는다 —
+    // 직전 프레임의 밝은 흔적(헤일로·블룸)이 몇 프레임에 걸쳐 식으며 남는다(누적면적 ↑)
+    var FADE = 0.30;
+    var top = mix(C_INK, C_DUSK, 0.10 + 0.55 * f);
+    var bot = mix(C_INK, C_DUSK, 0.50 + 0.50 * f);
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, rgba(top, FADE));
+    sky.addColorStop(1, rgba(bot, FADE));
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    for (var i = 0; i < specks.length; i++) {
+      var sp = specks[i];
+      var a = 0.05 + 0.30 * (0.5 + 0.5 * Math.sin(t * sp.spd + sp.ph));
+      ctx.fillStyle = rgba(C_MIST, a);
+      ctx.fillRect(sp.rx * W, sp.ry * H, 1.6, 1.6);
+    }
+
+    var gy = H - GROUND_H;
+    ctx.fillStyle = rgba(mix(C_INK, C_DUSK, 0.16 + 0.2 * f), 1);
+    ctx.fillRect(0, gy, W, GROUND_H);
+    ctx.fillStyle = rgba(C_MIST, 0.20 + 0.25 * f);
+    ctx.fillRect(0, gy, W, 1);
+
+    // 잔광 — 방금 지나간 낙뢰가 줄기 자리에 남기는 옅은 빛
+    var j, s, age, k;
+    for (j = 0; j < strikes.length; j++) {
+      s = strikes[j];
+      age = t - s.born;
+      if (age > s.life && age < s.life + 0.5) {
+        k = 1 - (age - s.life) / 0.5;
+        strokePath(s.pts, C_LILA, 10, 0.11 * k);
+        strokePath(s.pts, C_PINK, 2.4, 0.06 * k);
+      }
+    }
+
+    // 활성 낙뢰 — 헤일로·중간광·코어 세 겹
+    for (j = 0; j < strikes.length; j++) {
+      s = strikes[j];
+      var b = env(s, t);
+      if (b <= 0) continue;
+      strokePath(s.pts, C_LILA, 12, 0.22 * b);
+      strokePath(s.pts, C_LILA, 4.2, 0.55 * b);
+      strokePath(s.pts, C_CORE, 1.8, b);
+      // 착지 블룸 — 지면에 번지는 민트 빛과 핑크 고리
+      var bx = s.ex, by = gy;
+      var r = 12 + 42 * b;
+      var g2 = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+      g2.addColorStop(0, rgba(C_MINT, 0.5 * b));
+      g2.addColorStop(0.55, rgba(C_LILA, 0.2 * b));
+      g2.addColorStop(1, rgba(C_LILA, 0));
+      ctx.fillStyle = g2;
+      ctx.fillRect(bx - r, by - r, r * 2, r * 2);
+      ctx.beginPath();
+      ctx.arc(bx, by, 5 + 20 * b, 0, TAU);
+      ctx.strokeStyle = rgba(C_PINK, 0.3 * b);
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
+    if (f > 0.02) {
+      ctx.fillStyle = rgba(C_MINT, 0.08 * f);
+      ctx.fillRect(0, gy, W, GROUND_H);
+    }
+  }
+
+  function update(t, dt) {
+    if (t >= nextAt) {
+      spawn(t);
+      nextAt = t + 0.42 + rand() * 0.14;
+    }
+    flash *= Math.exp(-dt * 3.4);
+    for (var i = 0; i < strikes.length; i++) {
+      var s = strikes[i];
+      if (t - s.born < s.life && t - s.flickAt > 0.06) {
+        s.pts = makePath(s.sx, s.ex);   // 재점동 — 경로를 다시 뽑는 깜빡임
+        s.flickAt = t;
+      }
+    }
+    while (strikes.length && t - strikes[0].born > 1.3) strikes.shift();
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+  }
+
+  function stillFrame() {
+    strikes = [];
+    flash = 0.85;
+    var sx = 0.52 * W;
+    var ex = sx + W * 0.06;
+    strikes.push({ sx: sx, ex: ex, pts: makePath(sx, ex), born: 0.05, life: 0.62, flickAt: 0 });
+    draw(0.06);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    update(t, dt);
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  buildSpecks();
+  nOut.textContent = String(DEPTH);
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

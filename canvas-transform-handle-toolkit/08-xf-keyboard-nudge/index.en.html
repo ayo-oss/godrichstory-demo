@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One-Pixel Nudge Move With Arrow Keys — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="frame" id="frame">
+    <div class="draggable" id="draggable" tabindex="0" aria-label="Move with arrow keys — hold to accelerate"></div>
+  </div>
+  <div class="readout" id="readout" aria-hidden="true">×<span id="rm">1</span></div>
+</div>
+</main>
+<script>
+(function () {
+  var KEYBOARD_NUDGE_PX = 1; // 변형 08 이 8 로 키운다 — 키 하나를 눌렀을 때의 기본 이동량
+  var ACCEL_WINDOW_MS = 450;
+  var MAX_MULT = 6;
+  var SIM_TICK_MS = 50;
+
+  var scene = document.getElementById('scene');
+  var draggable = document.getElementById('draggable');
+  var rm = document.getElementById('rm');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var frameW = 184, frameH = 108;
+  var tx = 70, ty = 38;
+  var holdStart = null;
+  var holdKey = null;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  // 눌린 시간(elapsed) → 가속 배수. 막 눌렀을 때는 1배, ACCEL_WINDOW_MS 마다 1배씩 커져
+  // MAX_MULT 에서 멈춘다 — 키를 오래 누를수록(브라우저 네이티브 키 반복이 이 함수를 계속 호출) 더 멀리 간다.
+  function computeStep(elapsedMs) {
+    var mult = 1 + Math.min(Math.floor(elapsedMs / ACCEL_WINDOW_MS), MAX_MULT - 1);
+    return { step: Math.max(1, Math.round(KEYBOARD_NUDGE_PX * mult)), mult: mult };
+  }
+
+  function moveBy(dx, dy, mult) {
+    tx = clamp(tx + dx, 0, frameW - 44);
+    ty = clamp(ty + dy, 0, frameH - 32);
+    draggable.style.transform = 'matrix(1,0,0,1,' + tx.toFixed(0) + ',' + ty.toFixed(0) + ')';
+    rm.textContent = String(mult);
+  }
+
+  var DIRS = {
+    ArrowUp: { dx: 0, dy: -1 },
+    ArrowDown: { dx: 0, dy: 1 },
+    ArrowLeft: { dx: -1, dy: 0 },
+    ArrowRight: { dx: 1, dy: 0 }
+  };
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  draggable.addEventListener('keydown', function (e) {
+    var dir = DIRS[e.key];
+    if (!dir) return;
+    human();
+    e.preventDefault();
+    if (!e.repeat || holdKey !== e.key) {
+      holdKey = e.key;
+      holdStart = performance.now();
+    }
+    var elapsed = performance.now() - holdStart;
+    var acc = computeStep(elapsed);
+    moveBy(dir.dx * acc.step, dir.dy * acc.step, acc.mult);
+  });
+  draggable.addEventListener('keyup', function (e) {
+    if (e.key === holdKey) { holdKey = null; holdStart = null; rm.textContent = '1'; }
+  });
+
+  draggable.style.transform = 'matrix(1,0,0,1,' + tx + ',' + ty + ')';
+
+  // reduce: 실사용 경로 적용 — 위 keydown/keyup 은 트윈 없이 매 이벤트마다 즉시 반영한다.
+  // 아래 자동 루프는 시연 게이트만 — 실제 키 대신 같은 computeStep() 을 내부 타이머로 흉내내며
+  // reduce 에서는 돌지 않는다.
+  var SEQUENCE = [
+    { dir: DIRS.ArrowRight, holdTicks: 8 },
+    { dir: DIRS.ArrowDown, holdTicks: 6 },
+    { dir: DIRS.ArrowLeft, holdTicks: 8 },
+    { dir: DIRS.ArrowUp, holdTicks: 6 }
+  ];
+  var seqI = 0;
+
+  function simulateHold(entry, onDone) {
+    var tick = 0;
+    function step() {
+      if (!scene.classList.contains('is-demo')) return;
+      var elapsed = tick * SIM_TICK_MS;
+      var acc = computeStep(elapsed);
+      moveBy(entry.dir.dx * acc.step, entry.dir.dy * acc.step, acc.mult);
+      tick++;
+      if (tick < entry.holdTicks) {
+        timers.push(setTimeout(step, SIM_TICK_MS));
+      } else {
+        rm.textContent = '1';
+        onDone();
+      }
+    }
+    step();
+  }
+
+  function loop() {
+    if (!scene.classList.contains('is-demo')) return;
+    var entry = SEQUENCE[seqI % SEQUENCE.length];
+    seqI++;
+    simulateHold(entry, function () {
+      timers.push(setTimeout(loop, 400));
+    });
+  }
+
+  if (!reduce) {
+    timers.push(setTimeout(loop, 500));
+  }
+})();
+</script>
+</body>
+</html>

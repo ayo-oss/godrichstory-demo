@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>입력한 글자와 이름 사이 유사도 값으로 줄을 세우는 검색 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fz is-demo" id="fz">
+  <div class="fz__field">
+    <input class="fz__input" id="fzInput" type="text" placeholder="이모지 이름 검색" aria-label="이모지 이름 검색" autocomplete="off">
+  </div>
+  <ul class="fz__list" id="fzList" role="listbox" aria-label="검색 결과"></ul>
+  <p class="fz__sr" role="status" aria-live="polite" id="fzLive"></p>
+</div>
+<script>
+(function () {
+  var EMOJI_SEARCH_DEBOUNCE_MS = 200;
+  var ITEMS = [
+    { ch: '\u{1F600}', name: 'grinning face' }, { ch: '\u{1F602}', name: 'joy tears' },
+    { ch: '\u{1F525}', name: 'fire flame' }, { ch: '\u{1F31F}', name: 'glowing star' },
+    { ch: '\u{1F389}', name: 'party popper' }, { ch: '\u{1F9E0}', name: 'brain idea' },
+    { ch: '\u{1F680}', name: 'rocket launch' }, { ch: '\u{1F338}', name: 'cherry blossom' },
+    { ch: '\u{1F4A7}', name: 'water drop' }, { ch: '\u{1F308}', name: 'rainbow arc' },
+    { ch: '\u{1F52C}', name: 'science lab' }, { ch: '\u{1F9ED}', name: 'compass guide' }
+  ];
+
+  var root = document.getElementById('fz');
+  var input = document.getElementById('fzInput');
+  var listEl = document.getElementById('fzList');
+  var live = document.getElementById('fzLive');
+  var timer = 0;
+
+  var synthetic = false;
+  function human() { if (synthetic) return; if (root.classList.contains('is-demo')) root.classList.remove('is-demo'); }
+
+  // 계산 겹: 입력 글자를 이름 글자열 안에서 순서대로 찾아가며, 연속으로 이어질수록·앞쪽에서
+  // 맞을수록 유사도 값을 더 높게 쳐서 완전히 같지 않아도 값 순서로 줄을 세운다.
+  function score(query, name) {
+    if (!query) return 1;
+    var qi = 0, s = 0, streak = 0;
+    for (var ni = 0; ni < name.length && qi < query.length; ni++) {
+      if (name[ni] === query[qi]) {
+        streak++;
+        s += 1 + streak * 2 + (ni === 0 ? 4 : 0);
+        qi++;
+      } else {
+        streak = 0;
+      }
+    }
+    if (qi < query.length) return 0;
+    return s;
+  }
+
+  function rank(query) {
+    var q = query.trim().toLowerCase();
+    return ITEMS.map(function (it) { return { it: it, s: score(q, it.name) }; })
+      .filter(function (r) { return r.s > 0; })
+      .sort(function (a, b) { return b.s - a.s; });
+  }
+
+  var liByName = {};
+  var mounted = false;
+
+  // list 가 바뀔 때마다 통째로 다시 그리지 않는다 — 남는 항목은 위치만 옮기고(FLIP)
+  // 유사도 값으로 정한 막대 폭만 새로 매겨 전환시킨다. 그래야 값이 바뀔 때마다 화면이
+  // 계속 움직인다(키만 눌렀다 하면 순간 교체로 끝나던 것과 달리).
+  function renderList(query) {
+    var ranked = rank(query);
+    var keep = {};
+    var before = {};
+    Array.prototype.forEach.call(listEl.children, function (li) { before[li.dataset.name] = li.getBoundingClientRect(); });
+
+    ranked.forEach(function (r) {
+      var it = r.it, pct = Math.min(100, Math.max(8, Math.round(r.s * 3)));
+      keep[it.name] = true;
+      var li = liByName[it.name];
+      if (!li) {
+        li = document.createElement('li');
+        li.className = mounted ? 'fz__item fz__item--enter' : 'fz__item'; li.dataset.name = it.name;
+        li.setAttribute('role', 'option'); li.setAttribute('aria-selected', 'false');
+        li.innerHTML = '<span class="fz__ch">' + it.ch + '</span><span class="fz__name">' + it.name +
+          '</span><span class="fz__bar"><span class="fz__barFill"></span></span>';
+        liByName[it.name] = li;
+        listEl.appendChild(li);
+        if (mounted) {
+          requestAnimationFrame(function () {
+            li.classList.remove('fz__item--enter');
+            li.querySelector('.fz__barFill').style.width = pct + '%';
+          });
+        } else {
+          li.querySelector('.fz__barFill').style.width = pct + '%';
+        }
+      } else {
+        li.classList.remove('fz__item--exit');
+        listEl.appendChild(li);
+        li.querySelector('.fz__barFill').style.width = pct + '%';
+      }
+    });
+
+    Object.keys(liByName).forEach(function (name) {
+      if (keep[name]) return;
+      var li = liByName[name];
+      li.classList.add('fz__item--exit');
+      delete liByName[name];
+      window.setTimeout(function () { if (li.parentNode) li.parentNode.removeChild(li); }, 220);
+    });
+
+    Array.prototype.forEach.call(listEl.children, function (li) {
+      if (li.classList.contains('fz__item--enter') || li.classList.contains('fz__item--exit')) return;
+      var b = before[li.dataset.name];
+      if (!b) return;
+      var a = li.getBoundingClientRect(), dy = b.top - a.top;
+      if (Math.abs(dy) > .5) {
+        li.style.transition = 'none';
+        li.style.transform = 'translateY(' + dy + 'px)';
+        li.offsetHeight;
+        li.style.transition = '';
+        li.style.transform = '';
+      }
+    });
+    live.textContent = ranked.length + '개 일치';
+  }
+
+  function onInput() {
+    human();
+    var q = input.value;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(function () { renderList(q); }, reduce ? 0 : EMOJI_SEARCH_DEBOUNCE_MS);
+  }
+  input.addEventListener('input', onInput);
+
+  renderList('');
+  mounted = true;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var WORDS = ['fire', 'roc', 'star', 'gui', ''];
+  var STEP = 260;
+  var wi = 0, ci = 0, phase = 'type', loopTimer = 0;
+  function typeLoop() {
+    if (!root.classList.contains('is-demo')) return;
+    var word = WORDS[wi % WORDS.length];
+    if (phase === 'type') {
+      ci++;
+      input.value = word.slice(0, ci);
+      synthetic = true; input.dispatchEvent(new Event('input')); synthetic = false;
+      if (ci >= word.length) { phase = 'erase'; loopTimer = window.setTimeout(typeLoop, STEP + 200); return; }
+      loopTimer = window.setTimeout(typeLoop, STEP);
+      return;
+    }
+    ci--;
+    input.value = word.slice(0, Math.max(ci, 0));
+    synthetic = true; input.dispatchEvent(new Event('input')); synthetic = false;
+    if (ci <= 0) { phase = 'type'; wi++; loopTimer = window.setTimeout(typeLoop, STEP); return; }
+    loopTimer = window.setTimeout(typeLoop, STEP);
+  }
+  if (!reduce) { loopTimer = window.setTimeout(typeLoop, 200); }
+  else { root.classList.remove('is-demo'); }
+})();
+</script>
+</main>
+</body>
+</html>

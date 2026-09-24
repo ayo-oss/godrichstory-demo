@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinch zoom — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="pz is-demo" id="pz-root">
+    <div class="pz__frame" id="pz-frame">
+      <div class="pz__photo" id="pz-photo">
+        <svg viewBox="0 0 190 128" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+          <rect class="pz__bg" width="190" height="128"/>
+          <circle class="pz__moon" cx="138" cy="36" r="15"/>
+          <polygon class="pz__t1" points="0,128 55,58 110,128"/>
+          <polygon class="pz__t2" points="76,128 138,70 190,118 190,128"/>
+          <rect class="pz__field" y="102" width="190" height="26"/>
+          <circle class="pz__tree" cx="30" cy="96" r="7"/>
+          <circle class="pz__tree pz__tree--b" cx="163" cy="92" r="5"/>
+        </svg>
+      </div>
+      <span class="pz__finger pz__finger--a" id="pz-fa" aria-hidden="true"></span>
+      <span class="pz__finger pz__finger--b" id="pz-fb" aria-hidden="true"></span>
+    </div>
+    <div class="pz__side">
+      <button class="pz__btn" type="button" id="pz-in" aria-label="拡大">
+        <svg viewBox="0 0 256 256" width="15" height="15"><g fill="currentColor"><path d="M192 112a80 80 0 1 1-80-80a80 80 0 0 1 80 80" opacity=".2"/><path d="m229.66 218.34l-50.06-50.06a88.21 88.21 0 1 0-11.32 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32M40 112a72 72 0 1 1 72 72a72.08 72.08 0 0 1-72-72m112 0a8 8 0 0 1-8 8h-24v24a8 8 0 0 1-16 0v-24H80a8 8 0 0 1 0-16h24V80a8 8 0 0 1 16 0v24h24a8 8 0 0 1 8 8"/></g></svg>
+      </button>
+      <span class="pz__zoom" id="pz-zoom" aria-live="polite"><span class="pz__z pz__z--a">100%</span><span class="pz__z pz__z--b">162%</span></span>
+      <button class="pz__btn" type="button" id="pz-out" aria-label="縮小">
+        <svg viewBox="0 0 256 256" width="15" height="15"><g fill="currentColor"><path d="M192 112a80 80 0 1 1-80-80a80 80 0 0 1 80 80" opacity=".2"/><path d="m229.66 218.34l-50.06-50.06a88.21 88.21 0 1 0-11.32 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32M40 112a72 72 0 1 1 72 72a72.08 72.08 0 0 1-72-72m112 0a8 8 0 0 1-8 8H80a8 8 0 0 1 0-16h64a8 8 0 0 1 8 8"/></g></svg>
+      </button>
+    </div>
+  </div>
+</main>
+<script>
+// 실제 동작: 두 손가락 거리→拡大, 비틀림→회전. 마우스는 휠(拡大)·드래그(이동), 버튼·화살표 키도 같은 동작.
+var root = document.getElementById('pz-root');
+var frame = document.getElementById('pz-frame');
+var photo = document.getElementById('pz-photo');
+var zoom = document.getElementById('pz-zoom');
+var fa = document.getElementById('pz-fa');
+var fb = document.getElementById('pz-fb');
+var ptrs = {};   // pointerId -> {x, y}
+var scale = 1, rot = 0, tx = 0, ty = 0;
+var start = null; // 드래그/핀치 시작 스냅샷
+
+function paint() {
+  photo.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ') rotate(' + rot + 'deg)';
+  // 자동 루프를 끈 뒤(사람이 만진 뒤)에만 숫자를 직접 쓴다 — 루프 중에는 두 라벨이 steps 로 교체된다
+  if (!root.classList.contains('is-demo')) zoom.textContent = Math.round(scale * 100) + '%';
+}
+function pinchInfo() {
+  var ks = Object.keys(ptrs);
+  if (ks.length < 2) return null;
+  var a = ptrs[ks[0]], b = ptrs[ks[1]];
+  var r = frame.getBoundingClientRect();
+  var ax = a.x - r.left, ay = a.y - r.top, bx = b.x - r.left, by = b.y - r.top;
+  fa.style.transform = 'translate(' + ax + 'px,' + ay + 'px)';
+  fb.style.transform = 'translate(' + bx + 'px,' + by + 'px)';
+  return {
+    d: Math.hypot(ax - bx, ay - by),
+    ang: Math.atan2(by - ay, bx - ax) * 180 / Math.PI,
+    mx: (ax + bx) / 2, my: (ay + by) / 2
+  };
+}
+frame.addEventListener('pointerdown', function (e) {
+  root.classList.remove('is-demo');
+  frame.setPointerCapture(e.pointerId);
+  ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+  var info = pinchInfo();
+  start = { scale: scale, rot: rot, tx: tx, ty: ty,
+            d: info ? info.d : 0, ang: info ? info.ang : 0,
+            px: e.clientX, py: e.clientY };
+  e.preventDefault();
+});
+frame.addEventListener('pointermove', function (e) {
+  if (!(e.pointerId in ptrs)) return;
+  ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+  var info = pinchInfo();
+  if (info && start && start.d > 0) {
+    scale = Math.max(.6, Math.min(2.4, start.scale * info.d / start.d));
+    var da = info.ang - start.ang;
+    while (da > 180) da -= 360;
+    while (da < -180) da += 360;
+    rot = Math.max(-24, Math.min(24, start.rot + da * .5));
+  } else if (start) {
+    if (scale > 1.05) { // 확대된 상태에서 한 손가락 이동(팬)
+      tx = start.tx + (e.clientX - start.px);
+      ty = start.ty + (e.clientY - start.py);
+    }
+  }
+  paint();
+});
+function up(e) {
+  delete ptrs[e.pointerId];
+  var ks = Object.keys(ptrs);
+  if (ks.length === 1) { // 남은 한 손가락 기준으로 팬 시작점 다시 잡기
+    var p = ptrs[ks[0]];
+    start = { scale: scale, rot: rot, tx: tx, ty: ty, d: 0, ang: 0, px: p.x, py: p.y };
+  }
+}
+frame.addEventListener('pointerup', up);
+frame.addEventListener('pointercancel', up);
+frame.addEventListener('wheel', function (e) {
+  root.classList.remove('is-demo');
+  scale = Math.max(.6, Math.min(2.4, scale * (e.deltaY < 0 ? 1.12 : .89)));
+  paint();
+  e.preventDefault();
+}, { passive: false });
+function step(di) {
+  root.classList.remove('is-demo');
+  scale = Math.max(.6, Math.min(2.4, scale + di));
+  paint();
+}
+document.getElementById('pz-in').addEventListener('click', function () { step(.2); });
+document.getElementById('pz-out').addEventListener('click', function () { step(-.2); });
+root.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); tx += 8; paint(); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { root.classList.remove('is-demo'); tx -= 8; paint(); e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { root.classList.remove('is-demo'); ty += 8; paint(); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { root.classList.remove('is-demo'); ty -= 8; paint(); e.preventDefault(); }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마칭 스퀘어 — 16경우 경계 추출 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>4隅の閾値超過ビットから16通りの場合分けを選び、境界点を線形補間で求めると滑らかな閉じた輪郭になります — ボールが動き回り、合体と分離を繰り返します</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="マーチングスクエア境界抽出 実験パネル" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">5</b>ボール・マーチングスクエア輪郭</span>
+    <span class="cd__meta cd__meta--dim">canvas · getImageData · Path2D · quadraticCurveTo</span>
+  </div>
+</div>
+</main>
+<script>
+// 마칭 스퀘어(02). 스칼라 필드(볼마다 r²/d² 감쇠 합)를 오프스크린 저해상 캔버스에 굽는다 —
+// 격자 모서리당 1px 크기로, 볼마다 감쇠 radialGradient 스프라이트를 lighter 합성으로 겹한다.
+// getImageData 로 그 픽셀을 읽어 Float32Array 격자에 되돌리는 게 필드 샘플링이다(07 의 패턴).
+// 각 칸의 네 모서리 코너값이 임계값을 넘는지에 따라 4비트 인덱스(16경우)를 만들고,
+// 경우 테이블이 어떤 변을 경계가 가로지르는지 알려주면 그 위치를 변 양 끝 코너값의
+// 선형 보간으로 정한다. 이 점들을 짝지어 폴리라인을 만들고 quadraticCurveTo 로 평활한
+// 닫힌 윤곽을 Path2D 에 담아 fill+stroke — 3~5개 볼이 가까워지면 다리로 합체, 멀어지면 분리된다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var N_BALL = 5;      // ボール 개수 — 합체/분리가 잦은 밀도
+  var THRESH = 1.0;    // 필드 임계값
+  var CELL = 8;        // 격자 셀 픽셀 크기 — 보간 밀도
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+  var nOut = document.getElementById('cdN');
+  nOut.textContent = String(N_BALL);
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var C_FILL = tok('--ms-fill');
+  var C_DEEP = tok('--ms-deep');
+  var C_EDGE = tok('--ms-edge');
+  var C_CREAM = tok('--ms-cream');
+  var C_BG = '#ffd23f';
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, COLS = 0, ROWS = 0;
+  var grid = null;
+  var raf = 0, t0 = -1;
+
+  // 오프스크린 필드 캔버스 — 격자 모서리당 1px. 여기에 감쇠를 굽고 getImageData 로 읽는다
+  var fieldCv = document.createElement('canvas');
+  var fieldCtx = fieldCv.getContext('2d', { willReadFrequently: true });
+  var LOWW = 0, LOWH = 0;
+
+  // 시드 고정 PRNG — 미리보기가 항상 같은 ボール 궤도로 흐른다
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x317A02);
+
+  var balls = [];
+  function buildBalls() {
+    balls = [];
+    for (var i = 0; i < N_BALL; i++) {
+      balls.push({
+        fx: 0.3 + rand() * 0.5, fy: 0.24 + rand() * 0.44,
+        ph: rand() * Math.PI * 2, ax: 0.3 + rand() * 0.24, ay: 0.28 + rand() * 0.24,
+        cx: 0.5, cy: 0.5, rad: 42 + rand() * 22
+      });
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    COLS = Math.max(16, Math.round(W / CELL));
+    ROWS = Math.max(12, Math.round(H / CELL));
+    LOWW = COLS + 1; LOWH = ROWS + 1;
+    fieldCv.width = LOWW; fieldCv.height = LOWH;
+    grid = new Float32Array(LOWW * LOWH);
+  }
+
+  function ballPos(b, t) {
+    return [
+      (b.cx + Math.sin(t * b.fx + b.ph) * b.ax) * W,
+      (b.cy + Math.cos(t * b.fy + b.ph * 1.4) * b.ay) * H
+    ];
+  }
+
+  // ── 필드 굽기 + 픽셀 판독 ──
+  // 볼마다 r²/d² 감쇠를 회색조 radialGradient 로 오프스크린 캔버스(격자 모서리당 1px)에 그리고
+  // lighter 합성으로 겹한다 — 겹치는 볼의 감쇠가 픽셀 값으로 그대로 더해진다(메타볼 합산).
+  // 스프라이트 반경 안에서 gradient offset fr 마다 값 v=1/(fr·K)² 을 SCALE 배로 픽셀에 쓰고,
+  // getImageData 로 읽은 뒤 SCALE 로 나누면 이전 fieldAt 판(Σ r²·0.5/d²)과 같은 척도로 돌아온다.
+  // 임계값(1.0)이 새지 않도록 SCALE 을 넉넉히 잡아 포화(255) 가 임계값 부근에서 일어나지 않게 한다.
+  // 임계값(1.0) 부근의 양자화를 줄이려 SCALE 을 넉넉히 잡는다 — v=1(임계)이 픽셀 100 에 대응.
+  // 255 클램프는 블롭 깊은 내부(v≥2.55, 어차피 case 15)에서만 일어나 윤곽에 영향 없다.
+  var K = 8, SCALE = 100, STOPS = 32;
+  var rad2Cache = [];
+  function b_rad2(i) {
+    if (!rad2Cache[i]) rad2Cache[i] = balls[i].rad * balls[i].rad * 0.5;
+    return rad2Cache[i];
+  }
+
+  function drawField(t) {
+    var cw = W / COLS, ch = H / ROWS;
+    fieldCtx.globalCompositeOperation = 'source-over';
+    fieldCtx.fillStyle = '#000';
+    fieldCtx.fillRect(0, 0, LOWW, LOWH);
+    fieldCtx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < balls.length; i++) {
+      var p = ballPos(balls[i], t);
+      var cx = p[0] / cw, cy = p[1] / ch;
+      var R = Math.sqrt(b_rad2(i)) * K / cw;
+      var g = fieldCtx.createRadialGradient(cx, cy, 0, cx, cy, R);
+      for (var s = 0; s < STOPS; s++) {
+        var off = s / STOPS;
+        var fr = Math.max(off, 1 / (STOPS * 4));
+        var v = 1 / (fr * fr * K * K);
+        var px = Math.min(255, Math.round(v * SCALE));
+        g.addColorStop(off, 'rgb(' + px + ',' + px + ',' + px + ')');
+      }
+      g.addColorStop(1, 'rgb(0,0,0)'); // 꼬리 절단 — 반경 밖은 0(gradient 마지막 정지점이 밖으로 펴지는 걸 끊는다)
+      fieldCtx.fillStyle = g;
+      fieldCtx.fillRect(0, 0, LOWW, LOWH);
+    }
+    fieldCtx.globalCompositeOperation = 'source-over';
+  }
+
+  function classify() {
+    var img = fieldCtx.getImageData(0, 0, LOWW, LOWH);
+    var d = img.data;
+    for (var gy = 0; gy < LOWH; gy++) {
+      for (var gx = 0; gx < LOWW; gx++) {
+        grid[gy * LOWW + gx] = d[(gy * LOWW + gx) * 4] / SCALE;
+      }
+    }
+  }
+
+  // ambiguous(5·10) 칸의 중심값만 실계산으로 보강 — getImageData 픽셀과 같은 r²/d² 합
+  function fieldAt(px, py, t) {
+    var sum = 0;
+    for (var i = 0; i < balls.length; i++) {
+      var p = ballPos(balls[i], t);
+      var dx = px - p[0], dy = py - p[1];
+      var d2 = dx * dx + dy * dy;
+      if (d2 < 1) d2 = 1;
+      sum += (b_rad2(i)) / d2;
+    }
+    return sum;
+  }
+
+  function sampleGrid(t) {
+    drawField(t);
+    classify();
+  }
+
+  // 16경우 마칭 스퀘어 — 칸의 코너 비트(TL=1 TR=2 BR=4 BL=8, 임계 초과=1)에 따라
+  // 경계가 지나는 변 쌍을 돌려준다: top·right·bottom·left 변 코드
+  // ambiguous 5·10 는 중심값으로 판정해 두 선으로 나눈다.
+  var EDGES = { T: 0, R: 1, B: 2, L: 3 };
+  function caseSegments(cs) {
+    switch (cs) {
+      case 0:  return [];
+      case 15: return [];
+      case 1:  return [[EDGES.T, EDGES.L]];
+      case 14: return [[EDGES.T, EDGES.L]];
+      case 2:  return [[EDGES.T, EDGES.R]];
+      case 13: return [[EDGES.T, EDGES.R]];
+      case 3:  return [[EDGES.L, EDGES.R]];
+      case 12: return [[EDGES.L, EDGES.R]];
+      case 4:  return [[EDGES.R, EDGES.B]];
+      case 11: return [[EDGES.R, EDGES.B]];
+      case 6:  return [[EDGES.T, EDGES.B]];
+      case 9:  return [[EDGES.T, EDGES.B]];
+      case 7:  return [[EDGES.L, EDGES.B]];
+      case 8:  return [[EDGES.L, EDGES.B]];
+      case 5:  return 'AMB-x'; // 중심 낮음: TL 블롭과 BR 블롭 분리
+      case 10: return 'AMB-+'; // 중심 높음: 두 블롭 연결
+    }
+    return [];
+  }
+
+  // 변 위 경계점 — 코너값 선형 보간
+  function lerpPt(gx, gy, edge, cw, ch) {
+    var vTL = grid[gy * (COLS + 1) + gx];
+    var vTR = grid[gy * (COLS + 1) + gx + 1];
+    var vBR = grid[(gy + 1) * (COLS + 1) + gx + 1];
+    var vBL = grid[(gy + 1) * (COLS + 1) + gx];
+    var x0 = gx * cw, y0 = gy * ch;
+    function ip(a, b) { return (THRESH - a) / (b - a); }
+    switch (edge) {
+      case EDGES.T: return [x0 + cw * ip(vTL, vTR), y0];
+      case EDGES.B: return [x0 + cw * ip(vBL, vBR), y0 + ch];
+      case EDGES.L: return [x0, y0 + ch * ip(vTL, vBL)];
+      case EDGES.R: return [x0 + cw, y0 + ch * ip(vTR, vBR)];
+    }
+    return [x0, y0];
+  }
+
+  // 세그먼트 모으기 — 모든 칸의 경계 절편을 점 배열로
+  function collectSegments(t) {
+    var cw = W / COLS, ch = H / ROWS;
+    var pts = []; // [x, y, nx, ny] 시작점·끝점
+    for (var gy = 0; gy < ROWS; gy++) {
+      for (var gx = 0; gx < COLS; gx++) {
+        var vTL = grid[gy * (COLS + 1) + gx];
+        var vTR = grid[gy * (COLS + 1) + gx + 1];
+        var vBR = grid[(gy + 1) * (COLS + 1) + gx + 1];
+        var vBL = grid[(gy + 1) * (COLS + 1) + gx];
+        var cs = (vTL > THRESH ? 1 : 0) | (vTR > THRESH ? 2 : 0) | (vBR > THRESH ? 4 : 0) | (vBL > THRESH ? 8 : 0);
+        if (cs === 0 || cs === 15) continue;
+        var segs = caseSegments(cs);
+        if (typeof segs === 'string') {
+          // ambiguous — 칸 중심값으로 판정
+          var mc = fieldAt((gx + 0.5) * cw, (gy + 0.5) * ch, t);
+          var flip = (cs === 5) === (mc <= THRESH);
+          var a = flip ? [[EDGES.T, EDGES.R], [EDGES.L, EDGES.B]]
+                       : [[EDGES.T, EDGES.L], [EDGES.R, EDGES.B]];
+          for (var k = 0; k < 2; k++) {
+            var p1 = lerpPt(gx, gy, a[k][0], cw, ch);
+            var p2 = lerpPt(gx, gy, a[k][1], cw, ch);
+            pts.push([p1, p2]);
+          }
+        } else {
+          for (var s = 0; s < segs.length; s++) {
+            var q1 = lerpPt(gx, gy, segs[s][0], cw, ch);
+            var q2 = lerpPt(gx, gy, segs[s][1], cw, ch);
+            pts.push([q1, q2]);
+          }
+        }
+      }
+    }
+    return pts;
+  }
+
+  // 세그먼트를 연결해 닫힌 고리로 엮기 — 끝점 근사 매칭(그리드 해상도 한도)
+  function chainSegments(segs) {
+    var eps2 = (CELL * 1.5) * (CELL * 1.5);
+    var used = new Uint8Array(segs.length);
+    var loops = [];
+    for (var i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      used[i] = 1;
+      var loop = [segs[i][0], segs[i][1]];
+      var guard = 0;
+      while (guard++ < 4000) {
+        var tail = loop[loop.length - 1];
+        var found = -1;
+        for (var j = 0; j < segs.length; j++) {
+          if (used[j]) continue;
+          var dx = segs[j][0][0] - tail[0], dy = segs[j][0][1] - tail[1];
+          if (dx * dx + dy * dy < eps2) { found = j; loop.push(segs[j][1]); break; }
+          dx = segs[j][1][0] - tail[0]; dy = segs[j][1][1] - tail[1];
+          if (dx * dx + dy * dy < eps2) { loop.push(segs[j][0]); found = j; break; }
+        }
+        if (found < 0) break;
+        used[found] = 1;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    return loops;
+  }
+
+  // 고리를 quadraticCurveTo 로 평활 — 중점 규칙(각 점을 제어점, 중점을 앵커)
+  function smoothLoop(path, loop) {
+    var n = loop.length;
+    path.moveTo((loop[0][0] + loop[1][0]) / 2, (loop[0][1] + loop[1][1]) / 2);
+    for (var i = 1; i <= n; i++) {
+      var cur = loop[i % n];
+      var nxt = loop[(i + 1) % n];
+      path.quadraticCurveTo(cur[0], cur[1], (cur[0] + nxt[0]) / 2, (cur[1] + nxt[1]) / 2);
+    }
+    path.closePath();
+  }
+
+  function draw(t) {
+    sampleGrid(t);
+    var segs = collectSegments(t);
+    var loops = chainSegments(segs);
+
+    ctx.fillStyle = C_BG;
+    ctx.fillRect(0, 0, W, H);
+
+    // 옐로 무대 배경 변화 — 느린 크림 안개 드리프트(누적면적)
+    var mist = ctx.createRadialGradient(
+      W * (0.5 + Math.sin(t * 0.12) * 0.32), H * (0.5 + Math.cos(t * 0.1) * 0.3), 0,
+      W * 0.5, H * 0.5, Math.max(W, H) * 0.8
+    );
+    mist.addColorStop(0, 'rgba(255,247,230,0.5)');
+    mist.addColorStop(1, 'rgba(255,247,230,0)');
+    ctx.fillStyle = mist;
+    ctx.fillRect(0, 0, W, H);
+
+    // 임계값 내부 미리보기 채움(격자 픽셀) — 윤곽이 무엇을 감싸는지 보여주는 바탕
+    var cw = W / COLS, ch = H / ROWS;
+    ctx.fillStyle = C_DEEP;
+    ctx.globalAlpha = 0.16;
+    for (var gy = 0; gy < ROWS; gy++) {
+      for (var gx = 0; gx < COLS; gx++) {
+        if (grid[gy * (COLS + 1) + gx] > THRESH) ctx.fillRect(gx * cw, gy * ch, cw, ch);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // 닫힌 윤곽 — Path2D 에 평활 고리를 담아 fill + stroke
+    var path = new Path2D();
+    for (var li = 0; li < loops.length; li++) smoothLoop(path, loops[li]);
+    ctx.fillStyle = C_FILL;
+    ctx.globalAlpha = 0.9;
+    ctx.fill(path);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = C_EDGE;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke(path);
+
+    // ボール 중심 크림 점 — 코어 하이라이트
+    for (var i = 0; i < balls.length; i++) {
+      var p = ballPos(balls[i], t);
+      ctx.fillStyle = C_CREAM;
+      ctx.beginPath(); ctx.arc(p[0], p[1], 2.6, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function stillFrame() { draw(0.6); }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  buildBalls();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

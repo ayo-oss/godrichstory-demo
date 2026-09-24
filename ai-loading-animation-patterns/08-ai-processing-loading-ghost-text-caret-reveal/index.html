@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토큰 순번 값이 오를 때마다 한 글자씩 드러나는 고스트 텍스트 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld" id="ld">
+  <p class="ld__hint">
+    <svg class="ld__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 56v56a8 8 0 0 1-16 0V91.3l-25.6 25.7A80 80 0 1 1 174 60a8 8 0 1 1-9 13.2A64 64 0 1 0 179.7 128H216a8 8 0 0 1 0 16h-56a8 8 0 0 1-8-8V80a8 8 0 0 1 16 0v20.7L192.7 76A80.1 80.1 0 0 0 64 128a8 8 0 0 1-16 0a96 96 0 0 1 163.6-68.3L224 71.3V56a8 8 0 0 1 8 8" opacity=".2"/><path d="M224 48a8 8 0 0 0-8 8v15.3l-11.7-11.6a96 96 0 1 0 27.6 51.6a8 8 0 0 0-15.8 2.5a80 80 0 1 1-23-43l-25.7 25.7A8 8 0 0 0 173 112h56a8 8 0 0 0 8-8V56a8 8 0 0 0-13-8"/></g></svg>
+    <span>클릭하거나 스페이스바를 누르면 멈추거나 다시 갑니다</span>
+  </p>
+  <div class="ld__field" id="field" role="application" aria-label="고스트 텍스트 캐럿 리빌 실험판" tabindex="0">
+    <i class="ld__fill" id="fill" aria-hidden="true"></i>
+    <p class="ld__sentence" id="sentence"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var LOOP = 2.0;
+  var AI_LOADER_TOKEN_REVEAL_MS = 62;   // 토큰 순번 하나가 올라가는 데 걸리는 시간(ms)
+  var FADE_MS = 130;                    // 글자 하나가 고스트 색에서 실제 색으로 바뀌는 시간(ms)
+  var BLINK_MS = 280;                   // 캐럿 깜빡임 주기(ms)
+  var SENTENCE = '입력한 내용을 정리해 순서대로 알려드릴게요';
+
+  var root = document.getElementById('ld');
+  var field = document.getElementById('field');
+  var sentenceEl = document.getElementById('sentence');
+  var fill = document.getElementById('fill');
+  var paused = false;
+  var t0 = performance.now();
+  var raf = 0;
+
+  function reduced() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function hexToRgb(hex) {
+    var n = parseInt(hex.replace('#', ''), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function mix(a, b, t) {
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * t),
+      Math.round(a[1] + (b[1] - a[1]) * t),
+      Math.round(a[2] + (b[2] - a[2]) * t)
+    ];
+  }
+  function rgbStr(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  var chars = Array.prototype.slice.call(SENTENCE);
+  var LEN = chars.length;
+  var els = [];
+  chars.forEach(function (ch) {
+    var span = document.createElement('span');
+    span.className = 'ld__ch';
+    span.textContent = ch;
+    sentenceEl.appendChild(span);
+    els.push(span);
+  });
+  var caret = document.createElement('b');
+  caret.className = 'ld__caret';
+  caret.setAttribute('aria-hidden', 'true');
+  sentenceEl.appendChild(caret);
+
+  var GHOST = null, REAL = null;
+  function readColors() {
+    var cs = getComputedStyle(root);
+    GHOST = hexToRgb(cs.getPropertyValue('--ghost').trim());
+    REAL = hexToRgb(cs.getPropertyValue('--real').trim());
+  }
+
+  function draw(sec) {
+    if (!GHOST) readColors();
+    var t = sec % LOOP;
+    var elapsedMs = t * 1000;
+    var counter = Math.max(0, Math.min(LEN, Math.floor(elapsedMs / AI_LOADER_TOKEN_REVEAL_MS)));
+
+    for (var i = 0; i < LEN; i++) {
+      var revealAt = i * AI_LOADER_TOKEN_REVEAL_MS;
+      var fade = clamp01((elapsedMs - revealAt) / FADE_MS);
+      els[i].style.color = rgbStr(mix(GHOST, REAL, fade));
+    }
+
+    var target = counter < LEN ? els[counter] : els[LEN - 1];
+    if (target) {
+      var left = counter < LEN ? target.offsetLeft : target.offsetLeft + target.offsetWidth;
+      var top = target.offsetTop;
+      caret.style.transform = 'translate(' + left.toFixed(1) + 'px,' + top.toFixed(1) + 'px)';
+      fill.style.width = left.toFixed(1) + 'px';
+    }
+    var blinkOn = Math.floor(elapsedMs / BLINK_MS) % 2 === 0;
+    caret.style.opacity = blinkOn ? '1' : '.15';
+  }
+
+  function togglePause() { paused = !paused; root.classList.toggle('is-paused', paused); }
+  function restart() { t0 = performance.now(); draw(0); }
+  function onKey(e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePause(); }
+    else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+  }
+  field.addEventListener('click', togglePause);
+  field.addEventListener('keydown', onKey);
+
+  function onResize() {
+    if (paused || reduced()) draw((performance.now() - t0) / 1000 % LOOP);
+  }
+  window.addEventListener('resize', onResize);
+
+  function frame(now) {
+    if (!paused) draw((now - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  }
+
+  if (reduced()) {
+    root.classList.add('is-still');
+    draw(LOOP * 0.62);
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

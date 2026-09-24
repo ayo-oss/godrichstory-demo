@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step Scrubber With Inertia Coasting — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="sc">
+  <div class="sc__track" id="scTrack">
+    <span class="sc__fill" id="scFill"></span>
+    <span class="sc__tick" style="left:0%"></span>
+    <span class="sc__tick" style="left:25%"></span>
+    <span class="sc__tick" style="left:50%"></span>
+    <span class="sc__tick" style="left:75%"></span>
+    <span class="sc__tick" style="left:100%"></span>
+    <span class="sc__trail" id="scTrail" aria-hidden="true"></span>
+    <button type="button" class="sc__handle" id="scHandle" role="slider" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="4" aria-valuenow="0" aria-label="Tutorial steps" tabindex="0"></button>
+  </div>
+  <p class="sc__status" id="scStatus" aria-live="polite">1 / 5 steps</p>
+</div>
+</main>
+<script>
+(function () {
+  var STEP_SCRUB_INERTIA_FRICTION = 0.85;
+  var STEP_COUNT = 5;
+  var VEL_EPS = 0.05;
+  var SETTLE_MS = 260;
+  var SIM_KICK = 92;
+  var TRAIL_VEL_REF = 0.12; // 표시 레이어 정규화 기준(로직 무관)
+  var TRAIL_LAG = 5;
+
+  var root = document.getElementById('sc');
+  var track = document.getElementById('scTrack');
+  var fill = document.getElementById('scFill');
+  var trail = document.getElementById('scTrail');
+  var handle = document.getElementById('scHandle');
+  var status = document.getElementById('scStatus');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  var pos = 0; // 0..1 ratio along track
+  var vel = 0; // ratio units per frame
+  var dragging = false;
+  var lastX = 0;
+  var settling = null;
+
+  function trackWidth() { return track.clientWidth - handle.clientWidth; }
+
+  function render() {
+    var w = trackWidth();
+    var px = pos * w;
+    handle.style.transform = 'translateX(' + px.toFixed(1) + 'px)';
+    fill.style.width = (pos * 100).toFixed(2) + '%';
+    var stepIndex = Math.round(pos * (STEP_COUNT - 1));
+    handle.setAttribute('aria-valuenow', String(stepIndex));
+    status.textContent = (stepIndex + 1) + ' / ' + STEP_COUNT + ' steps';
+
+    var intensity = clamp(Math.abs(vel) / TRAIL_VEL_REF, 0, 1);
+    var trailPx = clamp(px - vel * w * TRAIL_LAG, 0, w);
+    trail.style.transform = 'translateX(' + trailPx.toFixed(1) + 'px) scale(' + (1 + intensity * 1.1).toFixed(2) + ')';
+    trail.style.opacity = (intensity * 0.85).toFixed(2);
+    fill.style.boxShadow = intensity > 0.02
+      ? '0 0 ' + (8 + intensity * 30).toFixed(1) + 'px rgba(91, 140, 248, ' + (0.3 + intensity * 0.6).toFixed(2) + ')'
+      : 'none';
+  }
+
+  function nearestStep(p) { return Math.round(p * (STEP_COUNT - 1)) / (STEP_COUNT - 1); }
+
+  function startSettle(target) {
+    var from = pos;
+    var start = null;
+    settling = function (now) {
+      if (start === null) start = now;
+      var t = clamp((now - start) / SETTLE_MS, 0, 1);
+      var eased = 1 - Math.pow(1 - t, 3);
+      pos = from + (target - from) * eased;
+      render();
+      if (t >= 1) { settling = null; pos = target; render(); }
+    };
+  }
+
+  handle.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    vel = 0;
+    settling = null;
+    root.classList.remove('is-demo');
+    lastX = e.clientX;
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var w = trackWidth();
+    var deltaRatio = (e.clientX - lastX) / w;
+    lastX = e.clientX;
+    vel = deltaRatio;
+    pos = clamp(pos + deltaRatio, 0, 1);
+    render();
+  });
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+  }
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
+
+  handle.addEventListener('keydown', function (e) {
+    var step = 1 / (STEP_COUNT - 1);
+    if (e.key === 'ArrowRight') { root.classList.remove('is-demo'); settling = null; pos = clamp(nearestStep(pos) + step, 0, 1); render(); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { root.classList.remove('is-demo'); settling = null; pos = clamp(nearestStep(pos) - step, 0, 1); render(); e.preventDefault(); }
+  });
+
+  function coastStep() {
+    if (Math.abs(vel) <= VEL_EPS) {
+      vel = 0;
+      if (!settling) startSettle(nearestStep(pos));
+      return;
+    }
+    vel = vel * STEP_SCRUB_INERTIA_FRICTION;
+    pos = clamp(pos + vel, 0, 1);
+    render();
+  }
+
+  var startTime = null;
+  var DEMO_KICK_SCHEDULE = [0.20, 0.70, 1.20, 1.70];
+  var kickIdx = -1;
+  var kickSign = 1;
+  function tick(now) {
+    if (startTime === null) startTime = now;
+    var t = (now - startTime) / 1000 % 2;
+    if (root.classList.contains('is-demo') && !dragging) {
+      if (t < DEMO_KICK_SCHEDULE[0] && kickIdx !== -1) kickIdx = -1;
+      for (var i = 0; i < DEMO_KICK_SCHEDULE.length; i++) {
+        if (t >= DEMO_KICK_SCHEDULE[i] && kickIdx < i) {
+          vel = (SIM_KICK / trackWidth()) * kickSign;
+          kickSign = -kickSign;
+          settling = null;
+          kickIdx = i;
+        }
+      }
+    }
+    if (reduce) {
+      if (!dragging) { pos = nearestStep(pos); render(); }
+    } else if (!dragging) {
+      if (vel !== 0) coastStep();
+      else if (settling) settling(now);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  render();
+  if (!reduce) requestAnimationFrame(tick);
+  else requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

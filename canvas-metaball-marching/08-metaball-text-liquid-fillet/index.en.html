@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>액체 글자 — 텍스트 픽셀 메타볼 모핑 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>Draw the text, then sample only the pixels with alpha as field circles — the whole sentence turns into a metaball blob, flowing and reshaping as liquid typography</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Liquid-Type Metaball test panel" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta"><b class="cd__val" id="cdN">BLOB</b>· text field circles</span>
+    <span class="cd__meta cd__meta--dim">measureText · getImageData · quadraticCurveTo</span>
+  </div>
+</div>
+</main>
+<script>
+// 액체 글자(08). 오프스크린에 글자를 크게 그리고(measureText 로 폭을 재 캔버스에 맞춤) getImageData 로
+// 알파 있는 픽셀만 격자 간격으로 샘플링해 필드원(seed) 목록을 만든다. 매 프레임 각 seed 를 살짝 흔들고
+// (liquid jitter) 전체를 숨쉬듯 스케일해, 저해상도 필드 캔버스에 가산 원으로 찍은 뒤 임계값 두 단(테두리·
+// 코어)으로 나눠 확대하면 글자가 통째로 출렁이는 메타볼 덩어리가 된다. 표면엔 quadraticCurveTo 로 그린
+// 하이라이트 곡선이 시간에 따라 훑고 지나가며 광택을 낸다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var TEXT = 'BLOB';    // 'LIQUID' 로 바꾸면 더 긴 변형
+  var STRIDE = 7;       // seed 샘플 간격(px, 텍스트 캔버스 기준) — 작을수록 촘촘하고 느림
+  var JITTER = 3.6;      // 액체 흔들림 진폭(px)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d');
+
+  var css = getComputedStyle(root);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var C_STAGE = tok('--mb-stage');
+  var C_EDGE = tok('--mb-edge');
+  var C_CORE = tok('--mb-core');
+  var C_GLOSS = tok('--mb-gloss');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var LOWW = 0, LOWH = 0, SCALE = 4;
+  var fieldCv = document.createElement('canvas');
+  var fieldCtx = fieldCv.getContext('2d');
+  var bandCv = document.createElement('canvas');
+  var bandCtx = bandCv.getContext('2d');
+  var txtCv = document.createElement('canvas');
+  var txtCtx = txtCv.getContext('2d');
+  var raf = 0, t0 = -1;
+  var seeds = [];
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x317A08);
+
+  // ── 텍스트 → 필드원 샘플링 (measureText + getImageData) ──
+  function buildSeeds() {
+    txtCv.width = W; txtCv.height = H;
+    txtCtx.clearRect(0, 0, W, H);
+    var fontSize = Math.round(H * 0.94);
+    txtCtx.font = '900 ' + fontSize + 'px -apple-system, "Segoe UI", sans-serif';
+    var m = txtCtx.measureText(TEXT);
+    var targetW = W * 0.92;
+    if (m.width > 0) fontSize = Math.max(24, Math.round(fontSize * (targetW / m.width)));
+    txtCtx.font = '900 ' + fontSize + 'px -apple-system, "Segoe UI", sans-serif';
+    m = txtCtx.measureText(TEXT);
+    var asc = m.actualBoundingBoxAscent || fontSize * 0.72;
+    var desc = m.actualBoundingBoxDescent || fontSize * 0.18;
+    var cx = W / 2, cy = H / 2 + (asc - desc) / 2;
+    txtCtx.textAlign = 'center';
+    txtCtx.textBaseline = 'alphabetic';
+    txtCtx.fillStyle = '#fff';
+    txtCtx.fillText(TEXT, cx, cy);
+
+    var img = txtCtx.getImageData(0, 0, W, H);
+    var d = img.data;
+    seeds = [];
+    for (var y = 4; y < H - 4; y += STRIDE) {
+      for (var x = 4; x < W - 4; x += STRIDE) {
+        var a = d[(y * W + x) * 4 + 3];
+        if (a > 120) {
+          seeds.push({ x: x, y: y, ph: rand() * Math.PI * 2, sp: 0.8 + rand() * 1.6 });
+        }
+      }
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    LOWW = Math.max(48, Math.round(W / SCALE));
+    LOWH = Math.max(30, Math.round(H / SCALE));
+    fieldCv.width = LOWW; fieldCv.height = LOWH;
+    bandCv.width = LOWW; bandCv.height = LOWH;
+    ctx.imageSmoothingEnabled = true;
+    buildSeeds();
+  }
+
+  function drawField(t) {
+    fieldCtx.clearRect(0, 0, LOWW, LOWH);
+    fieldCtx.fillStyle = '#000';
+    fieldCtx.fillRect(0, 0, LOWW, LOWH);
+    fieldCtx.globalCompositeOperation = 'lighter';
+    var breathe = 1 + Math.sin(t * 0.7) * 0.11;   // 숨쉬듯 전체 스케일
+    var r = 6.4 + Math.sin(t * 0.5) * 0.7;
+    // 문장 전체가 천천히 필드를 가로지러 흐른다(타이포가 자리를 바꾸며 모양을 다시 만든다)
+    var driftX = Math.sin(t * 0.33) * LOWW * 0.22 + Math.sin(t * 0.11) * LOWW * 0.08;
+    var driftY = Math.cos(t * 0.26) * LOWH * 0.20;
+    function blob(px, py, rad) {
+      var g = fieldCtx.createRadialGradient(px, py, 0, px, py, rad);
+      g.addColorStop(0, 'rgba(255,255,255,0.95)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      fieldCtx.fillStyle = g;
+      fieldCtx.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+    }
+    for (var i = 0; i < seeds.length; i++) {
+      var s = seeds[i];
+      var jx = Math.sin(t * s.sp + s.ph) * JITTER;
+      var jy = Math.cos(t * s.sp * 1.2 + s.ph) * JITTER;
+      var px = ((s.x + jx) / SCALE - LOWW / 2) * breathe + LOWW / 2 + driftX;
+      var py = ((s.y + jy) / SCALE - LOWH / 2) * breathe + LOWH / 2 + driftY;
+      blob(px, py, r);
+    }
+    // 위성 방울 — 글자 주위를 돌며 스쳐 병합하는 메타볼(모양이 더 크게 바뀐다)
+    var SAT = [[0.9, 0.5, 0.16], [0.6, 0.85, 0.21], [1.25, 0.32, 0.13], [0.45, 0.15, 0.12], [1.05, 0.72, 0.17]];
+    for (var k = 0; k < SAT.length; k++) {
+      var o = SAT[k];
+      var ox = LOWW / 2 + Math.sin(t * o[0] + k * 2.1) * LOWW * 0.42 + driftX * 0.4;
+      var oy = LOWH / 2 + Math.cos(t * o[1] + k * 1.4) * LOWH * 0.38 + driftY * 0.4;
+      blob(ox, oy, r * 1.5);
+    }
+    fieldCtx.globalCompositeOperation = 'source-over';
+  }
+
+  function classify() {
+    var img = fieldCtx.getImageData(0, 0, LOWW, LOWH);
+    var d = img.data;
+    for (var y = 0; y < LOWH; y++) {
+      for (var x = 0; x < LOWW; x++) {
+        var v = d[(y * LOWW + x) * 4] / 255;
+        var col = v > 0.56 ? C_CORE : (v > 0.15 ? C_EDGE : C_STAGE);
+        bandCtx.fillStyle = col;
+        bandCtx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+
+  function gloss(t) {
+    // 광택 스윕 — quadraticCurveTo 로 그린 곡선이 시간에 따라 왼쪽에서 오른쪽으로 훑는다
+    var u = (t * 0.28) % 1.4 - 0.2;
+    var x0 = -W * 0.2 + u * W, y0 = H * 0.32;
+    var cx1 = x0 + W * 0.22, cy1 = H * 0.08;
+    var x1 = x0 + W * 0.44, y1 = H * 0.4;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = C_GLOSS;
+    ctx.lineWidth = Math.max(10, H * 0.09);
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = 0.16;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.quadraticCurveTo(cx1, cy1, x1, y1);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw(t) {
+    drawField(t);
+    classify();
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = C_STAGE;
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(bandCv, 0, 0, LOWW, LOWH, 0, 0, W, H);
+    gloss(t);
+  }
+
+  function stillFrame() { draw(0.35); }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

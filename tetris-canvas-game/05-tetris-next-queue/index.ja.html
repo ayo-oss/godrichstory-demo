@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>넥스트 큐 — 미니 캔버스에 次 조각 미리 보기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="nq" id="nq">
+  <p class="nq__hint">7個バッグシャッフル — 次が読めない</p>
+  <div class="nq__row">
+    <div class="nq__field" id="field" role="application" aria-label="次のプレビュー" tabindex="0">
+      <canvas class="nq__cv" id="cv"></canvas>
+    </div>
+    <div class="nq__side">
+      <b class="nq__next">次</b>
+      <div class="nq__queue" id="queue"></div>
+      <p class="nq__bag" id="bag">バッグ 0 / 7</p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// 넥스트 큐 — 일곱 조각을 한 세트로 섞어 가방에 채우고 앞의 다섯을 미니 캔버스에
+// 그린다. 가방이 비면 다시 섞는다 — 편향 없이 다음이 예측만 되고 뻔하지는 않다.
+// 조각이 하나 소비될 때 큐가 한 칸씩 올라가고, 가방이 다시 섞이는 순간 표시가 바뀐다.
+(function () {
+  var root = document.getElementById('nq');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var queueEl = document.getElementById('queue');
+  var bagEl = document.getElementById('bag');
+  if (!root || !field || !cv || !queueEl || !bagEl) return;
+  var ctx = cv.getContext('2d');
+  var css = getComputedStyle(root);
+  function v(name) { return css.getPropertyValue(name).trim(); }
+  var FILL = { I: v('--c-i'), O: v('--c-o'), T: v('--c-t'), S: v('--c-s'), Z: v('--c-z'), J: v('--c-j'), L: v('--c-l') };
+  var EDGE = { I: v('--d-i'), O: v('--d-o'), T: v('--d-t'), S: v('--d-s'), Z: v('--d-z'), J: v('--d-j'), L: v('--d-l') };
+  var LINE = v('--grid-line');
+  var GLOW = v('--glow');
+
+  var COLS = 8, ROWS = 14;
+  var TYPES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
+  var SHAPES = {
+    I: [[0, 1], [1, 1], [2, 1], [3, 1]],
+    O: [[1, 1], [2, 1], [1, 2], [2, 2]],
+    T: [[1, 0], [0, 1], [1, 1], [2, 1]],
+    S: [[1, 0], [2, 0], [0, 1], [1, 1]],
+    Z: [[0, 0], [1, 0], [1, 1], [2, 1]],
+    J: [[0, 0], [0, 1], [1, 1], [2, 1]],
+    L: [[2, 0], [0, 1], [1, 1], [2, 1]]
+  };
+  var BOX = { I: 4, O: 4, T: 3, S: 3, Z: 3, J: 3, L: 3 };
+  var NQ = 5; // 미리 보는 조각 수
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rnd = mulberry32(3305);
+
+  function rotCW(cells, n) {
+    var out = [];
+    for (var i = 0; i < cells.length; i++) out.push([cells[i][1], n - 1 - cells[i][0]]);
+    return out;
+  }
+  function hits(grid, cells, row, col) {
+    for (var i = 0; i < cells.length; i++) {
+      var x = col + cells[i][0], y = row + cells[i][1];
+      if (x < 0 || x >= COLS || y >= ROWS) return true;
+      if (y >= 0 && grid[y][x]) return true;
+    }
+    return false;
+  }
+  function landingRow(grid, cells, col) {
+    var row = -4;
+    while (!hits(grid, cells, row + 1, col)) row += 1;
+    return row;
+  }
+  function emptyGrid() {
+    var g = [];
+    for (var y = 0; y < ROWS; y++) { g.push([]); for (var x = 0; x < COLS; x++) g[y].push(0); }
+    return g;
+  }
+  function cloneGrid(g) {
+    var o = [];
+    for (var y = 0; y < ROWS; y++) o.push(g[y].slice());
+    return o;
+  }
+  function shapeRot(t, r) {
+    var c = SHAPES[t].map(function (p) { return p.slice(); }), n = BOX[t];
+    for (var i = 0; i < r; i++) c = rotCW(c, n);
+    return c;
+  }
+  function choose(grid, t) {
+    var best = null;
+    for (var r = 0; r < 4; r++) {
+      var cells = shapeRot(t, r);
+      for (var c = -2; c < COLS; c++) {
+        if (hits(grid, cells, 0, c)) continue;
+        var row = landingRow(grid, cells, c);
+        if (row < 0) continue;
+        var g2 = cloneGrid(grid);
+        for (var i = 0; i < cells.length; i++) g2[row + cells[i][1]][c + cells[i][0]] = t;
+        var full = 0, holes = 0, agg = 0;
+        for (var y = 0; y < ROWS; y++) {
+          var f = 0;
+          for (var x = 0; x < COLS; x++) if (g2[y][x]) f += 1;
+          if (f === COLS) full += 1;
+        }
+        for (var x2 = 0; x2 < COLS; x2++) {
+          var seen = false;
+          for (var y2 = 0; y2 < ROWS; y2++) {
+            if (g2[y2][x2]) { seen = true; agg += ROWS - y2; }
+            else if (seen) holes += 1;
+          }
+        }
+        var score = full * 120 - holes * 90 - agg * 2 + row;
+        if (!best || score > best.score) best = { r: r, c: c, score: score };
+      }
+    }
+    return best;
+  }
+
+  // 시작 쓰레기 — 아래 4段, 구멍 1マス
+  var grid = emptyGrid();
+  for (var gy0 = ROWS - 4; gy0 < ROWS; gy0++) {
+    var h0 = Math.floor(rnd() * COLS);
+    for (var gx0 = 0; gx0 < COLS; gx0++) grid[gy0][gx0] = gx0 === h0 ? 0 : TYPES[Math.floor(rnd() * 7)];
+  }
+
+  // バッグ — 일곱 조각을 한 세트로 섞는다
+  var bag = [], bagUsed = 0, bagCount = 0;
+  function refill() {
+    bag = TYPES.slice();
+    for (var i = bag.length - 1; i > 0; i--) {
+      var j = Math.floor(rnd() * (i + 1)), tmp = bag[i]; bag[i] = bag[j]; bag[j] = tmp;
+    }
+    bagUsed = 0; bagCount += 1;
+  }
+  refill();
+  function nextType() { if (!bag.length) refill(); bagUsed += 1; return bag.pop(); }
+
+  // 큐 — 앞의 NQ 개
+  var queue = [];
+  function fillQueue() { while (queue.length < NQ + 2) queue.push(nextType()); }
+  fillQueue();
+
+  // 미니 캔버스 — 큐 슬롯마다 하나
+  var slots = [];
+  for (var s = 0; s < NQ; s++) {
+    var mini = document.createElement('canvas');
+    mini.className = 'nq__mini';
+    queueEl.appendChild(mini);
+    slots.push({ el: mini, ctx: mini.getContext('2d') });
+  }
+
+  var piece = null, popped = 0;
+  function spawn() {
+    var t = queue.shift();
+    fillQueue();
+    var plan = choose(grid, t);
+    if (!plan) { grid = emptyGrid(); plan = choose(grid, t); }
+    piece = { t: t, r: 0, cells: SHAPES[t].slice(), x: 3, y: -0.4, plan: plan };
+    popped += 1;
+  }
+  function lock() {
+    var rx = Math.round(piece.x), ry = Math.floor(piece.y), dead = false;
+    for (var i = 0; i < piece.cells.length; i++) {
+      var gx = rx + piece.cells[i][0], gy = ry + piece.cells[i][1];
+      if (gy < 0) { dead = true; break; }
+      grid[gy][gx] = piece.t;
+    }
+    if (dead) grid = emptyGrid();
+    else {
+      for (var y = 0; y < ROWS; y++) {
+        var n = 0;
+        for (var x = 0; x < COLS; x++) if (grid[y][x]) n += 1;
+        if (n === COLS) { grid.splice(y, 1); grid.unshift(new Array(COLS).fill(0)); }
+      }
+    }
+    // 판이 얇아지면 쓰레기 보충
+    var filled = 0;
+    for (var y2 = 0; y2 < ROWS; y2++) for (var x2 = 0; x2 < COLS; x2++) if (grid[y2][x2]) filled += 1;
+    if (filled < COLS * 2) {
+      for (var gy = ROWS - 3; gy < ROWS; gy++) {
+        var h = Math.floor(rnd() * COLS);
+        for (var gx = 0; gx < COLS; gx++) grid[gy][gx] = gx === h ? 0 : TYPES[Math.floor(rnd() * 7)];
+      }
+    }
+    piece = null;
+  }
+
+  var W = 0, H = 0, dpr = 1, cell = 8, ox = 0, oy = 0;
+  var miniS = 44;
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cell = Math.floor(Math.min(H / ROWS, W / COLS));
+    ox = Math.floor((W - cell * COLS) / 2); oy = Math.floor((H - cell * ROWS) / 2);
+    miniS = slots[0].el.clientWidth || 44;
+    for (var i = 0; i < slots.length; i++) {
+      var m = slots[i].el, w = m.clientWidth || 44, h = m.clientHeight || 44;
+      m.width = Math.round(w * dpr); m.height = Math.round(h * dpr);
+      slots[i].ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      slots[i].w = w; slots[i].h = h;
+    }
+  }
+  function paintCell(gx, gy, t, alpha) {
+    var r = Math.max(2, cell * 0.22);
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    ctx.beginPath();
+    ctx.roundRect(ox + gx * cell + 1, oy + gy * cell + 1, cell - 2, cell - 2, r);
+    ctx.fillStyle = FILL[t]; ctx.fill();
+    ctx.lineWidth = Math.max(1, cell * 0.14);
+    ctx.strokeStyle = EDGE[t]; ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawMini(slot, t, alpha) {
+    var c = slot.ctx, w = slot.w, h = slot.h;
+    c.clearRect(0, 0, w, h);
+    if (!t) return;
+    var cells = SHAPES[t];
+    // 조각을 슬롯 중앙에 맞춘다
+    var minX = 9, maxX = -9, minY = 9, maxY = -9;
+    for (var i = 0; i < cells.length; i++) {
+      minX = Math.min(minX, cells[i][0]); maxX = Math.max(maxX, cells[i][0]);
+      minY = Math.min(minY, cells[i][1]); maxY = Math.max(maxY, cells[i][1]);
+    }
+    var pw = maxX - minX + 1, ph = maxY - minY + 1;
+    var mc = Math.min(w / 4.4, h / 4.4);
+    var mx = (w - pw * mc) / 2, my = (h - ph * mc) / 2;
+    c.globalAlpha = alpha == null ? 1 : alpha;
+    for (var k = 0; k < cells.length; k++) {
+      // マス 밑면 — fillRect 로 깔고 그 위에 테두리 사각을 얹는다 (메인 보드와 같은 순서)
+      c.fillStyle = EDGE[t];
+      c.globalAlpha = (alpha == null ? 1 : alpha) * 0.25;
+      c.fillRect(mx + (cells[k][0] - minX) * mc, my + (cells[k][1] - minY) * mc, mc, mc);
+      c.globalAlpha = alpha == null ? 1 : alpha;
+      c.beginPath();
+      c.roundRect(mx + (cells[k][0] - minX) * mc + 1, my + (cells[k][1] - minY) * mc + 1, mc - 2, mc - 2, Math.max(2, mc * 0.22));
+      c.fillStyle = FILL[t]; c.fill();
+      c.lineWidth = Math.max(1.5, mc * 0.13);
+      c.strokeStyle = EDGE[t]; c.stroke();
+    }
+    c.globalAlpha = 1;
+  }
+
+  var last = 0, raf = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var popT = 0; // 큐 이동 보간 (초)
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = LINE; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = 0; x <= COLS; x++) { ctx.moveTo(ox + x * cell + .5, oy); ctx.lineTo(ox + x * cell + .5, oy + ROWS * cell); }
+    for (var y = 0; y <= ROWS; y++) { ctx.moveTo(ox, oy + y * cell + .5); ctx.lineTo(ox + COLS * cell, oy + y * cell + .5); }
+    ctx.stroke();
+    for (var gy = 0; gy < ROWS; gy++) for (var gx = 0; gx < COLS; gx++) if (grid[gy][gx]) paintCell(gx, gy, grid[gy][gx]);
+    if (piece) {
+      for (var i = 0; i < piece.cells.length; i++) {
+        var cy = piece.y + piece.cells[i][1];
+        if (cy >= 0) paintCell(Math.round(piece.x + piece.cells[i][0]), Math.round(cy), piece.t);
+      }
+    }
+  }
+
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (piece) {
+      var dx = piece.plan.c - piece.x;
+      piece.x += Math.max(-13 * dt, Math.min(13 * dt, dx));
+      if (piece.r !== piece.plan.r && Math.abs(dx) < 0.6) {
+        var rc = rotCW(piece.cells, BOX[piece.t]);
+        if (!hits(grid, rc, Math.floor(piece.y), Math.round(piece.x))) { piece.cells = rc; piece.r = (piece.r + 1) % 4; }
+        else piece.r = piece.plan.r;
+      }
+      var target = landingRow(grid, piece.cells, Math.round(piece.x));
+      var aligned = Math.abs(dx) < 0.05 && piece.r === piece.plan.r;
+      var ny = piece.y + (aligned ? 40 : 5.5) * dt;
+      piece.y = ny >= target ? target : ny;
+      if (piece.y === target) lock();
+    } else {
+      spawn();
+    }
+    popT = Math.max(0, popT - dt);
+    draw();
+    // 큐 — 소비 직후 슬롯이 위로 올라오며 사그라든다
+    for (var s2 = 0; s2 < slots.length; s2++) {
+      var a = 1 - 0.10 * s2;
+      drawMini(slots[s2], queue[s2], a * (s2 === 0 && popT > 0 ? 0.35 + 0.65 * (1 - popT / 0.2) : 1));
+    }
+    bagEl.textContent = 'バッグ ' + (TYPES.length - bagUsed % TYPES.length || TYPES.length) + ' / 7';
+    raf = requestAnimationFrame(step);
+  }
+
+  field.addEventListener('pointerdown', function () {
+    if (piece) {
+      piece.x = piece.plan.c; piece.r = piece.plan.r;
+      var c2 = shapeRot(piece.t, piece.plan.r);
+      piece.cells = c2;
+      piece.y = landingRow(grid, piece.cells, Math.round(piece.x));
+      lock();
+      popT = 0.2;
+    }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) { draw(); for (var i = 0; i < slots.length; i++) drawMini(slots[i], queue[i], 1 - 0.10 * i); } });
+  fit();
+  if (reduce) {
+    draw();
+    for (var r2 = 0; r2 < slots.length; r2++) drawMini(slots[r2], queue[r2], 1 - 0.10 * r2);
+    bagEl.textContent = 'バッグ 3 / 7';
+    root.classList.add('is-still');
+  } else {
+    last = performance.now();
+    raf = requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board 격자 — 10×20 칸을 배열로 그리기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tg" id="tg">
+  <p class="tg__hint">10 x 20 cells, per-frame collision checks</p>
+  <div class="tg__row">
+    <div class="tg__field" id="field" role="application" aria-label="Board grid lab" tabindex="0">
+      <canvas class="tg__cv" id="cv"></canvas>
+    </div>
+    <div class="tg__side">
+      <b class="tg__count" id="count" aria-live="polite">0</b>
+      <span class="tg__unit">cells drawn</span>
+      <p class="tg__scan">array <b id="scan">0</b><span class="tg__scanUnit">th cell</span></p>
+      <div class="tg__prof" id="prof" role="img" aria-label="Column height graph"><canvas id="pcv"></canvas></div>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+// Board 격자 — 2차원 array grid[20][10] 이 보드의 전 상태다. 매 프레임
+// (1) 낙하 조각을 중력 delta 만큼 내리고 (2) 모든 셀 좌표를 충돌 검사하고 (3) fillRect 로 칸을 그린다.
+// 조각 배치는 1수 탐색 — 회전 4 × 열 10 조합의 착지 결과를 격자에 놓아보고
+// (완성 lines - 구멍 - 높이) 로 점수를 매겨 최적을 고른다. 시드 고정(mulberry32)이라 같은 판이 반복된다.
+(function () {
+  var root = document.getElementById('tg');
+  var field = document.getElementById('field');
+  var cv = document.getElementById('cv');
+  var prof = document.getElementById('prof');
+  var pcv = document.getElementById('pcv');
+  var countEl = document.getElementById('count');
+  var scanEl = document.getElementById('scan');
+  if (!root || !field || !cv || !prof || !pcv || !countEl || !scanEl) return;
+  var ctx = cv.getContext('2d');
+  var ctx2 = pcv.getContext('2d');
+  var css = getComputedStyle(root);
+  function v(name) { return css.getPropertyValue(name).trim(); }
+  var FILL = { I: v('--c-i'), O: v('--c-o'), T: v('--c-t'), S: v('--c-s'), Z: v('--c-z'), J: v('--c-j'), L: v('--c-l') };
+  var EDGE = { I: v('--d-i'), O: v('--d-o'), T: v('--d-t'), S: v('--d-s'), Z: v('--d-z'), J: v('--d-j'), L: v('--d-l') };
+  var LINE = v('--grid-line');
+  var FLASH = v('--flash');
+  var BAR = v('--prof-bar');
+
+  var COLS = 10, ROWS = 20, CELLS = COLS * ROWS;
+  var TYPES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
+  var SHAPES = {
+    I: [[0, 1], [1, 1], [2, 1], [3, 1]],
+    O: [[1, 1], [2, 1], [1, 2], [2, 2]],
+    T: [[1, 0], [0, 1], [1, 1], [2, 1]],
+    S: [[1, 0], [2, 0], [0, 1], [1, 1]],
+    Z: [[0, 0], [1, 0], [1, 1], [2, 1]],
+    J: [[0, 0], [0, 1], [1, 1], [2, 1]],
+    L: [[2, 0], [0, 1], [1, 1], [2, 1]]
+  };
+  var BOX = { I: 4, O: 4, T: 3, S: 3, Z: 3, J: 3, L: 3 };
+  var KICKS = [0, -1, 1, -2, 2];
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rnd = mulberry32(3301);
+
+  // 회전 — (x,y) → (y,−x). 행렬 곱 90도와 같은 식이고, y 에 n−1 을 더해 n×n 상자 안으로 되돌린다
+  function rotCW(cells, n) {
+    var out = [];
+    for (var i = 0; i < cells.length; i++) out.push([cells[i][1], n - 1 - cells[i][0]]);
+    return out;
+  }
+  function shapeRot(t, r) {
+    var c = SHAPES[t], n = BOX[t];
+    for (var i = 0; i < r; i++) c = rotCW(c, n);
+    return c;
+  }
+  // 충돌 검사 — 조각 셀 전부를 격자·벽과 견준다. 이 하나가 벽 뚫림을 막는다
+  function hits(grid, cells, row, col) {
+    for (var i = 0; i < cells.length; i++) {
+      var x = col + cells[i][0], y = row + cells[i][1];
+      if (x < 0 || x >= COLS || y >= ROWS) return true;
+      if (y >= 0 && grid[y][x]) return true;
+    }
+    return false;
+  }
+  function landingRow(grid, cells, col) {
+    var row = -4;
+    while (!hits(grid, cells, row + 1, col)) row += 1;
+    return row;
+  }
+  function emptyGrid() {
+    var g = [];
+    for (var y = 0; y < ROWS; y++) { g.push([]); for (var x = 0; x < COLS; x++) g[y].push(0); }
+    return g;
+  }
+  function cloneGrid(g) {
+    var o = [];
+    for (var y = 0; y < ROWS; y++) o.push(g[y].slice());
+    return o;
+  }
+  // 1수 탐색 — 착지 결과의 구멍·총 높이·완성 줄로 Score. 깊게 놓을수록 좋다
+  function choose(grid, t) {
+    var best = null;
+    for (var r = 0; r < 4; r++) {
+      var cells = shapeRot(t, r);
+      for (var c = -2; c < COLS; c++) {
+        if (hits(grid, cells, 0, c)) continue;
+        var row = landingRow(grid, cells, c);
+        if (row < 0) continue;
+        var g2 = cloneGrid(grid);
+        for (var i = 0; i < cells.length; i++) g2[row + cells[i][1]][c + cells[i][0]] = t;
+        var full = 0, holes = 0, agg = 0;
+        for (var y = 0; y < ROWS; y++) {
+          var filled = 0;
+          for (var x = 0; x < COLS; x++) if (g2[y][x]) filled += 1;
+          if (filled === COLS) full += 1;
+        }
+        for (var x2 = 0; x2 < COLS; x2++) {
+          var seen = false;
+          for (var y2 = 0; y2 < ROWS; y2++) {
+            if (g2[y2][x2]) { seen = true; agg += ROWS - y2; }
+            else if (seen) holes += 1;
+          }
+        }
+        var score = full * 120 - holes * 90 - agg * 2 + row;
+        if (!best || score > best.score) best = { r: r, c: c, score: score };
+      }
+    }
+    return best;
+  }
+
+  var grid = emptyGrid(), bag = [], piece = null;
+  var flashRows = [], flashT = 0, restT = 0;
+  function refill() {
+    bag = TYPES.slice();
+    for (var i = bag.length - 1; i > 0; i--) {
+      var j = Math.floor(rnd() * (i + 1)), tmp = bag[i]; bag[i] = bag[j]; bag[j] = tmp;
+    }
+  }
+  function nextType() { if (!bag.length) refill(); return bag.pop(); }
+  function filledCount() {
+    var n = 0;
+    for (var y = 0; y < ROWS; y++) for (var x = 0; x < COLS; x++) if (grid[y][x]) n += 1;
+    return n;
+  }
+  function spawn() {
+    var t = nextType();
+    var plan = choose(grid, t);
+    if (!plan) { grid = emptyGrid(); plan = choose(grid, t); }
+    piece = { t: t, r: 0, cells: SHAPES[t].slice(), x: 3, y: -2.2, plan: plan, drop: 4.6, slide: 9.5 };
+    restT = 0;
+  }
+  function lock() {
+    var rx = Math.round(piece.x), ry = Math.floor(piece.y), dead = false;
+    for (var i = 0; i < piece.cells.length; i++) {
+      var gx = rx + piece.cells[i][0], gy = ry + piece.cells[i][1];
+      if (gy < 0) { dead = true; break; }
+      grid[gy][gx] = piece.t;
+    }
+    if (dead) { grid = emptyGrid(); }
+    else {
+      var full = [];
+      for (var y = 0; y < ROWS; y++) {
+        var n = 0;
+        for (var x = 0; x < COLS; x++) if (grid[y][x]) n += 1;
+        if (n === COLS) full.push(y);
+      }
+      if (full.length) { flashRows = full; flashT = 0.30; }
+    }
+    countEl.textContent = String(filledCount());
+    spawn();
+  }
+  function spliceFull() {
+    flashRows.sort(function (a, b) { return a - b; });
+    for (var i = 0; i < flashRows.length; i++) {
+      grid.splice(flashRows[i], 1);
+      grid.unshift(new Array(COLS).fill(0));
+    }
+    flashRows = [];
+    countEl.textContent = String(filledCount());
+  }
+  function tryRotate() {
+    var rc = rotCW(piece.cells, BOX[piece.t]);
+    var px = Math.round(piece.x), py = Math.floor(piece.y);
+    for (var k = 0; k < KICKS.length; k++) {
+      if (!hits(grid, rc, py, px + KICKS[k])) {
+        piece.cells = rc; piece.x = px + KICKS[k]; piece.r = (piece.r + 1) % 4;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  var W = 0, H = 0, PW = 0, PH = 0, dpr = 1, cell = 8, ox = 0, oy = 0, colSeen = new Array(COLS).fill(-9);
+  function fit() {
+    W = field.clientWidth; H = field.clientHeight;
+    PW = prof.clientWidth; PH = prof.clientHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    pcv.width = Math.round(PW * dpr); pcv.height = Math.round(PH * dpr);
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cell = Math.floor(Math.min(H / ROWS, W / COLS));
+    ox = Math.floor((W - cell * COLS) / 2); oy = Math.floor((H - cell * ROWS) / 2);
+  }
+  function cellRect(gx, gy) { return [ox + gx * cell, oy + gy * cell]; }
+  function paintCell(gx, gy, t, alpha) {
+    var p = cellRect(gx, gy), r = Math.max(2, cell * 0.22);
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    ctx.beginPath();
+    ctx.roundRect(p[0] + 1, p[1] + 1, cell - 2, cell - 2, r);
+    ctx.fillStyle = FILL[t]; ctx.fill();
+    ctx.lineWidth = Math.max(1, cell * 0.14);
+    ctx.strokeStyle = EDGE[t]; ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  function draw(time) {
+    ctx.clearRect(0, 0, W, H);
+    // 격자 — 배열의 cells 수 그대로
+    ctx.strokeStyle = LINE; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = 0; x <= COLS; x++) { ctx.moveTo(ox + x * cell + .5, oy); ctx.lineTo(ox + x * cell + .5, oy + ROWS * cell); }
+    for (var y = 0; y <= ROWS; y++) { ctx.moveTo(ox, oy + y * cell + .5); ctx.lineTo(ox + COLS * cell, oy + y * cell + .5); }
+    ctx.stroke();
+    // 쌓인 cells
+    for (var gy = 0; gy < ROWS; gy++) for (var gx = 0; gx < COLS; gx++) if (grid[gy][gx]) paintCell(gx, gy, grid[gy][gx]);
+    // Clear 섬광 — splice 전 0.3초
+    if (flashT > 0) {
+      ctx.globalAlpha = Math.min(1, flashT / 0.30) * 0.85;
+      for (var f = 0; f < flashRows.length; f++) {
+        ctx.fillStyle = FLASH;
+        ctx.fillRect(ox, oy + flashRows[f] * cell, cell * COLS, cell);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // 낙하 조각 (y<0 위쪽은 자른다)
+    if (piece) {
+      var fx = piece.x, fy = piece.y;
+      for (var i = 0; i < piece.cells.length; i++) {
+        var cx2 = piece.cells[i][0], cy2 = piece.cells[i][1];
+        if (fy + cy2 >= 0) paintCell(Math.round(fx + cx2), Math.round(fy + cy2), piece.t);
+      }
+    }
+    // array 스캔 — 200칸을 초당 120칸씩 훑는다(1.7초에 Board 한 바퀴). 검사가 지나간
+    // 열은 0.5초에 걸쳐 서서히 사그라는 잔상을 남긴다 — "살펴본 자리"가 눈에 쌓인다
+    var idx = Math.floor(time * 0.12) % CELLS;
+    var sx = idx % COLS, sy = Math.floor(idx / COLS);
+    colSeen[sx] = time;
+    ctx.fillStyle = FLASH;
+    for (var c2 = 0; c2 < COLS; c2++) {
+      var age = (time - colSeen[c2]) / 1000;
+      if (age < 0) age += 1e9; // 스캔을 아직 안 지나간 열
+      if (age > 0.6) continue;
+      var a = age < 0 ? 0 : 0.42 * (1 - age / 0.6);
+      if (a <= 0.02) continue;
+      ctx.globalAlpha = a;
+      ctx.fillRect(ox + c2 * cell, oy, cell, ROWS * cell);
+    }
+    ctx.globalAlpha = 1;
+    var sp = cellRect(sx, sy);
+    ctx.strokeStyle = FLASH; ctx.lineWidth = 2;
+    ctx.strokeRect(sp[0] + .5, sp[1] + .5, cell - 1, cell - 1);
+    scanEl.textContent = String(idx);
+  }
+  // Column height graph — 같은 배열을 다른 각도로 읽는다. 열마다 쌓인 cells 수를 세어
+  // 막대로 세운다. 조각이 놓이고 줄이 지워질 때마다 막대 전체가 다시 계산된다
+  function drawProfile(time) {
+    if (!PW || !PH) return;
+    ctx2.clearRect(0, 0, PW, PH);
+    var bw = PW / COLS;
+    for (var x = 0; x < COLS; x++) {
+      var h = 0;
+      for (var y = 0; y < ROWS; y++) if (grid[y][x]) h += 1;
+      if (!h) continue;
+      var bh = (h / ROWS) * PH;
+      ctx2.fillStyle = BAR;
+      ctx2.globalAlpha = 0.55 + 0.45 * (h / ROWS);
+      ctx2.fillRect(x * bw + 1, PH - bh, bw - 2, bh);
+    }
+    ctx2.globalAlpha = 1;
+    // 스캔이 지금 머문 열 표시
+    var idx2 = Math.floor(time * 0.12) % CELLS;
+    ctx2.strokeStyle = FLASH; ctx2.lineWidth = 2;
+    ctx2.strokeRect((idx2 % COLS) * bw + .5, .5, bw - 1, PH - 1);
+  }
+
+  var last = 0, raf = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function step(now) {
+    var dt = Math.min(64, now - last) / 1000; last = now;
+    if (flashT > 0) { flashT -= dt; if (flashT <= 0) spliceFull(); }
+    if (piece) {
+      var plan = piece.plan;
+      var dx = plan.c - piece.x;
+      piece.x += Math.max(-piece.slide * dt, Math.min(piece.slide * dt, dx));
+      if (piece.r !== plan.r && Math.abs(plan.c - piece.x) < 0.6) tryRotate();
+      piece.y += piece.drop * dt;
+      var rx = Math.round(piece.x), ry = Math.floor(piece.y) + 1;
+      if (hits(grid, piece.cells, ry, rx)) {
+        piece.y = ry - 1;
+        restT += dt;
+        var aligned = piece.r === plan.r && rx === plan.c;
+        if (aligned || restT > 1.4) { piece.x = plan.c; lock(); }
+      } else restT = 0;
+    }
+    draw(now);
+    drawProfile(now);
+    raf = requestAnimationFrame(step);
+  }
+  field.addEventListener('pointerdown', function () {
+    // 눌러 보기 — 현재 조각을 착지점까지 한 번에 내린다 (고스트 계산과 같은 식)
+    if (piece) {
+      piece.x = piece.plan.c;
+      while (piece.r !== piece.plan.r && tryRotate()) { /* 회전을 계획까지 맞춘다 */ }
+      piece.y = landingRow(grid, piece.cells, Math.round(piece.x));
+      lock();
+    }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(0); });
+  // 시작 쓰레기 — 아래 네 줄을 시드 난수로 미리 채운다. 줄마다 구멍 한 cells(Clear 직전 상태)
+  for (var gy0 = ROWS - 4; gy0 < ROWS; gy0++) {
+    var hole0 = Math.floor(rnd() * COLS);
+    for (var gx0 = 0; gx0 < COLS; gx0++) grid[gy0][gx0] = gx0 === hole0 ? 0 : TYPES[Math.floor(rnd() * 7)];
+  }
+  countEl.textContent = String(filledCount());
+  fit();
+  if (reduce) {
+    // 정지 한 장 — 스캔 지점과 쌓인 칸이 다 보이는 시각. 조각 여섯을 미리 놓는다
+    for (var i = 0; i < 6; i++) { spawn(); lock(); }
+    draw(320);
+    drawProfile(320);
+    root.classList.add('is-still');
+  } else {
+    spawn();
+    last = performance.now();
+    raf = requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>

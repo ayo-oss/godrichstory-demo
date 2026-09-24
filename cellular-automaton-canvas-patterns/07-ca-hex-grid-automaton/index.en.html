@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<title>A Hex-neighbor-count Value Splits Cells in a Honeycomb Grid Automaton — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="rv is-demo" tabindex="0" role="button" aria-label="Honeycomb grid running -- click or press space to pause, R to reseed">
+    <canvas class="rv__cv" width="480" height="300"></canvas>
+    <p class="rv__hint">Click or press space to pause, R to reseed</p>
+  </div>
+</main>
+<script>
+(function(){
+  'use strict';
+  // 395-09(진행률 채움 로더)와 다른 축: 육각 이웃 수 값이 생사를 가르는 계산이 주인공.
+  // odd-q 어긋난 육각 좌표계에서 매 세대 여섯 이웃 수를 세어 전체를 다시 계산하고 beginPath·fill 로 그린다.
+
+  function makeLcg(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  const W = 480, H = 300;
+  const SIZE = 16;
+  const HORIZ = SIZE * 1.5;
+  const VERT = SIZE * Math.sqrt(3);
+  const COLS = 18, ROWS = 9;
+  const OX = 30, OY = 28;
+  const ORANGE = '#c89a8f';
+  const ALIVE_COLOR = '#93a4ca';
+  let SEED = 70701;
+  let rnd = makeLcg(SEED);
+
+  const SURVIVE_MIN = 2, SURVIVE_MAX = 3, BIRTH_COUNT = 2; // 육각 6이웃 기준 생존·탄생 문턱
+
+  let grid = new Uint8Array(COLS * ROWS);
+  let next = new Uint8Array(COLS * ROWS);
+
+  function idx(x, y){ return y * COLS + x; }
+
+  // odd-q 어긋난 육각 좌표계 이웃 여섯 개 — 열이 짝수냐 홀수냐에 따라 표가 다르다.
+  const OFF_EVEN = [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]];
+  const OFF_ODD  = [[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]];
+
+  function seedGrid(){
+    for (let i = 0; i < grid.length; i++) grid[i] = rnd() < 0.33 ? 1 : 0;
+  }
+
+  function neighborCount(x, y){
+    const offs = (x & 1) ? OFF_ODD : OFF_EVEN;
+    let n = 0;
+    for (let i = 0; i < 6; i++){
+      const nx = x + offs[i][0], ny = y + offs[i][1];
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+      n += grid[idx(nx, ny)];
+    }
+    return n;
+  }
+
+  function step(){
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        const alive = grid[idx(x, y)] === 1;
+        const n = neighborCount(x, y);
+        let willLive = 0;
+        if (alive){
+          willLive = (n >= SURVIVE_MIN && n <= SURVIVE_MAX) ? 1 : 0;
+        } else {
+          willLive = (n === BIRTH_COUNT) ? 1 : 0;
+        }
+        next[idx(x, y)] = willLive;
+      }
+    }
+    const tmp = grid; grid = next; next = tmp;
+  }
+
+  const cvEl = document.querySelector('.rv__cv');
+  const ctx = cvEl.getContext('2d');
+  const rootEl = document.querySelector('.rv');
+
+  function hexPath(cx, cy){
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++){
+      const a = Math.PI / 180 * (60 * i);
+      const vx = cx + (SIZE - 1.2) * Math.cos(a);
+      const vy = cy + (SIZE - 1.2) * Math.sin(a);
+      if (i === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
+    }
+    ctx.closePath();
+  }
+
+  function render(){
+    ctx.fillStyle = ORANGE;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = ALIVE_COLOR;
+    for (let y = 0; y < ROWS; y++){
+      for (let x = 0; x < COLS; x++){
+        if (grid[idx(x, y)] === 1){
+          const cx = OX + x * HORIZ;
+          const cy = OY + VERT * (y + 0.5 * (x & 1));
+          hexPath(cx, cy);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  const ARIA_PLAY = 'Honeycomb grid running -- click or press space to pause, R to reseed';
+  const ARIA_PAUSE = 'Honeycomb grid paused -- click or press space to resume, R to reseed';
+
+  function updateAria(){
+    rootEl.setAttribute('aria-label', paused ? ARIA_PAUSE : ARIA_PLAY);
+  }
+
+  let paused = false;
+  const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function human(){ rootEl.classList.remove('is-demo'); }
+
+  function reseed(){
+    SEED = (SEED * 1103515245 + 12345) >>> 0;
+    rnd = makeLcg(SEED || 1);
+    seedGrid();
+  }
+
+  function togglePause(){
+    paused = !paused;
+    updateAria();
+  }
+
+  function onActivate(e){
+    if (e.type === 'keydown'){
+      if (e.key === 'r' || e.key === 'R'){
+        human();
+        reseed();
+        render();
+        return;
+      }
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    human();
+    if (reduceMQ.matches){
+      step();
+      render();
+    } else {
+      togglePause();
+    }
+  }
+
+  function onKey(e){
+    if (e.key === 'r' || e.key === 'R' || e.key === 'Enter' || e.key === ' '){
+      onActivate(e);
+    }
+  }
+
+  const GEN_INTERVAL_MS = 85;
+  let acc = 0, last = 0;
+
+  function frame(now){
+    if (!reduceMQ.matches){
+      if (!last) last = now;
+      const dt = now - last;
+      last = now;
+      if (!paused){
+        acc += dt;
+        while (acc >= GEN_INTERVAL_MS){
+          step();
+          acc -= GEN_INTERVAL_MS;
+        }
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function onResize(){ render(); }
+
+  rootEl.addEventListener('click', onActivate);
+  rootEl.addEventListener('keydown', onKey);
+  window.addEventListener('resize', onResize);
+
+  seedGrid();
+  updateAria();
+  render();
+  if (!reduceMQ.matches){
+    requestAnimationFrame(frame);
+  }
+
+})();
+</script>
+</body>
+</html>

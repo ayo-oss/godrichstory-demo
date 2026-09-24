@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widget Where an Idle-time Value Computes a Delay via Lazy Loading — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="liw is-demo" id="liw">
+  <div class="liw__widget" id="liwWidget">
+    <div class="liw__placeholder" id="liwPlaceholder">
+      <p class="liw__label">Recommendation widget slot</p>
+      <div class="liw__track">
+        <div class="liw__bar" id="liwBar"></div>
+      </div>
+      <p class="liw__sub" id="liwSub">Securing idle time 0%</p>
+    </div>
+    <div class="liw__content" id="liwContent">
+      <div class="liw__card"></div>
+      <div class="liw__card"></div>
+      <div class="liw__card"></div>
+    </div>
+  </div>
+  <button type="button" class="liw__replay" id="liwReplay">Replay</button>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('liw');
+  var widget = document.getElementById('liwWidget');
+  var bar = document.getElementById('liwBar');
+  var sub = document.getElementById('liwSub');
+  var replayBtn = document.getElementById('liwReplay');
+
+  var IDLE_BUDGET_MS = 260;
+  var IDLE_TIMEOUT_MS = 900;
+  var IDLE_TICK_CAP_MS = 40;
+  var CYCLE_GAP_MS = 1800;
+
+  var ric = window.requestIdleCallback || function (cb) {
+    var start = performance.now();
+    return setTimeout(function () {
+      cb({ didTimeout: false, timeRemaining: function () { return Math.max(0, 50 - (performance.now() - start)); } });
+    }, 40);
+  };
+  var cic = window.cancelIdleCallback || function (id) { clearTimeout(id); };
+
+  var accumulated = 0;
+  var idleHandle = null;
+  var running = false;
+
+  // 계산 겹: requestIdleCallback 이 넘겨주는 유휴 남은시간(timeRemaining) 값을
+  // 매 콜백마다 누적해, 누적값이 목표 예산(IDLE_BUDGET_MS)에 닿는 순간에만
+  // 위젯 자리를 실제 내용으로 바꾼다.
+  function tick(deadline) {
+    if (!running) { return; }
+    var got = deadline.didTimeout ? IDLE_TICK_CAP_MS : Math.min(deadline.timeRemaining(), IDLE_TICK_CAP_MS);
+    accumulated = Math.min(IDLE_BUDGET_MS, accumulated + Math.max(got, 12));
+    var pct = Math.round((accumulated / IDLE_BUDGET_MS) * 100);
+    bar.style.width = pct + '%';
+    sub.textContent = 'Securing idle time ' + pct + '%';
+    if (accumulated >= IDLE_BUDGET_MS) {
+      widget.classList.add('liw__widget--loaded');
+      running = false;
+    } else {
+      idleHandle = ric(tick, { timeout: IDLE_TIMEOUT_MS });
+    }
+  }
+
+  function start() {
+    if (running) { return; }
+    running = true;
+    accumulated = 0;
+    bar.style.width = '0%';
+    sub.textContent = 'Securing idle time 0%';
+    widget.classList.remove('liw__widget--loaded');
+    idleHandle = ric(tick, { timeout: IDLE_TIMEOUT_MS });
+  }
+
+  function stop() {
+    running = false;
+    if (idleHandle !== null) { cic(idleHandle); idleHandle = null; }
+  }
+
+  replayBtn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    stop();
+    start();
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    root.classList.remove('is-demo');
+    accumulated = IDLE_BUDGET_MS;
+    bar.style.width = '100%';
+    sub.textContent = 'Securing idle time 100%';
+    widget.classList.add('liw__widget--loaded');
+  } else {
+    (function loop() {
+      start();
+      var poll = setInterval(function () {
+        if (!widget.classList.contains('liw__widget--loaded')) { return; }
+        clearInterval(poll);
+        setTimeout(function () {
+          if (root.classList.contains('is-demo')) { loop(); }
+        }, CYCLE_GAP_MS);
+      }, 60);
+    })();
+  }
+})();
+</script>
+</body>
+</html>

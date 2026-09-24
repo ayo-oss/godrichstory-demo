@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>クリップボードから貼り付け — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pc" id="pc">
+  <p class="pc__hint" id="pcHint">Ctrl+V で clipboardData.items を走査し、kind が file のものだけを取り出します</p>
+  <div class="pc__zone" id="pcZone" role="button" tabindex="0" aria-describedby="pcHint" aria-label="貼り付け・ドロップゾーン">
+    <input type="file" id="pcInput" multiple class="pc__file" aria-label="ファイルを選択">
+    <svg class="pc__ic" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M200 32h-42.34a32 32 0 0 0-59.32 0H56a16 16 0 0 0-16 16v168a16 16 0 0 0 16 16h144a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16" opacity=".2"/><path d="M200 24h-33.5a31.9 31.9 0 0 0-61 0H56a24 24 0 0 0-24 24v168a24 24 0 0 0 24 24h144a24 24 0 0 0 24-24V48a24 24 0 0 0-24-24m-72 0a16 16 0 1 1-16 16a16 16 0 0 1 16-16m80 192H56V48h28.31a31.9 31.9 0 0 0 43.38 12.66A32 32 0 0 0 139.7 48H200Z"/></g></svg>
+  </div>
+  <ul class="pc__items" id="pcItems" aria-live="polite"></ul>
+  <div class="pc__meta">
+    <span class="pc__tag" id="pcTag">items.length 0</span>
+    <span class="pc__unit" id="pcUnit">kind file 0 · 除外 0</span>
+  </div>
+</div>
+</main>
+<script>
+// クリップボードから貼り付け(06) — paste 이벤트의 clipboardData 는 DataTransfer 이고 그 안의
+// DataTransferItemList(items) 를 훑어 kind==='file' 인 항목만 getAsFile() 로 실제 File 을 받아
+// 드롭과 같은 처리 파이프라인에 넣는다. kind==='string' 항목은 파일이 아니므로 건너뛴다 — 그
+// "훑어서 골라내는" 필터링 계산이 이 데모의 축이다.
+(function () {
+  var zone = document.getElementById('pcZone');
+  var input = document.getElementById('pcInput');
+  var listEl = document.getElementById('pcItems');
+  var tagEl = document.getElementById('pcTag');
+  var unitEl = document.getElementById('pcUnit');
+  if (!zone || !input || !listEl || !tagEl || !unitEl) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  var rnd = mulberry32(606);
+  var HEXES = ['#d6e1eb', '#93d9c0', '#b9a0ff', '#f6c6d3', '#f0dfae'];
+
+  // 가상 클립보드 배치 — string 항목과 file 항목이 섞인 시나리오 3종
+  var SETS = [
+    [{ kind: 'string' }, { kind: 'file', name: 'shot-01.png', type: 'image/png' }],
+    [{ kind: 'string' }, { kind: 'string' }, { kind: 'file', name: 'shot-02.jpg', type: 'image/jpeg' },
+     { kind: 'file', name: 'note.txt', type: 'text/plain' }],
+    [{ kind: 'file', name: 'shot-03.png', type: 'image/png' }]
+  ];
+  var cur = -1;
+
+  // clipboardData.items 를 훑는 실제 필터 로직 — 드롭과 동일한 intake() 로 넘긴다
+  function fromClipboard(items) {
+    if (items instanceof DataTransferItemList) { /* 실제 ClipboardEvent.clipboardData.items 경로 */ }
+    var picked = [];
+    var skipped = 0;
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.kind === 'file') {
+        var f = it.getAsFile();
+        if (f) picked.push(f);
+      } else {
+        skipped++;
+      }
+    }
+    render(items.length, picked, skipped);
+  }
+
+  function render(total, picked, skipped) {
+    listEl.textContent = '';
+    for (var i = 0; i < picked.length; i++) {
+      var f = picked[i];
+      var li = document.createElement('li');
+      li.className = 'pc__item';
+      var dot = document.createElement('span');
+      dot.className = 'pc__dot';
+      dot.style.background = HEXES[i % HEXES.length];
+      var nm = document.createElement('span');
+      nm.className = 'pc__name';
+      nm.textContent = f.name + ' · ' + f.type;
+      li.appendChild(dot); li.appendChild(nm);
+      if (!reduce) li.classList.add('is-in');
+      listEl.appendChild(li);
+    }
+    tagEl.textContent = 'items.length ' + total;
+    unitEl.textContent = 'kind file ' + picked.length + ' · 除外  ' + skipped;
+  }
+
+  // 실제 File 객체를 담은 진짜 DataTransfer — items.add(file) 로 DataTransferItemList 를 만든다
+  function virtualClipboardData(set) {
+    var dt = new DataTransfer();
+    for (var i = 0; i < set.length; i++) {
+      if (set[i].kind === 'file') {
+        try { dt.items.add(new File([new Blob(['x'])], set[i].name, { type: set[i].type })); }
+        catch (e) {}
+      } else {
+        try { dt.items.add('text-' + Math.floor(rnd() * 999), 'text/plain'); } catch (e) {}
+      }
+    }
+    return dt;
+  }
+
+  // 실제 paste — ClipboardEvent.clipboardData.items 를 그대로 훑는다
+  zone.addEventListener('paste', function (clipboardEvent) {
+    if (!(clipboardEvent instanceof ClipboardEvent) || !clipboardEvent.clipboardData) return;
+    if (clipboardEvent.clipboardData.items) fromClipboard(clipboardEvent.clipboardData.items);
+  });
+  // 실제 드롭도 같은 필터 형태로(items 가 없으면 files 로 대체)
+  zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault(); zone.classList.remove('is-over');
+    if (e.dataTransfer && e.dataTransfer.items) fromClipboard(e.dataTransfer.items);
+  });
+  input.addEventListener('change', function () {
+    var fs = input.files;
+    if (fs && fs.length) render(fs.length, Array.prototype.slice.call(fs), 0);
+    input.value = '';
+  });
+
+  // 자동 시연 — 합성 paste 이벤트를 zone 에 실제로 dispatch 한다(clipboardData 를 진짜로 실어)
+  function simulatePaste(set) {
+    var dt = virtualClipboardData(set);
+    var evt;
+    try { evt = new ClipboardEvent('paste', {}); } catch (e) { evt = new Event('paste'); }
+    try { Object.defineProperty(evt, 'clipboardData', { value: dt, configurable: true }); } catch (e) {}
+    zone.classList.add('is-over');
+    zone.dispatchEvent(evt);
+    setTimeout(function () { zone.classList.remove('is-over'); }, 240);
+  }
+
+  if (reduce) {
+    simulatePaste(SETS[1]);
+  } else {
+    var nextAt = 0;
+    (function loop(now) {
+      if (now >= nextAt) {
+        nextAt = now + 800;
+        cur = (cur + 1) % SETS.length;
+        simulatePaste(SETS[cur]);
+      }
+      requestAnimationFrame(loop);
+    })(0);
+  }
+})();
+</script>
+</body>
+</html>

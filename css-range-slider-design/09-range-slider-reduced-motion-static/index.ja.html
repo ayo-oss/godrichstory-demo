@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>動作軽減対応スライダー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rm" id="rm">
+  <p class="rm__hint">左はスプリングで追従し、右は値に即座にジャンプします — 実際のOS設定を検知すると左も即座に切り替わります</p>
+  <div class="rm__row">
+    <div class="rm__col">
+      <span class="rm__label">通常</span>
+      <div class="rm__wrap" id="rmWrapA">
+        <input class="rm__range" id="rmRangeA" type="range" min="0" max="100" step="1" value="50" aria-label="通常スライダー">
+      </div>
+    </div>
+    <div class="rm__col">
+      <span class="rm__label">動作を減らす</span>
+      <div class="rm__wrap" id="rmWrapB">
+        <input class="rm__range" id="rmRangeB" type="range" min="0" max="100" step="1" value="50" aria-label="動作軽減スライダー">
+      </div>
+    </div>
+  </div>
+  <p class="rm__meta"><b class="rm__tag" id="rmMode">検知: デフォルト</b><span class="rm__unit">prefers-reduced-motion</span></p>
+</div>
+</main>
+<script>
+// 동작 감소 대응(09) — 같은 목표값 배열을 두 패널이 같이 따라가되, 왼쪽(A)은
+// 스프링 보간, 오른쪽(B)은 목표가 바뀌는 즉시 그 값으로 점프한다(애니메이션이
+// 아니라 상태 전환). matchMedia('(prefers-reduced-motion: reduce)') 로 실제
+// OS 설정을 읽어 reduce 이면 A 도 B 와 같은 즉시 점프로 전환한다 — 두 값 중
+// 하나를 죽이는 게 아니라 "감쇠를 0 으로" 만드는 방식으로 구현 원리를 보여준다.
+// aria-valuenow 는 두 패널 모두 화면 갱신과 같은 프레임에서 갈아준다.
+(function () {
+  var root = document.getElementById('rm');
+  var wrapA = document.getElementById('rmWrapA');
+  var wrapB = document.getElementById('rmWrapB');
+  var rangeA = document.getElementById('rmRangeA');
+  var rangeB = document.getElementById('rmRangeB');
+  var modeEl = document.getElementById('rmMode');
+  if (!root || !wrapA || !wrapB || !rangeA || !rangeB || !modeEl) return;
+
+  var MIN = 0, MAX = 100;
+  var K = 150, C = 17;
+  var TAU = 0.13;
+
+  var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var reduce = mq.matches;
+  var MODE_TEXT = { def: '検知: デフォルト', reduced: '検知: 動作軽減' };
+  modeEl.textContent = reduce ? MODE_TEXT.reduced : MODE_TEXT.def;
+
+  function paint(wrap, range, v) {
+    var pct = (v - MIN) / (MAX - MIN) * 100;
+    wrap.style.setProperty('--pct', pct.toFixed(2));
+    range.setAttribute('aria-valuenow', String(Math.round(v)));
+  }
+
+  var posA = 50, velA = 0, target = 50;
+  var posB = 50;
+  paint(wrapA, rangeA, posA);
+  paint(wrapB, rangeB, posB);
+
+  var playing = true;
+  function stop() { playing = false; }
+  [rangeA, rangeB].forEach(function (r) {
+    r.addEventListener('pointerdown', stop);
+    r.addEventListener('keydown', stop);
+  });
+  rangeA.addEventListener('input', function () {
+    stop();
+    target = Number(rangeA.value); posA = target; velA = 0; posB = target;
+    rangeB.value = String(target);
+    paint(wrapA, rangeA, posA); paint(wrapB, rangeB, posB);
+  });
+
+  var targets = [50, 12, 88, 30, 96, 50];
+  var seg = 0, segFrom = target;
+  var SEG_MS = 400;
+  var segStart = performance.now();
+  var last = segStart;
+
+  if (reduce) {
+    target = targets[0]; posA = target; posB = target;
+    rangeA.value = String(target); rangeB.value = String(target);
+    paint(wrapA, rangeA, posA); paint(wrapB, rangeB, posB);
+  } else {
+    (function step(now) {
+      var dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      if (playing) {
+        var elapsed = now - segStart;
+        if (elapsed >= SEG_MS) {
+          seg = (seg + 1) % targets.length;
+          segStart = now; elapsed = 0; segFrom = target;
+          posB = targets[seg];
+        }
+        var t = elapsed / 1000;
+        var k = 1 - Math.exp(-t / TAU);
+        target = segFrom + (targets[seg] - segFrom) * k;
+      }
+      var acc = -K * (posA - target) - C * velA;
+      velA += acc * dt;
+      posA += velA * dt;
+      rangeA.value = String(Math.round(posA));
+      rangeB.value = String(Math.round(posB));
+      paint(wrapA, rangeA, posA);
+      paint(wrapB, rangeB, posB);
+      requestAnimationFrame(step);
+    })(last);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>背景フェード+画像スケールアップ切り替え — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <ul class="grid" id="grid">
+    <li><button class="thumb" id="thumb0" type="button" aria-haspopup="dialog" data-w="280" data-h="210"><span class="thumbImg thumbImg--a"></span><span class="thumbLabel">写真1</span></button></li>
+    <li><button class="thumb" id="thumb1" type="button" aria-haspopup="dialog" data-w="200" data-h="200"><span class="thumbImg thumbImg--b"></span><span class="thumbLabel">写真2</span></button></li>
+    <li><button class="thumb" id="thumb2" type="button" aria-haspopup="dialog" data-w="180" data-h="240"><span class="thumbImg thumbImg--c"></span><span class="thumbLabel">写真3</span></button></li>
+  </ul>
+  <div class="backdrop" id="backdrop"></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-hidden="true" aria-label="写真の拡大表示">
+    <span class="fullImg" id="fullImg"></span>
+    <p class="ratioNote" id="ratioNote"></p>
+    <button class="closeBtn" id="closeBtn" type="button">閉じる</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var OPEN_MS = 600;
+  var CLOSE_MS = 420;
+  var LOOP_MS = 2000;
+  var HOLD_OPEN_MS = 620;
+  var ASPECT_NORM_LO = 0.6;
+  var ASPECT_NORM_HI = 1.6;
+  var SCALE_FROM_MIN = 0.7;
+  var SCALE_FROM_MAX = 0.92;
+  var DIM_MAX = 0.82;
+  var DIM_MIN = 0.58;
+
+  var scene = document.getElementById('scene');
+  var backdrop = document.getElementById('backdrop');
+  var lightbox = document.getElementById('lightbox');
+  var fullImg = document.getElementById('fullImg');
+  var ratioNote = document.getElementById('ratioNote');
+  var closeBtn = document.getElementById('closeBtn');
+  var thumbs = [].slice.call(document.querySelectorAll('.thumb'));
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var imgClassByIdx = ['thumbImg--a', 'thumbImg--b', 'thumbImg--c'];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  // 이미지 자신의 가로세로 비율에서 시작 스케일과 배경 어둡기를 함께 계산한다 — 두 값이 같은 정규화 지점에서 나온다
+  function fromAspect(w, h) {
+    var aspect = w / h;
+    var norm = clamp((aspect - ASPECT_NORM_LO) / (ASPECT_NORM_HI - ASPECT_NORM_LO), 0, 1);
+    var scaleFrom = SCALE_FROM_MIN + (SCALE_FROM_MAX - SCALE_FROM_MIN) * norm;
+    var dim = DIM_MAX - (DIM_MAX - DIM_MIN) * norm;
+    return { aspect: aspect, scaleFrom: scaleFrom, dim: dim };
+  }
+
+  var open = false;
+  var activeIdx = 1;
+  var timers = [];
+
+  // reduce: 실사용 경로 적용 — 트윈 없이 최종 상태로 즉시 전환한다
+  function animate(duration, onFrame, onDone) {
+    if (reduce) { onFrame(1); if (onDone) onDone(); return; }
+    var start = performance.now();
+    function frame(now) {
+      var p = clamp((now - start) / duration, 0, 1);
+      onFrame(easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function openFrom(idx) {
+    if (open) return;
+    open = true;
+    var t = thumbs[idx];
+    var calc = fromAspect(Number(t.dataset.w), Number(t.dataset.h));
+    fullImg.className = 'fullImg ' + imgClassByIdx[idx];
+    ratioNote.textContent = '比率 ' + calc.aspect.toFixed(2) + ' ・開始倍率 ' + calc.scaleFrom.toFixed(2);
+    lightbox.style.visibility = 'visible';
+    lightbox.setAttribute('aria-hidden', 'false');
+    backdrop.style.visibility = 'visible';
+    animate(OPEN_MS, function (e) {
+      var s = calc.scaleFrom + (1 - calc.scaleFrom) * e;
+      fullImg.style.transform = 'scale(' + s.toFixed(4) + ')';
+      backdrop.style.opacity = (calc.dim * e).toFixed(3);
+    }, function () {
+      closeBtn.focus({ preventScroll: true });
+    });
+  }
+
+  function closeLightbox(idx) {
+    if (!open) return;
+    var t = thumbs[idx];
+    var calc = fromAspect(Number(t.dataset.w), Number(t.dataset.h));
+    animate(CLOSE_MS, function (e) {
+      var s = 1 + (calc.scaleFrom - 1) * e;
+      fullImg.style.transform = 'scale(' + s.toFixed(4) + ')';
+      backdrop.style.opacity = (calc.dim * (1 - e)).toFixed(3);
+    }, function () {
+      lightbox.style.visibility = 'hidden';
+      lightbox.setAttribute('aria-hidden', 'true');
+      backdrop.style.visibility = 'hidden';
+      open = false;
+      thumbs[idx].focus({ preventScroll: true });
+    });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (id) { clearTimeout(id); clearInterval(id); });
+      timers = [];
+    }
+  }
+
+  thumbs.forEach(function (t, i) {
+    t.addEventListener('click', function () {
+      human();
+      activeIdx = i;
+      openFrom(i);
+    });
+  });
+  closeBtn.addEventListener('click', function () { human(); closeLightbox(activeIdx); });
+  backdrop.addEventListener('click', function () { human(); closeLightbox(activeIdx); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && open) { human(); closeLightbox(activeIdx); }
+  });
+
+  function cycle() {
+    activeIdx = 2;
+    openFrom(2);
+    timers.push(setTimeout(function () { closeLightbox(2); }, OPEN_MS + HOLD_OPEN_MS));
+  }
+
+  if (!reduce) {
+    cycle();
+    timers.push(setInterval(function () {
+      if (scene.classList.contains('is-demo')) cycle();
+    }, LOOP_MS));
+  }
+})();
+</script>
+</body>
+</html>

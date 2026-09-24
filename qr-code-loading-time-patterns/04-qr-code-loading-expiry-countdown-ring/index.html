@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>남은 시간이 링으로 줄어드는 만료 카운트다운 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ecr is-demo" id="ecrRoot">
+  <div class="ecr__badge" id="ecrBadge">30초 남음</div>
+  <button class="ecr__ctrl" id="ecrCtrl" type="button">일시정지</button>
+  <div class="ecr__canvas-wrap">
+    <canvas class="ecr__canvas" id="ecrCanvas" width="240" height="200"></canvas>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // QR_EXPIRE_DURATION_MS — 변형 1: 30000 → 15000 으로 늘리면 만료까지 더 여유 있게 카운트다운한다.
+  var QR_EXPIRE_DURATION_MS = 30000;
+  // 시연 전용 가상 시계 배속: 30000ms 만료를 2초 측정 창 안에서 보여주기 위한 시연 장치일 뿐,
+  // 상수 QR_EXPIRE_DURATION_MS 자체는 그대로 유지한다.
+  var DEMO_ACCEL_FACTOR = 15;
+
+  var canvas = document.getElementById('ecrCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var badge = document.getElementById('ecrBadge');
+  var ctrl = document.getElementById('ecrCtrl');
+  var root = document.getElementById('ecrRoot');
+  var isDemo = root.classList.contains('is-demo');
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(407041);
+  var dots = [];
+  for (var y = 0; y < 9; y += 1) {
+    for (var x = 0; x < 9; x += 1) {
+      if (rand() < 0.42) dots.push({ x: x, y: y });
+    }
+  }
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // 계산된 시각 레이어: 캔버스 크기가 바뀌면 중심·링 반지름을 다시 잰다 —
+  // 링이 항상 스테이지 폭까지 채우게(278px 캡 없이 반응형).
+  var dpr = 1, cw = 240, ch = 200, cx = 120, cy = 100, radius = 70;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    cw = r.width; ch = r.height;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = cw / 2; cy = ch / 2;
+    radius = Math.min(cw, ch) * 0.44;
+    draw(lastElapsed);
+  }
+
+  var lastElapsed = 0;
+  function draw(virtualElapsed) {
+    lastElapsed = virtualElapsed;
+    ctx.clearRect(0, 0, cw, ch);
+
+    // 계산 한 겹: 경과 비율 → 각도(0~360) 로 링을 깎고, 만료 근접(20% 이하)일수록
+    // 파랑→빨강으로 색을 보간한다. 같은 urgency 값이 배경 톤·링 외곽 글로우에도 반영돼
+    // 화면 넓은 면이 함께 바뀐다.
+    var ratio = Math.min(1, virtualElapsed / QR_EXPIRE_DURATION_MS);
+    var remainRatio = 1 - ratio;
+    var angle = ratio * 360;
+    var urgency = remainRatio < 0.2 ? (0.2 - remainRatio) / 0.2 : 0;
+    var r1 = lerp(120, 255, urgency), g1 = lerp(200, 90, urgency), b1 = lerp(255, 90, urgency);
+    var ringColor = 'rgb(' + Math.round(r1) + ',' + Math.round(g1) + ',' + Math.round(b1) + ')';
+
+    // 카드 배경 밝기 — urgency 가 오를수록 전체 캔버스가 옅은 붉은 톤으로 밝아진다.
+    var bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(cw, ch) * 0.72);
+    bg.addColorStop(0, 'rgba(' + Math.round(lerp(40, 120, urgency)) + ',' + Math.round(lerp(30, 26, urgency)) + ',' + Math.round(lerp(48, 30, urgency)) + ',1)');
+    bg.addColorStop(1, 'rgba(18,20,30,1)');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, cw, ch);
+
+    var ringWidth = Math.max(6, cw * 0.034);
+
+    // 링 외곽 글로우 — urgency 가 오를수록 더 크고 옅게 번진다.
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(' + Math.round(r1) + ',' + Math.round(g1) + ',' + Math.round(b1) + ',' + (0.16 + urgency * 0.22).toFixed(3) + ')';
+    ctx.lineWidth = ringWidth * (2.4 + urgency * 1.6);
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + (angle * Math.PI / 180));
+    ctx.stroke();
+    ctx.globalCompositeOperation = 'source-over';
+
+    ctx.strokeStyle = 'rgba(255,255,255,.12)';
+    ctx.lineWidth = ringWidth;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = ringWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + (angle * Math.PI / 180));
+    ctx.stroke();
+
+    var box = Math.min(cw, ch) * 0.31;
+    ctx.fillStyle = 'rgba(20,26,38,.9)';
+    ctx.fillRect(cx - box / 2, cy - box / 2, box, box);
+    var cell = box / 9;
+    ctx.fillStyle = 'rgb(255,247,230)';
+    dots.forEach(function (d) {
+      var s = cell * 0.62;
+      ctx.fillRect(cx - box / 2 + d.x * cell + (cell - s) / 2, cy - box / 2 + d.y * cell + (cell - s) / 2, s, s);
+    });
+
+    var remainSec = Math.max(0, Math.ceil((QR_EXPIRE_DURATION_MS - virtualElapsed) / 1000));
+    badge.textContent = remainSec + '초 남음';
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playing = true;
+  var virtualElapsed = reduce ? QR_EXPIRE_DURATION_MS : 0;
+  if (reduce) {
+    playing = false;
+    root.classList.remove('is-demo');
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+    if (playing) {
+      var accel = isDemo ? DEMO_ACCEL_FACTOR : 1;
+      virtualElapsed += dt * accel;
+      if (virtualElapsed >= QR_EXPIRE_DURATION_MS) virtualElapsed -= QR_EXPIRE_DURATION_MS;
+    }
+    draw(virtualElapsed);
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(virtualElapsed);
+  requestAnimationFrame(tick);
+
+  ctrl.addEventListener('click', function () {
+    playing = !playing;
+    ctrl.textContent = playing ? '일시정지' : '재생';
+  });
+  ctrl.addEventListener('keydown', function (e) {
+    if ((e.key === 'r' || e.key === 'R') && !reduce) {
+      virtualElapsed = 0;
+      playing = true;
+      ctrl.textContent = '일시정지';
+    }
+  });
+})();
+</script>
+</body>
+</html>

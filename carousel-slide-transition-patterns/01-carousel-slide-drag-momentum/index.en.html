@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carousel That Keeps Gliding From Drag Momentum — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<section class="carousel is-demo" id="carousel" role="region" aria-roledescription="carousel" aria-label="Card carousel">
+  <div class="viewport" id="viewport">
+    <div class="track" id="track">
+      <div class="card card--0"><span class="num">1</span></div>
+      <div class="card card--1"><span class="num">2</span></div>
+      <div class="card card--2"><span class="num">3</span></div>
+      <div class="card card--3"><span class="num">4</span></div>
+      <div class="card card--4"><span class="num">5</span></div>
+    </div>
+  </div>
+  <button type="button" class="navBtn navBtn--prev" id="prevBtn" aria-label="Previous card">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="M112 56v144l-72-72Z" opacity=".2"/><path d="M216 120h-96V56a8 8 0 0 0-13.66-5.66l-72 72a8 8 0 0 0 0 11.32l72 72A8 8 0 0 0 120 200v-64h96a8 8 0 0 0 0-16m-112 60.69L51.31 128L104 75.31Z"/></g></svg>
+  </button>
+  <button type="button" class="navBtn navBtn--next" id="nextBtn" aria-label="Next card">
+    <svg viewBox="0 0 256 256" width="18" height="18" aria-hidden="true"><g fill="currentColor"><path d="m216 128l-72 72V56Z" opacity=".2"/><path d="m221.66 122.34l-72-72A8 8 0 0 0 136 56v64H40a8 8 0 0 0 0 16h96v64a8 8 0 0 0 13.66 5.66l72-72a8 8 0 0 0 0-11.32M152 180.69V75.31L204.69 128Z"/></g></svg>
+  </button>
+  <div class="readout" id="readout" aria-live="polite"></div>
+</section>
+</main>
+<script>
+(function () {
+  var STEP_MS = 16.6667;
+  // 관성 감쇠 계수 — 프레임(16.6667ms)마다 이 비율만큼 속도가 깎인다. 낮출수록 손을 뗀 뒤
+  // 카드가 더 오래·더 멀리 미끄러진다(변형 1). 높이면 짧게 미끄러지다 빨리 멈춘다.
+  var MOMENTUM_FRICTION = 0.10;
+  var VELOCITY_STOP = 0.02;      // px/ms 미만이면 정지로 본다
+  var SAMPLE_WINDOW_MS = 110;    // 이 시간 안의 포인터 표본만 속도 계산에 쓴다
+  var KEY_FLICK_VELOCITY = 0.62; // 화살표 키 한 번 = 이 속도의 플릭
+  var DEMO_FLICKS = [-0.85, 0.5, -0.62, 0.78]; // 자동 시연이 번갈아 쏘는 플릭 속도(px/ms) — 크기가 다르므로 미끄러지는 거리도 다르다
+  var DEMO_HOLD_MS = 260;
+
+  var carousel = document.getElementById('carousel');
+  var viewport = document.getElementById('viewport');
+  var track = document.getElementById('track');
+  var readout = document.getElementById('readout');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var TOTAL = 5;
+  var LABEL_PREFIX = 'Card ';
+  var LABEL_SEP = ' / ';
+
+  var pos = 0;          // 현재 translateX (px)
+  var velocity = 0;      // px/ms
+  var minX = 0, maxX = 0;
+  var dragging = false;
+  var samples = [];
+  var settleFrame = null;
+  var demoTimers = [];
+
+  function bounds() {
+    maxX = 0;
+    minX = Math.min(0, viewport.clientWidth - track.scrollWidth);
+  }
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  function paint() {
+    track.style.transform = 'translate3d(' + pos.toFixed(1) + 'px,0,0)';
+    var step = track.scrollWidth / TOTAL;
+    var idx = clamp(Math.round(-pos / step), 0, TOTAL - 1);
+    readout.textContent = LABEL_PREFIX + (idx + 1) + LABEL_SEP + TOTAL;
+  }
+
+  function stopSettle() {
+    if (settleFrame) { cancelAnimationFrame(settleFrame); settleFrame = null; }
+  }
+
+  function human() {
+    if (carousel.classList.contains('is-demo')) {
+      carousel.classList.remove('is-demo');
+      demoTimers.forEach(function (t) { clearTimeout(t); });
+      demoTimers = [];
+    }
+  }
+
+  // 관성 감쇠 루프 — 매 프레임 pos += velocity*dt, velocity *= (1-MOMENTUM_FRICTION)^(dt/16.6667).
+  // 경계에 닿으면 그 자리에서 속도를 0으로 끊는다(되튕김은 이 항목의 역할이 아니다 — 02가 담당).
+  function settle() {
+    var last = performance.now();
+    function frame(now) {
+      var dt = Math.min(40, now - last);
+      last = now;
+      pos = clamp(pos + velocity * dt, minX, maxX);
+      var decay = Math.pow(1 - MOMENTUM_FRICTION, dt / STEP_MS);
+      velocity *= decay;
+      if (pos === minX || pos === maxX) velocity = 0;
+      paint();
+      if (Math.abs(velocity) > VELOCITY_STOP) {
+        settleFrame = requestAnimationFrame(frame);
+      } else {
+        velocity = 0;
+        settleFrame = null;
+      }
+    }
+    settleFrame = requestAnimationFrame(frame);
+  }
+
+  function pushSample(t, x) {
+    samples.push({ t: t, x: x });
+    while (samples.length && t - samples[0].t > SAMPLE_WINDOW_MS) samples.shift();
+  }
+
+  function releaseVelocity() {
+    if (samples.length < 2) return 0;
+    var a = samples[0], b = samples[samples.length - 1];
+    var dt = b.t - a.t;
+    if (dt <= 0) return 0;
+    return (b.x - a.x) / dt;
+  }
+
+  function onPointerDown(e) {
+    human();
+    stopSettle();
+    dragging = true;
+    velocity = 0;
+    samples = [];
+    track.classList.add('isDragging');
+    viewport.setPointerCapture(e.pointerId);
+    pushSample(performance.now(), e.clientX);
+    carousel._originPos = pos;
+    carousel._startX = e.clientX;
+  }
+  function onPointerMove(e) {
+    if (!dragging) return;
+    var dx = e.clientX - carousel._startX;
+    pos = clamp(carousel._originPos + dx, minX, maxX);
+    pushSample(performance.now(), e.clientX);
+    paint();
+  }
+  function onPointerUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    track.classList.remove('isDragging');
+    try { viewport.releasePointerCapture(e.pointerId); } catch (err) {}
+    velocity = releaseVelocity();
+    settle();
+  }
+  function flick(v) {
+    human();
+    stopSettle();
+    velocity = v;
+    settle();
+  }
+  function onKeydown(e) {
+    if (e.key === 'ArrowLeft') { flick(-KEY_FLICK_VELOCITY); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { flick(KEY_FLICK_VELOCITY); e.preventDefault(); }
+  }
+
+  viewport.addEventListener('pointerdown', onPointerDown);
+  viewport.addEventListener('pointermove', onPointerMove);
+  viewport.addEventListener('pointerup', onPointerUp);
+  viewport.addEventListener('pointercancel', onPointerUp);
+  viewport.addEventListener('keydown', onKeydown);
+  viewport.tabIndex = 0;
+  prevBtn.addEventListener('click', function () { flick(-KEY_FLICK_VELOCITY); });
+  nextBtn.addEventListener('click', function () { flick(KEY_FLICK_VELOCITY); });
+
+  // reduce: 실사용 경로 적용 — 드래그·키보드·버튼 플릭은 위 리스너가 그대로 물리 계산을 돌린다.
+  // 아래 demoCycle() 은 시연 게이트만이고 reduce 에서는 돌지 않는다.
+  function demoCycle(i) {
+    if (!carousel.classList.contains('is-demo')) return;
+    velocity = DEMO_FLICKS[i % DEMO_FLICKS.length];
+    stopSettle();
+    settle();
+    demoTimers.push(setTimeout(function () {
+      demoTimers.push(setTimeout(function () { demoCycle(i + 1); }, DEMO_HOLD_MS));
+    }, 40));
+  }
+
+  function init() {
+    bounds();
+    paint();
+    if (!reduce) demoCycle(0);
+  }
+  window.addEventListener('resize', bounds);
+  init();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>As smoke particles rise from the bottom, they gradually spread sideways and blur more. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="smk is-demo" id="smkRoot">
+  <canvas class="smk__canvas" id="smkCanvas" width="480" height="300"></canvas>
+  <p class="smk__caption">As smoke particles rise from the bottom, they gradually spread sideways and blur more.</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 값 노이즈 필드로 좌우 흔들림(난류)을 만들어 입자마다 다른 파형으로 옆으로 밀어내고,
+  // 입자 나이(0~1)를 반경·투명도에 그대로 전파해 위로 갈수록 더 크고 흐리게 번지다 사라지게
+  // 한다. 파티클 물리 엔진 없이 배열 루프 하나로 발생·상승·소멸을 계산한다(계산 공간은
+  // CALC_W x CALC_H, 화면 표시 배율로 확대해 그린다).
+  var root = document.getElementById('smkRoot');
+  var canvas = document.getElementById('smkCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var SMOKE_RISE_SPEED_PX = 12;
+  var PLUME_SPAWN_PER_S = 50;
+  var PLUME_LIFE_MS = 2400;
+  var PLUME_DRIFT = 30;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var NOISE_DIM = 40;
+  var noiseRand = seedRand(423011);
+  var noiseTable = new Float32Array(NOISE_DIM * NOISE_DIM);
+  for (var ni = 0; ni < noiseTable.length; ni += 1) noiseTable[ni] = noiseRand();
+  function noiseAt(xi, yi) {
+    var wx = ((xi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    var wy = ((yi % NOISE_DIM) + NOISE_DIM) % NOISE_DIM;
+    return noiseTable[wy * NOISE_DIM + wx];
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function valueNoise2D(x, y) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var tx = smoothstep(x - x0), ty = smoothstep(y - y0);
+    var v00 = noiseAt(x0, y0), v10 = noiseAt(x0 + 1, y0);
+    var v01 = noiseAt(x0, y0 + 1), v11 = noiseAt(x0 + 1, y0 + 1);
+    var a = v00 + (v10 - v00) * tx;
+    var b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+  }
+
+  var pRand = seedRand(423012);
+  var particles = [];
+  var spawnAcc = 0;
+
+  function spawn(bornMs) {
+    particles.push({
+      bx: CALC_W * 0.5 + (pRand() - 0.5) * 10,
+      y: CALC_H - 6,
+      born: bornMs,
+      wSeed: pRand() * 1000,
+      sign: pRand() < 0.5 ? -1 : 1
+    });
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * PLUME_SPAWN_PER_S / 1000;
+    while (spawnAcc >= 1) { spawn(nowMs); spawnAcc -= 1; }
+    var alive = [];
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      p.y -= SMOKE_RISE_SPEED_PX * dtS;
+      if (nowMs - p.born < PLUME_LIFE_MS) alive.push(p);
+    }
+    particles = alive;
+  }
+
+  function drawSmoke(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < particles.length; i += 1) {
+      var p = particles[i];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / PLUME_LIFE_MS));
+      var turb = (valueNoise2D(p.wSeed * 0.03, nowMs * 0.0018) - 0.5) * 2;
+      var x = p.bx + turb * PLUME_DRIFT * f * p.sign;
+      var r = 7 + f * 32;
+      var alpha = Math.sin(f * Math.PI) * 0.55;
+      if (alpha <= 0.01) continue;
+      var dx = x * sx, dy = p.y * sy, dr = r * ((sx + sy) / 2);
+      var g = ctx.createRadialGradient(dx, dy, 0, dx, dy, dr);
+      g.addColorStop(0, 'rgba(255,247,230,' + alpha + ')');
+      g.addColorStop(1, 'rgba(255,247,230,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    drawSmoke(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 160 : 120;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      drawSmoke(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  drawSmoke(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

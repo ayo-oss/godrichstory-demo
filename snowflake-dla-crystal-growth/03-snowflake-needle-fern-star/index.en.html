@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>침·고사리 결정 — 습도 파라미터 대비 — 눈결정 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cd is-demo" id="cdRoot">
+  <p class="cd__hint">
+    <span>Change one parameter (branch-width odds) and grow two crystals side by side — a broad fern splits from a narrow needle, showing how snow crystals shift shape with temperature and humidity</span>
+  </p>
+  <div class="cd__field" id="cdField" role="application" aria-label="Needle vs. Fern Crystal Comparison Demo" tabindex="0">
+    <canvas class="cd__cv" id="cdCv"></canvas>
+  </div>
+  <div class="cd__bar">
+    <span class="cd__meta">left <b class="cd__val" id="cdL">0</b> · right <b class="cd__val cd__val--alt" id="cdR">0</b>particles aggregated</span>
+    <span class="cd__meta cd__meta--dim">canvas · ImageData · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 침·고사리 결정(03). 02 의 팁 가중 DLA 에서 흡착 확률 곡선의 "폭" 만 바꾸면
+// 결정 습관이 갈라진다 —
+//   · 고사리(fernite, left): 폭 넓게(BIAS 1.6) — 팁과 오목한 자리의 흡착 차가 작아
+//     가지가 옆으로도 붙으며 넓은 잎(고사리 무늬)으로 자란다.
+//   · 침(needle, 우): 폭 좁게(BIAS 4.6) — 바깥 팁만 붙고 안쪽은 전부 튕겨나가
+//     가늘고 긴 바늘 다발로 자란다.
+// 실제 눈결정의 형성 지도(온도·과포화도에 따라 판·침·고사리가 갈리는 Nakaya 다이어그램)의
+// 축 하나를 파라미터 하나로 압축한 대비 시연이다. 두 결정은 같은 배경 위에서 동시에 자란다.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var BIAS_FERN = 1.6;   // left(고사리) 팁 편향 지수 — 낮을수록 폭이 넓고 잎이 무성
+  var BIAS_NEEDLE = 4.6; // 우(침) 팁 편향 지수 — 높을수록 가늘고 긴 바늘
+  var PARTICLES = 22;    // 결정 하나당 동시 입자 수
+  var MAX_AGE = 0.55;    // 방금 붙은 칸이 빛나는 시간(초)
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('cdRoot');
+  var field = document.getElementById('cdField');
+  var cv = document.getElementById('cdCv');
+  var ctx = cv.getContext('2d', { alpha: false });
+  var lOut = document.getElementById('cdL');
+  var rOut = document.getElementById('cdR');
+
+  function makeRand(seed) {
+    var st = seed >>> 0;
+    return function () {
+      st = (st + 0x6D2B79F5) >>> 0;
+      var t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var rand = makeRand(0x319A03);
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--flake-ink');
+  var C_DEEP  = tokRGB('--flake-deep');
+  var C_HAZE  = tokRGB('--flake-haze');
+  var C_MOTE  = tokRGB('--flake-mote');
+  var C_ICE   = tokRGB('--flake-ice');
+  var C_GLOW  = tokRGB('--flake-glow');
+  var C_LILAC = tokRGB('--flake-lilac');
+  var C_MINT  = tokRGB('--flake-mint');
+  var C_SAND  = tokRGB('--flake-sand');     // 우(침) 결정 바깥 색 — 모래빛 파스텔
+  var C_MIST  = tokRGB('--flake-mist');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0, raf = 0, t0 = -1;
+  var bg, data, img2, data2;
+
+  // ── 결정 하나의 상태 — 좌우 두 개를 같은 구조로 ──
+  function makeCrystal(n, ox, bias, seed) {
+    return {
+      N: n, ox: ox, bias: bias,
+      grid: new Uint8Array(n * n),
+      age: new Float32Array(n * n),
+      walk: [],
+      rand: makeRand(seed),
+      stuck: 0, r: 1,
+      cx: n >> 1, cy: n >> 1
+    };
+  }
+  var L = null, R = null;
+  var snow = [];
+  var cellPx = 4;
+
+  function gridIdx(c, i, j) { return i * c.N + j; }
+  function inGrid(c, i, j) { return i >= 0 && j >= 0 && i < c.N && j < c.N; }
+  var DJ_EVEN = [0, -1, -1, 0, 0, 0];
+  var DJ_ODD  = [0, 0, 0, 0, 1, 1];
+  var DI = [-1, -1, 0, 1, 0, -1];
+  function nbr(c, i, j, k) { return [i + DI[k], j + ((j & 1) === 0 ? DJ_EVEN[k] : DJ_ODD[k])]; }
+  function setCell(c, i, j, t) { c.grid[gridIdx(c, i, j)] = 1; c.age[gridIdx(c, i, j)] = t; }
+
+  function plantSeed(c) {
+    var cx = c.cx, cy = c.cy;
+    setCell(c, cx, cy, 0); setCell(c, cx - 1, cy, 0); setCell(c, cx + 1, cy, 0);
+    setCell(c, cx, cy - 1, 0); setCell(c, cx, cy + 1, 0);
+    setCell(c, cx - 1, cy - 1, 0); setCell(c, cx + 1, cy + 1, 0);
+    c.stuck = 7;
+  }
+
+  function launch(c) {
+    var rnd = c.rand;
+    var a = rnd() * Math.PI * 2;
+    var r = c.r * 1.22 + 3;
+    var i = c.cx + Math.round(Math.cos(a) * r);
+    var j = c.cy + Math.round(Math.sin(a) * r);
+    if (!inGrid(c, i, j) || c.grid[gridIdx(c, i, j)]) return;
+    c.walk.push([i, j, Math.floor(rnd() * 6), rnd() * Math.PI * 2]);
+  }
+
+  function touching(c, i, j) {
+    for (var k = 0; k < 6; k++) {
+      var nb = nbr(c, i, j, k);
+      if (inGrid(c, nb[0], nb[1]) && c.grid[gridIdx(c, nb[0], nb[1])]) return true;
+    }
+    return false;
+  }
+
+  // 팁 가중 흡착 — bias 가 결정의 습관(폭)을 정한다
+  function stickProb(c, i, j) {
+    var dc = Math.hypot(i - c.cx, (j - c.cy) * 0.92);
+    var k = Math.min(1, dc / Math.max(1, c.r));
+    return Math.pow(k, 1) * 0.15 + Math.pow(k, c.bias) * 0.85 + 0.05;
+  }
+
+  function step(c, t) {
+    var rnd = c.rand;
+    for (var s = 0; s < 20; s++) {
+      for (var w = c.walk.length - 1; w >= 0; w--) {
+        var p = c.walk[w];
+        if (rnd() < 0.25) p[2] = Math.floor(rnd() * 6);
+        var nb = nbr(c, p[0], p[1], p[2]);
+        var i = nb[0], j = nb[1];
+        if (!inGrid(c, i, j)) { c.walk.splice(w, 1); continue; }
+        if (rnd() < 0.2) p[3] += (rnd() - 0.5) * 0.7;
+        p[0] = i; p[1] = j;
+        if (touching(c, i, j)) {
+          if (rnd() < stickProb(c, i, j)) {
+            setCell(c, i, j, t);
+            c.stuck++;
+            var dc = Math.hypot(i - c.cx, (j - c.cy) * 0.92);
+            if (dc + 2 > c.r) c.r = Math.min(c.N * 0.46, dc + 2);
+          }
+        } else if (Math.hypot(i - c.cx, j - c.cy) > c.r * 1.7 + 8) {
+          c.walk.splice(w, 1);
+        }
+      }
+      while (c.walk.length < PARTICLES) launch(c);
+    }
+  }
+
+  function buildSnow() {
+    for (var i = 0; i < 60; i++) {
+      snow.push({
+        x: rand(), y: rand(),
+        r: 1.1 + rand() * 2.2,
+        v: 0.06 + rand() * 0.13,
+        sway: 0.013 + rand() * 0.032,
+        ph: rand() * Math.PI * 2,
+        tw: 0.6 + rand() * 0.9
+      });
+    }
+  }
+
+  var perm = new Uint8Array(512);
+  (function () {
+    var p = [];
+    for (var i = 0; i < 256; i++) p.push(i);
+    for (var i2 = 255; i2 > 0; i2--) {
+      var k2 = Math.floor(rand() * (i2 + 1));
+      var tmp = p[i2]; p[i2] = p[k2]; p[k2] = tmp;
+    }
+    for (var i3 = 0; i3 < 512; i3++) perm[i3] = p[i3 & 255];
+  })();
+  function fade(k) { return k * k * (3 - 2 * k); }
+  function vnoise(x, y) {
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var xf = x - xi, yf = y - yi;
+    var a2 = perm[(perm[xi & 255] + yi) & 255];
+    var b2 = perm[(perm[(xi + 1) & 255] + yi) & 255];
+    var c2 = perm[(perm[xi & 255] + yi + 1) & 255];
+    var d2 = perm[(perm[(xi + 1) & 255] + yi + 1) & 255];
+    var u = fade(xf), v = fade(yf);
+    return (a2 + (b2 - a2) * u + (c2 - a2) * v + (a2 - b2 - c2 + d2) * u * v) / 255;
+  }
+  function lerp(a, b, k) { return a + (b - a) * k; }
+
+  function drawBackdrop(t) {
+    var sc = 0.055;
+    for (var y = 0; y < H; y++) {
+      var u = y / H;
+      var r0 = C_INK[0] + (C_DEEP[0] - C_INK[0]) * u;
+      var g0 = C_INK[1] + (C_DEEP[1] - C_INK[1]) * u;
+      var b0 = C_INK[2] + (C_DEEP[2] - C_INK[2]) * u;
+      for (var x = 0; x < W; x++) {
+        var sh = (vnoise(x * sc, y * sc + t * 0.35) - 0.5) * 16;
+        var j3 = (y * W + x) * 4;
+        data[j3]     = r0 + sh;
+        data[j3 + 1] = g0 + sh;
+        data[j3 + 2] = b0 + sh * 1.3;
+      }
+    }
+    // 각 결정 주위 헤이즈 — 좌우 각각
+    var halves = [[L, W * 0.27], [R, W * 0.73]];
+    for (var h = 0; h < 2; h++) {
+      var c = halves[h][0], pcx = halves[h][1], pcy = H * 0.5;
+      for (var y2 = 0; y2 < H; y2 += 2) {
+        var dyv = y2 - pcy;
+        for (var x2 = Math.max(0, pcx - W * 0.28); x2 < Math.min(W, pcx + W * 0.28); x2 += 2) {
+          var dxv = x2 - pcx;
+          var d2 = dxv * dxv + dyv * dyv;
+          var haze = Math.exp(-d2 / (W * W * 0.008)) * 24;
+          for (var yy = y2; yy < Math.min(H, y2 + 2); yy++) {
+            for (var xx = x2; xx < Math.min(W, x2 + 2); xx++) {
+              var j4 = (yy * W + xx) * 4;
+              data[j4]     += haze * (C_HAZE[0] / 255);
+              data[j4 + 1] += haze * (C_HAZE[1] / 255);
+              data[j4 + 2] += haze * (C_HAZE[2] / 255);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function putc(px, py, c, alpha) {
+    if (px < 0 || py < 0 || px >= W || py >= H) return;
+    var j3 = (py * W + px) * 4;
+    data2[j3]     += (c[0] - data2[j3])     * alpha;
+    data2[j3 + 1] += (c[1] - data2[j3 + 1]) * alpha;
+    data2[j3 + 2] += (c[2] - data2[j3 + 2]) * alpha;
+  }
+
+  // left(고사리)는 화이트→라일락, 우(침)는 화이트→모래빛 — 색으로도 습관을 구분
+  function cellColor(c, g, ag, outer) {
+    var k = Math.min(1, g / (c.N * 0.38));
+    var base = [
+      lerp(C_ICE[0], outer[0], k),
+      lerp(C_ICE[1], outer[1], k),
+      lerp(C_ICE[2], outer[2], k)
+    ];
+    if (ag < MAX_AGE) {
+      var b = Math.pow(1 - ag / MAX_AGE, 1.6);
+      base[0] += (C_GLOW[0] - base[0]) * (0.85 * b);
+      base[1] += (C_GLOW[1] - base[1]) * (0.85 * b);
+      base[2] += (C_GLOW[2] - base[2]) * (0.85 * b);
+    }
+    return base;
+  }
+
+  function drawCrystal(c, t, outer) {
+    var ox = c.ox, oy = (H - c.N * cellPx) / 2;
+    var rr = Math.max(1, Math.round(cellPx * 0.58));
+    var rr2 = rr * rr;
+    for (var i = 0; i < c.N; i++) {
+      for (var j = 0; j < c.N; j++) {
+        var gi = gridIdx(c, i, j);
+        if (!c.grid[gi]) continue;
+        var col = cellColor(c, Math.hypot(i - c.cx, (j - c.cy) * 0.92), t - c.age[gi], outer);
+        var px = Math.round(ox + i * cellPx + ((j & 1) ? cellPx * 0.5 : 0));
+        var py = Math.round(oy + j * cellPx);
+        for (var dy = -rr; dy <= rr; dy++) {
+          for (var dx = -rr; dx <= rr; dx++) {
+            var dd = dx * dx + dy * dy;
+            if (dd > rr2) continue;
+            var px2 = px + dx, py2 = py + dy;
+            if (px2 < 0 || py2 < 0 || px2 >= W || py2 >= H) continue;
+            var j3 = (py2 * W + px2) * 4;
+            var a3 = 1 - dd / (rr2 + 1);
+            data2[j3]     += (col[0] - data2[j3])     * a3;
+            data2[j3 + 1] += (col[1] - data2[j3 + 1]) * a3;
+            data2[j3 + 2] += (col[2] - data2[j3 + 2]) * a3;
+          }
+        }
+      }
+    }
+    for (var wi = 0; wi < c.walk.length; wi++) {
+      var p = c.walk[wi];
+      var px = Math.round(ox + p[0] * cellPx + ((p[1] & 1) ? cellPx * 0.5 : 0));
+      var py = Math.round(oy + p[1] * cellPx);
+      var tw = 0.55 + 0.45 * Math.sin(t * 7 + p[3] * 3);
+      putc(px, py, C_MINT, 0.95);
+      putc(px + 1, py, C_MINT, 0.5 * tw);
+      putc(px - 1, py, C_MINT, 0.5 * tw);
+      putc(px, py + 1, C_MINT, 0.5 * tw);
+      putc(px, py - 1, C_MINT, 0.9 * tw);
+    }
+  }
+
+  function draw(t, dt) {
+    drawBackdrop(t);
+    ctx.putImageData(bg, 0, 0);
+
+    var f = 1 - Math.exp(-dt * 4.2);
+    for (var k = 0; k < data2.length; k += 4) {
+      data2[k]     += (data[k]     - data2[k])     * f;
+      data2[k + 1] += (data[k + 1] - data2[k + 1]) * f;
+      data2[k + 2] += (data[k + 2] - data2[k + 2]) * f;
+    }
+
+    drawCrystal(L, t, C_LILAC);
+    drawCrystal(R, t, C_SAND);
+
+    for (var si = 0; si < snow.length; si++) {
+      var s = snow[si];
+      var sx = (s.x + Math.sin(t * s.sway * 6 + s.ph) * 0.035) * W;
+      var sy = ((s.y + s.v * t) % 1.15 - 0.07) * H;
+      var br = 0.5 + 0.5 * Math.sin(t * s.tw * 2.4 + s.ph);
+      var a4 = 0.55 + 0.4 * br;
+      var sr = Math.ceil(s.r);
+      for (var dy2 = -sr; dy2 <= sr; dy2++) {
+        for (var dx2 = -sr; dx2 <= sr; dx2++) {
+          if (dx2 * dx2 + dy2 * dy2 > s.r * s.r) continue;
+          putc(Math.round(sx) + dx2, Math.round(sy) + dy2, C_MOTE, a4);
+        }
+      }
+    }
+    // 가운데 경계 — 얇은 안개 라인(대비 구분)
+    var mx = Math.round(W / 2);
+    for (var y3 = 0; y3 < H; y3++) {
+      putc(mx, y3, C_MIST, 0.10 + 0.06 * Math.sin(t * 1.4 + y3 * 0.05));
+    }
+    ctx.putImageData(img2, 0, 0);
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W; cv.height = H;
+    ctx = cv.getContext('2d', { alpha: false });
+    cellPx = Math.max(2, Math.min(4, Math.floor(Math.min(W / 2, H) / 46)));
+    var N = Math.floor(Math.min(W / 2, H) / cellPx);
+    if ((N & 1) === 0) N -= 1;
+    L = makeCrystal(N, (W / 2 - N * cellPx) / 2, BIAS_FERN, 0x319B01);
+    R = makeCrystal(N, W / 2 + (W / 2 - N * cellPx) / 2, BIAS_NEEDLE, 0x319B02);
+    plantSeed(L); plantSeed(R);
+    snow = [];
+    bg = ctx.createImageData(W, H); data = bg.data;
+    img2 = ctx.createImageData(W, H); data2 = img2.data;
+    for (var k = 3; k < data.length; k += 4) { data[k] = 255; data2[k] = 255; }
+    buildSnow();
+  }
+
+  function stillFrame() {
+    for (var k = 0; k < 240; k++) { step(L, 0.01 * k); step(R, 0.01 * k); }
+    draw(2.4, 0.016);
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    var dt = Math.min(0.05, (now - (frame.prev || now)) / 1000);
+    frame.prev = now;
+    step(L, t); step(R, t);
+    draw(t, dt);
+    if (lOut) lOut.textContent = String(L.stuck);
+    if (rOut) rOut.textContent = String(R.stuck);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', function () {
+    fit();
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

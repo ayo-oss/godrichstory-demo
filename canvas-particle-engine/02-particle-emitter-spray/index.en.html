@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이동하는 방출기 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pe" id="pe">
+  <p class="pe__hint">
+    <svg class="pe__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 116v36a80 80 0 0 1-80 80c-44.18 0-55.81-24-93.32-90a20 20 0 0 1 34.64-20L96 152V44a20 20 0 0 1 40 0v56a20 20 0 0 1 40 0v16a20 20 0 0 1 40 0" opacity=".2"/><path d="M196 88a27.86 27.86 0 0 0-13.35 3.39A28 28 0 0 0 144 74.7V44a28 28 0 0 0-56 0v80l-3.82-6.13A28 28 0 0 0 35.73 146l4.67 8.23C74.81 214.89 89.05 240 136 240a88.1 88.1 0 0 0 88-88v-36a28 28 0 0 0-28-28m12 64a72.08 72.08 0 0 1-72 72c-37.63 0-47.84-18-81.68-77.68l-4.69-8.27V138A12 12 0 0 1 54 121.61a11.9 11.9 0 0 1 6-1.6a12 12 0 0 1 10.41 6a2 2 0 0 0 .14.23l18.67 30A8 8 0 0 0 104 152V44a12 12 0 0 1 24 0v68a8 8 0 0 0 16 0v-12a12 12 0 0 1 24 0v20a8 8 0 0 0 16 0v-4a12 12 0 0 1 24 0Z"/></g></svg>
+    <span>Grab and drag the nozzle and it keeps spraying from there</span>
+  </p>
+  <div class="pe__field" id="field" role="application" aria-label="Moving emitter test board" tabindex="0">
+    <canvas class="pe__cv" id="cv"></canvas>
+    <b class="pe__live" aria-hidden="true"><span class="pe__liveNum" id="alive">0</span><span class="pe__liveUnit"> grains in flight</span></b>
+  </div>
+  <div class="pe__bar">
+    <label class="pe__dial">Spray width
+      <input type="range" id="spread" min="12" max="60" step="6" value="24" aria-label="Spray width">
+      <b class="pe__val" id="spreadVal">24°</b>
+    </label>
+    <button class="pe__reset" id="reset" type="button">
+      <svg class="pe__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M232 128a104 104 0 1 1-104-104a104 104 0 0 1 104 104" opacity=".2"/><path d="M232 136a104 104 0 1 1-38.17-80.55L208 60v-4a8 8 0 0 1 16 0v34a8 8 0 0 1-8 8h-34a8 8 0 0 1 0-16h7.6l-8.89-7.4A88 88 0 1 0 216 136a8 8 0 0 1 16 0Z"/></g></svg>
+      <span>From the start</span>
+    </button>
+  </div>
+</div>
+</main>
+<script>
+// 이동하는 방출기 — 파티클 각각을 움직이는 게 아니라 뿌리는 곳을 움직인다.
+// 방출기는 스스로 가로 톱니(삼각파) 주사 + 세로 사인 경로를 돌며 초당 90개를 뿌리고,
+// 드래그하면 노즐이 손끝으로 따라와 그 자리에서 계속 분사한다. 놓으면 자율 주행으로 돌아간다.
+var root = document.getElementById('pe');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var spreadIn = document.getElementById('spread');
+var spreadVal = document.getElementById('spreadVal');
+var aliveOut = document.getElementById('alive');
+var resetBtn = document.getElementById('reset');
+
+var POOL = 170;            // 초당 90개 × 최대 Lifetime 1.5s + 여유 — 링 버퍼로 돌려 쓴다
+var RATE = 90;             // 초당 방출 수
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, dpr = 1;
+var pool = new Array(POOL);
+var cursor = 0;
+var t = 0;
+var ex = 0, ey = 0, aim = 0;      // 방출기 위치와 분사 방향
+var prevEx = 0, prevEy = 0;
+var emitAcc = 0;                  // 시간을 쌓아 두었다가 프레임이 늦게 와도 방출 수가 튀지 않게 한다
+var spreadDeg = 24;
+var dragging = false;
+var px = 0, py = 0;               // 손끝 위치
+var trail = [];                   // 방출기가 지나온 길 — quadraticCurveTo 로 부드럽게 잇는다
+
+for (var i0 = 0; i0 < POOL; i0++) {
+  pool[i0] = { x: 0, y: 0, vx: 0, vy: 0, r: 1, life: 1, age: 1, pick: 0 };   // age >= life — 빈  slots
+}
+
+// 고DPI 대응 — 배킹 스토어를 devicePixelRatio 배로 키우고 좌표계는 CSS 픽셀 그대로 쓴다
+function fit() {
+  var r = field.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function spawnAt(x, y, ang, spreadRad) {
+  var p = pool[cursor];
+  cursor = (cursor + 1) % POOL;                 // 가장 낡은 칸을 덮어 쓴다
+  var a = ang + (Math.random() - 0.5) * spreadRad;
+  var sp = 70 + Math.random() * 110;
+  p.x = x; p.y = y;
+  p.vx = Math.cos(a) * sp;
+  p.vy = Math.sin(a) * sp;
+  p.r = 1.8 + Math.random() * 1.8;
+  p.life = 0.7 + Math.random() * 0.8;
+  p.age = 0;
+  p.pick = Math.random();
+}
+
+function step(dt) {
+  t += dt;
+  // 자율 주행 경로 — 가로는 삼각파(톱니 주사), 세로는 사인. 레이저가 판을 훑는 길이다.
+  var tri = (t * 0.14) % 2;
+  tri = tri < 1 ? tri : 2 - tri;
+  var pad = Math.max(12, W * 0.07);
+  var tx = pad + tri * (W - pad * 2);
+  var ty = H * 0.46 + Math.sin(t * 2 + 0.7) * H * 0.24;
+  prevEx = ex; prevEy = ey;
+  if (dragging) {
+    var k = 1 - Math.exp(-14 * dt);             // 노즐이 손끝으로 스르르 온다
+    ex += (px - ex) * k;
+    ey += (py - ey) * k;
+  } else {
+    var k2 = 1 - Math.exp(-6 * dt);             // 자율 경로도 급차 없이 따라간다
+    ex += (tx - ex) * k2;
+    ey += (ty - ey) * k2;
+  }
+  // 분사 방향 — 이동 방향을 따라 부드럽게 돌아간다
+  var vx = (ex - prevEx) / dt, vy = (ey - prevEy) / dt;
+  if (vx * vx + vy * vy > 900) {
+    var want = Math.atan2(vy, vx);
+    var diff = want - aim;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    aim += diff * Math.min(1, 10 * dt);
+  } else {
+    aim += Math.sin(t * 3.1) * 1.5 * dt;        // 제자리에서는 노즐이 살짝 흔들린다
+  }
+  trail.push({ x: ex, y: ey });
+  if (trail.length > 26) trail.shift();
+  emitAcc += RATE * dt;
+  var spreadRad = spreadDeg * Math.PI / 180;
+  while (emitAcc >= 1) {
+    spawnAt(ex, ey, aim, spreadRad);
+    emitAcc -= 1;
+  }
+  for (var i = 0; i < POOL; i++) {
+    var p = pool[i];
+    if (p.age >= p.life) continue;
+    p.age += dt;
+    p.vy += 210 * dt;                           // 중력 — 뿌린 알갱이를 끌어내린다
+    p.vx *= (1 - 0.35 * dt);                    // 공기 저항으로 살짝 감쇠
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 지나온 길 — 점을 이어 붙이는 게 아니라 중간점을 향해 quadraticCurveTo 로 잇는다
+  if (trail.length > 2) {
+    ctx.strokeStyle = 'rgba(23,20,26,.32)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(trail[0].x, trail[0].y);
+    for (var i = 1; i < trail.length - 1; i++) {
+      var mx = (trail[i].x + trail[i + 1].x) / 2;
+      var my = (trail[i].y + trail[i + 1].y) / 2;
+      ctx.quadraticCurveTo(trail[i].x, trail[i].y, mx, my);
+    }
+    var lastPt = trail[trail.length - 1];
+    ctx.lineTo(lastPt.x, lastPt.y);
+    ctx.stroke();
+  }
+  var alive = 0;
+  for (var j = 0; j < POOL; j++) {
+    var p = pool[j];
+    if (p.age >= p.life) continue;
+    alive++;
+    var tt = p.age / p.life;
+    // 감쇠 — 태어날 때 잠깐 나타나고 수명이 끝나갈수록 옅어져 자리를 비운다
+    ctx.globalAlpha = tt < 0.12 ? tt / 0.12 : 1 - (tt - 0.12) / 0.88;
+    ctx.fillStyle = p.pick < 0.5 ? '#17141a' : (p.pick < 0.8 ? '#0a4fe8' : '#2f6df6');
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // 노즐 — save 로 상태를 보관하고 이동·회전시켜 그린 뒤 restore 로 되돌린다
+  ctx.save();
+  ctx.translate(ex, ey);
+  ctx.rotate(aim);
+  ctx.fillStyle = '#17141a';
+  ctx.beginPath();
+  ctx.moveTo(15, 0);
+  ctx.lineTo(-7, -8);
+  ctx.lineTo(-7, 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(23,20,26,.4)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-7, 0);
+  ctx.lineTo(-15, 0);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#0a4fe8';
+  ctx.beginPath();
+  ctx.arc(ex, ey, 2.4, 0, Math.PI * 2);
+  ctx.fill();
+  aliveOut.textContent = String(alive);
+}
+
+var lastT = 0;
+function frame(now) {
+  var dt = lastT ? Math.min((now - lastT) / 1000, 0.05) : 0.016;
+  lastT = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function setPointer(e) {
+  var r = cv.getBoundingClientRect();
+  px = e.clientX - r.left;
+  py = e.clientY - r.top;
+}
+
+function restart() {
+  t = 0;
+  trail.length = 0;
+  emitAcc = 0;
+  for (var i = 0; i < POOL; i++) pool[i].age = pool[i].life;   // 전부 빈 칸으로
+  ex = Math.max(12, W * 0.07);
+  ey = H * 0.46;
+  aim = 0;
+  if (reduce) draw();
+}
+
+spreadIn.addEventListener('input', function () {
+  spreadDeg = Number(spreadIn.value);
+  spreadVal.textContent = spreadDeg + '°';
+  if (reduce) draw();
+});
+resetBtn.addEventListener('click', restart);
+field.addEventListener('pointerdown', function (e) {
+  dragging = true;
+  setPointer(e);
+  field.setPointerCapture(e.pointerId);
+});
+field.addEventListener('pointermove', function (e) { setPointer(e); });
+field.addEventListener('pointerup', function () { dragging = false; });
+field.addEventListener('pointercancel', function () { dragging = false; });
+field.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    for (var i = 0; i < 60; i++) spawnAt(ex, ey, (i / 60) * Math.PI * 2, 0);   // 사방으로 일제 분사
+    if (reduce) draw();
+  }
+});
+window.addEventListener('resize', function () { fit(); draw(); });
+
+fit();
+restart();
+if (reduce) {
+  // reduce — 루프를 돌리지 않는다. 뿌리던 순간의 상태를 1.3s 남짓 밟아 본 뒤 한 장만 남긴다.
+  for (var warm = 0; warm < 80; warm++) step(1 / 60);
+  root.classList.add('is-still');
+  draw();
+} else {
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

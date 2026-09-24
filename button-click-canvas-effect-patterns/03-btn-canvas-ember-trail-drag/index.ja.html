@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドラッグ速度の値で散る残り火トレイルボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="et is-demo" id="root">
+  <canvas class="et__cv" id="cv" width="480" height="300"></canvas>
+  <button class="et__btn" id="btn" type="button">送信する</button>
+  <p class="et__hint">ボタンをドラッグしてみてください — 速くドラッグするほど残り火が多く散ります</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var W = 480, H = 300;
+  var SEED = 30309;
+  var rnd = makeLcg(SEED);
+
+  var GRAVITY = 520;        // px/s^2 — 잔불을 아래로 끌어내리는 중력 가속도
+  var AIR_DRAG = 0.988;     // 프레임마다 속도에 곱해지는 공기 저항
+  var EMBER_LIFE_MIN = 620; // ms
+  var EMBER_LIFE_SPAN = 620;
+  var EMBER_HOT = [255, 214, 120];
+  var EMBER_COOL = [196, 40, 10];
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  var particles = [];
+  var dragging = false;
+  var lastX = null, lastY = null, lastT = null;
+
+  function spawnEmbers(x, y, speed, now) {
+    var count = Math.max(1, Math.min(9, Math.round(speed / 26)));
+    for (var i = 0; i < count; i++) {
+      var ang = rnd() * Math.PI * 2;
+      var spd = 24 + rnd() * 96;
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(ang) * spd * 0.34,
+        vy: Math.sin(ang) * spd * 0.34 - 34 - rnd() * 46,
+        born: now,
+        life: EMBER_LIFE_MIN + rnd() * EMBER_LIFE_SPAN,
+        size: 2.6 + rnd() * 3.2
+      });
+    }
+  }
+
+  function stepParticles(now, dt) {
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      var age = now - p.born;
+      if (age > p.life) { particles.splice(i, 1); continue; }
+      p.vy += GRAVITY * dt;
+      p.vx *= AIR_DRAG;
+      p.vy *= AIR_DRAG;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+  }
+
+  function render(now) {
+    ctx.fillStyle = '#ff4d1f';
+    ctx.fillRect(0, 0, W, H);
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var age = Math.max(0, now - p.born);
+      var frac = Math.max(0, Math.min(1, age / p.life));
+      var r = EMBER_HOT[0] + (EMBER_COOL[0] - EMBER_HOT[0]) * frac;
+      var g = EMBER_HOT[1] + (EMBER_COOL[1] - EMBER_HOT[1]) * frac;
+      var b = EMBER_HOT[2] + (EMBER_COOL[2] - EMBER_HOT[2]) * frac;
+      var a = 1 - frac;
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(' + (r | 0) + ',' + (g | 0) + ',' + (b | 0) + ',' + a.toFixed(3) + ')';
+      ctx.arc(p.x, p.y, p.size * (1 - frac * 0.4), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function pointFromEvent(e) {
+    var r = cv.getBoundingClientRect();
+    return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)];
+  }
+  function buttonCenter() {
+    var r = btn.getBoundingClientRect(), c = cv.getBoundingClientRect();
+    return [(r.left + r.width / 2 - c.left) * (W / c.width), (r.top + r.height / 2 - c.top) * (H / c.height)];
+  }
+
+  function dragTo(x, y, now) {
+    if (lastX !== null) {
+      var dt = Math.max(1, now - lastT);
+      var dist = Math.hypot(x - lastX, y - lastY);
+      var speed = dist / dt * 1000;
+      spawnEmbers(x, y, speed, now);
+    }
+    lastX = x; lastY = y; lastT = now;
+  }
+
+  function press(px, py) {
+    root.classList.remove('is-demo');
+    lastX = null; lastY = null; lastT = null;
+    spawnEmbers(px, py, 240, performance.now());
+    if (reduceMQ.matches) render(performance.now());
+  }
+
+  btn.addEventListener('click', function () { var p = buttonCenter(); press(p[0], p[1]); });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    var p = buttonCenter(); press(p[0], p[1]);
+  });
+  cv.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    dragging = true;
+    cv.setPointerCapture(e.pointerId);
+    var p = pointFromEvent(e);
+    lastX = null; lastY = null; lastT = null;
+    dragTo(p[0], p[1], performance.now());
+    if (reduceMQ.matches) render(performance.now());
+  });
+  cv.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var p = pointFromEvent(e);
+    dragTo(p[0], p[1], performance.now());
+    if (reduceMQ.matches) render(performance.now());
+  });
+  window.addEventListener('pointerup', function () { dragging = false; });
+  window.addEventListener('pointercancel', function () { dragging = false; });
+  window.addEventListener('resize', function () { render(performance.now()); });
+
+  function pathPoint(t) {
+    var cx = W / 2, cy = H / 2;
+    return [cx + Math.sin(t * 0.0026) * 190, cy + Math.sin(t * 0.0044 + 1) * 108];
+  }
+
+  var autoStart = null;
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      if (autoStart === null) autoStart = now;
+      var dt = lastT === null ? 0.016 : Math.min(0.05, (now - lastT) / 1000);
+      if (root.classList.contains('is-demo')) {
+        var t = now - autoStart;
+        var p = pathPoint(t);
+        dragTo(p[0], p[1], now);
+      }
+      stepParticles(now, dt);
+      render(now);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    var t0 = performance.now();
+    var pts = [pathPoint(0), pathPoint(120), pathPoint(240)];
+    for (var i = 0; i < pts.length; i++) spawnEmbers(pts[i][0], pts[i][1], 200, t0 - 260 + i * 90);
+    render(t0);
+  } else {
+    var p0 = pathPoint(0);
+    dragTo(p0[0], p0[1], performance.now());
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

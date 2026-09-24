@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>조석 꼬리 클로즈업 — 은하 n체 시뮬레이션 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="gx is-demo" id="gxRoot">
+  <p class="gx__hint">
+    <span>수천 별 중 한 별만 궤적을 남기면, 꼬리가 만들어지는 순간 그 별이 두 중심 사이를 왕복하다 던져집니다</span>
+  </p>
+  <div class="gx__field" id="gxField" role="application" aria-label="조석 꼬리 클로즈업 실험판" tabindex="0">
+    <canvas class="gx__cv" id="gxCv"></canvas>
+  </div>
+  <div class="gx__bar">
+    <span class="gx__meta">별 340개 · 추적 1개 궤적</span>
+    <span class="gx__meta gx__meta--dim">canvas · one-star trail · requestAnimationFrame</span>
+  </div>
+</div>
+</main>
+<script>
+// 조석 꼬리 클로즈업(06) — 수천 별 중 딱 한 별의 궤적만 굵게 남기는 장면.
+// 계산은 01 과 같은 전 쌍 O(N²) 뉴턴 중력 + leapfrog(근사 아님).
+// 다른 점은 렌더 뿐이다:
+//  - 다른 별은 흐린 점 + 짧은 잔상(집단의 흐름만 보인다)
+//  - 추적 별(TRACK 인덱스, 원반 바깥쪽에 심는다)은 굵은 앰버 궤적을
+//    별도 트레일 버퍼(좌표 180개 링)에 쌓아 lineTo 로 이어 그린다 —
+//    두 은하 중심 사이를 왕복(Lissajous)하다 조석 킥에 던져지는 과정이 한 줄로 드러난다.
+// "꼬리는 별 하나하나의 궤도가 아니라 궤도의 집합"이라는 08 의 전 단계 시연.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형을 만든다 ──
+  var NSTARS = 340;   // 두 은하 합계 별 수
+  var TRAILN = 180;   // 추적 별 궤적 길이(프레임) — 변형 "궤적 길이"가 180→360으로
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('gxRoot');
+  var field = document.getElementById('gxField');
+  var cv = document.getElementById('gxCv');
+
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK  = tokRGB('--gx-ink');
+  var C_GLOW = tokRGB('--gx-glow');
+  var C_HOT  = tokRGB('--gx-hot');
+  var C_TAIL = tokRGB('--gx-tail');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = 0, t0 = -1;
+  var W = 0, H = 0, dpr = 1;
+  var chainCv, chainCtx;
+
+  var N = 0, X = [], Y = [], VX = [], VY = [];
+  var TRACK = -1;                       // 추적 별 인덱스 — seed() 에서 원반 가장자리로 정한다
+  var trailX = [], trailY = [];         // 추적 별 궤적 링 버퍼
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = '100%'; cv.style.height = '100%';
+    chainCv = document.createElement('canvas');
+    chainCv.width = W * dpr; chainCv.height = H * dpr;
+    chainCtx = chainCv.getContext('2d');
+    chainCtx.scale(dpr, dpr);
+  }
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // G·질량은 캔버스 픽셀 단위 시뮬레이션 값(물리 상수 아님 — 글에서 설명)
+  var G = 140.0, SOFT2 = 16;
+  var DT = 1 / 60;
+
+  var AX = [], AY = [];
+  function accel() {
+    // 전 쌍 O(N²) 뉴턴 중력 — a_i = Σ G·(x_j - x_i)/(|d|²+ε²)^1.5 (근사 아님)
+    var i, j, dx, dy, d2, inv, f;
+    for (i = 0; i < N; i++) { AX[i] = 0; AY[i] = 0; }
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        dx = X[j] - X[i]; dy = Y[j] - Y[i];
+        d2 = dx * dx + dy * dy + SOFT2;
+        inv = 1 / Math.sqrt(d2);
+        f = G * inv * inv * inv;
+        AX[i] += dx * f; AY[i] += dy * f;
+        AX[j] -= dx * f; AY[j] -= dy * f;
+      }
+    }
+  }
+
+  var aReady = false;
+  function stepLeap() {
+    if (!aReady) { accel(); aReady = true; }
+    var h = DT * 0.5;
+    for (var i = 0; i < N; i++) {
+      VX[i] += AX[i] * h; VY[i] += AY[i] * h;
+      X[i]  += VX[i] * DT; Y[i] += VY[i] * DT;
+    }
+    accel();
+    for (var j = 0; j < N; j++) {
+      VX[j] += AX[j] * h; VY[j] += AY[j] * h;
+    }
+  }
+
+  function placeDisk(cx, cy, R, count, phase, dvx, dvy, dir, rnd, sc) {
+    var M = R * R * 0.90;
+    var start = N;
+    for (var i = 0; i < count; i++) {
+      var r = R * Math.sqrt(rnd());
+      var a = phase + (i / count) * Math.PI * 2 + rnd() * 0.5;
+      var v = Math.sqrt(M / Math.max(r, 6)) * dir;
+      X.push(cx + Math.cos(a) * r);
+      Y.push(cy + Math.sin(a) * r);
+      VX.push(dvx * sc * 0.30 + -Math.sin(a) * v + (rnd() - 0.5) * 2);
+      VY.push(dvy * sc * 0.30 +  Math.cos(a) * v + (rnd() - 0.5) * 2);
+      N++;
+    }
+    // 추적 별 — 첫 원반 바깥쪽 마지막 별(조석 꼬리가 먼저 잡히는 위치)
+    if (TRACK < 0 && start === 0) TRACK = N - 1;
+  }
+
+  function seed() {
+    X = []; Y = []; VX = []; VY = []; N = 0; aReady = false;
+    TRACK = -1; trailX = []; trailY = [];
+    var rnd = mulberry32(13);
+    var half = NSTARS >> 1;
+    var R = Math.min(W, H) * 0.46;
+    var sc = R;
+    placeDisk(W * 0.26, H * 0.30, R, half, 0, 0.62, -0.42, 1.0, rnd, sc);
+    placeDisk(W * 0.74, H * 0.70, R, NSTARS - half, Math.PI, -0.62, 0.42, 0.85, rnd, sc);
+  }
+
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+  function decay() {
+    // 집단 잔상은 빨리 지운다(궤적이 아니라 흐름만 남긴다) — 추적 궤적은 trail 버퍼가 기억
+    chainCtx.setTransform(1, 0, 0, 1, 0, 0);
+    chainCtx.globalCompositeOperation = 'destination-out';
+    chainCtx.fillStyle = 'rgba(0,0,0,0.028)';
+    chainCtx.fillRect(0, 0, W * dpr, H * dpr);
+    chainCtx.globalCompositeOperation = 'source-over';
+    chainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var prev = null;
+  function stamp() {
+    if (prev) {
+      for (var i = 0; i < N; i++) {
+        if (i === TRACK) continue;          // 추적 별은 여기 찍지 않는다(굵은 궤적이 대신한다)
+        chainCtx.strokeStyle = rgba(i < (N >> 1) ? C_GLOW : C_TAIL, 0.26);
+        chainCtx.lineWidth = 1.6;
+        chainCtx.beginPath();
+        chainCtx.moveTo(prev[0][i], prev[1][i]);
+        chainCtx.lineTo(X[i], Y[i]);
+        chainCtx.stroke();
+      }
+    }
+    if (!prev) { prev = [X.slice(), Y.slice()]; }
+    else { prev[0] = X.slice(); prev[1] = Y.slice(); }
+    // 추적 궤적 링 버퍼 — 오래된 좌표는 밀려난다
+    trailX.push(X[TRACK]); trailY.push(Y[TRACK]);
+    if (trailX.length > TRAILN) { trailX.shift(); trailY.shift(); }
+  }
+
+  function draw() {
+    var ctx = cv.getContext('2d');   // CanvasRenderingContext2D — 이 데모의 그리기 문맥
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = rgb(C_INK);
+    ctx.fillRect(0, 0, W, H);
+    var rnd = mulberry32(14);
+    ctx.fillStyle = rgba(C_GLOW, 0.35);
+    for (var k = 0; k < 40; k++) {
+      var bx = rnd() * W, by = rnd() * H, br = rnd() * 0.8 + 0.3;
+      ctx.globalAlpha = 0.12 + rnd() * 0.22;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(chainCv, 0, 0, W, H);
+    // 추적 궤적 — 굵은 앰버 라인. 오래된 세그먼트일수록 옅게(페이드)
+    var tn = trailX.length;
+    if (tn > 1) {
+      for (var s = 1; s < tn; s++) {
+        var age = s / tn;                    // 0 오래됨 → 1 최신
+        ctx.strokeStyle = rgba(C_HOT, 0.10 + age * 0.75);
+        ctx.lineWidth = 0.8 + age * 1.9;
+        ctx.beginPath();
+        ctx.moveTo(trailX[s - 1], trailY[s - 1]);
+        ctx.lineTo(trailX[s], trailY[s]);
+        ctx.stroke();
+      }
+    }
+    // 별 — 집단은 흐린 점, 추적 별은 큰 앰버 글로우 + 코어
+    for (var i = 0; i < N; i++) {
+      if (i === TRACK) continue;
+      var col = i < (N >> 1) ? C_GLOW : C_TAIL;
+      ctx.fillStyle = rgba(col, 0.11);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 3.0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgba(col, 0.58);
+      ctx.beginPath(); ctx.arc(X[i], Y[i], 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = rgba(C_HOT, 0.16);
+    ctx.beginPath(); ctx.arc(X[TRACK], Y[TRACK], 7.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 0.55);
+    ctx.beginPath(); ctx.arc(X[TRACK], Y[TRACK], 3.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = rgba(C_HOT, 1.0);
+    ctx.beginPath(); ctx.arc(X[TRACK], Y[TRACK], 1.6, 0, Math.PI * 2); ctx.fill();
+    // 은하 B 코어 표식
+    ctx.fillStyle = rgba(C_GLOW, 0.85);
+    ctx.beginPath(); ctx.arc(X[N >> 1], Y[N >> 1], 2.0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+
+  var simSteps = 0;
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var loop = ((now - t0) / 1000) % 3.0;      // 3초 루프 — 스침 → 왕복 → 킥 순간 반복
+    var target = Math.floor(loop / DT);
+    while (simSteps < target) { stepLeap(); simSteps++; stamp(); }
+    if (target < simSteps - 3) { seed(); simSteps = 0; prev = null; chainCtx.clearRect(0, 0, W, H); }
+    decay();
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function stillFrame() {
+    // reduce — 킥 직후까지 적분한 뒤 한 장 고정
+    for (var s = 0; s < 170; s++) { stepLeap(); stamp(); }
+    draw();
+  }
+
+  window.addEventListener('resize', function () {
+    fit(); seed(); simSteps = 0; prev = null; aReady = false;
+    if (reduce) stillFrame();
+  });
+
+  fit();
+  seed();
+  if (reduce) {
+    stillFrame();
+    root.classList.add('is-still');
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

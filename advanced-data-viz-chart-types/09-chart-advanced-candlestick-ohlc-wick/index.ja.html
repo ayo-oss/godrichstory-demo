@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>始値と終値の間を四角い実体として、高値・安値までを細いひげ線として計算して描き、1本のバーにその日の4つの値が重なって収められる — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cdl is-demo" id="cdlRoot">
+  <canvas class="cdl__canvas" id="cdlCanvas" width="480" height="300"></canvas>
+  <div class="cdl__kbd" id="cdlKbd" tabindex="0" aria-label="ローソク足を探索"></div>
+  <p class="cdl__caption">始値と終値の間を四角い実体として、高値・安値までを細いひげ線として計算して描き、1本のバーにその日の4つの値が重なって収められる</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 시가·종가 사이를 몸통 사각형, 고가·저가 사이를 얇은 꼬리선으로 실제 값 좌표에 맞춰
+  // 계산해 그린다. 등장할 때는 값 위치는 고정한 채 중심에서부터 높이만 커지도록(진행도 스케일)
+  // 그려 부드럽게 나타나게 하고, 포인터·화살표 키로 특정 막대를 가리키면 크로스헤어와 함께
+  // 시가·고가·저가·종가 네 숫자를 칩에 표시한다.
+  var root = document.getElementById('cdlRoot');
+  var canvas = document.getElementById('cdlCanvas');
+  var kbdEl = document.getElementById('cdlKbd');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var rand = seedRand(425091);
+  var CANDLE_COUNT = 10;
+  var candles = [];
+  var price = 100;
+  for (var i = 0; i < CANDLE_COUNT; i += 1) {
+    var open = price;
+    var vol = 4 + rand() * 10;
+    var close = open + (rand() - 0.5) * 2 * vol;
+    var high = Math.max(open, close) + rand() * vol * 0.6;
+    var low = Math.min(open, close) - rand() * vol * 0.6;
+    candles.push({ open: open, close: close, high: high, low: low });
+    price = close;
+  }
+  var scaleMin = Math.min.apply(null, candles.map(function (c) { return c.low; }));
+  var scaleMax = Math.max.apply(null, candles.map(function (c) { return c.high; }));
+
+  var CANDLE_REVEAL_STAGGER_MS = 110, CANDLE_REVEAL_DUR_MS = 160;
+  var hoverIndex = -1;
+  var lastUserInputAt = -9999;
+
+  var LOOP_MS = 2000;
+  var T0 = 200;
+  var ALL_DONE_MS = T0 + (CANDLE_COUNT - 1) * CANDLE_REVEAL_STAGGER_MS + CANDLE_REVEAL_DUR_MS;
+  var cw = 480, ch = 300;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+
+  function candleX(idx) {
+    var padX = cw * 0.06;
+    var slot = (cw - padX * 2) / CANDLE_COUNT;
+    return padX + slot * (idx + 0.5);
+  }
+  function priceY(v) {
+    var padY = ch * 0.12;
+    return ch - padY - (ch - padY * 2) * (v - scaleMin) / (scaleMax - scaleMin);
+  }
+  function growP(idx, t) {
+    return clamp((t - T0 - idx * CANDLE_REVEAL_STAGGER_MS) / CANDLE_REVEAL_DUR_MS, 0, 1);
+  }
+  function nearestCandle(x) {
+    var best = 0, bestD = Infinity;
+    for (var k = 0; k < CANDLE_COUNT; k += 1) {
+      var d = Math.abs(candleX(k) - x);
+      if (d < bestD) { bestD = d; best = k; }
+    }
+    return best;
+  }
+
+  function render(elapsedMs) {
+    var t = elapsedMs % LOOP_MS;
+    ctx.clearRect(0, 0, cw, ch);
+    var padX = cw * 0.06;
+    var slot = (cw - padX * 2) / CANDLE_COUNT;
+    var bw = slot * 0.55;
+
+    for (var idx = 0; idx < CANDLE_COUNT; idx += 1) {
+      var c = candles[idx];
+      var grow = easeOutCubic(growP(idx, t));
+      var x = candleX(idx);
+
+      var wickTopFull = priceY(c.high), wickBotFull = priceY(c.low);
+      var wickCenter = (wickTopFull + wickBotFull) / 2;
+      var wickHalf = (wickBotFull - wickTopFull) / 2 * grow;
+      ctx.strokeStyle = '#9a93a6';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, wickCenter - wickHalf);
+      ctx.lineTo(x, wickCenter + wickHalf);
+      ctx.stroke();
+
+      var bodyTopFull = priceY(Math.max(c.open, c.close));
+      var bodyBotFull = priceY(Math.min(c.open, c.close));
+      var bodyCenter = (bodyTopFull + bodyBotFull) / 2;
+      var bodyHalf = Math.max(1, (bodyBotFull - bodyTopFull) / 2 * grow);
+      var up = c.close >= c.open;
+      ctx.fillStyle = up ? '#3ddc97' : '#ff7a5e';
+      ctx.fillRect(x - bw / 2, bodyCenter - bodyHalf, bw, bodyHalf * 2);
+    }
+
+    if (hoverIndex >= 0) {
+      var hc = candles[hoverIndex];
+      var hx = candleX(hoverIndex);
+      var hy = priceY(hc.close);
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(255,255,255,.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, 0); ctx.lineTo(hx, ch); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, hy); ctx.lineTo(cw, hy); ctx.stroke();
+      ctx.setLineDash([]);
+
+      var label = Math.round(hc.open) + '·' + Math.round(hc.high) + '·' + Math.round(hc.low) + '·' + Math.round(hc.close);
+      ctx.font = '11px sans-serif';
+      var padChip = 6;
+      var textW = ctx.measureText(label).width;
+      var chipW = textW + padChip * 2, chipH = 20;
+      var chipX = clamp(hx + 8, 4, cw - chipW - 4);
+      var chipY = Math.max(4, hy - chipH - 6);
+      ctx.fillStyle = '#231f28';
+      ctx.fillRect(chipX, chipY, chipW, chipH);
+      ctx.fillStyle = '#9a93a6';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, chipX + padChip, chipY + chipH / 2);
+    }
+  }
+
+  function setHoverIndex(idx) {
+    hoverIndex = clamp(idx, -1, CANDLE_COUNT - 1);
+    render(elapsed);
+  }
+
+  canvas.addEventListener('pointermove', function (e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) * (cw / rect.width);
+    lastUserInputAt = elapsed;
+    setHoverIndex(nearestCandle(x));
+  });
+  canvas.addEventListener('pointerleave', function () {
+    setHoverIndex(-1);
+  });
+
+  kbdEl.addEventListener('keydown', function (e) {
+    e.preventDefault();
+    if (e.key === 'ArrowLeft') {
+      lastUserInputAt = elapsed;
+      setHoverIndex(hoverIndex < 0 ? 0 : hoverIndex - 1);
+    } else if (e.key === 'ArrowRight') {
+      lastUserInputAt = elapsed;
+      setHoverIndex(hoverIndex < 0 ? 0 : hoverIndex + 1);
+    }
+  });
+
+  function autoDemoStep(elapsedMs) {
+    var t = elapsedMs % LOOP_MS;
+    if (elapsedMs - lastUserInputAt >= 800 && t >= ALL_DONE_MS) {
+      var span = Math.max(1, LOOP_MS - ALL_DONE_MS);
+      var frac = (t - ALL_DONE_MS) / span;
+      hoverIndex = Math.min(CANDLE_COUNT - 1, Math.floor(frac * CANDLE_COUNT));
+    }
+    render(elapsedMs);
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    render(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = reduce ? ALL_DONE_MS + 50 : 0;
+  if (reduce) root.classList.remove('is-demo');
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      autoDemoStep(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  render(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

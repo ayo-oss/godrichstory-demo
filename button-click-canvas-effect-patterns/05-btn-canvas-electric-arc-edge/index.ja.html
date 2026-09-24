@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ホバー強度の値が上がるほど太くなる電気アーク縁取りボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ae is-demo" id="root">
+  <canvas class="ae__cv" id="cv" width="480" height="300"></canvas>
+  <button class="ae__btn" id="btn" type="button">始める</button>
+  <p class="ae__hint">ボタンにカーソルを乗せると縁が電流のように震えます</p>
+</div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var W = 480, H = 300;
+  var SEED = 50510;
+  var rnd = makeLcg(SEED);
+
+  // 02번(btn-canvas-crack-shatter-press)의 균열 각도 값(BTN_CANVAS_CRACK_BRANCH_COUNT = 6)을
+  // 이 편의 "테두리를 도는 전류 굵기" 계산에 그대로 재사용한다 (훅 참고).
+  var CRACK_VALUE_ECHO = 6;
+
+  var BTN_CANVAS_ARC_JITTER_MS = 70; // 앵커 하나가 새 값으로 튀기까지 걸리는 시간
+
+  var ARC_SEGMENTS = 6;     // 테두리를 나누는 앵커 개수 — 02번 균열 가지 개수와 같다
+  var SUBDIV = 12;          // 앵커 사이를 매끄럽게 잇는 보간 점 수
+  var JITTER_AMP_MAX = 28;  // px — 세기 값 1.0 일 때 앵커가 튀는 최대 폭
+  var GLOW_DECAY = 0.90;
+  var GLOW_CELL = 6;
+  var GLOW_COLS = Math.floor(W / GLOW_CELL);
+  var GLOW_ROWS = Math.floor(H / GLOW_CELL);
+  var GLOW_COLOR = [110, 206, 255];
+  var BG = [23, 20, 26];
+
+  var RX = 158, RY = 68;
+  var CX = W / 2, CY = H / 2;
+
+  var root = document.getElementById('root');
+  var cv = document.getElementById('cv');
+  var btn = document.getElementById('btn');
+  var ctx = cv.getContext('2d');
+  var reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  var field = new Float32Array(GLOW_COLS * GLOW_ROWS);
+  var small = document.createElement('canvas');
+  small.width = GLOW_COLS; small.height = GLOW_ROWS;
+  var sctx = small.getContext('2d');
+  var img = sctx.createImageData(GLOW_COLS, GLOW_ROWS);
+
+  var anchors = [];
+  for (var ai = 0; ai < ARC_SEGMENTS; ai++) anchors.push(0);
+
+  var intensity = 0, targetIntensity = 0;
+  var lastJitter = 0;
+  var lastT = null;
+
+  function stampGlow(px, py, strength) {
+    var gx = Math.floor(px / GLOW_CELL), gy = Math.floor(py / GLOW_CELL);
+    for (var oy = -2; oy <= 2; oy++) {
+      for (var ox = -2; ox <= 2; ox++) {
+        var xx = gx + ox, yy = gy + oy;
+        if (xx < 0 || yy < 0 || xx >= GLOW_COLS || yy >= GLOW_ROWS) continue;
+        var d = Math.sqrt(ox * ox + oy * oy);
+        var w = d === 0 ? 1 : Math.max(0, 1 - d / 2.6);
+        field[yy * GLOW_COLS + xx] += strength * w;
+      }
+    }
+  }
+
+  function pathPoints() {
+    var pts = [];
+    for (var i = 0; i < ARC_SEGMENTS; i++) {
+      var a0 = anchors[i], a1 = anchors[(i + 1) % ARC_SEGMENTS];
+      for (var s = 0; s < SUBDIV; s++) {
+        var u = s / SUBDIV;
+        var w = (1 - Math.cos(u * Math.PI)) / 2; // 코사인 보간 — 앵커 사이를 매끄럽게
+        var jitter = a0 + (a1 - a0) * w;
+        var ang = ((i + u) / ARC_SEGMENTS) * Math.PI * 2;
+        var rr = 1 + jitter / ((RX + RY) / 2);
+        pts.push({
+          x: CX + Math.cos(ang) * RX * rr,
+          y: CY + Math.sin(ang) * RY * rr
+        });
+      }
+    }
+    return pts;
+  }
+
+  function render(now, dt) {
+    intensity += (targetIntensity - intensity) * Math.min(1, dt * 7);
+
+    if (now - lastJitter >= BTN_CANVAS_ARC_JITTER_MS) {
+      lastJitter = now;
+      for (var i = 0; i < ARC_SEGMENTS; i++) {
+        anchors[i] = (rnd() - 0.5) * 2 * JITTER_AMP_MAX * (0.12 + intensity);
+      }
+    }
+
+    for (var f = 0; f < field.length; f++) field[f] *= GLOW_DECAY;
+
+    var pts = pathPoints();
+    for (var p = 0; p < pts.length; p++) {
+      stampGlow(pts[p].x, pts[p].y, 0.62 + intensity * 2.0);
+    }
+
+    var data = img.data, idx = 0;
+    for (var gy = 0; gy < GLOW_ROWS; gy++) {
+      for (var gx = 0; gx < GLOW_COLS; gx++) {
+        var v = Math.min(1, field[gy * GLOW_COLS + gx] / 2.4);
+        data[idx] = GLOW_COLOR[0]; data[idx + 1] = GLOW_COLOR[1]; data[idx + 2] = GLOW_COLOR[2];
+        data[idx + 3] = (v * 255) | 0;
+        idx += 4;
+      }
+    }
+    sctx.putImageData(img, 0, 0);
+
+    ctx.fillStyle = 'rgb(' + BG[0] + ',' + BG[1] + ',' + BG[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(small, 0, 0, GLOW_COLS, GLOW_ROWS, 0, 0, W, H);
+
+    var lineWidth = 1 + intensity * CRACK_VALUE_ECHO;
+    ctx.beginPath();
+    for (var q = 0; q < pts.length; q++) {
+      if (q === 0) ctx.moveTo(pts[q].x, pts[q].y); else ctx.lineTo(pts[q].x, pts[q].y);
+    }
+    ctx.closePath();
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = 'rgba(' + GLOW_COLOR[0] + ',' + GLOW_COLOR[1] + ',' + GLOW_COLOR[2] + ',' + (0.55 + intensity * 0.45).toFixed(3) + ')';
+    ctx.stroke();
+  }
+
+  function setHover(on) {
+    targetIntensity = on ? 1 : 0;
+  }
+
+  btn.addEventListener('pointerenter', function () { root.classList.remove('is-demo'); setHover(true); if (reduceMQ.matches) render(performance.now(), 0.05); });
+  btn.addEventListener('pointerleave', function () { setHover(false); if (reduceMQ.matches) render(performance.now(), 0.05); });
+  btn.addEventListener('click', function () { root.classList.remove('is-demo'); setHover(true); if (reduceMQ.matches) render(performance.now(), 0.05); });
+  btn.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    root.classList.remove('is-demo');
+    setHover(true);
+    if (reduceMQ.matches) render(performance.now(), 0.05);
+  });
+  cv.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    setHover(true);
+    if (reduceMQ.matches) render(performance.now(), 0.05);
+  });
+  window.addEventListener('resize', function () { render(performance.now(), 0.016); });
+
+  function frame(now) {
+    if (!reduceMQ.matches) {
+      var dt = lastT === null ? 0.016 : Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      if (root.classList.contains('is-demo')) {
+        var t = now % 2400;
+        targetIntensity = t < 1400 ? Math.min(1, t / 500) : Math.max(0, 1 - (t - 1400) / 700);
+      }
+      render(now, dt);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  if (reduceMQ.matches) {
+    targetIntensity = 0.6;
+    intensity = 0.6;
+    for (var i0 = 0; i0 < ARC_SEGMENTS; i0++) anchors[i0] = (rnd() - 0.5) * 2 * JITTER_AMP_MAX * 0.6;
+    render(performance.now(), 0.05);
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

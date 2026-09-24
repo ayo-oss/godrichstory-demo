@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이미지 드롭 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dz" id="dz">
+  <p class="dz__hint" id="dzHint">이미지를 드롭하면 DataTransfer.files 를 검사해 객체 URL 로 즉시 그립니다</p>
+  <div class="dz__zone" id="dzZone" role="button" tabindex="0" aria-describedby="dzHint" aria-label="이미지 드롭존">
+    <input type="file" id="dzInput" accept="image/*" class="dz__file" aria-label="파일 선택">
+    <svg class="dz__ic dz__ic--up" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M216 48v160H40V48a16 16 0 0 1 16-16h144a16 16 0 0 1 16 16" opacity=".2"/><path d="M224 144v64a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8v-64a8 8 0 0 1 16 0v56h160v-56a8 8 0 0 1 16 0M93.66 77.66L120 51.31V144a8 8 0 0 0 16 0V51.31l26.34 26.35a8 8 0 0 0 11.32-11.32l-40-40a8 8 0 0 0-11.32 0l-40 40a8 8 0 0 0 11.32 11.32"/></g></svg>
+    <div class="dz__frame" id="dzFrame" aria-hidden="true">
+      <canvas class="dz__cv" id="dzCv" width="192" height="120"></canvas>
+    </div>
+    <p class="dz__file-label" id="dzFileLabel">cover-sky.png · 512×320</p>
+  </div>
+  <div class="dz__meta">
+    <span class="dz__chip" id="dzChip">image/png</span>
+    <span class="dz__chip" id="dzChip2">URL.createObjectURL</span>
+    <span class="dz__unit" id="dzUrl">blob:…37f2</span>
+    <span class="dz__unit" id="dzRevoked">revoke 후보 0</span>
+  </div>
+</div>
+</main>
+<script>
+// 이미지 드롭(01) — drop 이벤트의 DataTransfer.files 에서 File 을 꺼내 File.type 이 image/ 접두사인지
+// startsWith 로 검사하고, 통과하면 URL.createObjectURL 로 브라우저 메모리 안에서만 접근 가능한 주소를
+// 만들어 캔버스에 그린다. 서버 전송은 전혀 없고(시뮬레이션만), 미리보기를 치울 때는 revokeObjectURL 로
+// 메모리를 되돌린다. 시드 고정 캔버스 패턴으로 "가상 이미지 파일"을 Blob 으로 만들어 File 처럼 다룬다.
+(function () {
+  var zone = document.getElementById('dzZone');
+  var frame = document.getElementById('dzFrame');
+  var cv = document.getElementById('dzCv');
+  var fileLabel = document.getElementById('dzFileLabel');
+  var chip = document.getElementById('dzChip');
+  var urlEl = document.getElementById('dzUrl');
+  var revEl = document.getElementById('dzRevoked');
+  if (!zone || !frame || !cv || !fileLabel || !chip || !urlEl || !revEl) return;
+  var ctx = cv.getContext('2d');
+  if (!ctx) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 시드 고정 난수(mulberry32) — 같은 시드는 같은 그림. Math.random 금지.
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  var PALETTES = [
+    { name: 'cover-sky.png', w: 512, h: 320, type: 'image/png', seed: 37, hex: '#d6e1eb' },
+    { name: 'profile-mint.png', w: 256, h: 256, type: 'image/png', seed: 61, hex: '#93d9c0' },
+    { name: 'poster-lilac.jpg', w: 640, h: 400, type: 'image/jpeg', seed: 89, hex: '#b9a0ff' }
+  ];
+  var DROP_MS = 240;   // 놓인 순간 스케일 정착 시간 — 변형 아님(기본값), 시간 표기와 일치
+  var HEXES = ['#d6e1eb', '#93d9c0', '#b9a0ff', '#f6c6d3', '#cfd8f5'];
+
+  // 가상 이미지 파일 — 시드 패턴을 캔버스로 그려 Blob(File) 로 만든다 (외부 이미지 0)
+  function drawPattern(p) {
+    var rnd = mulberry32(p.seed);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    var cell = 12;
+    for (var y = 0; y < cv.height; y += cell) {
+      for (var x = 0; x < cv.width; x += cell) {
+        var v = rnd();
+        if (v > .72) {
+          ctx.fillStyle = HEXES[Math.floor(rnd() * HEXES.length)];
+          ctx.beginPath();
+          var r = 2 + rnd() * (cell / 2 - 1);
+          ctx.arc(x + cell / 2, y + cell / 2, r, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = v > .5 ? 'rgba(23,20,26,.06)' : 'rgba(255,247,230,.5)';
+          ctx.fillRect(x, y, cell - 1, cell - 1);
+        }
+      }
+    }
+  }
+
+  var cur = -1;
+  var objUrls = [];      // createObjectURL 발급 이력 — revoke 시뮬레이션 카운터
+  var scale = 1, scaleV = 0;
+
+  // File 시뮬레이션 — new File(Blob) 로 실제 File 객체를 만들어 type/size 를 진짜로 읽게 한다
+  function virtualFile(p, cb) {
+    try {
+      cv.toBlob(function (b) {
+        var f = new File([b], p.name, { type: p.type });
+        cb(f);
+      }, p.type.split('/')[1] === 'jpeg' ? 'image/jpeg' : 'image/png');
+    } catch (e) { cb(null); }
+  }
+
+  // drop 처리 — DataTransfer.files 경로와 같은 검사·URL 발급을 탄다
+  function intake(files) {
+    var f = files && files[0];
+    if (!f) return;
+    var ok = f.type && f.type.indexOf('image/') === 0;   // File.type 접두사 판정
+    if (!ok) return;
+    if (cur >= 0) { try { URL.revokeObjectURL(objUrls[cur]); } catch (e) {} }
+    cur = (cur + 1) % PALETTES.length;
+    drawPattern(PALETTES[cur]);
+    var u = URL.createObjectURL(f);
+    objUrls.push(u);
+    chip.textContent = f.type + ' · ' + f.size + 'B';
+    urlEl.textContent = 'blob:…' + u.slice(-4);
+    revEl.textContent = 'revoke 후보 ' + objUrls.length;
+    fileLabel.textContent = PALETTES[cur].name + ' · ' + PALETTES[cur].w + '×' + PALETTES[cur].h;
+    frame.classList.add('is-in');
+    scale = .82; scaleV = 0;   // 스케일 스프링(계산)
+  }
+
+  // 실제 드롭 — 사람이 파일을 올리면 같은 파이프라인
+  zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault(); zone.classList.remove('is-over');
+    if (e.dataTransfer && e.dataTransfer.files) intake(e.dataTransfer.files);
+  });
+  var input = document.getElementById('dzInput');
+  if (input) input.addEventListener('change', function () {
+    if (input.files) intake(input.files);
+    input.value = '';
+  });
+
+  // 자동 시연 — 2.4초마다 가상 파일을 "드롭". 화면이 계속 살아 있다.
+  var nextAt = 0;
+  if (reduce) {
+    drawPattern(PALETTES[0]);
+    frame.classList.add('is-in');
+    cur = 0;
+    virtualFile(PALETTES[0], function () {});
+  } else {
+    (function loop(now) {
+      if (now >= nextAt) {
+        nextAt = now + 2400;
+        virtualFile(PALETTES[(cur + 1) % PALETTES.length], function (f) { if (f) intake([f]); });
+      }
+      // 스케일 스프링 — k=0.09 감쇠 lerp (계산 곡선)
+      if (frame.classList.contains('is-in')) {
+        scaleV += (1 - scale) * 0.09; scaleV *= 0.78;
+        scale += scaleV;
+        frame.style.transform = 'scale(' + scale.toFixed(4) + ')';
+      }
+      requestAnimationFrame(loop);
+    })(0);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>네 모서리 핸들로 하는 비율 유지 크기 조절 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="scene is-demo" id="scene">
+  <div class="frame" id="frame" tabindex="0" aria-label="크기 조절 프레임, 모서리 핸들을 끌면 비율을 지킨 채 커지거나 작아진다">
+    <div class="subjectShape"></div>
+    <div class="handle handle--tl" data-corner="tl" tabindex="0" role="slider" aria-label="왼쪽 위 모서리 핸들" aria-valuemin="50" aria-valuemax="180" aria-valuenow="100"></div>
+    <div class="handle handle--tr" data-corner="tr" tabindex="0" role="slider" aria-label="오른쪽 위 모서리 핸들" aria-valuemin="50" aria-valuemax="180" aria-valuenow="100"></div>
+    <div class="handle handle--bl" data-corner="bl" tabindex="0" role="slider" aria-label="왼쪽 아래 모서리 핸들" aria-valuemin="50" aria-valuemax="180" aria-valuenow="100"></div>
+    <div class="handle handle--br" data-corner="br" tabindex="0" role="slider" aria-label="오른쪽 아래 모서리 핸들" aria-valuemin="50" aria-valuemax="180" aria-valuenow="100"></div>
+  </div>
+  <div class="readout" id="readout" aria-hidden="true"><span id="rp">100</span>%</div>
+</div>
+</main>
+<script>
+(function () {
+  var MIN_SCALE = 0.55;
+  var MAX_SCALE = 1.75;
+  var LOOP_SEQUENCE = [1.5, 0.7, 1];
+  var HOP_MS = 620;
+  var HOLD_MS = 340;
+
+  var scene = document.getElementById('scene');
+  var frame = document.getElementById('frame');
+  var subject = frame.querySelector('.subjectShape');
+  var handles = [].slice.call(frame.querySelectorAll('.handle'));
+  var rp = document.getElementById('rp');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 앵커 고정 비율 산술: 드래그하는 모서리의 대각선 반대쪽을 앵커로 고정하고, 앵커→포인터 거리의
+  // 비로 균일 스케일을 만든다. transform-origin 을 앵커 좌표에 두면 그 점은 화면에서 움직이지 않는다.
+  var ORIGIN_BY_CORNER = {
+    tl: '100% 100%',
+    tr: '0% 100%',
+    bl: '100% 0%',
+    br: '0% 0%'
+  };
+
+  var scale = 1;
+  var dragCorner = null;
+  var anchorX = 0, anchorY = 0, d0 = 1, s0 = 1;
+  var timers = [];
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+  function applyScale(corner, s) {
+    scale = clamp(s, MIN_SCALE, MAX_SCALE);
+    subject.style.transformOrigin = ORIGIN_BY_CORNER[corner];
+    subject.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    rp.textContent = Math.round(scale * 100);
+    handles.forEach(function (h) { h.setAttribute('aria-valuenow', String(Math.round(scale * 100))); });
+  }
+
+  function human() {
+    if (scene.classList.contains('is-demo')) {
+      scene.classList.remove('is-demo');
+      timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      timers = [];
+    }
+  }
+
+  function cornerAnchorRect(corner) {
+    var r = frame.getBoundingClientRect();
+    switch (corner) {
+      case 'tl': return { x: r.right, y: r.bottom };
+      case 'tr': return { x: r.left, y: r.bottom };
+      case 'bl': return { x: r.right, y: r.top };
+      default: return { x: r.left, y: r.top };
+    }
+  }
+
+  handles.forEach(function (h) {
+    h.addEventListener('pointerdown', function (e) {
+      human();
+      dragCorner = h.dataset.corner;
+      h.setPointerCapture(e.pointerId);
+      var a = cornerAnchorRect(dragCorner);
+      anchorX = a.x; anchorY = a.y;
+      d0 = Math.max(1, dist(anchorX, anchorY, e.clientX, e.clientY));
+      s0 = scale;
+      h.classList.add('isActive');
+    });
+    h.addEventListener('pointermove', function (e) {
+      if (dragCorner !== h.dataset.corner) return;
+      var d1 = dist(anchorX, anchorY, e.clientX, e.clientY);
+      applyScale(dragCorner, s0 * (d1 / d0));
+    });
+    function end(e) {
+      if (dragCorner !== h.dataset.corner) return;
+      dragCorner = null;
+      h.classList.remove('isActive');
+      try { h.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
+    h.addEventListener('pointerup', end);
+    h.addEventListener('pointercancel', end);
+    h.addEventListener('keydown', function (e) {
+      var corner = h.dataset.corner;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowRight') { human(); applyScale(corner, scale + 0.08); e.preventDefault(); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') { human(); applyScale(corner, scale - 0.08); e.preventDefault(); }
+    });
+  });
+
+  // reduce: 실사용 경로 적용 — 핸들 pointer·keydown 은 위에서 트윈 없이 즉시 반영한다.
+  // 아래 hopScale()·cycle() 은 시연 게이트만 — reduce 에서는 돌지 않는다.
+  function hopScale(corner, target, onDone) {
+    var from = scale;
+    var start = performance.now();
+    function frame(now) {
+      if (!scene.classList.contains('is-demo')) return;
+      var p = clamp((now - start) / HOP_MS, 0, 1);
+      applyScale(corner, from + (target - from) * easeOutCubic(p));
+      if (p < 1) requestAnimationFrame(frame);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function cycle(i) {
+    if (!scene.classList.contains('is-demo')) return;
+    var target = LOOP_SEQUENCE[i % LOOP_SEQUENCE.length];
+    hopScale('br', target, function () {
+      timers.push(setTimeout(function () { cycle(i + 1); }, HOLD_MS));
+    });
+  }
+
+  if (!reduce) {
+    cycle(0);
+  }
+})();
+</script>
+</body>
+</html>

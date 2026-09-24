@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>타임라인 값으로 하이라이트가 옮겨가는 가사 스크롤 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-play" viewBox="0 0 256 256"><g fill="currentColor"><path d="M228.23 134.69L84.15 222.81A8 8 0 0 1 72 216.12V39.88a8 8 0 0 1 12.15-6.69l144.08 88.12a7.82 7.82 0 0 1 0 13.38" opacity=".2"/><path d="M232.4 114.49L88.32 26.35a16 16 0 0 0-16.2-.3A15.86 15.86 0 0 0 64 39.87v176.26A15.94 15.94 0 0 0 80 232a16.07 16.07 0 0 0 8.36-2.35l144.04-88.14a15.81 15.81 0 0 0 0-27ZM80 215.94V40l143.83 88Z"/></g></symbol>
+    <symbol id="ico-pause" viewBox="0 0 256 256"><g fill="currentColor"><path d="M208 48v160a8 8 0 0 1-8 8h-40a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8h40a8 8 0 0 1 8 8M96 40H56a8 8 0 0 0-8 8v160a8 8 0 0 0 8 8h40a8 8 0 0 0 8-8V48a8 8 0 0 0-8-8" opacity=".2"/><path d="M200 32h-40a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176h-40V48h40ZM96 32H56a16 16 0 0 0-16 16v160a16 16 0 0 0 16 16h40a16 16 0 0 0 16-16V48a16 16 0 0 0-16-16m0 176H56V48h40Z"/></g></symbol>
+  </defs>
+</svg>
+<main class="stage">
+<div class="lyr is-demo is-playing" id="lyr">
+  <p class="lyr__hint"><span>재생하면 타임라인 값이 흘러 그 줄을 찾아 화면 가운데로 하이라이트가 옮겨갑니다</span></p>
+  <div class="lyr__panel">
+    <button class="lyr__play" id="play" type="button" aria-label="재생">
+      <svg class="lyr__ico lyr__ico--play" aria-hidden="true"><use href="#ico-play"></use></svg>
+      <svg class="lyr__ico lyr__ico--pause" aria-hidden="true"><use href="#ico-pause"></use></svg>
+    </button>
+    <div class="lyr__viewport" id="viewport" tabindex="0" role="listbox" aria-label="가사 줄, 화살표 키로 이동">
+      <ul class="lyr__list" id="list"></ul>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('lyr');
+  var playBtn = document.getElementById('play');
+  var viewport = document.getElementById('viewport');
+  var list = document.getElementById('list');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  var LINE_COUNT = 10;
+  var LINE_H = 22; // 한 줄의 세로 간격
+  var VIEWPORT_H = 88;
+  var PLAYBACK_LENGTH_S = 40; // 합성 타임라인 총 길이(초) — 실제 곡 길이가 아니라 시연용 값
+  var SPEED = 8; // 시연 배속 — 실제 시간(Date)이 아니라 타임라인 값을 빨리 흘리는 시연 전용 배율
+  var LINE_TIMES = [];
+  for (var i = 0; i < LINE_COUNT; i++) LINE_TIMES.push(i * 4);
+
+  var lines = [];
+  for (var i = 0; i < LINE_COUNT; i++) {
+    var li = document.createElement('li');
+    li.className = 'lyr__line';
+    li.setAttribute('role', 'option');
+    li.setAttribute('data-i', String(i));
+    li.tabIndex = -1;
+    li.textContent = 'Line ' + (i < 9 ? '0' + (i + 1) : i + 1);
+    list.appendChild(li);
+    lines.push(li);
+  }
+  viewport.style.height = VIEWPORT_H + 'px';
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+
+  var playedMs = 0, playing = true;
+
+  function activeIndexOf(progressS) {
+    var idx = 0;
+    for (var i = 0; i < LINE_TIMES.length; i++) { if (LINE_TIMES[i] <= progressS) idx = i; }
+    return idx;
+  }
+
+  function seekToLine(i) {
+    i = Math.max(0, Math.min(LINE_COUNT - 1, i));
+    playedMs = (LINE_TIMES[i] / SPEED) * 1000;
+  }
+
+  function render() {
+    var progressS = (playedMs / 1000) * SPEED % PLAYBACK_LENGTH_S;
+    var activeIndex = activeIndexOf(progressS);
+    var target = activeIndex * LINE_H - (VIEWPORT_H / 2 - LINE_H / 2);
+    var maxOffset = Math.max(0, LINE_COUNT * LINE_H - VIEWPORT_H);
+    target = Math.max(0, Math.min(maxOffset, target));
+    if (currentOffset == null) currentOffset = target;
+    currentOffset += (target - currentOffset) * 0.22; // 타임라인이 옮겨간 자리로 관성 있게 다가간다
+    list.style.transform = 'translateY(' + (-currentOffset).toFixed(2) + 'px)';
+    for (var i = 0; i < lines.length; i++) {
+      var dist = Math.abs(i - activeIndex);
+      var isActive = i === activeIndex;
+      lines[i].classList.toggle('is-active', isActive);
+      lines[i].setAttribute('aria-selected', String(isActive));
+      lines[i].style.opacity = String(isActive ? 1 : Math.max(0.28, 1 - dist * 0.22));
+      lines[i].style.transform = 'scale(' + (isActive ? 1 : 0.94) + ')';
+    }
+  }
+  var currentOffset = null;
+
+  function setPlaying(next) { playing = next; root.classList.toggle('is-playing', next); }
+  function onPlayClick() { human(); setPlaying(!playing); }
+  function onPlayKeydown(e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); setPlaying(!playing); }
+  }
+  function onLineClick(i) { human(); seekToLine(i); render(); }
+  function onViewportKeydown(e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); human();
+      var progressS = (playedMs / 1000) * SPEED % PLAYBACK_LENGTH_S;
+      var cur = activeIndexOf(progressS);
+      seekToLine(cur + (e.key === 'ArrowDown' ? 1 : -1));
+      render();
+    }
+  }
+
+  lines.forEach(function (li, i) { li.addEventListener('click', function () { onLineClick(i); }); });
+  viewport.addEventListener('keydown', onViewportKeydown);
+
+  var lastNow = 0;
+  function frame(now) {
+    if (!lastNow) lastNow = now;
+    var dt = now - lastNow;
+    lastNow = now;
+    var effPlaying = isDemo ? true : playing;
+    if (effPlaying) playedMs += dt;
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  if (reduce) {
+    root.classList.add('is-still');
+    render();
+    playBtn.addEventListener('click', function () { human(); setPlaying(!playing); render(); });
+    playBtn.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); human(); setPlaying(!playing); render(); }
+    });
+  } else {
+    playBtn.addEventListener('click', onPlayClick);
+    playBtn.addEventListener('keydown', onPlayKeydown);
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flick burst — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp" id="sp">
+  <p class="sp__hint">
+    <svg class="sp__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M224 128a96 96 0 1 1-96-96a96 96 0 0 1 96 96" opacity=".2"/><path d="M232 128a104 104 0 0 1-208 0c0-41 23.81-78.36 60.66-95.27a8 8 0 0 1 6.68 14.54C60.15 61.59 40 93.27 40 128a88 88 0 0 0 176 0c0-34.73-20.15-66.41-51.34-80.73a8 8 0 0 1 6.68-14.54C208.19 49.64 232 87 232 128"/></g></svg>
+    <span>Flick the scroll fast and particles burst outward in that instant.</span>
+  </p>
+  <div class="sp__viewport" id="viewport" tabindex="0" role="region" aria-label="Particle burst scroll area">
+    <canvas class="sp__cv" id="cv" aria-hidden="true"></canvas>
+    <b class="sp__val" id="val" aria-hidden="true">0</b>
+    <div class="sp__track" aria-hidden="true"></div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('sp');
+  var viewport = document.getElementById('viewport');
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var val = document.getElementById('val');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var isDemo = true;
+
+  function makeLcg(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rng = makeLcg(99194853);
+
+  var css = getComputedStyle(root);
+  var PARTICLE_COLOR = css.getPropertyValue('--particle-color').trim() || '#17141a';
+
+  // 계산 겹: 방사 폭발 + 마찰 감쇠(burst-radiate-with-friction-decay) —
+  // 스크롤 속도가 문턱(FLICK_THRESHOLD)을 아래에서 위로 넘는 순간(플릭)마다 BURST_COUNT 개를
+  // 중심에서 방사형으로 쏘고, 이후 매 프레임 속도를 지수적으로 줄여(FRICTION) 멈춰 세운다.
+  var FLICK_THRESHOLD = 260; // 이 속도(px/s) 를 아래→위로 넘는 순간에만 새 폭발이 터진다
+  var BURST_COUNT = 40;      // 플릭 한 번이 만드는 입자 수 (변형 대상 상수)
+  var BASE_SPEED = 60;       // 방사 기본 속력 (px/s)
+  var SPEED_VAR = 90;        // 방사 속력 편차 (px/s)
+  var FRICTION = 1.5;        // 속도 감쇠율 (1/s)
+  var LIFE_MS = 1300;
+  var MAX_PARTICLES = 220;
+
+  var W = 0, H = 0, dpr = 1;
+  var particles = [];
+  var burstCount = 0;
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  var scrollPos = 0, scrollVel = 0, scrollDir = 0, idleMs = 0, lastTop = 0, lastT = 0, prevAbsVel = 0;
+  function sampleScroll(now) {
+    var top = viewport.scrollTop;
+    var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    scrollPos = top / max;
+    var dt = lastT ? Math.max(1, now - lastT) : 16;
+    var v = (top - lastTop) / dt * 1000;
+    scrollVel += (v - scrollVel) * 0.4;
+    if (Math.abs(scrollVel) > 4) { scrollDir = scrollVel > 0 ? 1 : -1; idleMs = 0; } else { idleMs += dt; }
+    lastTop = top; lastT = now;
+
+    var absVel = Math.abs(scrollVel);
+    if (prevAbsVel < FLICK_THRESHOLD && absVel >= FLICK_THRESHOLD) burst(now);
+    prevAbsVel = absVel;
+  }
+  viewport.addEventListener('scroll', function () {
+    sampleScroll(performance.now());
+    if (reduce) paintStatic();
+  });
+
+  function human() { if (isDemo) { root.classList.remove('is-demo'); isDemo = false; } }
+  ['wheel', 'touchstart', 'pointerdown'].forEach(function (evt) {
+    viewport.addEventListener(evt, human, { passive: true });
+  });
+
+  function burst(now) {
+    burstCount++;
+    for (var i = 0; i < BURST_COUNT; i++) {
+      var ang = rng() * Math.PI * 2;
+      var speed = BASE_SPEED + rng() * SPEED_VAR;
+      particles.push({
+        x: W / 2, y: H / 2,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        r: 1.2 + rng() * 2.2,
+        born: now
+      });
+    }
+    if (particles.length > MAX_PARTICLES) particles.splice(0, particles.length - MAX_PARTICLES);
+  }
+
+  function step(now, dtSec) {
+    var decay = Math.exp(-FRICTION * dtSec);
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.vx *= decay; p.vy *= decay;
+      p.x += p.vx * dtSec;
+      p.y += p.vy * dtSec;
+      if (now - p.born > LIFE_MS) particles.splice(i, 1);
+    }
+  }
+
+  function paint(now) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var t = (now - p.born) / LIFE_MS;
+      ctx.globalAlpha = Math.max(0, 1 - t) * 0.9;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateVal() { val.textContent = String(burstCount); }
+
+  function paintStatic() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = PARTICLE_COLOR;
+    var n = 14;
+    var rad = 10 + scrollPos * 50;
+    for (var i = 0; i < n; i++) {
+      var ang = (i / n) * Math.PI * 2;
+      var x = W / 2 + Math.cos(ang) * rad;
+      var y = H / 2 + Math.sin(ang) * rad;
+      ctx.globalAlpha = 0.65;
+      ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    updateVal();
+  }
+
+  var lastFrameT = 0;
+  function frame(now) {
+    if (!lastFrameT) lastFrameT = now;
+    var dtSec = Math.min(0.05, (now - lastFrameT) / 1000);
+    lastFrameT = now;
+    step(now, dtSec);
+    paint(now);
+    updateVal();
+    requestAnimationFrame(frame);
+  }
+
+  var DRIVE_PERIOD_MS = 2000;
+  var driveStart = 0;
+  function flickWave(frac) {
+    // 급상승·급하강(플릭) 세 번과 그 사이 정지 유지를 반복하는 구동 파형 —
+    // 정지 구간마다 직전 폭발이 마찰로 가라앉는 모습을 보여준다
+    if (frac < 0.06) return (frac / 0.06) * 0.35;
+    if (frac < 0.2) return 0.35;
+    if (frac < 0.26) return 0.35 + (frac - 0.2) / 0.06 * 0.65;
+    if (frac < 0.5) return 1;
+    if (frac < 0.56) return 1 - (frac - 0.5) / 0.06 * 0.6;
+    if (frac < 0.8) return 0.4;
+    return 0.4 * (1 - (frac - 0.8) / 0.2);
+  }
+  function driveTick(now) {
+    if (!driveStart) driveStart = now;
+    if (isDemo && !reduce) {
+      var frac = ((now - driveStart) % DRIVE_PERIOD_MS) / DRIVE_PERIOD_MS;
+      var w = flickWave(frac);
+      var max = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = w * max;
+    }
+    requestAnimationFrame(driveTick);
+  }
+
+  window.addEventListener('resize', fit);
+  fit();
+
+  if (reduce) {
+    root.classList.add('is-still');
+    sampleScroll(performance.now());
+    paintStatic();
+  } else {
+    requestAnimationFrame(frame);
+    requestAnimationFrame(driveTick);
+  }
+})();
+</script>
+</body>
+</html>

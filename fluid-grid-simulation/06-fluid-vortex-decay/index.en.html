@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>소용돌이 감쇠 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage stage--ink">
+<div class="fa" id="fa">
+  <p class="fa__hint">
+    <svg class="fa__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M128 216a88 88 0 1 1 88-88 8 8 0 0 1-16 0 72 72 0 1 0-72 72 8 8 0 0 1 0 16Z" opacity=".2"/><path d="M128 24a104.2 104.2 0 0 0-73.5 30.5 8 8 0 0 0 11.3 11.3A88 88 0 1 1 40 128a8 8 0 0 0-16 0 104 104 0 1 0 104-104Zm0 40a64 64 0 1 0 64 64 8 8 0 0 0-16 0 48 48 0 1 1-48-48 8 8 0 0 0 0-16Z"/></g></svg>
+    <span>The core spins together like a rigid body while the outer rim slows with distance, and viscosity fades the whole thing out over time</span>
+  </p>
+  <div class="fa__field" id="field" role="application" aria-label="Vortex decay board" tabindex="0">
+    <canvas class="fa__cv" id="cv"></canvas>
+    <b class="fa__badge" aria-hidden="true">32<span class="fa__badgeUnit">grid</span></b>
+  </div>
+</div>
+</main>
+<script>
+// 소용돌이 감쇠 — 초기화 시점에 랭킨 소용돌이(Rankine vortex) 속도장을 딱 한 번 심는다.
+// 중심 반경(r_core) 안쪽은 강체 회전(속도 ∝ 거리), 바깥쪽은 속도 ∝ 1/거리로 줄어든다.
+// 이후엔 연속 주입 없이 약한 확산 + 매 프레임 곱셈 감쇠만 걸어 소용돌이가 스스로 흐려져 사라지게 둔다.
+// 감쇠가 끝나면 자동으로 다시 심어 루프를 반복한다 — 클릭하면 그 자리에 즉시 새로 심어진다.
+var root = document.getElementById('fa');
+var field = document.getElementById('field');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { willReadFrequently: true });
+
+var css = getComputedStyle(root);
+var PAL0 = css.getPropertyValue('--dye-0').trim();
+var PAL1 = css.getPropertyValue('--dye-1').trim();
+var PAL2 = css.getPropertyValue('--dye-2').trim();
+
+var N = 32;
+var SIZE = (N + 2) * (N + 2);
+var IX = function (x, y) { return x + (N + 2) * y; };
+var u = new Float32Array(SIZE), v = new Float32Array(SIZE);
+var u0 = new Float32Array(SIZE), v0 = new Float32Array(SIZE);
+var d = new Float32Array(SIZE), d0 = new Float32Array(SIZE);
+
+var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var W = 0, H = 0, raf = 0;
+
+var R_CORE = N * 0.17;      // 강체 회전 반경 — 이 안쪽은 각속도가 일정하다
+var OMEGA = 1.35;           // 중심 각속도 — 값이 클수록 처음에 세게 돈다
+var LIFE = 110;             // 씨드 뒤 이 스텝(≈3.7초 @30fps) 이 지나면 자동으로 다시 심는다
+var lifeStep = 0;
+var cycle = 0;
+
+function fit() {
+  var r = field.getBoundingClientRect();
+  W = r.width; H = r.height;
+  cv.width = Math.round(W); cv.height = Math.round(H);
+}
+
+// 01 과 동일한 후방 이류(semi-Lagrangian).
+function advect(b, dt) {
+  var src = b === 'u' ? u0 : (b === 'v' ? v0 : d0);
+  var dst = b === 'u' ? u : (b === 'v' ? v : d);
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var x = i - dt * N * u0[IX(i, j)];
+      var y = j - dt * N * v0[IX(i, j)];
+      if (x < 0.5) x = 0.5; else if (x > N + 0.5) x = N + 0.5;
+      var i0 = x | 0; var i1 = i0 + 1;
+      if (y < 0.5) y = 0.5; else if (y > N + 0.5) y = N + 0.5;
+      var j0 = y | 0; var j1 = j0 + 1;
+      var s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+      dst[IX(i, j)] = s0 * (t0 * src[IX(i0, j0)] + t1 * src[IX(i0, j1)]) +
+                      s1 * (t0 * src[IX(i1, j0)] + t1 * src[IX(i1, j1)]);
+    }
+  }
+}
+
+// 약한 점성 확산 — 회전 에너지를 이웃 칸으로 새어 나가게 해 소용돌이 팔이 무뎌지며 사라지게 한다.
+function diffuse(b, k, dt) {
+  var src = b === 'u' ? u : (b === 'v' ? v : d);
+  var a = dt * k * N * N;
+  for (var iter = 0; iter < 2; iter++) {
+    for (var j = 1; j <= N; j++) {
+      for (var i = 1; i <= N; i++) {
+        var idx = IX(i, j);
+        src[idx] = (src[idx] + a * (src[IX(i - 1, j)] + src[IX(i + 1, j)] + src[IX(i, j - 1)] + src[IX(i, j + 1)])) / (1 + 4 * a);
+      }
+    }
+  }
+}
+
+function bounds() {
+  for (var i = 1; i <= N; i++) {
+    d[IX(i, 0)] = d[IX(i, 1)] * 0.5; d[IX(i, N + 1)] = d[IX(i, N)] * 0.5;
+    u[IX(i, 0)] = u[IX(i, 1)] * 0.4; u[IX(i, N + 1)] = u[IX(i, N)] * 0.4;
+    v[IX(i, 0)] = v[IX(i, 1)] * 0.4; v[IX(i, N + 1)] = v[IX(i, N)] * 0.4;
+  }
+  for (var j = 1; j <= N; j++) {
+    d[IX(0, j)] = d[IX(1, j)] * 0.5; d[IX(N + 1, j)] = d[IX(N, j)] * 0.5;
+    u[IX(0, j)] = u[IX(1, j)] * 0.4; u[IX(N + 1, j)] = u[IX(N, j)] * 0.4;
+    v[IX(0, j)] = v[IX(1, j)] * 0.4; v[IX(N + 1, j)] = v[IX(N, j)] * 0.4;
+  }
+}
+
+// 랭킨 소용돌이 심기 — 필드를 전부 비우고 새 소용돌이 하나만 남긴다(연속 주입이 아니라 일회성 초기화).
+function seedVortex(cx, cy, dir) {
+  u.fill(0); v.fill(0); d.fill(0);
+  u0.fill(0); v0.fill(0); d0.fill(0);
+  for (var j = 1; j <= N; j++) {
+    for (var i = 1; i <= N; i++) {
+      var dx = i - cx, dy = j - cy;
+      var r = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      var vTheta = r <= R_CORE ? OMEGA * r : OMEGA * (R_CORE * R_CORE) / r;
+      var idx = IX(i, j);
+      // 접선 방향(반시계=dir 1, 시계=dir -1): (-dy/r, dx/r)
+      u[idx] = dir * (-dy / r) * vTheta;
+      v[idx] = dir * (dx / r) * vTheta;
+      // 밀도는 소용돌이 팔 모양을 보이려고 코어 주변 링 모양으로 심는다
+      var ring = Math.exp(-Math.pow((r - R_CORE * 1.15) / (R_CORE * 0.85), 2));
+      d[idx] = ring * 1.4;
+    }
+  }
+  lifeStep = 0;
+}
+
+function step(dt) {
+  u0.set(u); v0.set(v); d0.set(d);
+  advect('u', dt); u0.set(u);
+  advect('v', dt); v0.set(v);
+  advect('d', dt);
+  diffuse('u', 0.0016, dt);
+  diffuse('v', 0.0016, dt);
+  diffuse('d', 0.0016, dt);
+  bounds();
+  // 매 프레임 곱셈 감쇠 — 연속 주입 없이 이것만으로 소용돌이가 시간이 갈수록 흐려진다
+  var decay = 0.9905;
+  for (var k = 0; k < SIZE; k++) { u[k] *= decay; v[k] *= decay; d[k] *= 0.988; }
+  lifeStep++;
+  if (lifeStep >= LIFE) {
+    cycle++;
+    var dir = cycle % 2 === 0 ? 1 : -1;
+    var cx = N * 0.5 + (cycle % 3 - 1) * N * 0.05;
+    var cy = N * 0.5 + ((cycle + 1) % 3 - 1) * N * 0.05;
+    seedVortex(cx, cy, dir);
+  }
+}
+
+function render() {
+  var img = ctx.createImageData(cv.width, cv.height);
+  var px = img.data;
+  var cellW = cv.width / N, cellH = cv.height / N;
+  var pal = [PAL0, PAL1, PAL2];
+  for (var py = 0; py < cv.height; py++) {
+    var gy = Math.min(N - 1, (py / cellH) | 0);
+    for (var pxx = 0; pxx < cv.width; pxx++) {
+      var gx = Math.min(N - 1, (pxx / cellW) | 0);
+      var q = d[IX(gx + 1, gy + 1)];
+      var o = (py * cv.width + pxx) * 4;
+      if (q <= 0) { px[o] = 23; px[o + 1] = 20; px[o + 2] = 26; px[o + 3] = 255; continue; }
+      var band = q > 0.62 ? 2 : (q > 0.3 ? 1 : 0);
+      var c = pal[band];
+      var rr = parseInt(c.slice(1, 3), 16), gg = parseInt(c.slice(3, 5), 16), bb = parseInt(c.slice(5, 7), 16);
+      var a = Math.min(1, q);
+      px[o] = 23 + (rr - 23) * a; px[o + 1] = 20 + (gg - 20) * a; px[o + 2] = 26 + (bb - 26) * a; px[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function frame() {
+  step(1 / 30);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+// 실제 사용 — 클릭한 자리에 즉시 새 소용돌이를 심는다(같은 seedVortex 를 자동 루프와 공유).
+field.addEventListener('pointerdown', function (e) {
+  var r = field.getBoundingClientRect();
+  var gx = 1 + ((e.clientX - r.left) / r.width * (N - 1));
+  var gy = 1 + ((e.clientY - r.top) / r.height * (N - 1));
+  cycle++;
+  seedVortex(gx, gy, cycle % 2 === 0 ? 1 : -1);
+  if (reduce) render();
+});
+field.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  cycle++;
+  seedVortex(N * 0.5, N * 0.5, cycle % 2 === 0 ? 1 : -1);
+  if (reduce) render();
+});
+window.addEventListener('resize', function () { fit(); if (reduce) render(); });
+
+fit();
+seedVortex(N * 0.5, N * 0.5, 1);
+if (reduce) {
+  // reduce — 40 걸음만 앞으로 감아 감쇠가 진행 중인 한 장을 그린다(빈 화면도, 갓 심은 화면도 아니다)
+  for (var k = 0; k < 40; k++) step(1 / 30);
+  render();
+} else {
+  raf = requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

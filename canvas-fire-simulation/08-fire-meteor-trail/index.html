@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>유성 — 잔상이 남는 불의 궤적 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mt is-demo" id="mtRoot">
+  <p class="mt__hint">
+    <svg class="mt__ico" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="m230.08 78.26l-31.84 26.88l9.76 40.19a5.46 5.46 0 0 1-8.19 5.86L164 129.66l-35.78 21.53a5.46 5.46 0 0 1-8.19-5.86l9.73-40.19l-31.84-26.88a5.38 5.38 0 0 1 3.13-9.48l41.79-3.31l16.1-38.14a5.51 5.51 0 0 1 10.12 0l16.1 38.14L227 68.78a5.38 5.38 0 0 1 3.08 9.48" opacity=".2"/><path d="M239.35 70.08a13.41 13.41 0 0 0-11.77-9.28l-36.94-2.92l-14.21-33.66a13.51 13.51 0 0 0-24.86 0l-14.21 33.66l-36.94 2.92a13.39 13.39 0 0 0-7.66 23.58l28.06 23.68l-8.56 35.39a13.32 13.32 0 0 0 5.1 13.91a13.51 13.51 0 0 0 15 .69L164 139l31.65 19.06a13.54 13.54 0 0 0 15-.69a13.34 13.34 0 0 0 5.09-13.91l-8.56-35.39l28.06-23.68a13.32 13.32 0 0 0 4.11-14.31M193.08 99a8 8 0 0 0-2.61 8l8.28 34.21l-30.62-18.41a8 8 0 0 0-8.25 0l-30.62 18.43l8.28-34.23a8 8 0 0 0-2.62-8L108 76.26l35.52-2.81a8 8 0 0 0 6.74-4.87L164 35.91l13.79 32.67a8 8 0 0 0 6.74 4.87l35.53 2.81Zm-105 24.18l-58.42 58.48a8 8 0 0 1-11.32-11.32l58.45-58.45a8 8 0 0 1 11.32 11.32Zm10.81 49.87a8 8 0 0 1 0 11.31l-53.23 53.3a8 8 0 0 1-11.32-11.32l53.27-53.26a8 8 0 0 1 11.31 0Zm73-1a8 8 0 0 1 0 11.32l-54.28 54.28a8 8 0 0 1-11.32-11.32l54.29-54.28a8 8 0 0 1 11.36.01Z"/></g></svg>
+    <span>머리 뒤로 파티클 꼬리를 흘리며, 지나간 자리는 천천히 식어 잔상 궤적이 됩니다</span>
+  </p>
+  <div class="mt__field" id="mtField" role="application" aria-label="유성 궤적 실험판" tabindex="0">
+    <canvas class="mt__cv" id="mtCv"></canvas>
+  </div>
+  <div class="mt__bar">
+    <span class="mt__meta"><b class="mt__val" id="mtTrail">28</b>프레임 냉각 · 꼬리 입자 26</span>
+    <span class="mt__meta mt__meta--dim">heat 필드 · 색온도 감소</span>
+  </div>
+</div>
+</main>
+<script>
+// 유성(08). 머리(meteor head)가 시드 고정 타원 궤도를 가로지르며, 매 프레임 자기 위치에
+// 열(heat)을 꼬리 입자로 남긴다. 열 필드는 프레임마다 일정 비율로 냉각된다(k -= COOL) —
+// 이 냉각 곡선이 잔상: 방금 지난 자리는 gold, 오래된 자리는 amber→ember→잉크로 색온도가 내려간다.
+// 렌더는 heat 칸마다 rgba 스탬프를 lighter 로 쌓는다(누적 발광). 자동 재생만 — 실측 입력 없음.
+(function () {
+  // ── 변형 상수 블록 — 아래 값 하나만 바꿔 변형 3종을 만든다 ──
+  var TAIL_N = 42;       // 머리 뒤 매 프레임 흘리는 꼬리 입자 수 — 변형 "꼬리 밀도" 축
+  var COOL = 0.017;      // 프레임당 냉각률 — 변형 "잔상 길이" 축(0.05 짧게 → 0.012 길게) — 더 오래 남아 화면을 더 가로지른다
+  var SPEED = 2.6;       // 머리 속도 배율(px/frame) — 변형 "속도" 축
+  // ────────────────────────────────────────────────────
+
+  var root = document.getElementById('mtRoot');
+  var field = document.getElementById('mtField');
+  var cv = document.getElementById('mtCv');
+  var ctx = cv.getContext('2d');
+  var trailOut = document.getElementById('mtTrail');
+
+  // 시드 고정 PRNG — mulberry32. 미리보기가 항상 같은 유성으로 날아간다
+  var SEED = 0x5eed08;
+  var prngState = SEED >>> 0;
+  function rand() {
+    prngState = (prngState + 0x6D2B79F5) >>> 0;
+    var t = prngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // 색은 CSS 커스텀 프로퍼티(--fire-*)에서 getComputedStyle 로 읽는다 — 파스텔 토큰이 scss 한 곳에
+  var css = getComputedStyle(root);
+  function tokRGB(name) {
+    var s = css.getPropertyValue(name).trim();
+    var hx = s.length === 4
+      ? s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3)
+      : s.slice(1);
+    return [parseInt(hx.slice(0, 2), 16), parseInt(hx.slice(2, 4), 16), parseInt(hx.slice(4, 6), 16)];
+  }
+  var C_INK   = tokRGB('--fire-ink');
+  var C_AMBER = tokRGB('--fire-amber');
+  var C_GOLD  = tokRGB('--fire-gold');
+  var C_ROSE  = tokRGB('--fire-rose');
+  var C_EMBER = tokRGB('--fire-ember');
+  var C_SMOKE = tokRGB('--fire-smoke');
+
+  var TAU = Math.PI * 2;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var W = 0, H = 0;
+  var raf = 0, t0 = -1;
+
+  // ── 유성 머리 — 리사주 궤도. 화면 밖에서 들어와 가로지르고 나간 뒤 되돌아온다 ──
+  var head = { x: 0, y: 0, px: 0, py: 0 };
+
+  // ── 꼬리 입자 풀 — 고정 크기 배열, 죽은 칸은 즉시 재사용(할당 없는 루프) ──
+  // 꼬리가 더 오래·더 넓게 남도록(COOL 감소) 늘린 만큼 풀도 함께 키운다(TAIL_N × 수명 프레임 이상)
+  var POOL = 1800;
+  var parts = [];
+  for (var i = 0; i < POOL; i++) parts.push({ x: 0, y: 0, vx: 0, vy: 0, k: 0, r: 0, rose: false });
+  var poolAt = 0;
+  function emit(x, y, vx, vy, k, r) {
+    var p = parts[poolAt];
+    p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.k = k; p.r = r;
+    p.rose = rand() < 0.12;                // 일부는 로즈 톤 — 파스텔 팔레트 변형색
+    poolAt = (poolAt + 1) % POOL;
+  }
+
+  // 별밤 배경 — 시드 고정. 매 프레임 같은 자리(정지 부품), 위치는 fit 때 한 번만 뽑는다
+  var stars = [];
+  function seedStars() {
+    stars = [];
+    for (var i = 0; i < 46; i++) {
+      stars.push({ x: rand() * W, y: rand() * H, r: 0.5 + rand() * 1.1, a: 0.12 + rand() * 0.3 });
+    }
+  }
+
+  function fit() {
+    var r = field.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W); cv.height = Math.round(H);
+    prngState = SEED >>> 0;                // 별 위치가 창 크기와 무관하게 같은 시드에서
+    seedStars();
+  }
+
+  // 머리 위치 — 시간의 리사주. 진폭을 판보다 크게 잡아 화면 밖에서 진입/퇴장한다
+  // 진폭을 넓혀 더 큰 대각선을 그리며 화면을 크게 가로지른다(누적면적 확장)
+  function headAt(tSec) {
+    var u = tSec * 0.5;                    // 주기 4초 분의 1 속도 인자
+    return [
+      W * (0.5 + 0.72 * Math.sin(u * 0.9)),
+      H * (0.5 + 0.54 * Math.sin(u * 1.7 + 0.6))
+    ];
+  }
+
+  // 색온도 k(1=가장 뜨거움) → 팔레트 색. gold→amber→ember 의 3정 색역 보간
+  function heatColor(k, rose) {
+    var base;
+    if (rose) base = C_ROSE;
+    else if (k > 0.62) {                   // 뜨거운 구간 — gold→amber
+      var u1 = (k - 0.62) / 0.38;
+      base = [
+        C_AMBER[0] + (C_GOLD[0] - C_AMBER[0]) * u1,
+        C_AMBER[1] + (C_GOLD[1] - C_AMBER[1]) * u1,
+        C_AMBER[2] + (C_GOLD[2] - C_AMBER[2]) * u1
+      ];
+    } else {                               // 식는 구간 — ember→amber
+      var u2 = k / 0.62;
+      base = [
+        C_EMBER[0] + (C_AMBER[0] - C_EMBER[0]) * u2,
+        C_EMBER[1] + (C_AMBER[1] - C_EMBER[1]) * u2,
+        C_EMBER[2] + (C_AMBER[2] - C_EMBER[2]) * u2
+      ];
+    }
+    return base;
+  }
+
+  function draw(tSec) {
+    ctx.fillStyle = 'rgb(' + C_INK[0] + ',' + C_INK[1] + ',' + C_INK[2] + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // 별밤 — 정지. 반짝임 없이(한 애니메이션 원칙: 유성 궤적만 산다)
+    for (var s = 0; s < stars.length; s++) {
+      var st = stars[s];
+      ctx.fillStyle = 'rgba(' + C_SMOKE[0] + ',' + C_SMOKE[1] + ',' + C_SMOKE[2] + ',' + st.a.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, st.r, 0, TAU);
+      ctx.fill();
+    }
+
+    // ── 머리 이동 + 꼬리 방출 ──
+    var hp = headAt(tSec);
+    head.px = head.x; head.py = head.y;
+    head.x = hp[0]; head.y = hp[1];
+    var dvx = (head.x - head.px), dvy = (head.y - head.py);
+    var dlen = Math.sqrt(dvx * dvx + dvy * dvy) || 1;
+    var dirx = dvx / dlen, diry = dvy / dlen;        // 진행 방향 단위벡터
+
+    for (var n = 0; n < TAIL_N; n++) {
+      // 머리 뒤쪽(진행 반대)으로 흩뿌린다 — 꼬리가 머리 뒤로 늘어진다(더 넓게, 더 길게)
+      var back = (n / TAIL_N) * 13 * SPEED;
+      var jx = (rand() - 0.5) * 8;
+      var jy = (rand() - 0.5) * 8;
+      emit(
+        head.x - dirx * back + jx,
+        head.y - diry * back + jy,
+        -dirx * (0.2 + rand() * 0.5) + (rand() - 0.5) * 0.3,
+        -diry * (0.2 + rand() * 0.5) + (rand() - 0.5) * 0.3 - 0.05,
+        0.75 + rand() * 0.25,
+        2.4 + rand() * 3.8
+      );
+    }
+
+    // ── 앙비언트 글로우 — 유성이 지나가는 자리 주변에 빛을 뿌린다 ──
+    // 고정 후광이 아니라 매 프레임 재계산: 트레일에 살아 있는 전체 열량에 연동해 반경·알파가
+    // 펄스 치고, 중심은 머리 위치를 그대로 따라간다. lighter 로 덧그려 화면 전체가 은은히 밝아진다.
+    var liveK = 0;
+    for (var lk = 0; lk < POOL; lk++) { if (parts[lk].k > 0) liveK += parts[lk].k; }
+    var liveNorm = Math.min(1, liveK / (TAIL_N * 9));    // 대략적인 정규화 — 꼬리가 꽉 찼을 때 1 근처
+    var flick2 = 0.55 + 0.28 * Math.sin(tSec * 4.6) + 0.18 * Math.sin(tSec * 10.3 + 2.0) + 0.08 * Math.sin(tSec * 17.1 + 5.1);
+    var gAlpha = (0.18 + 0.32 * liveNorm) * Math.max(0.2, Math.min(1, flick2));
+    var gRad = Math.max(W, H) * 0.66;
+    ctx.globalCompositeOperation = 'lighter';
+    var amb = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, gRad);
+    amb.addColorStop(0,    'rgba(' + C_AMBER[0] + ',' + C_AMBER[1] + ',' + C_AMBER[2] + ',' + gAlpha.toFixed(3) + ')');
+    amb.addColorStop(0.5,  'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',' + (gAlpha * 0.5).toFixed(3) + ')');
+    amb.addColorStop(1,    'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',0)');
+    ctx.fillStyle = amb;
+    ctx.fillRect(0, 0, W, H);
+
+    // ── 냉각·이동·소거 + 발광 스탬프 ──
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < POOL; i++) {
+      var p = parts[i];
+      if (p.k <= 0) continue;
+      p.k -= COOL;                           // 열량 감소 = 잔상 냉각
+      if (p.k <= 0) { p.k = 0; continue; }
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.985; p.vy *= 0.985;
+      var col = heatColor(p.k, p.rose);
+      var rad = p.r * (0.4 + p.k * 0.9);
+      var a = Math.min(0.5, p.k * 0.42);
+      var g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rad * 2);
+      g.addColorStop(0, 'rgba(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ',' + a.toFixed(3) + ')');
+      g.addColorStop(1, 'rgba(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ',0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, rad * 2, 0, TAU);
+      ctx.fill();
+    }
+
+    // ── 머리 — 가장 뜨거운 코어 + 진행 방향 앞쪽 예열 하이라이트 ──
+    var hg = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, 16);
+    hg.addColorStop(0, 'rgba(' + C_GOLD[0] + ',' + C_GOLD[1] + ',' + C_GOLD[2] + ',0.95)');
+    hg.addColorStop(0.4, 'rgba(' + C_AMBER[0] + ',' + C_AMBER[1] + ',' + C_AMBER[2] + ',0.5)');
+    hg.addColorStop(1, 'rgba(' + C_EMBER[0] + ',' + C_EMBER[1] + ',' + C_EMBER[2] + ',0)');
+    ctx.fillStyle = hg;
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, 16, 0, TAU);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+
+    trailOut.textContent = String(Math.round(1 / COOL));
+  }
+
+  function frame(now) {
+    if (t0 < 0) t0 = now;
+    var t = (now - t0) / 1000;
+    draw(t * SPEED * 0.42);
+    raf = requestAnimationFrame(frame);
+  }
+
+  // 키보드로 머리를 살짝 미는 보조 — 화살표로 방향에 순풍을 준다(포인터 실측은 07 담당)
+  field.addEventListener('keydown', function (e) {
+    var d = { ArrowLeft: [-0.6, 0], ArrowRight: [0.6, 0], ArrowUp: [0, -0.6], ArrowDown: [0, 0.6] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    for (var i = 0; i < POOL; i++) {
+      var p = parts[i];
+      if (p.k > 0) { p.vx += d[0] * 0.04; p.vy += d[1] * 0.04; }
+    }
+  });
+  window.addEventListener('resize', function () { fit(); if (reduce) draw(1.9); });
+
+  fit();
+  if (reduce) {
+    // reduce — 루프 없이 궤적이 살아 있는 한 장. 프레임을 몰아 전진해 잔상을 만든 뒤 담는다
+    root.classList.remove('is-demo');
+    root.classList.add('is-still');
+    for (var warm = 0; warm < 46; warm++) {
+      var hp2 = headAt(warm * 0.09);
+      head.px = head.x; head.py = head.y; head.x = hp2[0]; head.y = hp2[1];
+      var dvx2 = head.x - head.px, dvy2 = head.y - head.py;
+      var dl2 = Math.sqrt(dvx2 * dvx2 + dvy2 * dvy2) || 1;
+      for (var n2 = 0; n2 < TAIL_N; n2++) {
+        emit(
+          head.x - (dvx2 / dl2) * (n2 / TAIL_N) * 13 + (rand() - 0.5) * 8,
+          head.y - (dvy2 / dl2) * (n2 / TAIL_N) * 13 + (rand() - 0.5) * 8,
+          -(dvx2 / dl2) * 0.3, -(dvy2 / dl2) * 0.3,
+          0.8, 2.4 + rand() * 3.8
+        );
+      }
+      for (var i2 = 0; i2 < POOL; i2++) {
+        var p2 = parts[i2];
+        if (p2.k > 0) { p2.k -= COOL; p2.x += p2.vx; p2.y += p2.vy; }
+      }
+    }
+    draw(1.9);
+  } else {
+    raf = requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>
