@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scatters small dust particles at every floor contact and leaves the rolled path as a faint line that slowly fades after the throw. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300" role="img" aria-label="Scatters small dust particles at every floor contact and leaves the rolled path as a faint line that slowly fades after the throw."></canvas>
+  <output class="bp__status" aria-live="polite"><span id="bpLabel">Rolling</span> <b id="bpNum"></b></output>
+  <button type="button" class="bp__btn" id="bpBtn">Roll</button>
+  <p class="bp__caption">Scatters small dust particles at every floor contact and leaves the rolled path as a faint line that slowly fades after the throw.</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var labelEl = document.getElementById('bpLabel');
+  var numEl = document.getElementById('bpNum');
+  var btn = document.getElementById('bpBtn');
+
+  var CALC_W = 320, CALC_H = 200;
+  var FIXED_DT = 16;
+  var dtS = FIXED_DT / 1000;
+  var DICE_RESTITUTION = 0.45;
+  var SPIN_DAMPING = 0.985;
+  var DICE_SEED = 7;
+  var GRAVITY = 22;
+  var DIE_HALF = 1;
+  var INERTIA = 2 * DIE_HALF * DIE_HALF / 3;
+  var FLOOR_FRICTION = 0.35;
+  var SETTLE_AFTER_MS = 2000;
+  var SETTLE_RATE = 0.16;
+  var HOLD_MS = 700;
+  var CAM_Y = 5.6, CAM_BACK = 12, FOCAL = 275, VIEW_CX = 160, VIEW_CY = 82;
+  var TABLE_X = 4.4, TABLE_Z0 = -3, TABLE_Z1 = 5;
+  var PH_FLY = 0, PH_SETTLE = 1, PH_HOLD = 2, PH_IDLE = 3;
+  var STRIP_BASE = 128;
+  var BAR_MAX = 18;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var demo = !reduce;
+  if (!demo) root.classList.remove('is-demo');
+  function stopDemo() { demo = false; root.classList.remove('is-demo'); }
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+  function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+  function unit(a) { var l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
+  function matMul(a, b) {
+    var o = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (var i = 0; i < 3; i += 1) {
+      for (var j = 0; j < 3; j += 1) o[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+    }
+    return o;
+  }
+  function matVec(m, v) {
+    return [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]];
+  }
+  // 로드리게스 공식: 단위 축 ax 둘레로 ang 만큼 도는 회전 행렬
+  function rotAxis(ax, ang) {
+    var c = Math.cos(ang), s = Math.sin(ang), t = 1 - c, x = ax[0], y = ax[1], z = ax[2];
+    return [t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+      t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+      t * x * z - s * y, t * y * z + s * x, t * z * z + c];
+  }
+  function orthonormalize(m) {
+    var a = unit([m[0], m[1], m[2]]);
+    var k = a[0] * m[3] + a[1] * m[4] + a[2] * m[5];
+    var b = unit([m[3] - a[0] * k, m[4] - a[1] * k, m[5] - a[2] * k]);
+    var c = cross(a, b);
+    return [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]];
+  }
+  function randAxis(rnd) { return unit([rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1]); }
+
+  var PITCH = Math.atan2(CAM_Y, CAM_BACK);
+  var CAM_S = Math.sin(PITCH), CAM_C = Math.cos(PITCH);
+  function camPoint(p) {
+    var qy = p[1] - CAM_Y, qz = p[2] + CAM_BACK;
+    return [p[0], qy * CAM_C + qz * CAM_S, -qy * CAM_S + qz * CAM_C];
+  }
+  function camDir(v) { return [v[0], v[1] * CAM_C + v[2] * CAM_S, -v[1] * CAM_S + v[2] * CAM_C]; }
+  function scr(p) {
+    var c = camPoint(p);
+    var k = FOCAL / c[2];
+    return [VIEW_CX + c[0] * k, VIEW_CY - c[1] * k, k];
+  }
+
+  var FACE_N = [[0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+  var FACE_U = [[1, 0, 0], [1, 0, 0], [0, 1, 0], [0, 1, 0], [1, 0, 0], [1, 0, 0]];
+  var FACE_V = [[0, 0, 1], [0, 0, 1], [0, 0, 1], [0, 0, 1], [0, 1, 0], [0, 1, 0]];
+  var FACE_VAL = [1, 6, 2, 5, 3, 4];
+  var PIPS = [[], [[0, 0]], [[-1, -1], [1, 1]], [[-1, -1], [0, 0], [1, 1]],
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]], [[-1, -1], [1, -1], [0, 0], [-1, 1], [1, 1]],
+    [[-1, -1], [-1, 0], [-1, 1], [1, -1], [1, 0], [1, 1]]];
+  var DICE_PAL = [
+    { face: [255, 214, 226], edge: [240, 160, 186], pip: '#4b3a63' },
+    { face: [200, 232, 255], edge: [140, 190, 236], pip: '#3b4a6b' },
+    { face: [224, 212, 255], edge: [170, 150, 232], pip: '#46386b' },
+    { face: [255, 240, 196], edge: [236, 206, 120], pip: '#5a4636' }
+  ];
+  var LIGHT = unit([-0.45, 0.85, -0.35]);
+
+  function newDie(pal, xmin, xmax, zmin, zmax) {
+    return { p: [0, DIE_HALF, 0], v: [0, 0, 0], R: [1, 0, 0, 0, 1, 0, 0, 0, 1], w: [0, 0, 0], pal: pal, phase: PH_IDLE, t: 0, hold: 0,
+      bounces: 0, result: 0, top: 1, hit: 0, hx: 0, hz: 0, xmin: xmin, xmax: xmax, zmin: zmin, zmax: zmax };
+  }
+  function topIndex(d) {
+    var best = 0, by = -9;
+    for (var f = 0; f < 6; f += 1) {
+      var ny = d.R[3] * FACE_N[f][0] + d.R[4] * FACE_N[f][1] + d.R[5] * FACE_N[f][2];
+      if (ny > by) { by = ny; best = f; }
+    }
+    return best;
+  }
+  // 던지기: 시작 위치·속도·회전을 시드 수열에서 순서대로 뽑는다 (뽑는 순서가 곧 재현 규칙)
+  function launch(d, rnd, x, z, vx, vz, vy0, spin) {
+    d.p = [x, 2.4, z];
+    d.v = [vx + (rnd() - 0.5) * 1.6, vy0 + rnd() * 2.2, vz + (rnd() - 0.5) * 1.6];
+    var ax = randAxis(rnd);
+    var s = spin * (0.6 + rnd() * 0.8);
+    d.w = [ax[0] * s, ax[1] * s, ax[2] * s];
+    d.R = rotAxis(randAxis(rnd), rnd() * 6.283);
+    d.phase = PH_FLY; d.t = 0; d.hold = 0; d.bounces = 0; d.result = 0; d.hit = 0;
+  }
+  function spinStep(d, dt) {
+    var wl = Math.hypot(d.w[0], d.w[1], d.w[2]);
+    if (wl > 1e-5) d.R = matMul(rotAxis([d.w[0] / wl, d.w[1] / wl, d.w[2] / wl], wl * dt), d.R);
+  }
+  function floorStep(d) {
+    var mi = 0, my = 99;
+    var rx = 0, ry = 0, rz = 0;
+    for (var i = 0; i < 8; i += 1) {
+      var lx = (i & 1) ? DIE_HALF : -DIE_HALF, ly = (i & 2) ? DIE_HALF : -DIE_HALF, lz = (i & 4) ? DIE_HALF : -DIE_HALF;
+      var wy = d.R[3] * lx + d.R[4] * ly + d.R[5] * lz;
+      if (wy < my) { my = wy; mi = i; rx = d.R[0] * lx + d.R[1] * ly + d.R[2] * lz; ry = wy; rz = d.R[6] * lx + d.R[7] * ly + d.R[8] * lz; }
+    }
+    var low = d.p[1] + my;
+    if (low >= 0) return;
+    d.p[1] -= low;
+    var cvx = d.v[0] + d.w[1] * rz - d.w[2] * ry;
+    var cvy = d.v[1] + d.w[2] * rx - d.w[0] * rz;
+    var cvz = d.v[2] + d.w[0] * ry - d.w[1] * rx;
+    if (cvy >= 0) return;
+    var j = -(1 + DICE_RESTITUTION) * cvy / (1 + (rx * rx + rz * rz) / INERTIA);
+    d.v[1] += j;
+    d.w[0] += -rz * j / INERTIA; d.w[2] += rx * j / INERTIA;
+    var tl = Math.hypot(cvx, cvz);
+    if (tl > 1e-4) {
+      var jt = Math.min(FLOOR_FRICTION * j, tl * 0.5);
+      var tx = -cvx / tl * jt, tz = -cvz / tl * jt;
+      d.v[0] += tx; d.v[2] += tz;
+      d.w[0] += ry * tz / INERTIA; d.w[1] += (rz * tx - rx * tz) / INERTIA; d.w[2] += -ry * tx / INERTIA;
+    }
+    if (cvy < -1.2) { d.bounces += 1; d.hit = -cvy; d.hx = d.p[0] + rx; d.hz = d.p[2] + rz; }
+  }
+  function wallStep(d) {
+    if (d.p[0] < d.xmin) { d.p[0] = d.xmin; d.v[0] = Math.abs(d.v[0]) * 0.5; }
+    if (d.p[0] > d.xmax) { d.p[0] = d.xmax; d.v[0] = -Math.abs(d.v[0]) * 0.5; }
+    if (d.p[2] < d.zmin) { d.p[2] = d.zmin; d.v[2] = Math.abs(d.v[2]) * 0.5; }
+    if (d.p[2] > d.zmax) { d.p[2] = d.zmax; d.v[2] = -Math.abs(d.v[2]) * 0.5; }
+  }
+  // 멈추기: 법선 y 가 가장 큰 면을 윗면으로 읽고, 그 면이 정확히 위를 보도록 남은 각도의 SETTLE_RATE 만큼씩 돌린다
+  function settleStep(d) {
+    var k = topIndex(d);
+    d.top = FACE_VAL[k];
+    var nw = matVec(d.R, FACE_N[k]);
+    var ang = Math.acos(clamp(nw[1], -1, 1));
+    if (ang > 1e-4) {
+      var ax = unit(cross(nw, [0, 1, 0]));
+      d.R = orthonormalize(matMul(rotAxis(ax, ang * SETTLE_RATE), d.R));
+    }
+    d.R = orthonormalize(matMul(rotAxis([0, 1, 0], d.w[1] * dtS), d.R));
+    d.w[1] *= 0.88;
+    d.v[0] *= 0.86; d.v[2] *= 0.86; d.v[1] = 0;
+    d.p[0] += d.v[0] * dtS; d.p[2] += d.v[2] * dtS;
+    d.p[1] += (DIE_HALF - d.p[1]) * 0.22;
+    wallStep(d);
+    if (ang < 0.004 && Math.abs(d.p[1] - DIE_HALF) < 0.01) {
+      d.p[1] = DIE_HALF;
+      var q = topIndex(d);
+      d.R = orthonormalize(matMul(rotAxis(unit(cross(matVec(d.R, FACE_N[q]), [0, 1, 0])), Math.acos(clamp(matVec(d.R, FACE_N[q])[1], -1, 1))), d.R));
+      d.phase = PH_HOLD; d.hold = 0; d.result = FACE_VAL[q]; d.top = d.result;
+    }
+  }
+  function stepDie(d) {
+    if (d.phase === PH_FLY) {
+      d.t += FIXED_DT;
+      d.v[1] -= GRAVITY * dtS;
+      d.p[0] += d.v[0] * dtS; d.p[1] += d.v[1] * dtS; d.p[2] += d.v[2] * dtS;
+      spinStep(d, dtS);
+      d.w[0] *= SPIN_DAMPING; d.w[1] *= SPIN_DAMPING; d.w[2] *= SPIN_DAMPING;
+      wallStep(d);
+      floorStep(d);
+      var sp = Math.hypot(d.v[0], d.v[1], d.v[2]);
+      if (d.t > SETTLE_AFTER_MS || (d.bounces >= 3 && sp < 1.6)) d.phase = PH_SETTLE;
+    } else if (d.phase === PH_SETTLE) {
+      d.t += FIXED_DT;
+      settleStep(d);
+    } else if (d.phase === PH_HOLD) {
+      d.hold += FIXED_DT;
+    }
+  }
+  function runUntilHold(d) {
+    for (var i = 0; i < 1200 && d.phase !== PH_HOLD; i += 1) stepDie(d);
+    return d.result;
+  }
+
+  // ── 그리기 ──
+  function rgb(c, k) {
+    return 'rgb(' + Math.min(255, Math.round(c[0] * k)) + ',' + Math.min(255, Math.round(c[1] * k)) + ',' + Math.min(255, Math.round(c[2] * k)) + ')';
+  }
+  function quad(c, u, v, s) {
+    var o = [];
+    var sg = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (var i = 0; i < 4; i += 1) {
+      o.push(scr([c[0] + (u[0] * sg[i][0] + v[0] * sg[i][1]) * s * DIE_HALF, c[1] + (u[1] * sg[i][0] + v[1] * sg[i][1]) * s * DIE_HALF, c[2] + (u[2] * sg[i][0] + v[2] * sg[i][1]) * s * DIE_HALF]));
+    }
+    return o;
+  }
+  function fillPoly(pts, color, edge) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (edge > 0) { ctx.strokeStyle = color; ctx.lineWidth = edge; ctx.stroke(); }
+  }
+  function drawDie(d, hi, alpha) {
+    var pal = DICE_PAL[d.pal % DICE_PAL.length];
+    ctx.globalAlpha = alpha;
+    ctx.lineJoin = 'round';
+    for (var f = 0; f < 6; f += 1) {
+      var nw = matVec(d.R, FACE_N[f]);
+      var cw = [d.p[0] + nw[0] * DIE_HALF, d.p[1] + nw[1] * DIE_HALF, d.p[2] + nw[2] * DIE_HALF];
+      var cc = camPoint(cw), nc = camDir(nw);
+      if (nc[0] * cc[0] + nc[1] * cc[1] + nc[2] * cc[2] >= 0) continue;
+      var uw = matVec(d.R, FACE_U[f]), vw = matVec(d.R, FACE_V[f]);
+      var lit = 0.66 + 0.34 * Math.max(0, dot(nw, LIGHT));
+      var k0 = scr(cw)[2];
+      fillPoly(quad(cw, uw, vw, 1), rgb(pal.edge, lit), k0 * 0.1);
+      fillPoly(quad(cw, uw, vw, 0.84), rgb(pal.face, lit), k0 * 0.16);
+      if (f === hi) fillPoly(quad(cw, uw, vw, 0.84), 'rgba(255,255,255,0.4)', 0);
+      var val = FACE_VAL[f];
+      for (var pi = 0; pi < PIPS[val].length; pi += 1) {
+        var a = PIPS[val][pi][0] * 0.5 * DIE_HALF, b = PIPS[val][pi][1] * 0.5 * DIE_HALF;
+        var ring = [];
+        for (var j = 0; j < 10; j += 1) {
+          var an = j * 0.62832, rr = 0.17 * DIE_HALF;
+          var ca = Math.cos(an) * rr, sa = Math.sin(an) * rr;
+          ring.push(scr([cw[0] + uw[0] * (a + ca) + vw[0] * (b + sa) + nw[0] * 0.004, cw[1] + uw[1] * (a + ca) + vw[1] * (b + sa) + nw[1] * 0.004, cw[2] + uw[2] * (a + ca) + vw[2] * (b + sa) + nw[2] * 0.004]));
+        }
+        fillPoly(ring, pal.pip, 0);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  function drawShadow(d, alpha) {
+    var s = scr([d.p[0], 0, d.p[2]]);
+    var h = Math.max(0, d.p[1] - DIE_HALF);
+    var r = DIE_HALF * s[2] * (1.2 + h * 0.18);
+    ctx.save();
+    ctx.translate(s[0], s[1]);
+    ctx.scale(1, 0.42);
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, 6.2832);
+    ctx.fillStyle = 'rgba(30,60,60,' + (0.34 * alpha / (1 + h * 0.7)) + ')';
+    ctx.fill();
+    ctx.restore();
+  }
+  var FELT_DOTS = [];
+  (function () {
+    var fr = seedRand(99);
+    for (var i = 0; i < 70; i += 1) FELT_DOTS.push([(fr() * 2 - 1) * TABLE_X, TABLE_Z0 + fr() * (TABLE_Z1 - TABLE_Z0), 0.04 + fr() * 0.08]);
+  })();
+  function tablePts(m) {
+    return [scr([-TABLE_X - m, 0, TABLE_Z0 - m]), scr([TABLE_X + m, 0, TABLE_Z0 - m]), scr([TABLE_X + m, 0, TABLE_Z1 + m]), scr([-TABLE_X - m, 0, TABLE_Z1 + m])];
+  }
+  function drawStage(lightX, lightK) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#1d1a2b';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.setTransform(sc, 0, 0, sc, 0, 0);
+    var bg = ctx.createRadialGradient(160, 80, 10, 160, 80, 210);
+    bg.addColorStop(0, '#3f3764');
+    bg.addColorStop(1, '#221d36');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, CALC_W, CALC_H);
+    fillPoly(tablePts(0.5), '#8e80c8', 0);
+    var tp = tablePts(0);
+    var g = ctx.createLinearGradient(0, tp[0][1], 0, tp[2][1]);
+    g.addColorStop(0, '#9fdcc3');
+    g.addColorStop(1, '#78c8aa');
+    fillPoly(tp, g, 0);
+    for (var i = 0; i < FELT_DOTS.length; i += 1) {
+      var s = scr([FELT_DOTS[i][0], 0, FELT_DOTS[i][1]]);
+      ctx.beginPath();
+      ctx.arc(s[0], s[1], FELT_DOTS[i][2] * s[2], 0, 6.2832);
+      ctx.fillStyle = 'rgba(40,110,90,0.12)';
+      ctx.fill();
+    }
+    var lp = scr([lightX, 0, 1]);
+    var lg = ctx.createRadialGradient(lp[0], lp[1], 4, lp[0], lp[1], 120);
+    lg.addColorStop(0, 'rgba(255,255,255,' + (0.3 * lightK) + ')');
+    lg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(tp[0][0], tp[0][1]); ctx.lineTo(tp[1][0], tp[1][1]); ctx.lineTo(tp[2][0], tp[2][1]); ctx.lineTo(tp[3][0], tp[3][1]);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = lg;
+    ctx.fillRect(0, 0, CALC_W, CALC_H);
+    ctx.restore();
+  }
+  function drawChip(x, y, s, value, pal, mark) {
+    var p = DICE_PAL[pal % DICE_PAL.length];
+    ctx.fillStyle = value > 0 ? rgb(p.face, 1) : 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = mark ? '#7fe3bd' : rgb(p.edge, 1);
+    ctx.lineWidth = mark ? 1.8 : 1;
+    ctx.fillRect(x, y, s, s);
+    ctx.strokeRect(x, y, s, s);
+    for (var i = 0; i < PIPS[value].length; i += 1) {
+      ctx.beginPath();
+      ctx.arc(x + s / 2 + PIPS[value][i][0] * s * 0.26, y + s / 2 + PIPS[value][i][1] * s * 0.26, s * 0.1, 0, 6.2832);
+      ctx.fillStyle = p.pip;
+      ctx.fill();
+    }
+  }
+
+  // ── 상태 줄 (aria-live) ──
+  var stLabel = '', stNum = '', stAt = -9999;
+  function setStatus(label, num, force) {
+    if (label === stLabel && num === stNum) return;
+    if (!force && label === stLabel && elapsed - stAt < 450) return;
+    stLabel = label; stNum = num; stAt = elapsed;
+    labelEl.textContent = label;
+    numEl.textContent = num;
+  }
+  var cw = 480, ch = 300, sc = 1.5, elapsed = 0;
+  var rafId = 0;
+  var cleaners = [];
+
+  // 기법: 바닥에 닿는 걸음마다 충격 속도에 비례한 개수의 먼지 입자를 시드 난수로 흩뿌리고(수평 퍼짐·위로 솟음·중력·마찰),
+  // 그림자 점의 경로를 DUST_FADE_MS 동안 옅어지는 선으로 바닥에 남긴다. 입자·자국 모두 수명(age)으로만 투명도를 정한다.
+  var T_RESULT = 'Result';
+  var T_ROLLING = 'Rolling';
+  var DUST_FADE_MS = 3600;
+  var die = newDie(1, -3.4, 3.4, -1.8, 2.6);
+  var rng = seedRand(DICE_SEED + 6);
+  var dustRng = seedRand(DICE_SEED + 60);
+  var dust = [];
+  var path = [];
+  var marks = [];
+
+  function sceneInit() { die.phase = PH_IDLE; }
+  function sceneRoll(manual) {
+    launch(die, rng, -3.2, rng() * 2.4 - 0.8, 3.8, 0.3, 3.2, 15);
+    setStatus(T_ROLLING, '', true);
+  }
+  function sceneDone() { return die.phase === PH_HOLD; }
+  function sceneFinish() { setStatus(T_RESULT, String(die.result), true); }
+  function spawnDust(x, z, speed) {
+    var n = 7 + Math.min(10, Math.round(speed * 1.1));
+    for (var i = 0; i < n; i += 1) {
+      var an = dustRng() * 6.2832, sp = 0.6 + dustRng() * 1.8;
+      dust.push({ x: x, y: 0.05, z: z, vx: Math.cos(an) * sp, vy: 0.8 + dustRng() * 1.8, vz: Math.sin(an) * sp, born: elapsed, life: 900 + dustRng() * 700, size: 0.07 + dustRng() * 0.11 });
+    }
+    marks.push([x, z, elapsed, 0.3 + Math.min(0.5, speed * 0.04)]);
+    if (marks.length > 24) marks.shift();
+  }
+  function stepWorld() {
+    if (die.phase === PH_IDLE) return;
+    stepDie(die);
+    if (die.phase !== PH_HOLD && Math.round(die.t / FIXED_DT) % 3 === 0) { path.push([die.p[0], die.p[2], elapsed]); if (path.length > 90) path.shift(); }
+    if (die.hit > 0) { spawnDust(die.hx, die.hz, die.hit); die.hit = 0; }
+    var live = [];
+    for (var i = 0; i < dust.length; i += 1) {
+      var p = dust[i];
+      if (elapsed - p.born > p.life) continue;
+      p.vy -= 3.2 * dtS; p.vx *= 0.97; p.vz *= 0.97;
+      p.x += p.vx * dtS; p.y = Math.max(0, p.y + p.vy * dtS); p.z += p.vz * dtS;
+      live.push(p);
+    }
+    dust = live;
+    if (die.phase === PH_HOLD) setStatus(T_RESULT, String(die.result), true);
+    if (die.phase === PH_HOLD && demo && die.hold >= HOLD_MS) sceneRoll(false);
+  }
+  function drawWorld() {
+    drawStage(die.p[0], 0.8);
+    ctx.lineCap = 'round';
+    for (var i = 1; i < path.length; i += 1) {
+      var age = (elapsed - path[i][2]) / DUST_FADE_MS;
+      if (age >= 1) continue;
+      var a = scr([path[i - 1][0], 0, path[i - 1][1]]), b = scr([path[i][0], 0, path[i][1]]);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+      ctx.strokeStyle = 'rgba(95,70,150,' + (0.5 * (1 - age)) + ')'; ctx.lineWidth = b[2] * 0.3 * (1 - age * 0.6); ctx.stroke();
+    }
+    for (var m = 0; m < marks.length; m += 1) {
+      var f = (elapsed - marks[m][2]) / (DUST_FADE_MS + 800);
+      if (f >= 1) continue;
+      var s = scr([marks[m][0], 0, marks[m][1]]);
+      ctx.save(); ctx.translate(s[0], s[1]); ctx.scale(1, 0.4);
+      ctx.beginPath(); ctx.arc(0, 0, s[2] * marks[m][3], 0, 6.2832);
+      ctx.fillStyle = 'rgba(40,110,90,' + (0.34 * (1 - f)) + ')'; ctx.fill();
+      ctx.restore();
+    }
+    if (die.phase !== PH_IDLE) { drawShadow(die, 1); drawDie(die, -1, 1); }
+    for (var d = 0; d < dust.length; d += 1) {
+      var q = dust[d];
+      var t = (elapsed - q.born) / q.life;
+      var sp = scr([q.x, q.y, q.z]);
+      ctx.beginPath(); ctx.arc(sp[0], sp[1], sp[2] * q.size * (1 + t * 1.6), 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,248,230,' + (0.85 * (1 - t)) + ')'; ctx.fill();
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sc = cw / CALC_W;
+    drawWorld();
+  }
+  var lastTs = -1;
+  var acc = 0;
+  function tick(ts) {
+    if (lastTs < 0) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    acc += frameDt;
+    while (acc >= FIXED_DT) { elapsed += FIXED_DT; stepWorld(); acc -= FIXED_DT; }
+    drawWorld();
+    rafId = requestAnimationFrame(tick);
+  }
+  // 모션 줄이기: 애니메이션 없이 결과가 나올 때까지 같은 계산을 한 번에 돌려 최종 장면만 그린다
+  function runToDone() {
+    var i = 0;
+    do { elapsed += FIXED_DT; stepWorld(); i += 1; } while (i < 1500 && !sceneDone());
+    sceneFinish();
+    drawWorld();
+  }
+  function onRollClick() {
+    stopDemo();
+    sceneRoll(true);
+    if (reduce) runToDone();
+  }
+  sceneInit();
+  sceneRoll(false);
+  if (reduce) {
+    runToDone();
+  } else {
+    for (var w0 = 0; w0 < 8; w0 += 1) { elapsed += FIXED_DT; stepWorld(); }
+  }
+  btn.addEventListener('click', onRollClick);
+  cleaners.push(function () { btn.removeEventListener('click', onRollClick); });
+  fit();
+  window.addEventListener('resize', fit);
+  cleaners.push(function () { window.removeEventListener('resize', fit); });
+  if (!reduce) rafId = requestAnimationFrame(tick);
+
+  function destroy() {
+    cancelAnimationFrame(rafId);
+    for (var i = 0; i < cleaners.length; i += 1) cleaners[i]();
+  }
+
+})();
+</script>
+</body>
+</html>
