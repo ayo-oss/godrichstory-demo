@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>明暗差の小さいメッシュは段階が帯に見えるので、ピクセルごとに種固定のノイズを一段階以内で足し、丸めの境を散らして帯を消す。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <canvas class="mg__canvas" id="mgCanvas" width="160" height="100" tabindex="0" aria-label="明暗差の小さいメッシュは段階が帯に見えるので、ピクセルごとに種固定のノイズを一段階以内で足し、丸めの境を散らして帯を消す。"></canvas>
+  <p class="mg__status" id="mgStatus" aria-live="polite">デモ実行中</p>
+  <button class="mg__btn" id="mgBtn" type="button">一時停止</button>
+  <p class="mg__caption">明暗差の小さいメッシュは段階が帯に見えるので、ピクセルごとに種固定のノイズを一段階以内で足し、丸めの境を散らして帯を消す。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mgRoot');
+  var canvas = document.getElementById('mgCanvas');
+  var statusEl = document.getElementById('mgStatus');
+  var btnEl = document.getElementById('mgBtn');
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var CALC_W = 160, CALC_H = 100;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_MS = 900;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce)
+          root.classList.remove('is-demo');
+      var paused = false;
+      var elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { var c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      // 시드 고정 난수 (mulberry32) — 같은 시드는 언제나 같은 수열이다
+      function seedRand(seed) {
+          var s = seed >>> 0;
+          return function () {
+              s = (s + 0x6D2B79F5) >>> 0;
+              var z = s;
+              z = Math.imul(z ^ (z >>> 15), z | 1);
+              z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+              return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+          };
+      }
+      // 파스텔 여섯 색 — 분홍·라일락·하늘·민트·살구·버터
+      var PAL = [[255, 152, 178], [182, 152, 255], [122, 200, 255], [122, 222, 186], [255, 196, 140], [255, 228, 130]];
+      // 색 목록을 원형으로 읽는다. pos 의 정수부는 몇 번째 색, 소수부는 다음 색으로 넘어가는 정도
+      function pick(pal, pos, out) {
+          var n = pal.length;
+          var i0 = Math.floor(pos);
+          var f = pos - i0;
+          var a = pal[((i0 % n) + n) % n];
+          var b = pal[(((i0 + 1) % n) + n) % n];
+          out[0] = lerp(a[0], b[0], f);
+          out[1] = lerp(a[1], b[1], f);
+          out[2] = lerp(a[2], b[2], f);
+      }
+      function put(d, x, y, r, g, b) {
+          var o = (y * CALC_W + x) * 4;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = 255;
+      }
+      canvas.width = CALC_W;
+      canvas.height = CALC_H;
+      var img = ctx.createImageData(CALC_W, CALC_H);
+      var px = img.data;
+      // 06 알갱이 디더 — 같은 어두운 그라데이션을 8비트보다 거친 STEP 단계로 반올림해, 왼쪽은 그대로 오른쪽은 알갱이를 더한다
+      var REDUCE_MS = 900;
+      var STEP = 10;
+      var GRAIN = 1;
+      var DARK = [30, 34, 66];
+      var LIGHT = [112, 100, 170];
+      var NOISE_N = CALC_W * CALC_H;
+      var noiseTab = [];
+      var rnd = seedRand(2026);
+      for (var ni = 0; ni < NOISE_N; ni += 1) {
+          noiseTab.push(rnd());
+      }
+      function paint(t, d) {
+          var cx = 0.5 + 0.28 * Math.sin(6.2832 * t * 0.4);
+          var cy = 0.5 + 0.2 * Math.cos(6.2832 * t * 0.31);
+          var frame = Math.floor(t * 30);
+          for (var y = 0; y < CALC_H; y += 1) {
+              var v = y / (CALC_H - 1);
+              for (var x = 0; x < CALC_W; x += 1) {
+                  var u = x / (CALC_W - 1);
+                  var dx = (u - cx) * 1.6, dy = v - cy;
+                  var k = 1 - clamp(Math.sqrt(dx * dx + dy * dy) * 1.05, 0, 1);
+                  var right = x >= CALC_W / 2;
+                  var n = noiseTab[(y * CALC_W + x + frame * 997) % NOISE_N];
+                  // 반올림 문턱을 픽셀마다 0.5 ± GRAIN/2 단계 안에서 흔든다 (왼쪽은 문턱 0.5 고정)
+                  var th = right ? 0.5 + (n - 0.5) * GRAIN : 0.5;
+                  var ch = [0, 0, 0];
+                  for (var c = 0; c < 3; c += 1) {
+                      var val = lerp(DARK[c], LIGHT[c], k);
+                      ch[c] = Math.floor(val / STEP + th) * STEP;
+                  }
+                  if (x === Math.floor(CALC_W / 2) || x === Math.floor(CALC_W / 2) - 1) {
+                      ch = [236, 232, 255];
+                  }
+                  put(d, x, y, ch[0], ch[1], ch[2]);
+              }
+          }
+      }
+      function draw() {
+          paint(elapsed / 1000, px);
+          ctx.putImageData(img, 0, 0);
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+              }
+              draw();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      function onButton() {
+          root.classList.remove('is-demo');
+          if (reduce) {
+              elapsed += REDUCE_STEP_MS;
+              draw();
+              setStatus('一場面ずつ送っています');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? '再生' : '一時停止';
+          setStatus(paused ? '一時停止中' : 'デモ実行中');
+      }
+      draw();
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function () { onButton(); });
+      listen(canvas, 'keydown', function (e) {
+          var k = e.key;
+          if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              onButton();
+          }
+      });
+      if (reduce) {
+          elapsed = REDUCE_MS;
+          draw();
+          btnEl.textContent = '次の場面';
+          setStatus('一場面ずつ送っています');
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nine control points sway near their anchors, and the weights are eased at every cell border so the colour flows without a seam, computed pixel by pixel. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <canvas class="mg__canvas" id="mgCanvas" width="160" height="100" tabindex="0" aria-label="Nine control points sway near their anchors, and the weights are eased at every cell border so the colour flows without a seam, computed pixel by pixel."></canvas>
+  <p class="mg__status" id="mgStatus" aria-live="polite">Demo running</p>
+  <button class="mg__btn" id="mgBtn" type="button">Pause</button>
+  <p class="mg__caption">Nine control points sway near their anchors, and the weights are eased at every cell border so the colour flows without a seam, computed pixel by pixel.</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mgRoot');
+  var canvas = document.getElementById('mgCanvas');
+  var statusEl = document.getElementById('mgStatus');
+  var btnEl = document.getElementById('mgBtn');
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var CALC_W = 160, CALC_H = 100;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_MS = 900;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce)
+          root.classList.remove('is-demo');
+      var paused = false;
+      var elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { var c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      // 시드 고정 난수 (mulberry32) — 같은 시드는 언제나 같은 수열이다
+      function seedRand(seed) {
+          var s = seed >>> 0;
+          return function () {
+              s = (s + 0x6D2B79F5) >>> 0;
+              var z = s;
+              z = Math.imul(z ^ (z >>> 15), z | 1);
+              z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+              return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+          };
+      }
+      // 파스텔 여섯 색 — 분홍·라일락·하늘·민트·살구·버터
+      var PAL = [[255, 152, 178], [182, 152, 255], [122, 200, 255], [122, 222, 186], [255, 196, 140], [255, 228, 130]];
+      // 색 목록을 원형으로 읽는다. pos 의 정수부는 몇 번째 색, 소수부는 다음 색으로 넘어가는 정도
+      function pick(pal, pos, out) {
+          var n = pal.length;
+          var i0 = Math.floor(pos);
+          var f = pos - i0;
+          var a = pal[((i0 % n) + n) % n];
+          var b = pal[(((i0 + 1) % n) + n) % n];
+          out[0] = lerp(a[0], b[0], f);
+          out[1] = lerp(a[1], b[1], f);
+          out[2] = lerp(a[2], b[2], f);
+      }
+      function put(d, x, y, r, g, b) {
+          var o = (y * CALC_W + x) * 4;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = 255;
+      }
+      canvas.width = CALC_W;
+      canvas.height = CALC_H;
+      var img = ctx.createImageData(CALC_W, CALC_H);
+      var px = img.data;
+      // 02 3×3 제어점 smoothstep — 아홉 제어점이 제자리 근처에서 흔들리고 색도 이웃 색으로 넘어간다
+      var REDUCE_MS = 900;
+      var SWAY = 0.12;
+      var NODE_RATE = 1.2;
+      var nodeCol = [];
+      var nodeDx = [];
+      var nodeDy = [];
+      for (var ni = 0; ni < 9; ni += 1) {
+          nodeCol.push([0, 0, 0]);
+          nodeDx.push(0);
+          nodeDy.push(0);
+      }
+      var meshTmp = [0, 0, 0];
+      // 0~1 좌표를 칸 번호(0 또는 1)와 칸 안의 부드러운 가중치로 나눈다
+      function meshAt(u, v, out) {
+          var gx = clamp(u, 0, 1) * 2, gy = clamp(v, 0, 1) * 2;
+          var ix = Math.min(1, Math.floor(gx)), iy = Math.min(1, Math.floor(gy));
+          var fx = smooth(gx - ix), fy = smooth(gy - iy);
+          var a = nodeCol[iy * 3 + ix], b = nodeCol[iy * 3 + ix + 1];
+          var c = nodeCol[(iy + 1) * 3 + ix], e = nodeCol[(iy + 1) * 3 + ix + 1];
+          out[0] = lerp(lerp(a[0], b[0], fx), lerp(c[0], e[0], fx), fy);
+          out[1] = lerp(lerp(a[1], b[1], fx), lerp(c[1], e[1], fx), fy);
+          out[2] = lerp(lerp(a[2], b[2], fx), lerp(c[2], e[2], fx), fy);
+      }
+      function paint(t, d) {
+          for (var n = 0; n < 9; n += 1) {
+              pick(PAL, n * 0.7 + t * NODE_RATE, nodeCol[n]);
+              nodeDx[n] = SWAY * Math.sin(6.2832 * (t * 1.2 + n * 0.37));
+              nodeDy[n] = SWAY * Math.cos(6.2832 * (t * 1.05 + n * 0.51));
+          }
+          for (var y = 0; y < CALC_H; y += 1) {
+              var v = y / (CALC_H - 1);
+              var gy = v * 2, iy = Math.min(1, Math.floor(gy)), fy = smooth(gy - iy);
+              for (var x = 0; x < CALC_W; x += 1) {
+                  var u = x / (CALC_W - 1);
+                  var gx = u * 2, ix = Math.min(1, Math.floor(gx)), fx = smooth(gx - ix);
+                  var k0 = iy * 3 + ix, k1 = k0 + 1, k2 = k0 + 3, k3 = k0 + 4;
+                  // 제어점이 움직인 만큼 읽는 자리를 거꾸로 민다 — 같은 부드러운 가중치로 변위를 섞는다
+                  var du = lerp(lerp(nodeDx[k0], nodeDx[k1], fx), lerp(nodeDx[k2], nodeDx[k3], fx), fy);
+                  var dv = lerp(lerp(nodeDy[k0], nodeDy[k1], fx), lerp(nodeDy[k2], nodeDy[k3], fx), fy);
+                  meshAt(u - du, v - dv, meshTmp);
+                  put(d, x, y, meshTmp[0], meshTmp[1], meshTmp[2]);
+              }
+          }
+      }
+      function draw() {
+          paint(elapsed / 1000, px);
+          ctx.putImageData(img, 0, 0);
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+              }
+              draw();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      function onButton() {
+          root.classList.remove('is-demo');
+          if (reduce) {
+              elapsed += REDUCE_STEP_MS;
+              draw();
+              setStatus('Stepping one scene at a time');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? 'Play' : 'Pause';
+          setStatus(paused ? 'Paused' : 'Demo running');
+      }
+      draw();
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function () { onButton(); });
+      listen(canvas, 'keydown', function (e) {
+          var k = e.key;
+          if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              onButton();
+          }
+      });
+      if (reduce) {
+          elapsed = REDUCE_MS;
+          draw();
+          btnEl.textContent = 'Next scene';
+          setStatus('Stepping one scene at a time');
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>

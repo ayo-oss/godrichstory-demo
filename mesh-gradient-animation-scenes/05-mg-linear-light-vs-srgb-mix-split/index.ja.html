@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同じ二色を左は値のまま、右は明るさを線形に戻して混ぜ、真ん中の帯が暗く濁る側と澄んだまま残る側を一画面で比べる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <canvas class="mg__canvas" id="mgCanvas" width="160" height="100" tabindex="0" aria-label="同じ二色を左は値のまま、右は明るさを線形に戻して混ぜ、真ん中の帯が暗く濁る側と澄んだまま残る側を一画面で比べる。"></canvas>
+  <p class="mg__status" id="mgStatus" aria-live="polite">デモ実行中</p>
+  <button class="mg__btn" id="mgBtn" type="button">一時停止</button>
+  <p class="mg__caption">同じ二色を左は値のまま、右は明るさを線形に戻して混ぜ、真ん中の帯が暗く濁る側と澄んだまま残る側を一画面で比べる。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mgRoot');
+  var canvas = document.getElementById('mgCanvas');
+  var statusEl = document.getElementById('mgStatus');
+  var btnEl = document.getElementById('mgBtn');
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var CALC_W = 160, CALC_H = 100;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_MS = 900;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce)
+          root.classList.remove('is-demo');
+      var paused = false;
+      var elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { var c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      // 시드 고정 난수 (mulberry32) — 같은 시드는 언제나 같은 수열이다
+      function seedRand(seed) {
+          var s = seed >>> 0;
+          return function () {
+              s = (s + 0x6D2B79F5) >>> 0;
+              var z = s;
+              z = Math.imul(z ^ (z >>> 15), z | 1);
+              z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+              return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+          };
+      }
+      // 파스텔 여섯 색 — 분홍·라일락·하늘·민트·살구·버터
+      var PAL = [[255, 152, 178], [182, 152, 255], [122, 200, 255], [122, 222, 186], [255, 196, 140], [255, 228, 130]];
+      // 색 목록을 원형으로 읽는다. pos 의 정수부는 몇 번째 색, 소수부는 다음 색으로 넘어가는 정도
+      function pick(pal, pos, out) {
+          var n = pal.length;
+          var i0 = Math.floor(pos);
+          var f = pos - i0;
+          var a = pal[((i0 % n) + n) % n];
+          var b = pal[(((i0 + 1) % n) + n) % n];
+          out[0] = lerp(a[0], b[0], f);
+          out[1] = lerp(a[1], b[1], f);
+          out[2] = lerp(a[2], b[2], f);
+      }
+      function put(d, x, y, r, g, b) {
+          var o = (y * CALC_W + x) * 4;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = 255;
+      }
+      canvas.width = CALC_W;
+      canvas.height = CALC_H;
+      var img = ctx.createImageData(CALC_W, CALC_H);
+      var px = img.data;
+      // 05 감마 보정 섞기 — 왼쪽 절반은 값 그대로, 오른쪽 절반은 선형 밝기로 되돌려 섞는다 (같은 보라·주황)
+      var REDUCE_MS = 800;
+      var COLOR_A = [130, 90, 245];
+      var COLOR_B = [255, 156, 60];
+      var GAMMA = 2.2;
+      var linA = [Math.pow(COLOR_A[0] / 255, GAMMA), Math.pow(COLOR_A[1] / 255, GAMMA), Math.pow(COLOR_A[2] / 255, GAMMA)];
+      var linB = [Math.pow(COLOR_B[0] / 255, GAMMA), Math.pow(COLOR_B[1] / 255, GAMMA), Math.pow(COLOR_B[2] / 255, GAMMA)];
+      var HALF = CALC_W / 2;
+      function paint(t, d) {
+          for (var y = 0; y < CALC_H; y += 1) {
+              var v = y / (CALC_H - 1);
+              for (var x = 0; x < CALC_W; x += 1) {
+                  var right = x >= HALF;
+                  var lx = (right ? x - HALF : x) / (HALF - 1);
+                  // 두 색 사이의 비율 s — 양쪽 절반이 같은 값 s 를 쓴다
+                  var s = smooth(lx + 0.22 * Math.sin(6.2832 * (v * 1.1 + t * 0.5)) + 0.1 * Math.sin(6.2832 * (v * 2.3 - t * 0.35)));
+                  var r, g, b;
+                  if (!right) {
+                      r = lerp(COLOR_A[0], COLOR_B[0], s);
+                      g = lerp(COLOR_A[1], COLOR_B[1], s);
+                      b = lerp(COLOR_A[2], COLOR_B[2], s);
+                  }
+                  else {
+                      r = 255 * Math.pow(lerp(linA[0], linB[0], s), 1 / GAMMA);
+                      g = 255 * Math.pow(lerp(linA[1], linB[1], s), 1 / GAMMA);
+                      b = 255 * Math.pow(lerp(linA[2], linB[2], s), 1 / GAMMA);
+                  }
+                  if (x === Math.floor(HALF) || x === Math.floor(HALF) - 1) {
+                      r = 255;
+                      g = 255;
+                      b = 255;
+                  }
+                  put(d, x, y, r, g, b);
+              }
+          }
+      }
+      function draw() {
+          paint(elapsed / 1000, px);
+          ctx.putImageData(img, 0, 0);
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+              }
+              draw();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      function onButton() {
+          root.classList.remove('is-demo');
+          if (reduce) {
+              elapsed += REDUCE_STEP_MS;
+              draw();
+              setStatus('一場面ずつ送っています');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? '再生' : '一時停止';
+          setStatus(paused ? '一時停止中' : 'デモ実行中');
+      }
+      draw();
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function () { onButton(); });
+      listen(canvas, 'keydown', function (e) {
+          var k = e.key;
+          if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              onButton();
+          }
+      });
+      if (reduce) {
+          elapsed = REDUCE_MS;
+          draw();
+          btnEl.textContent = '次の場面';
+          setStatus('一場面ずつ送っています');
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>

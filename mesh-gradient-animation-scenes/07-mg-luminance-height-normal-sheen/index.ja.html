@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>メッシュの明るさを高さとみなして隣のピクセルとの差から傾きを求め、動く光源が当たる所に輝きが乗った濡れたゼリーのような面になる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <canvas class="mg__canvas" id="mgCanvas" width="160" height="100" tabindex="0" aria-label="メッシュの明るさを高さとみなして隣のピクセルとの差から傾きを求め、動く光源が当たる所に輝きが乗った濡れたゼリーのような面になる。"></canvas>
+  <p class="mg__status" id="mgStatus" aria-live="polite">デモ実行中</p>
+  <button class="mg__btn" id="mgBtn" type="button">一時停止</button>
+  <p class="mg__caption">メッシュの明るさを高さとみなして隣のピクセルとの差から傾きを求め、動く光源が当たる所に輝きが乗った濡れたゼリーのような面になる。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mgRoot');
+  var canvas = document.getElementById('mgCanvas');
+  var statusEl = document.getElementById('mgStatus');
+  var btnEl = document.getElementById('mgBtn');
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var CALC_W = 160, CALC_H = 100;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_MS = 900;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce)
+          root.classList.remove('is-demo');
+      var paused = false;
+      var elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { var c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      // 시드 고정 난수 (mulberry32) — 같은 시드는 언제나 같은 수열이다
+      function seedRand(seed) {
+          var s = seed >>> 0;
+          return function () {
+              s = (s + 0x6D2B79F5) >>> 0;
+              var z = s;
+              z = Math.imul(z ^ (z >>> 15), z | 1);
+              z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+              return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+          };
+      }
+      // 파스텔 여섯 색 — 분홍·라일락·하늘·민트·살구·버터
+      var PAL = [[255, 152, 178], [182, 152, 255], [122, 200, 255], [122, 222, 186], [255, 196, 140], [255, 228, 130]];
+      // 색 목록을 원형으로 읽는다. pos 의 정수부는 몇 번째 색, 소수부는 다음 색으로 넘어가는 정도
+      function pick(pal, pos, out) {
+          var n = pal.length;
+          var i0 = Math.floor(pos);
+          var f = pos - i0;
+          var a = pal[((i0 % n) + n) % n];
+          var b = pal[(((i0 + 1) % n) + n) % n];
+          out[0] = lerp(a[0], b[0], f);
+          out[1] = lerp(a[1], b[1], f);
+          out[2] = lerp(a[2], b[2], f);
+      }
+      function put(d, x, y, r, g, b) {
+          var o = (y * CALC_W + x) * 4;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = 255;
+      }
+      canvas.width = CALC_W;
+      canvas.height = CALC_H;
+      var img = ctx.createImageData(CALC_W, CALC_H);
+      var px = img.data;
+      // 07 밝기를 높이로 읽는 광택 — 메쉬 밝기 → 높이 → 이웃 차이 기울기 → 움직이는 광원의 확산광·반짝임
+      var REDUCE_MS = 1000;
+      var HEIGHT = 0.9;
+      var SLOPE_GAIN = 0.045;
+      var SHINE = 24;
+      var SHEEN = 0.85;
+      var ASPECT = CALC_W / CALC_H;
+      var SEED_FX = [0.27, 0.38, 0.33, 0.45];
+      var SEED_FY = [0.35, 0.29, 0.41, 0.31];
+      var SEED_PH = [0.0, 0.27, 0.55, 0.8];
+      var dotX = [0, 0, 0, 0];
+      var dotY = [0, 0, 0, 0];
+      var colR = new Float32Array(CALC_W * CALC_H);
+      var colG = new Float32Array(CALC_W * CALC_H);
+      var colB = new Float32Array(CALC_W * CALC_H);
+      var hgt = new Float32Array(CALC_W * CALC_H);
+      var TONE = [PAL[1], PAL[0], PAL[2], PAL[4]];
+      function paint(t, d) {
+          for (var k = 0; k < 4; k += 1) {
+              dotX[k] = (0.5 + 0.38 * Math.sin(6.2832 * (t * SEED_FX[k] + SEED_PH[k]))) * ASPECT;
+              dotY[k] = 0.5 + 0.38 * Math.cos(6.2832 * (t * SEED_FY[k] + SEED_PH[k] * 1.3));
+          }
+          for (var y = 0; y < CALC_H; y += 1) {
+              var v = y / (CALC_H - 1);
+              for (var x = 0; x < CALC_W; x += 1) {
+                  var u = (x / (CALC_W - 1)) * ASPECT;
+                  var wr = 0, wg = 0, wb = 0, ws = 0;
+                  for (var j = 0; j < 4; j += 1) {
+                      var dx = u - dotX[j], dy = v - dotY[j];
+                      var w = 1 / (dx * dx + dy * dy + 0.004);
+                      wr += w * TONE[j][0];
+                      wg += w * TONE[j][1];
+                      wb += w * TONE[j][2];
+                      ws += w;
+                  }
+                  var i = y * CALC_W + x;
+                  colR[i] = wr / ws;
+                  colG[i] = wg / ws;
+                  colB[i] = wb / ws;
+                  // 밝기(0~1)에서 가까운 점의 가중 비율을 한 번 더 제곱해 높이로 쓴다
+                  var lum = (0.299 * colR[i] + 0.587 * colG[i] + 0.114 * colB[i]) / 255;
+                  hgt[i] = lum * lum * HEIGHT * CALC_H;
+              }
+          }
+          var ang = 6.2832 * t * 0.35;
+          var lx = Math.cos(ang) * 0.7, ly = Math.sin(ang) * 0.7, lz = 0.6;
+          var ln = Math.sqrt(lx * lx + ly * ly + lz * lz);
+          lx /= ln;
+          ly /= ln;
+          lz /= ln;
+          // 반사 벡터 대신 절반 벡터(광원 + 시선)로 반짝임을 잰다
+          var hx = lx, hy = ly, hz = lz + 1;
+          var hn = Math.sqrt(hx * hx + hy * hy + hz * hz);
+          hx /= hn;
+          hy /= hn;
+          hz /= hn;
+          for (var y2 = 0; y2 < CALC_H; y2 += 1) {
+              var ya = Math.max(0, y2 - 1), yb = Math.min(CALC_H - 1, y2 + 1);
+              for (var x2 = 0; x2 < CALC_W; x2 += 1) {
+                  var xa = Math.max(0, x2 - 1), xb = Math.min(CALC_W - 1, x2 + 1);
+                  var gx = (hgt[y2 * CALC_W + xa] - hgt[y2 * CALC_W + xb]) * SLOPE_GAIN * 10;
+                  var gy = (hgt[ya * CALC_W + x2] - hgt[yb * CALC_W + x2]) * SLOPE_GAIN * 10;
+                  var nn = Math.sqrt(gx * gx + gy * gy + 1);
+                  var nx = gx / nn, ny = gy / nn, nz = 1 / nn;
+                  var diff = clamp(nx * lx + ny * ly + nz * lz, 0, 1);
+                  var spec = Math.pow(clamp(nx * hx + ny * hy + nz * hz, 0, 1), SHINE) * SHEEN;
+                  var j2 = y2 * CALC_W + x2;
+                  var shade = 0.72 + 0.4 * diff;
+                  put(d, x2, y2, clamp(colR[j2] * shade + 255 * spec, 0, 255), clamp(colG[j2] * shade + 255 * spec, 0, 255), clamp(colB[j2] * shade + 255 * spec, 0, 255));
+              }
+          }
+      }
+      function draw() {
+          paint(elapsed / 1000, px);
+          ctx.putImageData(img, 0, 0);
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+              }
+              draw();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      function onButton() {
+          root.classList.remove('is-demo');
+          if (reduce) {
+              elapsed += REDUCE_STEP_MS;
+              draw();
+              setStatus('一場面ずつ送っています');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? '再生' : '一時停止';
+          setStatus(paused ? '一時停止中' : 'デモ実行中');
+      }
+      draw();
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function () { onButton(); });
+      listen(canvas, 'keydown', function (e) {
+          var k = e.key;
+          if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              onButton();
+          }
+      });
+      if (reduce) {
+          elapsed = REDUCE_MS;
+          draw();
+          btnEl.textContent = '次の場面';
+          setStatus('一場面ずつ送っています');
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A moving mesh, grain and an edge vignette are stacked behind a headline so one scene shows whether the text keeps a readable brightness gap as the colours move. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <canvas class="mg__canvas" id="mgCanvas" width="160" height="100" tabindex="0" aria-label="A moving mesh, grain and an edge vignette are stacked behind a headline so one scene shows whether the text keeps a readable brightness gap as the colours move."></canvas>
+  <div class="mg__hero">
+    <h1 class="mg__title">A first screen where soft colour flows</h1>
+    <p class="mg__sub">Check that it stays readable while the mesh keeps moving behind it</p>
+  </div>
+  <p class="mg__status" id="mgStatus" aria-live="polite">Demo running</p>
+  <button class="mg__btn" id="mgBtn" type="button">Pause</button>
+  <p class="mg__caption">A moving mesh, grain and an edge vignette are stacked behind a headline so one scene shows whether the text keeps a readable brightness gap as the colours move.</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('mgRoot');
+  var canvas = document.getElementById('mgCanvas');
+  var statusEl = document.getElementById('mgStatus');
+  var btnEl = document.getElementById('mgBtn');
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var CALC_W = 160, CALC_H = 100;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_MS = 900;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce)
+          root.classList.remove('is-demo');
+      var paused = false;
+      var elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { var c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      // 시드 고정 난수 (mulberry32) — 같은 시드는 언제나 같은 수열이다
+      function seedRand(seed) {
+          var s = seed >>> 0;
+          return function () {
+              s = (s + 0x6D2B79F5) >>> 0;
+              var z = s;
+              z = Math.imul(z ^ (z >>> 15), z | 1);
+              z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+              return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+          };
+      }
+      // 파스텔 여섯 색 — 분홍·라일락·하늘·민트·살구·버터
+      var PAL = [[255, 152, 178], [182, 152, 255], [122, 200, 255], [122, 222, 186], [255, 196, 140], [255, 228, 130]];
+      // 색 목록을 원형으로 읽는다. pos 의 정수부는 몇 번째 색, 소수부는 다음 색으로 넘어가는 정도
+      function pick(pal, pos, out) {
+          var n = pal.length;
+          var i0 = Math.floor(pos);
+          var f = pos - i0;
+          var a = pal[((i0 % n) + n) % n];
+          var b = pal[(((i0 + 1) % n) + n) % n];
+          out[0] = lerp(a[0], b[0], f);
+          out[1] = lerp(a[1], b[1], f);
+          out[2] = lerp(a[2], b[2], f);
+      }
+      function put(d, x, y, r, g, b) {
+          var o = (y * CALC_W + x) * 4;
+          d[o] = r;
+          d[o + 1] = g;
+          d[o + 2] = b;
+          d[o + 3] = 255;
+      }
+      canvas.width = CALC_W;
+      canvas.height = CALC_H;
+      var img = ctx.createImageData(CALC_W, CALC_H);
+      var px = img.data;
+      // 09 제목 뒤 히어로 — 역거리 메쉬 + 시드 고정 알갱이 + 가장자리 어둠. 글자 쪽(가운데)은 밝게 둔다
+      var REDUCE_MS = 1000;
+      var POWER = 2;
+      var VIGNETTE = 0.22;
+      var GRAIN_AMOUNT = 5;
+      var ASPECT = CALC_W / CALC_H;
+      var SEED_FX = [0.23, 0.34, 0.29, 0.41, 0.31];
+      var SEED_FY = [0.3, 0.26, 0.37, 0.28, 0.35];
+      var SEED_PH = [0.0, 0.21, 0.43, 0.62, 0.81];
+      var HERO_PAL = [PAL[1], PAL[2], PAL[0], PAL[3], PAL[5]];
+      var dotX = [0, 0, 0, 0, 0];
+      var dotY = [0, 0, 0, 0, 0];
+      var NOISE_N = CALC_W * CALC_H;
+      var noiseTab = [];
+      var rnd = seedRand(99);
+      for (var ni = 0; ni < NOISE_N; ni += 1) {
+          noiseTab.push(rnd());
+      }
+      function paint(t, d) {
+          for (var k = 0; k < 5; k += 1) {
+              dotX[k] = (0.5 + 0.42 * Math.sin(6.2832 * (t * SEED_FX[k] + SEED_PH[k]))) * ASPECT;
+              dotY[k] = 0.5 + 0.4 * Math.cos(6.2832 * (t * SEED_FY[k] + SEED_PH[k] * 1.6));
+          }
+          var halfP = POWER / 2;
+          var frame = Math.floor(t * 30);
+          for (var y = 0; y < CALC_H; y += 1) {
+              var v = y / (CALC_H - 1);
+              for (var x = 0; x < CALC_W; x += 1) {
+                  var u = (x / (CALC_W - 1)) * ASPECT;
+                  var wr = 0, wg = 0, wb = 0, ws = 0;
+                  for (var j = 0; j < 5; j += 1) {
+                      var dx = u - dotX[j], dy = v - dotY[j];
+                      var w = 1 / (Math.pow(dx * dx + dy * dy, halfP) + 0.003);
+                      wr += w * HERO_PAL[j][0];
+                      wg += w * HERO_PAL[j][1];
+                      wb += w * HERO_PAL[j][2];
+                      ws += w;
+                  }
+                  // 가장자리 어둠 — 중심에서 멀수록 곱하는 값이 1 에서 1 - VIGNETTE 로 내려간다
+                  var ex = (x / (CALC_W - 1) - 0.5) * 2, ey = (y / (CALC_H - 1) - 0.5) * 2;
+                  var vig = 1 - VIGNETTE * smooth((Math.sqrt(ex * ex * 0.6 + ey * ey) - 0.55) / 0.9);
+                  var grain = (noiseTab[(y * CALC_W + x + frame * 991) % NOISE_N] - 0.5) * GRAIN_AMOUNT;
+                  put(d, x, y, clamp((wr / ws) * vig + grain, 0, 255), clamp((wg / ws) * vig + grain, 0, 255), clamp((wb / ws) * vig + grain, 0, 255));
+              }
+          }
+      }
+      function draw() {
+          paint(elapsed / 1000, px);
+          ctx.putImageData(img, 0, 0);
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+              }
+              draw();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      function onButton() {
+          root.classList.remove('is-demo');
+          if (reduce) {
+              elapsed += REDUCE_STEP_MS;
+              draw();
+              setStatus('Stepping one scene at a time');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? 'Play' : 'Pause';
+          setStatus(paused ? 'Paused' : 'Demo running');
+      }
+      draw();
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function () { onButton(); });
+      listen(canvas, 'keydown', function (e) {
+          var k = e.key;
+          if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              onButton();
+          }
+      });
+      if (reduce) {
+          elapsed = REDUCE_MS;
+          draw();
+          btnEl.textContent = 'Next scene';
+          setStatus('Stepping one scene at a time');
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>
