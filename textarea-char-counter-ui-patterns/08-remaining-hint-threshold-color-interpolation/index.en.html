@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remaining-Count Hint with Threshold Stages and Color Interpolation — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">Note</label>
+  <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="Write something"></textarea>
+  <div class="cc__hintRow" id="ccCount">
+    <span class="cc__remain" id="ccRemain">100</span>
+    <span class="cc__msg" id="ccMsg">Plenty of room</span>
+  </div>
+  <div class="cc__meter" aria-hidden="true"><i class="cc__fill" id="ccFill"></i></div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 사용 비율이 WARN_RATIO 에 닿기 전까지는 민트, WARN_RATIO 부터 한도까지는 민트에서 앰버로,
+  // 한도를 넘으면 앰버에서 핑크로 색을 선형 보간한다. Left: 숫자는 비율에 따라 1배에서 MAX_SCALE 배까지 커진다.
+  // 구간이 바뀔 때만 안내 문구를 바꾸고(스크린 리더에도 그때만 알린다) 문구는 짧게 페이드인한다.
+  var HINT_LIMIT = 100;
+  var WARN_RATIO = 0.8;
+  var MAX_SCALE = 1.8;
+  var OVER_SPAN = 0.15;
+  var RATIO_LERP_RATE = 10;
+  var MSG_FADE_MS = 220;
+  var START_MS = 200;
+  var CHUNK_MS = 130;
+  var HOLD_MS = 1500;
+
+  var CHUNKS = ['Tonight', 'with pals', 'at the new', 'diner,', 'warm soup', 'and fries', 'to share.', 'But', 'seats ran out', 'so a long', 'wait began,', 'we got hungry', 'and just', 'kept', 'reading the menu.', 'Still,', 'the food', 'beat hopes.', 'A review', 'to write,', 'photos', 'were taken.', 'Next time', 'come earlier,', 'for sure.'];
+  var DEMO_TEXT = CHUNKS.join(' ');
+
+  var MINT = [76, 212, 166];
+  var AMBER = [250, 218, 140];
+  var PINK = [255, 158, 187];
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var rowEl = document.getElementById('ccCount');
+  var remainEl = document.getElementById('ccRemain');
+  var msgEl = document.getElementById('ccMsg');
+  var fill = document.getElementById('ccFill');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function countGraphemes(s) {
+    if (!seg) return Array.from(s).length;
+    return Array.from(seg.segment(s)).length;
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function mix(a, b, t) {
+    return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+  }
+  function css(c) { return 'rgb(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ')'; }
+  function tint(c, alpha) { return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + alpha + ')'; }
+  function rgbAt(ratio) {
+    var t1 = clamp((ratio - WARN_RATIO) / (1 - WARN_RATIO), 0, 1);
+    var t2 = clamp((ratio - 1) / OVER_SPAN, 0, 1);
+    return mix(mix(MINT, AMBER, t1), PINK, t2);
+  }
+  function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+
+  var used = 0;
+  var shownUsed = 0;
+  var stage = 0;
+  var swapAt = -1;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function paint(nowMs) {
+    var ratio = shownUsed / HINT_LIMIT;
+    var rgb = rgbAt(ratio);
+    var color = css(rgb);
+    rowEl.style.background = tint(rgb, 0.18);
+    var scale = lerp(1, MAX_SCALE, smooth((ratio - 0.5) / 0.6));
+    remainEl.textContent = String(Math.round(HINT_LIMIT - shownUsed));
+    remainEl.style.color = color;
+    remainEl.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    msgEl.style.color = color;
+    fill.style.background = color;
+    fill.style.transform = 'scaleX(' + clamp(ratio, 0, 1).toFixed(4) + ')';
+    var a = swapAt < 0 || reduce ? 1 : clamp((nowMs - swapAt) / MSG_FADE_MS, 0, 1);
+    msgEl.style.opacity = a.toFixed(3);
+    if (a >= 1) swapAt = -1;
+  }
+
+  function update(nowMs) {
+    used = countGraphemes(ta.value);
+    var ratio = used / HINT_LIMIT;
+    var next = ratio >= 1 ? 2 : (ratio >= WARN_RATIO ? 1 : 0);
+    if (next !== stage) {
+      stage = next;
+      var text = next === 2 ? 'Over the limit' : (next === 1 ? 'Close to the limit' : 'Plenty of room');
+      msgEl.textContent = text;
+      sr.textContent = next === 0 ? '' : text;
+      swapAt = nowMs;
+    }
+    if (reduce) { shownUsed = used; paint(nowMs); }
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', stopDemo);
+  ta.addEventListener('input', function () { stopDemo(); update(perfNow()); });
+
+  var lastN = -1;
+  var lastTs = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var cyc = (now - START_MS) % (CHUNKS.length * CHUNK_MS + HOLD_MS);
+      var n = now < START_MS ? 0 : Math.min(CHUNKS.length, Math.floor(cyc / CHUNK_MS) + 1);
+      if (n !== lastN) {
+        lastN = n;
+        ta.value = CHUNKS.slice(0, n).join(' ');
+        update(now);
+      }
+    }
+    shownUsed += (used - shownUsed) * (1 - Math.exp(-dt * RATIO_LERP_RATE));
+    paint(now);
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = DEMO_TEXT;
+    update(0);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

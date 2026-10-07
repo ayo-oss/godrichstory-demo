@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文字・単語・バイト・読む時間を一度に測るメーター — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">メモ</label>
+  <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="書いてみてください"></textarea>
+  <div class="cc__tiles" id="ccCount">
+    <div class="cc__tile cc__tile--chars"><span class="cc__tileLabel">文字</span><span class="cc__num" id="ccChars">0</span><i class="cc__bar"></i></div>
+    <div class="cc__tile cc__tile--words"><span class="cc__tileLabel">単語</span><span class="cc__num" id="ccWords">0</span><i class="cc__bar"></i></div>
+    <div class="cc__tile cc__tile--bytes"><span class="cc__tileLabel">バイト</span><span class="cc__num" id="ccBytes">0</span><i class="cc__bar"></i></div>
+    <div class="cc__tile cc__tile--time"><span class="cc__tileLabel">読む時間</span><span class="cc__num"><b id="ccTime">0</b><small>秒</small></span><i class="cc__bar"></i></div>
+  </div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 같은 텍스트에서 네 값을 한꺼번에 계산한다.
+  // 글자는 자소 묶음 수, 단어는 Intl.Segmenter 의 word 단위(isWordLike), 바이트는 TextEncoder 의 UTF-8 길이,
+  // 읽는 시간은 文字 수를 분당 READ_CHARS_PER_MIN 으로 나눈 초다. 숫자는 목표값을 향해 보간으로 굴러간다.
+  var READ_CHARS_PER_MIN = 500;
+  var NUMBER_LERP_RATE = 12;
+  var ANNOUNCE_EVERY = 50;
+  var START_MS = 200;
+  var CHUNK_MS = 130;
+  var HOLD_MS = 1500;
+  var BAR_CAPS = [150, 30, 450, 20];
+
+  var CHUNKS = ['今夜', '友達と', '新しくできた', '食堂に行って', '温かいスープと', 'サクサクの揚げ物を', '分け合うことにした', 'けれど', '席が足りなくて', 'しばらく', '待たなければならず', 'お腹が空いて', 'メニューばかり', 'ずっと', 'めくっていた', 'それでも', '味は', '期待以上だった', 'レビューを', '残そうと', '写真も', '撮っておいた', '次は', 'もっと早く', '来よう'];
+  var DEMO_TEXT = CHUNKS.join(' ');
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var outs = [document.getElementById('ccChars'), document.getElementById('ccWords'), document.getElementById('ccBytes'), document.getElementById('ccTime')];
+  var bars = Array.prototype.slice.call(root.querySelectorAll('.cc__bar'));
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var gSeg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  var wSeg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'word' }) : null;
+  var enc = new TextEncoder();
+
+  function measure(text) {
+    var chars = gSeg ? Array.from(gSeg.segment(text)).length : Array.from(text).length;
+    var words = wSeg
+      ? Array.from(wSeg.segment(text)).filter(function (x) { return x.isWordLike; }).length
+      : text.split(/\s+/).filter(Boolean).length;
+    var bytes = enc.encode(text).length;
+    var secs = Math.ceil(chars / READ_CHARS_PER_MIN * 60);
+    return [chars, words, bytes, secs];
+  }
+
+  var target = [0, 0, 0, 0];
+  var shown = [0, 0, 0, 0];
+  var lastAnnounce = 0;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function paint() {
+    for (var i = 0; i < 4; i += 1) {
+      outs[i].textContent = String(Math.round(shown[i]));
+      var fraction = Math.min(1, shown[i] / BAR_CAPS[i]);
+      bars[i].style.transform = 'scaleX(' + fraction.toFixed(4) + ')';
+      bars[i].parentNode.style.setProperty('--fill', fraction.toFixed(4));
+    }
+  }
+
+  function update() {
+    target = measure(ta.value);
+    var bucket = Math.floor(target[0] / ANNOUNCE_EVERY);
+    if (bucket !== lastAnnounce) {
+      lastAnnounce = bucket;
+      if (bucket > 0) sr.textContent = '現在 ' + target[0] + '文字';
+    }
+    if (reduce) { shown = target.slice(); paint(); }
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', stopDemo);
+  ta.addEventListener('input', function () { stopDemo(); update(); });
+
+  var lastN = -1;
+  var lastTs = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var cyc = (now - START_MS) % (CHUNKS.length * CHUNK_MS + HOLD_MS);
+      var n = now < START_MS ? 0 : Math.min(CHUNKS.length, Math.floor(cyc / CHUNK_MS) + 1);
+      if (n !== lastN) {
+        lastN = n;
+        ta.value = CHUNKS.slice(0, n).join(' ');
+        update();
+      }
+    }
+    var k = 1 - Math.exp(-dt * NUMBER_LERP_RATE);
+    for (var i = 0; i < 4; i += 1) shown[i] += (target[i] - shown[i]) * k;
+    paint();
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = DEMO_TEXT;
+    update();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

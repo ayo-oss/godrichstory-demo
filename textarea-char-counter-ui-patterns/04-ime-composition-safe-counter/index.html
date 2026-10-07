@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>조합 중인 글자까지 흔들리지 않는 IME 대응 카운터 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">메모</label>
+  <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="일본어로 입력해 보세요"></textarea>
+  <div class="cc__pair">
+    <div class="cc__card">
+      <span class="cc__cardLabel">바로 세기</span>
+      <span class="cc__num cc__num--raw" id="ccRaw">0</span>
+    </div>
+    <div class="cc__card cc__card--safe">
+      <span class="cc__cardLabel">조합 보류</span>
+      <span class="cc__num" id="ccCount">0</span>
+    </div>
+    <div class="cc__state">
+      <span class="cc__dot" id="ccDot"></span>
+      <span class="cc__stateText" id="ccState">확정</span>
+      <span class="cc__pre" id="ccPre"></span>
+    </div>
+  </div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: compositionstart 와 compositionend 이벤트로 조합 중인지 기억한다.
+  // 조합 중 input 은 "바로 세기" 숫자만 흔들고 "조합 보류" 숫자는 마지막 확정값에 붙잡아 둔다.
+  // compositionend 의 순간 한 번 새 값으로 올리고 스프링 오버슛으로 튀게 한다.
+  var STEP_MS = 100;
+  var PAUSE_MS = 220;
+  var START_MS = 200;
+  var HOLD_MS = 1200;
+  var BUMP_MS = 440;
+
+  // 일본어 입력기가 보여 주는 조합 단계 (로마자가 가나로 바뀌고 길이가 오르내린다)
+  var WORDS = [
+    ['n', 'に', 'にh', 'にほ', 'にほn', 'にほん'],
+    ['k', 'か', 'かu', 'かう', 'かうn', 'かうん', 'かうんt', 'かうんた'],
+    ['m', 'も', 'もj', 'もじ'],
+    ['s', 'す', 'すu', 'すう'],
+    ['え', 'えn', 'えん']
+  ];
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var rawEl = document.getElementById('ccRaw');
+  var safeEl = document.getElementById('ccCount');
+  var dot = document.getElementById('ccDot');
+  var stateEl = document.getElementById('ccState');
+  var preEl = document.getElementById('ccPre');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function countGraphemes(s) {
+    if (!seg) return Array.from(s).length;
+    return Array.from(seg.segment(s)).length;
+  }
+
+  var composing = false;
+  var rawCount = 0;
+  var safeCount = 0;
+  var bumpAt = -1;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function paint(nowMs) {
+    rawEl.textContent = String(rawCount);
+    safeEl.textContent = String(safeCount);
+    stateEl.textContent = composing ? '조합 중' : '확정';
+    dot.className = 'cc__dot' + (composing ? ' is-on' : '');
+    var s = 1;
+    if (bumpAt >= 0 && !reduce) {
+      var age = nowMs - bumpAt;
+      s = age >= BUMP_MS ? 1 : 1 + 0.5 * Math.exp(-age / 90) * Math.cos(age / 60);
+      if (age >= BUMP_MS) bumpAt = -1;
+    }
+    safeEl.style.transform = s === 1 ? '' : 'scale(' + s.toFixed(3) + ')';
+    var pulse = composing && !reduce ? 0.5 + 0.5 * Math.sin(nowMs / 90) : 1;
+    dot.style.opacity = composing ? (0.45 + 0.55 * pulse).toFixed(2) : '';
+  }
+
+  function onCompStart() { composing = true; }
+  function onInput() {
+    rawCount = countGraphemes(ta.value);
+    if (!composing) safeCount = rawCount;
+  }
+  function onCompEnd(nowMs) {
+    composing = false;
+    preEl.textContent = '';
+    var next = countGraphemes(ta.value);
+    if (next !== safeCount) bumpAt = nowMs;
+    safeCount = next;
+    rawCount = next;
+    sr.textContent = '현재 ' + safeCount + '자';
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('compositionstart', function () { stopDemo(); onCompStart(); });
+  ta.addEventListener('compositionend', function () { onCompEnd(perfNow()); paint(perfNow()); });
+  ta.addEventListener('input', function () { stopDemo(); onInput(); paint(perfNow()); });
+
+  // 시연: 조합 단계를 같은 핸들러로 흘려 보낸다 (이벤트를 새로 만들지 않고 같은 함수를 부른다)
+  var timeline = [];
+  var base = '';
+  var clock = 0;
+  var baseAt = [];
+  WORDS.forEach(function (steps, w) {
+    baseAt.push(base);
+    timeline.push({ t: clock, kind: 'start', w: w });
+    steps.forEach(function (st, i) {
+      timeline.push({ t: clock + (i + 1) * STEP_MS, kind: 'step', w: w, text: st });
+    });
+    var endT = clock + (steps.length + 1) * STEP_MS;
+    timeline.push({ t: endT, kind: 'end', w: w, text: steps[steps.length - 1] });
+    base += steps[steps.length - 1];
+    clock = endT + PAUSE_MS;
+  });
+  var CYCLE_MS = clock + HOLD_MS;
+  var cursor = 0;
+  var cycleStart = START_MS;
+
+  function runEvent(ev, nowMs) {
+    if (ev.kind === 'start') {
+      onCompStart();
+    } else if (ev.kind === 'step') {
+      ta.value = baseAt[ev.w] + ev.text;
+      preEl.textContent = ev.text;
+      onInput();
+    } else {
+      ta.value = baseAt[ev.w] + ev.text;
+      onCompEnd(nowMs);
+    }
+  }
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (root.classList.contains('is-demo') && now >= START_MS) {
+      var local = now - cycleStart;
+      if (local >= CYCLE_MS) {
+        cycleStart += CYCLE_MS;
+        local = now - cycleStart;
+        cursor = 0;
+        ta.value = '';
+        composing = false;
+        rawCount = 0;
+        safeCount = 0;
+        preEl.textContent = '';
+      }
+      while (cursor < timeline.length && timeline[cursor].t <= local) {
+        runEvent(timeline[cursor], now);
+        cursor += 1;
+      }
+    }
+    paint(now);
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = base;
+    rawCount = safeCount = countGraphemes(base);
+    paint(0);
+    sr.textContent = '현재 ' + safeCount + '자';
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

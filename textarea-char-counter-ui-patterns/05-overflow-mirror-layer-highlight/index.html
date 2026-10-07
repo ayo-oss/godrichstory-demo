@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>한도를 넘은 뒷부분만 표시하는 거울 레이어 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">메모</label>
+  <div class="cc__field">
+    <div class="cc__mirror" id="ccMirror" aria-hidden="true"></div>
+    <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="글을 써 보세요"></textarea>
+  </div>
+  <div class="cc__row">
+    <div class="cc__big"><span class="cc__num" id="ccCount">0</span><span class="cc__unit">/ 60자</span></div>
+    <span class="cc__over" id="ccOver"></span>
+  </div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 입력칸 뒤에 같은 글꼴·패딩·줄바꿈 규칙의 거울 레이어를 깔고, 거울 안에서
+  // 한도 이후의 글자만 mark 로 감싸 분홍 배경을 칠한다. 입력칸은 투명이라 그 위로 비쳐 보인다.
+  // 스크롤은 입력칸 scrollTop 을 거울에 그대로 복사해 맞추고, 새로 넘친 글자는 처음에 진하게 칠했다가 가라앉는다.
+  var MIRROR_LIMIT = 60;
+  var FLASH_MS = 520;
+  var START_MS = 200;
+  var CHUNK_MS = 130;
+  var HOLD_MS = 1500;
+
+  var CHUNKS = ['오늘 저녁에', '친구들과', '새로 생긴', '식당에 가서', '따뜻한 국물과', '바삭한 튀김을', '나눠 먹기로', '했다 그런데', '자리가 모자라', '한참을', '기다려야 했고', '배가 고파서', '메뉴판만', '계속', '뒤적였다', '그래도', '맛은', '기대 이상이었다', '후기를', '남기려고', '사진도', '찍어 두었다', '다음엔', '더 일찍', '와야겠다'];
+  var DEMO_TEXT = CHUNKS.join(' ');
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var mirror = document.getElementById('ccMirror');
+  var countEl = document.getElementById('ccCount');
+  var overEl = document.getElementById('ccOver');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function graphemes(s) {
+    if (!seg) return Array.from(s);
+    return Array.from(seg.segment(s), function (x) { return x.segment; });
+  }
+
+  var mark = null;
+  var flashAt = -1;
+  var lastOver = 0;
+  var stage = 0;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function syncScroll() { mirror.scrollTop = ta.scrollTop; }
+
+  function update(nowMs) {
+    var list = graphemes(ta.value);
+    var over = Math.max(0, list.length - MIRROR_LIMIT);
+    mirror.textContent = '';
+    mirror.appendChild(document.createTextNode(list.slice(0, MIRROR_LIMIT).join('')));
+    mark = null;
+    if (over > 0) {
+      mark = document.createElement('mark');
+      mark.className = 'cc__mark';
+      mark.textContent = list.slice(MIRROR_LIMIT).join('');
+      mirror.appendChild(mark);
+    }
+    mirror.appendChild(document.createTextNode('​'));
+    syncScroll();
+    countEl.textContent = String(list.length);
+    countEl.style.color = over > 0 ? '#9a2b52' : '';
+    overEl.textContent = over > 0 ? '넘침 ' + over + '자' : '';
+    overEl.className = 'cc__over' + (over > 0 ? ' is-on' : '');
+    if (over > lastOver && !reduce) flashAt = nowMs;
+    lastOver = over;
+    var next = over > 0 ? 1 : 0;
+    if (next !== stage) {
+      sr.textContent = next === 1 ? '한도를 넘었어요' : '';
+      stage = next;
+    }
+    if (mark) paintMark(reduce ? 1e9 : nowMs);
+  }
+
+  function paintMark(nowMs) {
+    if (!mark) return;
+    var age = flashAt < 0 ? 1e9 : nowMs - flashAt;
+    var a = 0.5 + 0.5 * Math.exp(-age / (FLASH_MS / 3));
+    mark.style.backgroundColor = 'rgba(255,158,187,' + a.toFixed(3) + ')';
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', stopDemo);
+  ta.addEventListener('input', function () { stopDemo(); update(perfNow()); });
+  ta.addEventListener('scroll', syncScroll);
+
+  var lastDemoN = -1;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (root.classList.contains('is-demo')) {
+      var cyc = (now - START_MS) % (CHUNKS.length * CHUNK_MS + HOLD_MS);
+      var n = now < START_MS ? 0 : Math.min(CHUNKS.length, Math.floor(cyc / CHUNK_MS) + 1);
+      if (n !== lastDemoN) {
+        lastDemoN = n;
+        ta.value = CHUNKS.slice(0, n).join(' ');
+        ta.scrollTop = ta.scrollHeight;
+        update(now);
+      }
+    }
+    paintMark(now);
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = DEMO_TEXT;
+    ta.scrollTop = ta.scrollHeight;
+    update(0);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

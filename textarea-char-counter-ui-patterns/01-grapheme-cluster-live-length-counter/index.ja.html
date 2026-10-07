@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>書記素クラスタ単位で数えるリアルタイム文字数 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">メモ</label>
+  <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="絵文字も入れてみて"></textarea>
+  <div class="cc__row">
+    <div class="cc__big"><span class="cc__num" id="ccCount">0</span><span class="cc__unit">文字</span></div>
+    <div class="cc__sub">lengthでは <b id="ccLen">0</b></div>
+  </div>
+  <div class="cc__strip" id="ccStrip" aria-hidden="true"></div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 입력이 바뀔 때마다 Intl.Segmenter 로 문자열을 사람이 보는 한 文字(자소 묶음) 단위로 쪼개 센다.
+  // 이모지 가족·국기·결합 악센트는 lengthでは 여러 칸이지만 묶음으로는 한 글자다.
+  // 숫자는 보간으로 따라가고, 새로 들어온 묶음 칸은 스프링 오버슛으로 튀어 오른다.
+  var STRIP_SLOTS = 16;
+  var POP_MS = 460;
+  var COUNT_LERP_RATE = 14;
+  var START_MS = 200;
+  var CHAR_MS = 150;
+  var HOLD_MS = 1400;
+  var ANNOUNCE_EVERY = 10;
+
+  var FAMILY = '👨‍👩‍👧';
+  var FLAG = '🇰🇷';
+  var CAFE = 'café';
+  var DEMO_CHUNKS = ['空が晴れている ', FAMILY, ' 家族と ', FLAG, ' 旅行 ', CAFE];
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var countEl = document.getElementById('ccCount');
+  var lenEl = document.getElementById('ccLen');
+  var strip = document.getElementById('ccStrip');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function graphemes(s) {
+    if (!seg) return Array.from(s);
+    return Array.from(seg.segment(s), function (x) { return x.segment; });
+  }
+
+  var demoGraphemes = graphemes(DEMO_CHUNKS.join(''));
+  var tiles = [];
+  var born = [];
+  for (var i = 0; i < STRIP_SLOTS; i += 1) {
+    var tile = document.createElement('span');
+    tile.className = 'cc__tile';
+    strip.appendChild(tile);
+    tiles.push(tile);
+    born.push(-1);
+  }
+
+  var target = 0;
+  var shown = 0;
+  var lenTarget = 0;
+  var lenShown = 0;
+  var lastCount = 0;
+  var lastDemoN = -1;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function popScale(age) {
+    if (age < 0) return 1;
+    if (age >= POP_MS) return 1;
+    return 1 - Math.exp(-age / 70) * Math.cos(age / 55);
+  }
+
+  function update(nowMs) {
+    var list = graphemes(ta.value);
+    var count = list.length;
+    var view = count <= STRIP_SLOTS ? list : list.slice(count - STRIP_SLOTS);
+    for (var k = 0; k < STRIP_SLOTS; k += 1) {
+      var g = view[k] || '';
+      tiles[k].textContent = g;
+      tiles[k].className = 'cc__tile' + (g ? ' is-on' : '') + (g.length > 1 ? ' is-multi' : '');
+    }
+    if (count > lastCount && !reduce) born[Math.min(count, STRIP_SLOTS) - 1] = nowMs;
+    if (count % ANNOUNCE_EVERY === 0 && count !== lastCount && count > 0) {
+      sr.textContent = '現在 ' + count + '文字';
+    }
+    lastCount = count;
+    target = count;
+    lenTarget = ta.value.length;
+    if (reduce) {
+      shown = target;
+      lenShown = lenTarget;
+      paintNumbers();
+    }
+  }
+
+  function paintNumbers() {
+    countEl.textContent = String(Math.round(shown));
+    lenEl.textContent = String(Math.round(lenShown));
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', stopDemo);
+  ta.addEventListener('input', function () { stopDemo(); update(perfNow()); });
+
+  var lastTs = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var cyc = (now - START_MS) % (demoGraphemes.length * CHAR_MS + HOLD_MS);
+      var n = now < START_MS ? 0 : Math.min(demoGraphemes.length, Math.floor(cyc / CHAR_MS) + 1);
+      if (n !== lastDemoN) {
+        lastDemoN = n;
+        ta.value = demoGraphemes.slice(0, n).join('');
+        update(now);
+      }
+    }
+    var k = 1 - Math.exp(-dt * COUNT_LERP_RATE);
+    shown += (target - shown) * k;
+    lenShown += (lenTarget - lenShown) * k;
+    paintNumbers();
+    for (var m = 0; m < STRIP_SLOTS; m += 1) {
+      if (born[m] < 0) continue;
+      var s = popScale(now - born[m]);
+      tiles[m].style.transform = s === 1 ? '' : 'scale(' + s.toFixed(3) + ')';
+      if (s === 1) born[m] = -1;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = demoGraphemes.join('');
+    update(0);
+    sr.textContent = '現在 ' + lastCount + '文字';
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

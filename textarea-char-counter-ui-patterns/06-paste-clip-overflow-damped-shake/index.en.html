@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clip an Overflowing Paste and Signal It with a Damped Shake — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">Note</label>
+  <div class="cc__field" id="ccField">
+    <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="Write something"></textarea>
+  </div>
+  <div class="cc__meter" aria-hidden="true"><i class="cc__fill" id="ccFill"></i></div>
+  <div class="cc__row">
+    <div class="cc__big"><span class="cc__num" id="ccCount">0</span><span class="cc__unit">/ 80 chars</span></div>
+    <span class="cc__toast" id="ccToast"></span>
+  </div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 붙여넣기 이벤트를 가로채 남은 칸만큼의 앞부분(자소 묶음 기준)만 받고 나머지는 버린다.
+  // 잘렸다는 것은 입력칸이 감쇠 사인으로 좌우로 흔들리다 가라앉는 것으로 알린다 (진폭 x 지수 감쇠 x 사인, 난수 없음).
+  // 시연은 paste 이벤트와 같은 applyPaste 함수를 직접 부른다.
+  var PASTE_LIMIT = 80;
+  var SHAKE_AMP = 7;
+  var SHAKE_DECAY_MS = 240;
+  var SHAKE_OMEGA = 0.07;
+  var TOAST_MS = 1500;
+  var START_MS = 200;
+  var CHUNK_MS = 120;
+  var CYCLE_MS = 4800;
+  var PASTE_AT = [1500, 2900];
+
+  var CHUNKS = ['Tonight', 'with pals', 'at the new', 'diner,', 'warm soup', 'and fries', 'to share.', 'But'];
+  var PASTE_SAMPLE = 'Then we ordered dessert and tea and ate slowly';
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var field = document.getElementById('ccField');
+  var fill = document.getElementById('ccFill');
+  var countEl = document.getElementById('ccCount');
+  var toast = document.getElementById('ccToast');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function graphemes(s) {
+    if (!seg) return Array.from(s);
+    return Array.from(seg.segment(s), function (x) { return x.segment; });
+  }
+
+  var used = 0;
+  var shown = 0;
+  var shakeAt = -1;
+  var toastAt = -1;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function refresh() {
+    used = graphemes(ta.value).length;
+    countEl.textContent = String(used);
+    if (reduce) { shown = used; paintFill(); }
+  }
+
+  function paintFill() {
+    fill.style.transform = 'scaleX(' + Math.min(1, shown / PASTE_LIMIT).toFixed(4) + ')';
+  }
+
+  function signal(dropped, nowMs) {
+    toast.textContent = 'Clipped ' + dropped + ' chars';
+    sr.textContent = 'The paste went over the limit and was clipped';
+    if (reduce) { toast.className = 'cc__toast is-on'; return; }
+    shakeAt = nowMs;
+    toastAt = nowMs;
+  }
+
+  function applyPaste(text, nowMs) {
+    var start = ta.selectionStart;
+    var end = ta.selectionEnd;
+    var before = ta.value.slice(0, start);
+    var after = ta.value.slice(end);
+    var room = PASTE_LIMIT - graphemes(before + after).length;
+    var incoming = graphemes(text);
+    var take = incoming.slice(0, Math.max(0, room)).join('');
+    ta.value = before + take + after;
+    ta.setSelectionRange(start + take.length, start + take.length);
+    refresh();
+    if (incoming.length > room) signal(incoming.length - Math.max(0, room), nowMs);
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', function (e) {
+    stopDemo();
+    e.preventDefault();
+    applyPaste(e.clipboardData ? e.clipboardData.getData('text') : '', perfNow());
+  });
+  ta.addEventListener('input', function () {
+    stopDemo();
+    var list = graphemes(ta.value);
+    if (list.length > PASTE_LIMIT) {
+      ta.value = list.slice(0, PASTE_LIMIT).join('');
+      signal(list.length - PASTE_LIMIT, perfNow());
+    }
+    refresh();
+  });
+
+  var lastN = -1;
+  var pasteDone = [false, false];
+  var cycleStart = START_MS;
+  function paintMotion(nowMs) {
+    var dx = 0;
+    var edge = 0;
+    if (shakeAt >= 0) {
+      var age = nowMs - shakeAt;
+      var amp = SHAKE_AMP * Math.exp(-age / SHAKE_DECAY_MS);
+      if (amp < 0.1) { shakeAt = -1; } else { dx = amp * Math.sin(age * SHAKE_OMEGA); edge = amp / SHAKE_AMP; }
+    }
+    field.style.transform = dx === 0 ? '' : 'translateX(' + dx.toFixed(2) + 'px)';
+    field.style.setProperty('--edge', edge.toFixed(3));
+    if (toastAt >= 0) {
+      var ta2 = nowMs - toastAt;
+      if (ta2 >= TOAST_MS) { toastAt = -1; toast.className = 'cc__toast'; } else {
+        toast.className = 'cc__toast is-on';
+        var rise = Math.min(1, ta2 / 160);
+        toast.style.transform = 'translateY(' + ((1 - rise) * 8).toFixed(2) + 'px)';
+        toast.style.opacity = String(rise);
+      }
+    }
+  }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo') && now >= START_MS) {
+      var local = now - cycleStart;
+      if (local >= CYCLE_MS) {
+        cycleStart += CYCLE_MS;
+        local = now - cycleStart;
+        pasteDone = [false, false];
+        lastN = -1;
+        ta.value = '';
+        refresh();
+      }
+      var n = Math.min(CHUNKS.length, Math.floor(local / CHUNK_MS) + 1);
+      if (n !== lastN && local < PASTE_AT[0]) {
+        lastN = n;
+        ta.value = CHUNKS.slice(0, n).join(' ');
+        refresh();
+      }
+      for (var p = 0; p < PASTE_AT.length; p += 1) {
+        if (!pasteDone[p] && local >= PASTE_AT[p]) {
+          pasteDone[p] = true;
+          var len = ta.value.length;
+          ta.setSelectionRange(len, len);
+          applyPaste(PASTE_SAMPLE, now);
+        }
+      }
+    }
+    shown += (used - shown) * (1 - Math.exp(-dt * 14));
+    paintFill();
+    paintMotion(now);
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = CHUNKS.join(' ');
+    var endPos = ta.value.length;
+    ta.setSelectionRange(endPos, endPos);
+    applyPaste(PASTE_SAMPLE, 0);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Width-Weighted Count: Full-Width 2, Half-Width 1 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cc is-demo" id="ccRoot">
+  <label class="cc__label" for="ccText">Note</label>
+  <textarea class="cc__ta" id="ccText" aria-describedby="ccCount" placeholder="Type a mix"></textarea>
+  <div class="cc__bar" id="ccBar" aria-hidden="true"></div>
+  <div class="cc__row">
+    <div class="cc__big"><span class="cc__num" id="ccCount">0</span><span class="cc__unit">/ 80 wide</span></div>
+    <div class="cc__legend"><span class="cc__chip cc__chip--half">Half 1</span><span class="cc__chip cc__chip--full">Full 2</span></div>
+  </div>
+  <p class="cc__sr" id="ccSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 글자마다 코드 포인트 범위로 폭 가중치를 매긴다. ASCII 와 반각 가타카나는 1, 나머지는 2.
+  // 가중치를 모두 더한 값이 WIDTH_LIMIT 를 넘으면 그 뒤 칸은 핑크로 칠한다.
+  // 막대 칸의 너비는 가중치 비율이고, 새 칸은 아래에서 스프링 오버슛으로 솟는다.
+  var WIDTH_LIMIT = 80;
+  var HALF_WEIGHT = 1;
+  var FULL_WEIGHT = 2;
+  var POP_MS = 420;
+  var COUNT_LERP_RATE = 14;
+  var START_MS = 200;
+  var CHUNK_MS = 200;
+  var HOLD_MS = 1500;
+
+  var CHUNKS = ['Hello', 'こんにちは', 'World', 'カウンター', 'ABC', '文字数', '123', 'ｶﾀｶﾅ', 'ありがとう', 'Text', '全角と半角', 'mix', 'ＡＢＣ', '１２３', '日本語', 'kana', 'おわり'];
+  var DEMO_TEXT = CHUNKS.join(' ');
+
+  var root = document.getElementById('ccRoot');
+  var ta = document.getElementById('ccText');
+  var bar = document.getElementById('ccBar');
+  var countEl = document.getElementById('ccCount');
+  var sr = document.getElementById('ccSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var seg = (typeof Intl !== 'undefined' && Intl.Segmenter) ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function graphemes(s) {
+    if (!seg) return Array.from(s);
+    return Array.from(seg.segment(s), function (x) { return x.segment; });
+  }
+  function weightOf(g) {
+    var cp = g.codePointAt(0);
+    if (cp <= 0x7e || (cp >= 0xff61 && cp <= 0xff9f)) return HALF_WEIGHT;
+    return FULL_WEIGHT;
+  }
+
+  var cells = [];
+  var born = [];
+  var total = 0;
+  var shown = 0;
+  var prevCount = 0;
+  var stage = 0;
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function popScale(age) {
+    if (age < 0 || age >= POP_MS) return 1;
+    return 1 - Math.exp(-age / 70) * Math.cos(age / 55);
+  }
+
+  function update(nowMs) {
+    var list = graphemes(ta.value);
+    var cum = 0;
+    for (var i = 0; i < list.length; i += 1) {
+      if (!cells[i]) {
+        var c = document.createElement('span');
+        bar.appendChild(c);
+        cells.push(c);
+        born.push(-1);
+      }
+      var w = weightOf(list[i]);
+      var el = cells[i];
+      el.style.display = '';
+      el.style.left = (cum / WIDTH_LIMIT * 100).toFixed(3) + '%';
+      el.style.width = 'calc(' + (w / WIDTH_LIMIT * 100).toFixed(3) + '% - 1px)';
+      var over = cum + w > WIDTH_LIMIT;
+      el.className = 'cc__cell ' + (over ? 'is-over' : (w === FULL_WEIGHT ? 'is-full' : 'is-half')) + (list[i] === ' ' ? ' is-space' : '');
+      if (i >= prevCount && !reduce) born[i] = nowMs;
+      cum += w;
+    }
+    for (var j = list.length; j < cells.length; j += 1) cells[j].style.display = 'none';
+    prevCount = list.length;
+    total = cum;
+    var next = total > WIDTH_LIMIT ? 2 : 0;
+    if (next !== stage) {
+      sr.textContent = next === 2 ? 'Over the width limit' : '';
+      stage = next;
+    }
+    if (reduce) { shown = total; paintNumber(); }
+  }
+
+  function paintNumber() {
+    countEl.textContent = String(Math.round(shown));
+    countEl.style.color = Math.round(shown) > WIDTH_LIMIT ? 'rgb(255,158,187)' : '';
+  }
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  ta.addEventListener('focus', stopDemo);
+  ta.addEventListener('keydown', stopDemo);
+  ta.addEventListener('paste', stopDemo);
+  ta.addEventListener('input', function () { stopDemo(); update(perfNow()); });
+
+  var lastDemoN = -1;
+  var lastTs = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var cyc = (now - START_MS) % (CHUNKS.length * CHUNK_MS + HOLD_MS);
+      var n = now < START_MS ? 0 : Math.min(CHUNKS.length, Math.floor(cyc / CHUNK_MS) + 1);
+      if (n !== lastDemoN) {
+        if (n === 1) prevCount = 0;
+        lastDemoN = n;
+        ta.value = CHUNKS.slice(0, n).join(' ');
+        update(now);
+      }
+    }
+    shown += (total - shown) * (1 - Math.exp(-dt * COUNT_LERP_RATE));
+    paintNumber();
+    for (var m = 0; m < born.length; m += 1) {
+      if (born[m] < 0) continue;
+      var s = popScale(now - born[m]);
+      cells[m].style.transform = s === 1 ? '' : 'scaleY(' + s.toFixed(3) + ')';
+      if (s === 1) born[m] = -1;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    ta.value = DEMO_TEXT;
+    update(0);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
