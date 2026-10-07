@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Button Whose Text Flips as the Fill Brightens — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bc is-demo" id="bcRoot">
+  <button class="bc__btn" id="bcBtn" type="button">Readable label</button>
+  <p class="bc__meta"><span class="bc__tag">L</span> <b id="bcLum">0.01</b> <span class="bc__tag">RATIO</span> <b id="bcRatio">17.0</b><span>:1</span></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 바탕색이 어두운 색에서 밝은 색으로 옮겨 가는 동안 매 프레임 상대 밝기 L 을 직접 계산한다.
+  // L 이 FLIP_THRESHOLD 를 넘는 순간 글자를 흰색에서 검정으로 뒤집는다.
+  // 흰색과 검정이 같은 대비(4.58:1)를 내는 밝기가 0.179 라서, 이 기준이면 어느 중간 색에서도 4.5:1 아래로 떨어지지 않는다.
+  var FLIP_THRESHOLD = 0.179;
+  var FILL_RATE = 4;
+  var START_MS = 200;
+  var ON_MS = 1000;
+  var CYCLE_MS = 2000;
+
+  var root = document.getElementById('bcRoot');
+  var btn = document.getElementById('bcBtn');
+  var lumEl = document.getElementById('bcLum');
+  var ratioEl = document.getElementById('bcRatio');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function readRgb(name) {
+    var v = getComputedStyle(btn).getPropertyValue(name).trim().replace('#', '');
+    if (v.length === 3) v = v.split('').map(function (c) { return c + c; }).join('');
+    return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+  }
+  function toHex(rgb) {
+    return '#' + rgb.map(function (c) { return ('0' + Math.round(c).toString(16)).slice(-2); }).join('');
+  }
+  function channel(c) {
+    var s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  }
+  function luminance(rgb) {
+    return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+  }
+  function ratio(a, b) {
+    var hi = Math.max(a, b);
+    var lo = Math.min(a, b);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  var from = readRgb('--c-from');
+  var to = readRgb('--c-to');
+  var textLight = readRgb('--t-light');
+  var textDark = readRgb('--t-dark');
+  var lumLight = luminance(textLight);
+  var lumDark = luminance(textDark);
+  var cur = from.slice();
+  var pointerIn = false;
+  var kbFocus = false;
+  var t0 = null;
+  var lastTs = null;
+
+  function demoOn(now) {
+    return root.classList.contains('is-demo') && now >= START_MS && (now - START_MS) % CYCLE_MS < ON_MS;
+  }
+  function goalOf(now) { return demoOn(now) || pointerIn || kbFocus ? to : from; }
+  function paint() {
+    var l = luminance(cur);
+    var dark = l > FLIP_THRESHOLD;
+    btn.style.background = toHex(cur);
+    btn.style.color = toHex(dark ? textDark : textLight);
+    lumEl.textContent = l.toFixed(2);
+    ratioEl.textContent = ratio(l, dark ? lumDark : lumLight).toFixed(1);
+  }
+  function stopDemo() { root.classList.remove('is-demo'); }
+  function jump() { cur = (pointerIn || kbFocus ? to : from).slice(); paint(); }
+
+  btn.addEventListener('pointerenter', function () { stopDemo(); pointerIn = true; if (reduce) jump(); });
+  btn.addEventListener('pointerleave', function () { pointerIn = false; if (reduce) jump(); });
+  btn.addEventListener('focus', function () { kbFocus = btn.matches(':focus-visible'); if (kbFocus) stopDemo(); if (reduce) jump(); });
+  btn.addEventListener('blur', function () { kbFocus = false; if (reduce) jump(); });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    var g = goalOf(now);
+    var k = 1 - Math.exp(-dt * FILL_RATE);
+    var gap = 0;
+    for (var i = 0; i < 3; i += 1) {
+      cur[i] += (g[i] - cur[i]) * k;
+      gap += Math.abs(g[i] - cur[i]);
+    }
+    if (gap < 0.5) cur = g.slice();
+    paint();
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    paint();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
