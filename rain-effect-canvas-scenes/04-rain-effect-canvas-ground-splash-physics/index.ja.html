@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雨粒が地面に着いた瞬間、方向と速度をランダムに分けた複数の跳ね粒子を作り、その粒子ごとに毎フレーム重力を足し直して放物線を描きながら散らばる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rn is-demo" id="rnRoot">
+  <canvas class="rn__canvas" id="rnCanvas" width="480" height="300"></canvas>
+  <p class="rn__caption">雨粒が地面に着いた瞬間、方向と速度をランダムに分けた複数の跳ね粒子を作り、その粒子ごとに毎フレーム重力を足し直して放物線を描きながら散らばる。</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 빗줄기가 바닥선(GROUND_Y)에 닿는 순간 splashBurst() 가 SPLASH_PARTICLE_COUNT 개
+  // 입자를 방향·속도를 나눠 흩뿌리고, 그 입자마다 SPLASH_GRAVITY_PX_S2 를 매 프레임 다시 더해
+  // 포물선을 그리며 옆으로 흩어지다 옅어진다. 속성 트윈이 아니라 매 프레임 중력 적분이다.
+  var root = document.getElementById('rnRoot');
+  var canvas = document.getElementById('rnCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var GROUND_Y = 88;
+  var SPLASH_PARTICLE_COUNT = 6;
+  var SPLASH_GRAVITY_PX_S2 = 260;
+  var SPLASH_LIFE_MS = 420;
+  var RAIN_STREAK_COUNT = 46;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rRand = seedRand(431041);
+  var sRand = seedRand(431042);
+
+  var streaks = [];
+  for (var i = 0; i < RAIN_STREAK_COUNT; i += 1) {
+    streaks.push({
+      x: rRand() * CALC_W,
+      y: rRand() * GROUND_Y,
+      speed: 120 + rRand() * 60,
+      thick: 0.8 + rRand() * 1.2
+    });
+  }
+
+  var splashes = [];
+  function splashBurst(x, nowMs) {
+    for (var i = 0; i < SPLASH_PARTICLE_COUNT; i += 1) {
+      var ang = Math.PI + sRand() * Math.PI; // 위쪽 반원으로 퍼진다
+      var speed = 16 + sRand() * 26;
+      splashes.push({
+        x: x, y: GROUND_Y,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        born: nowMs
+      });
+    }
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      s.y += s.speed * dtS;
+      if (s.y >= GROUND_Y) {
+        splashBurst(s.x, nowMs);
+        s.y = -4 - rRand() * 10;
+        s.x = rRand() * CALC_W;
+      }
+    }
+    var alive = [];
+    for (var j = 0; j < splashes.length; j += 1) {
+      var p = splashes[j];
+      p.vy += SPLASH_GRAVITY_PX_S2 * dtS;
+      p.x += p.vx * dtS;
+      p.y += p.vy * dtS;
+      if (nowMs - p.born < SPLASH_LIFE_MS) alive.push(p);
+    }
+    splashes = alive;
+  }
+
+  function draw(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var sc = (sx + sy) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.strokeStyle = 'rgba(20,26,54,.22)';
+    ctx.lineWidth = Math.max(1, 1.4 * sc);
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y * sy);
+    ctx.lineTo(cw, GROUND_Y * sy);
+    ctx.stroke();
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      if (s.y < 0 || s.y > GROUND_Y) continue;
+      var x = s.x * sx, y0 = s.y * sy, y1 = (s.y - s.thick * 5) * sy;
+      ctx.strokeStyle = 'rgba(20,26,54,.62)';
+      ctx.lineWidth = Math.max(0.6, s.thick * sc);
+      ctx.beginPath();
+      ctx.moveTo(x, y0);
+      ctx.lineTo(x, y1);
+      ctx.stroke();
+    }
+    for (var k = 0; k < splashes.length; k += 1) {
+      var p = splashes[k];
+      var f = Math.max(0, Math.min(1, (nowMs - p.born) / SPLASH_LIFE_MS));
+      var alpha = (1 - f) * 0.75;
+      var dx = p.x * sx, dy = p.y * sy, dr = (0.7 + (1 - f) * 0.7) * sc;
+      ctx.fillStyle = 'rgba(20,26,54,' + alpha + ')';
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 60 : 20;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

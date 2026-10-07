@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>물방울마다 무게와 저항을 계산해 흘러내리는 속도를 다시 정하고, 지나가는 길에 다른 물방울과 겹치면 둘을 하나로 합쳐 크기를 키운다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rn is-demo" id="rnRoot">
+  <canvas class="rn__canvas" id="rnCanvas" width="480" height="300"></canvas>
+  <p class="rn__caption">물방울마다 무게와 저항을 계산해 흘러내리는 속도를 다시 정하고, 지나가는 길에 다른 물방울과 겹치면 둘을 하나로 합쳐 크기를 키운다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 물방울마다 질량(mass)을 갖고, 매 프레임 무게 대 저항(DROPLET_DRAG_COEF) 비율로
+  // 목표 속도를 다시 계산해 그쪽으로 서서히 붙는다(lerp). dropletMassMerge() 가 겹친 두
+  // 물방울의 질량을 합쳐 반지름을 키우고 하나로 줄인다 — 무거워질수록 더 빨리 흘러내린다.
+  // 하이라이트는 물방울 왼쪽 위에 밝은 점을 얹어 굴절된 빛처럼 보이게 한다.
+  var root = document.getElementById('rnRoot');
+  var canvas = document.getElementById('rnCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var DROPLET_DRAG_COEF = 3.2;
+  var DROPLET_GRAVITY_PX_S = 58;
+  var DROPLET_MERGE_DIST_PX = 2.4;
+  var DROPLET_SPAWN_PER_S = 2.6;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var dRand = seedRand(431031);
+
+  var drops = [];
+  var spawnAcc = 0;
+
+  function spawnDroplet() {
+    var r = 1.6 + dRand() * 1.6;
+    drops.push({
+      x: dRand() * CALC_W,
+      y: -3,
+      r: r,
+      mass: r * r,
+      vy: 4,
+      seed: dRand() * 1000
+    });
+  }
+
+  function dropletMassMerge(a, b) {
+    var mass = a.mass + b.mass;
+    var r = Math.sqrt(mass) * 0.92;
+    return {
+      x: (a.x * a.mass + b.x * b.mass) / mass,
+      y: Math.max(a.y, b.y),
+      r: r, mass: mass, vy: Math.max(a.vy, b.vy), seed: a.seed
+    };
+  }
+
+  function stepSim(dtMs, nowMs) {
+    var dtS = dtMs / 1000;
+    spawnAcc += dtMs * DROPLET_SPAWN_PER_S / 1000;
+    while (spawnAcc >= 1 && drops.length < 46) { spawnDroplet(); spawnAcc -= 1; }
+    for (var i = 0; i < drops.length; i += 1) {
+      var d = drops[i];
+      var targetVy = (DROPLET_GRAVITY_PX_S * Math.sqrt(d.mass)) / DROPLET_DRAG_COEF;
+      d.vy += (targetVy - d.vy) * Math.min(1, 5 * dtS);
+      d.y += d.vy * dtS;
+      d.x += Math.sin(nowMs * 0.0012 + d.seed) * 1.6 * dtS;
+    }
+    // 병합 — 가까운 두 물방울이 겹치면 하나로
+    for (var a = 0; a < drops.length; a += 1) {
+      for (var b = a + 1; b < drops.length; b += 1) {
+        var p1 = drops[a], p2 = drops[b];
+        if (!p1 || !p2) continue;
+        var dx = p1.x - p2.x, dy = p1.y - p2.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < DROPLET_MERGE_DIST_PX + (p1.r + p2.r) * 0.55) {
+          drops[a] = dropletMassMerge(p1, p2);
+          drops.splice(b, 1);
+          b -= 1;
+        }
+      }
+    }
+    var alive = [];
+    for (var k = 0; k < drops.length; k += 1) {
+      if (drops[k].y - drops[k].r < CALC_H + 6) alive.push(drops[k]);
+    }
+    drops = alive;
+  }
+
+  function draw() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var s = (sx + sy) / 2;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < drops.length; i += 1) {
+      var d = drops[i];
+      var dx = d.x * sx, dy = d.y * sy, dr = d.r * s;
+      ctx.fillStyle = 'rgba(15,24,52,.42)';
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+      var g = ctx.createRadialGradient(dx - dr * 0.35, dy - dr * 0.4, 0, dx - dr * 0.35, dy - dr * 0.4, dr * 0.7);
+      g.addColorStop(0, 'rgba(255,255,255,.85)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(dx - dr * 0.35, dy - dr * 0.4, dr * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,1)';
+      ctx.beginPath();
+      ctx.moveTo(dx - dr * 0.1, dy - dr * 1.3);
+      ctx.lineTo(dx - dr * 0.1, dy - dr * (1.3 - Math.min(0.7, dr * 0.05)));
+      ctx.stroke();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 180 : 90;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(20, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt, elapsed);
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

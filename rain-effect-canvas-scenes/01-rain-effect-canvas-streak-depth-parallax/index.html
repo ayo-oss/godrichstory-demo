@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>빗줄기마다 가상의 거리를 부여해 굵기와 떨어지는 속도를 거리에 반비례하게 정하고, 가까운 줄기는 굵고 빠르게, 먼 줄기는 가늘고 느리게 떨어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rn is-demo" id="rnRoot">
+  <canvas class="rn__canvas" id="rnCanvas" width="480" height="300"></canvas>
+  <p class="rn__caption">빗줄기마다 가상의 거리를 부여해 굵기와 떨어지는 속도를 거리에 반비례하게 정하고, 가까운 줄기는 굵고 빠르게, 먼 줄기는 가늘고 느리게 떨어진다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 빗줄기마다 층(RAIN_LAYER_COUNT)을 매겨 가상의 거리(depth z, 0=멀다 1=가깝다)를 부여한다.
+  // 굵기·속도·불투명도를 모두 z 에 비례해 정하므로 가까운 줄기는 굵고 빠르고 진하게, 먼 줄기는
+  // 가늘고 느리고 옅게 떨어진다 — 거리 하나가 세 가지 값을 동시에 결정하는 시차(parallax) 계산.
+  var root = document.getElementById('rnRoot');
+  var canvas = document.getElementById('rnCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var RAIN_LAYER_COUNT = 4;
+  var RAIN_NEAR_SPEED_PX_S = 150;
+  var RAIN_FAR_SPEED_PX_S = 40;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rRand = seedRand(431011);
+
+  function streakDepthZ(layerIndex) {
+    return RAIN_LAYER_COUNT <= 1 ? 1 : layerIndex / (RAIN_LAYER_COUNT - 1);
+  }
+
+  var streaks = [];
+  for (var li = 0; li < RAIN_LAYER_COUNT; li += 1) {
+    var z = streakDepthZ(li);
+    var count = Math.round(32 - z * 18);
+    var speed = RAIN_FAR_SPEED_PX_S + (RAIN_NEAR_SPEED_PX_S - RAIN_FAR_SPEED_PX_S) * z;
+    var thick = 0.5 + z * 2.1;
+    var alpha = 0.28 + z * 0.62;
+    for (var i = 0; i < count; i += 1) {
+      streaks.push({
+        x: rRand() * CALC_W,
+        y: rRand() * CALC_H,
+        z: z, speed: speed, thick: thick, alpha: alpha,
+        len: 4 + z * 12
+      });
+    }
+  }
+  streaks.sort(function (a, b) { return a.z - b.z; });
+
+  function stepSim(dtS) {
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      s.y += s.speed * dtS;
+      if (s.y - s.len > CALC_H + 4) {
+        s.y = -4 - rRand() * 10;
+        s.x = rRand() * CALC_W;
+      }
+    }
+  }
+
+  function draw() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      var x = s.x * sx;
+      var y0 = s.y * sy, y1 = (s.y - s.len) * sy;
+      ctx.strokeStyle = 'rgba(214,232,255,' + s.alpha + ')';
+      ctx.lineWidth = Math.max(0.6, s.thick * ((sx + sy) / 2));
+      ctx.beginPath();
+      ctx.moveTo(x, y0);
+      ctx.lineTo(x, y1);
+      ctx.stroke();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw();
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 90 : 40;
+  for (var w = 0; w < warmSteps; w += 1) stepSim(0.02);
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      stepSim(dt / 1000);
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

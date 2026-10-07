@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터가 화면 중심에서 벗어난 만큼 바람 벡터의 방향을 다시 계산해, 포인터를 움직이는 동안 빗줄기 전체가 그 방향으로 같이 기울어 떨어진다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rn is-demo" id="rnRoot" tabindex="0" role="img" aria-label="포인터를 좌우로 움직이거나 화살표 키를 누르면 비가 그쪽으로 눕는 장면">
+  <canvas class="rn__canvas" id="rnCanvas" width="480" height="300"></canvas>
+  <p class="rn__caption">포인터가 화면 중심에서 벗어난 만큼 바람 벡터의 방향을 다시 계산해, 포인터를 움직이는 동안 빗줄기 전체가 그 방향으로 같이 기울어 떨어진다</p>
+  <p class="rn__hint">포인터를 움직이거나 ← → 키</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: windLeanTarget() 이 포인터(또는 가상 포인터) x 위치를 -1~1 로 정규화해 기울기 목표각을 정하고,
+  // 실제 기울기는 POINTER_WIND_LERP 비율로 목표각을 매 프레임 뒤쫓는다(즉시 꺾이지 않고 관성처럼 따라감).
+  // virtualPointerSweep() 은 실제 입력이 없을 때 같은 함수를 그대로 호출하는 자동 시연 경로.
+  var root = document.getElementById('rnRoot');
+  var canvas = document.getElementById('rnCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var POINTER_WIND_LERP = 0.06;
+  var WIND_LEAN_MAX_DEG = 22;
+  var RAIN_STREAK_COUNT = 90;
+  var SWEEP_PERIOD_MS = 3400;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rRand = seedRand(431071);
+
+  var streaks = [];
+  for (var i = 0; i < RAIN_STREAK_COUNT; i += 1) {
+    streaks.push({ x: rRand() * CALC_W, y: rRand() * CALC_H, speed: 100 + rRand() * 80, thick: 0.6 + rRand() * 1.1 });
+  }
+
+  var manual = false;
+  var pointerNormX = 0;
+  var manualReleaseTimer = null;
+
+  function windLeanTarget(normX) {
+    return normX * WIND_LEAN_MAX_DEG;
+  }
+
+  function virtualPointerSweep(nowMs) {
+    return Math.sin((nowMs / SWEEP_PERIOD_MS) * Math.PI * 2);
+  }
+
+  var leanDeg = 0;
+  function stepSim(dtS, nowMs) {
+    var normX = manual ? pointerNormX : virtualPointerSweep(nowMs);
+    var target = windLeanTarget(normX);
+    leanDeg += (target - leanDeg) * Math.min(1, POINTER_WIND_LERP * (dtS * 60));
+    var leanRad = (leanDeg * Math.PI) / 180;
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      s.y += s.speed * dtS;
+      s.x += Math.sin(leanRad) * s.speed * 0.7 * dtS;
+      if (s.y > CALC_H + 4) { s.y = -4 - rRand() * 6; s.x = rRand() * CALC_W; }
+      if (s.x < -6) s.x = CALC_W + 6;
+      if (s.x > CALC_W + 6) s.x = -6;
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function draw() {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = 'rgba(38,20,10,0.06)';
+    ctx.fillRect(0, 0, cw, ch);
+    var leanRad = (leanDeg * Math.PI) / 180;
+    var dx = Math.sin(leanRad) * 6, dy = Math.cos(leanRad) * 6;
+    ctx.strokeStyle = 'rgba(255,236,214,0.55)';
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      var x = s.x * sx, y = s.y * sy;
+      ctx.lineWidth = Math.max(0.6, s.thick * ((sx + sy) / 2));
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - dx * s.thick * (sx / 6), y - dy * s.thick * (sy / 6));
+      ctx.stroke();
+    }
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw();
+  }
+
+  function setManualFromClientX(clientX) {
+    var r = canvas.getBoundingClientRect();
+    var normX = ((clientX - r.left) / Math.max(1, r.width)) * 2 - 1;
+    pointerNormX = Math.max(-1, Math.min(1, normX));
+    manual = true;
+    root.classList.remove('is-demo');
+    if (manualReleaseTimer) clearTimeout(manualReleaseTimer);
+  }
+
+  function scheduleRelease() {
+    if (manualReleaseTimer) clearTimeout(manualReleaseTimer);
+    manualReleaseTimer = setTimeout(function () { manual = false; }, 2600);
+  }
+
+  canvas.addEventListener('pointermove', function (e) {
+    setManualFromClientX(e.clientX);
+    scheduleRelease();
+  });
+  canvas.addEventListener('pointerdown', function (e) {
+    setManualFromClientX(e.clientX);
+    scheduleRelease();
+  });
+  canvas.addEventListener('pointerleave', function () {
+    scheduleRelease();
+  });
+
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      manual = true;
+      root.classList.remove('is-demo');
+      var step = e.key === 'ArrowLeft' ? -0.18 : 0.18;
+      pointerNormX = Math.max(-1, Math.min(1, pointerNormX + step));
+      scheduleRelease();
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var elapsed = 0;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 30 : 40;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(0.02, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt / 1000, elapsed);
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

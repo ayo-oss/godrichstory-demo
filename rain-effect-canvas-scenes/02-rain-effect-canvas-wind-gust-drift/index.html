@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>느리게 흔들리는 파형 값으로 바람의 세기와 각도를 계속 다시 계산해, 빗줄기 전체의 기울기와 낙하 속도가 같은 바람 값을 따라 함께 기운다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rn is-demo" id="rnRoot">
+  <canvas class="rn__canvas" id="rnCanvas" width="480" height="300"></canvas>
+  <p class="rn__caption">느리게 흔들리는 파형 값으로 바람의 세기와 각도를 계속 다시 계산해, 빗줄기 전체의 기울기와 낙하 속도가 같은 바람 값을 따라 함께 기운다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 두 사인파를 합성한 windGustAngle() 값 하나가 바람의 각도를 정하고, 모든 빗줄기가
+  // 매 프레임 그 같은 값을 읽어 기울기·낙하 속도를 다시 계산한다. WIND_GUST_MAX_DEG 는 그
+  // 각도의 최댓값 — 값을 늘리면 약한 바람에도 크게 기울고, 줄이면 강한 바람에도 거의 수직이다.
+  var root = document.getElementById('rnRoot');
+  var canvas = document.getElementById('rnCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_W = 160, CALC_H = 100;
+  var WIND_GUST_MAX_DEG = 8;
+  var RAIN_WIND_CYCLE_MS = 5200;
+  var RAIN_STREAK_COUNT = 70;
+  var RAIN_FALL_SPEED_PX_S = 130;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rRand = seedRand(431021);
+
+  function windGustAngle(nowMs) {
+    var a = Math.sin(nowMs / RAIN_WIND_CYCLE_MS * Math.PI * 2) * 0.62;
+    var b = Math.sin(nowMs / (RAIN_WIND_CYCLE_MS * 1.73) * Math.PI * 2 + 1.3) * 0.38;
+    return (a + b) * WIND_GUST_MAX_DEG;
+  }
+
+  var streaks = [];
+  for (var i = 0; i < RAIN_STREAK_COUNT; i += 1) {
+    streaks.push({
+      x: rRand() * CALC_W,
+      y: rRand() * CALC_H,
+      speed: RAIN_FALL_SPEED_PX_S * (0.6 + rRand() * 0.7),
+      thick: 0.8 + rRand() * 1.4
+    });
+  }
+
+  var elapsed = 0;
+  function stepSim(dtS, nowMs) {
+    var deg = windGustAngle(nowMs);
+    var rad = deg * Math.PI / 180;
+    var sinA = Math.sin(rad), cosA = Math.cos(rad);
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      s.y += s.speed * cosA * dtS;
+      s.x += s.speed * sinA * dtS;
+      if (s.y > CALC_H + 6) { s.y = -6 - rRand() * 8; s.x = rRand() * CALC_W; }
+      if (s.x < -6) s.x = CALC_W + 6;
+      if (s.x > CALC_W + 6) s.x = -6;
+    }
+  }
+
+  function draw(nowMs) {
+    var sx = cw / CALC_W, sy = ch / CALC_H;
+    var deg = windGustAngle(nowMs);
+    var rad = deg * Math.PI / 180;
+    var lx = Math.sin(rad), ly = Math.cos(rad);
+    ctx.clearRect(0, 0, cw, ch);
+    for (var i = 0; i < streaks.length; i += 1) {
+      var s = streaks[i];
+      var len = 5 + s.speed * 0.03;
+      var x0 = s.x * sx, y0 = s.y * sy;
+      var x1 = (s.x - lx * len) * sx, y1 = (s.y - ly * len) * sy;
+      ctx.strokeStyle = 'rgba(20,26,54,.7)';
+      ctx.lineWidth = Math.max(0.6, s.thick * ((sx + sy) / 2));
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+  }
+
+  var cw = 480, ch = 300;
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    draw(elapsed);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  var warmSteps = reduce ? 130 : 40;
+  for (var w = 0; w < warmSteps; w += 1) { elapsed += 20; stepSim(0.02, elapsed); }
+
+  var lastTs = null;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var dt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!reduce) {
+      elapsed += dt;
+      stepSim(dt / 1000, elapsed);
+      draw(elapsed);
+    }
+    requestAnimationFrame(tick);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  draw(elapsed);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
