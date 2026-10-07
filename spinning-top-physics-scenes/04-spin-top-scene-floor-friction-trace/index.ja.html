@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接点の位置を速度ベクトルで動かし、床の摩擦係数を掛けて速度を減らしながら、通った跡を細い線として残し、だんだん狭まる渦の軌跡を描く。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300"></canvas>
+  <p class="bp__caption">接点の位置を速度ベクトルで動かし、床の摩擦係数を掛けて速度を減らしながら、通った跡を細い線として残し、だんだん狭まる渦の軌跡を描く。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+  var CALC_W = 320, CALC_H = 200;
+  var FIXED_DT = 16;
+  var dtS = FIXED_DT / 1000;
+  var STRIPE_COUNT = 6;
+  var STRIPE_FUSE_HZ = 14;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var demo = !reduce;
+  if (!demo) root.classList.remove('is-demo');
+  function stopDemo() { demo = false; root.classList.remove('is-demo'); }
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(435004);
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  var PALS = [
+    { a: '#ffb3c7', b: '#fff1c9', mid: '#ffd6c8', body: '#f29bb7' },
+    { a: '#a8e6cf', b: '#e6fbf1', mid: '#c9f1e0', body: '#7fcfae' },
+    { a: '#c9b8ff', b: '#f1ecff', mid: '#ddd2ff', body: '#a590ef' },
+    { a: '#9fd8ff', b: '#e6f5ff', mid: '#c4e6ff', body: '#6fb7ec' }
+  ];
+  var cw = 480, ch = 300, sc = 1.5, elapsed = 0;
+  var rafId = 0;
+  var cleaners = [];
+
+  function makeTop(x, y, palIndex, R, omega) {
+    return { x: x, y: y, vx: 0, vy: 0, omega: omega, tilt: 0.08, az: rand() * 6.283, spin: rand() * 6.283,
+      R: R, pal: PALS[palIndex % PALS.length], kick: 0, tipX: x, tipY: y };
+  }
+
+  var pulses = [];
+  function addPulse(x, y, rgb) { pulses.push({ x: x, y: y, born: elapsed, rgb: rgb || '255,255,255' }); }
+  function stepPulses() {
+    var live = [];
+    for (var i = 0; i < pulses.length; i += 1) if (elapsed - pulses[i].born < 520) live.push(pulses[i]);
+    pulses = live;
+  }
+  function drawPulses() {
+    for (var i = 0; i < pulses.length; i += 1) {
+      var p = pulses[i], f = (elapsed - p.born) / 520;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.scale(1, 0.38);
+      ctx.beginPath();
+      ctx.arc(0, 0, 12 + f * 62, 0, 6.2832);
+      ctx.strokeStyle = 'rgba(' + p.rgb + ',' + (0.8 * (1 - f)) + ')';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function pushTrail(arr, x, y, max) { arr.push({ x: x, y: y }); if (arr.length > max) arr.shift(); }
+  function drawTrail(arr, rgb, w) {
+    ctx.lineCap = 'round';
+    for (var i = 1; i < arr.length; i += 1) {
+      var f = i / arr.length;
+      ctx.beginPath();
+      ctx.moveTo(arr[i - 1].x, arr[i - 1].y);
+      ctx.lineTo(arr[i].x, arr[i].y);
+      ctx.strokeStyle = 'rgba(' + rgb + ',' + (0.62 * f) + ')';
+      ctx.lineWidth = w * (0.35 + 0.65 * f);
+      ctx.stroke();
+    }
+  }
+
+  var glowX = 160, glowY = 150, glowS = 1;
+  function drawArena() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#1d1a2b';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.setTransform(sc, 0, 0, sc, 0, 0);
+    var g = ctx.createRadialGradient(160, 118, 10, 160, 118, 200);
+    g.addColorStop(0, '#463e68');
+    g.addColorStop(1, '#2a2442');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CALC_W, CALC_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.09)';
+    ctx.lineWidth = 1;
+    for (var k = 1; k <= 4; k += 1) {
+      ctx.beginPath();
+      ctx.ellipse(160, 120, 44 * k, 21 * k, 0, 0, 6.2832);
+      ctx.stroke();
+    }
+    // 원근 격자: 팽이 위치(glowX)에 가까울수록 밝게 비친다
+    var gl = ctx.createRadialGradient(glowX, glowY, 6, glowX, glowY, 140);
+    gl.addColorStop(0, 'rgba(255,255,255,' + (0.62 * glowS) + ')');
+    gl.addColorStop(1, 'rgba(255,255,255,0.07)');
+    ctx.strokeStyle = gl;
+    ctx.lineWidth = 1;
+    for (var gr = 0; gr < 10; gr += 1) {
+      var gf = gr / 9;
+      var gy = 72 + 128 * Math.pow(gf, 1.7);
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.lineTo(CALC_W, gy);
+      ctx.stroke();
+    }
+    for (var gc = -9; gc <= 9; gc += 1) {
+      ctx.beginPath();
+      ctx.moveTo(160 + gc * 12, 72);
+      ctx.lineTo(160 + gc * 52, CALC_H);
+      ctx.stroke();
+    }
+    var pool = ctx.createRadialGradient(glowX, glowY + 4, 0, glowX, glowY + 4, 120);
+    pool.addColorStop(0, 'rgba(255,238,252,' + (0.3 * glowS) + ')');
+    pool.addColorStop(1, 'rgba(255,238,252,0)');
+    ctx.fillStyle = pool;
+    ctx.fillRect(0, 0, CALC_W, CALC_H);
+  }
+
+  function wedges(R, n, base, alpha, color) {
+    ctx.fillStyle = color;
+    ctx.globalAlpha = alpha;
+    for (var i = 0; i < n; i += 1) {
+      var a0 = base + i * 6.2832 / n;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a0 + 3.1416 / n);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTop(t) {
+    var R = t.R, L = R * 1.25;
+    // 바닥에 남는 회전 잔상 원판과 도는 점선 고리
+    var gw = Math.abs(t.omega);
+    ctx.save();
+    ctx.translate(t.x, t.y + 3);
+    ctx.scale(1, 0.3);
+    wedges(R * 1.7, STRIPE_COUNT, t.spin * 0.8, 0.2 + 0.14 * clamp(gw / 30, 0, 1), t.pal.a);
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 1.95, 0, 6.2832);
+    ctx.setLineDash([R * 0.3, R * 0.2]);
+    ctx.lineDashOffset = -t.spin * R * 0.6;
+    ctx.strokeStyle = t.pal.a;
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 8;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    glowX = t.x + (t.tipX - t.x) * 0.5;
+    glowY = t.y;
+    glowS = 0.55 + 0.45 * clamp(gw / 30, 0, 1);
+    var s = Math.sin(t.tilt), c = Math.cos(t.tilt);
+    var cx = t.x + Math.cos(t.az) * s * L * 1.15;
+    var cy = t.y - c * L * 0.95 + Math.sin(t.az) * s * L * 0.35;
+    ctx.save();
+    ctx.translate(t.x + R * 0.28, t.y + 1);
+    ctx.scale(1, 0.26);
+    ctx.beginPath();
+    ctx.arc(0, 0, R * (0.8 + 0.6 * s), 0, 6.2832);
+    ctx.fillStyle = 'rgba(10,8,20,' + (0.4 - 0.12 * s) + ')';
+    ctx.fill();
+    ctx.restore();
+
+    var dx = cx - t.x, dy = cy - t.y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var phi = Math.atan2(dx, -dy);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(phi);
+    ctx.beginPath();
+    ctx.moveTo(-R, 0); ctx.lineTo(0, dist); ctx.lineTo(R, 0); ctx.closePath();
+    ctx.fillStyle = t.pal.body;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(0, dist); ctx.lineTo(R, 0); ctx.closePath();
+    ctx.fillStyle = 'rgba(30,16,60,0.24)';
+    ctx.fill();
+
+    var kv = 0.34 + 0.3 * s;
+    ctx.save();
+    ctx.scale(1, kv);
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, 6.2832);
+    ctx.fillStyle = t.pal.b;
+    ctx.fill();
+    var sgn = t.omega < 0 ? -1 : 1;
+    var w = Math.abs(t.omega);
+    wedges(R, STRIPE_COUNT, t.spin, 1, t.pal.a);
+    if (w > 8) {
+      for (var k = 1; k <= 3; k += 1) wedges(R, STRIPE_COUNT, t.spin - sgn * k * w * 0.012, 0.2 / k, t.pal.a);
+    }
+    var f = w * STRIPE_COUNT / 6.2832;
+    var blur = clamp((f - STRIPE_FUSE_HZ) / 26, 0, 0.8);
+    if (blur > 0) {
+      ctx.globalAlpha = blur;
+      ctx.beginPath();
+      ctx.arc(0, 0, R, 0, 6.2832);
+      ctx.fillStyle = t.pal.mid;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, 6.2832);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1 / kv;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(0, -R * 0.62);
+    ctx.strokeStyle = t.pal.body;
+    ctx.lineWidth = R * 0.16;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -R * 0.66, R * 0.12, 0, 6.2832);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.restore();
+    t.tipX = cx + Math.sin(phi) * R * 0.66;
+    t.tipY = cy - Math.cos(phi) * R * 0.66;
+  }
+
+  function wallBounce(t, rest, margin) {
+    var m = t.R + margin;
+    if (t.x < m) { t.x = m; t.vx = Math.abs(t.vx) * rest; }
+    if (t.x > CALC_W - m) { t.x = CALC_W - m; t.vx = -Math.abs(t.vx) * rest; }
+    var top = t.R * 2.1, bottom = CALC_H - 8;
+    if (t.y < top) { t.y = top; t.vy = Math.abs(t.vy) * rest; }
+    if (t.y > bottom) { t.y = bottom; t.vy = -Math.abs(t.vy) * rest; }
+  }
+
+  function pairCollide(a, b, rest, spinMix, kickAmt) {
+    var dx = b.x - a.x, dy = (b.y - a.y) * 1.6;
+    var dist = Math.hypot(dx, dy);
+    var minDist = (a.R + b.R) * 0.92;
+    if (dist <= 0 || dist >= minDist) return false;
+    var nx = dx / dist, ny = dy / dist;
+    var overlap = (minDist - dist) * 0.5;
+    a.x -= nx * overlap; a.y -= ny * overlap / 1.6;
+    b.x += nx * overlap; b.y += ny * overlap / 1.6;
+    var vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (vn >= 0) return false;
+    var j = -(1 + rest) * vn / 2;
+    a.vx -= j * nx; a.vy -= j * ny;
+    b.vx += j * nx; b.vy += j * ny;
+    var tr = (b.omega - a.omega) * spinMix;
+    a.omega += tr; b.omega -= tr;
+    a.vx += -ny * tr * 1.4; a.vy += nx * tr * 1.4;
+    b.vx -= -ny * tr * 1.4; b.vy -= nx * tr * 1.4;
+    a.kick = kickAmt; b.kick = kickAmt;
+    addPulse((a.x + b.x) / 2, (a.y + b.y) / 2 + 6, '255,255,255');
+    return true;
+  }
+  // 기법: 팽이가 각속도에 비례해 밀려가는 힘을 받고, 그 방향이 세차처럼 계속 돌아 나선으로 떠돈다.
+  // 매 스텝 속도에 바닥 마찰 비율(FLOOR_FRICTION)을 곱해 깎고, 지나간 자리를 바닥 자취로 남긴다.
+  var FLOOR_FRICTION = 0.992;
+  var DRIFT_ACCEL = 70;
+  var HEADING_RATE = 1.6;
+  var SPIN_FADE = 0.18;
+  var OMEGA_BASE = 36;
+  var spinTop = makeTop(160, 130, 1, 30, OMEGA_BASE);
+  var floorTrace = [];
+  var heading = 0.4;
+  spinTop.vx = 60; spinTop.vy = 20;
+
+  function stepWorld() {
+    spinTop.omega *= Math.exp(-SPIN_FADE * dtS);
+    spinTop.spin += spinTop.omega * dtS;
+    heading += HEADING_RATE * dtS;
+    var drive = DRIFT_ACCEL * (spinTop.omega / OMEGA_BASE) * dtS;
+    spinTop.vx += Math.cos(heading) * drive;
+    spinTop.vy += Math.sin(heading) * drive * 0.7;
+    spinTop.vx *= FLOOR_FRICTION;
+    spinTop.vy *= FLOOR_FRICTION;
+    spinTop.x += spinTop.vx * dtS;
+    spinTop.y += spinTop.vy * dtS;
+    wallBounce(spinTop, 0.6, 6);
+    var slow = 1 - clamp(spinTop.omega / OMEGA_BASE, 0, 1);
+    spinTop.tilt = 0.1 + 0.4 * slow * slow + 0.1 * Math.min(1, Math.hypot(spinTop.vx, spinTop.vy) / 120);
+    spinTop.az = heading;
+    if (elapsed % 32 === 0) pushTrail(floorTrace, spinTop.x, spinTop.y + 3, 420);
+    if (spinTop.omega < 9) {
+      spinTop.omega = OMEGA_BASE;
+      spinTop.vx += 50; spinTop.vy -= 30;
+      addPulse(spinTop.x, spinTop.y + 4, '168,230,207');
+    }
+    stepPulses();
+  }
+
+  function drawWorld() {
+    drawArena();
+    drawTrail(floorTrace, '168,230,207', 20);
+    drawPulses();
+    drawTop(spinTop);
+  }
+
+  function fit() {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw; canvas.height = ch;
+    sc = cw / CALC_W;
+    drawWorld();
+  }
+
+  var lastTs = null;
+  var acc = 0;
+  function tick(ts) {
+    if (lastTs === null) lastTs = ts;
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    acc += frameDt;
+    while (acc >= FIXED_DT) { elapsed += FIXED_DT; stepWorld(); acc -= FIXED_DT; }
+    drawWorld();
+    rafId = requestAnimationFrame(tick);
+  }
+  for (var w0 = 0; w0 < 30; w0 += 1) { elapsed += FIXED_DT; stepWorld(); }
+  fit();
+  window.addEventListener('resize', fit);
+  cleaners.push(function () { window.removeEventListener('resize', fit); });
+  if (!reduce) rafId = requestAnimationFrame(tick);
+
+  function destroy() {
+    cancelAnimationFrame(rafId);
+    for (var i = 0; i < cleaners.length; i += 1) cleaners[i]();
+  }
+
+})();
+</script>
+</body>
+</html>
