@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>정렬 기준을 바꾸면 각 댓글이 이전 위치와 새 위치의 세로 거리를 계산해, 그 거리만큼 자리를 옮기며 지나가는 댓글끼리는 겹치지 않게 잠깐 옆으로 비켜난다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="srt is-demo" id="srtRoot">
+  <div class="srt__head">
+    <button type="button" class="srt__sortBtn" id="srtSortBtn" aria-pressed="false">
+      <svg class="srt__sortIcon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M176 48v160H80V48Z" opacity=".2"/><path d="M117.66 170.34a8 8 0 0 1 0 11.32l-32 32a8 8 0 0 1-11.32 0l-32-32a8 8 0 0 1 11.32-11.32L72 188.69V48a8 8 0 0 1 16 0v140.69l18.34-18.35a8 8 0 0 1 11.32 0m96-96l-32-32a8 8 0 0 0-11.32 0l-32 32a8 8 0 0 0 11.32 11.32L168 67.31V208a8 8 0 0 0 16 0V67.31l18.34 18.35a8 8 0 0 0 11.32-11.32"/></g></svg>
+      <span class="srt__sortLabel" id="srtSortLabel">최신순</span>
+    </button>
+  </div>
+  <ul class="srt__list" role="list" id="srtList">
+    <li class="srt__item" data-id="c1" data-likes="12">
+      <span class="srt__avatar" aria-hidden="true"></span>
+      <div class="srt__body">
+        <p class="srt__meta"><strong class="srt__name">하늘연필</strong><span class="srt__time">방금</span></p>
+        <p class="srt__text">정리 잘 되어있네요.</p>
+      </div>
+      <span class="srt__likes">♥ 12</span>
+    </li>
+    <li class="srt__item" data-id="c2" data-likes="41">
+      <span class="srt__avatar" aria-hidden="true"></span>
+      <div class="srt__body">
+        <p class="srt__meta"><strong class="srt__name">노을풍경</strong><span class="srt__time">3분 전</span></p>
+        <p class="srt__text">코드 그대로 써도 되나요?</p>
+      </div>
+      <span class="srt__likes">♥ 41</span>
+    </li>
+    <li class="srt__item" data-id="c3" data-likes="7">
+      <span class="srt__avatar" aria-hidden="true"></span>
+      <div class="srt__body">
+        <p class="srt__meta"><strong class="srt__name">초록달빛</strong><span class="srt__time">9분 전</span></p>
+        <p class="srt__text">감사합니다, 큰 도움 됐어요.</p>
+      </div>
+      <span class="srt__likes">♥ 7</span>
+    </li>
+    <li class="srt__item" data-id="c4" data-likes="25">
+      <span class="srt__avatar" aria-hidden="true"></span>
+      <div class="srt__body">
+        <p class="srt__meta"><strong class="srt__name">바람소리</strong><span class="srt__time">22분 전</span></p>
+        <p class="srt__text">다음 편도 기대할게요.</p>
+      </div>
+      <span class="srt__likes">♥ 25</span>
+    </li>
+    <li class="srt__item" data-id="c5" data-likes="3">
+      <span class="srt__avatar" aria-hidden="true"></span>
+      <div class="srt__body">
+        <p class="srt__meta"><strong class="srt__name">모래시계</strong><span class="srt__time">41분 전</span></p>
+        <p class="srt__text">이 부분 설명 최고예요.</p>
+      </div>
+      <span class="srt__likes">♥ 3</span>
+    </li>
+  </ul>
+  <p class="srt__sr" id="srtStatus" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: FLIP(First-Last-Invert-Play). 정렬 기준을 바꾸기 전 각 항목의 getBoundingClientRect
+  // 를 기록(First)하고, DOM 순서를 새 정렬로 바로 바꾼 뒤(Last, 레이아웃은 이 한 번만 재계산)
+  // 다시 rect 를 재서 두 값의 차이(Invert)를 transform 으로 되돌려 놓았다가 0 으로 애니메이션
+  // (Play)한다. 실제로는 항상 최종 DOM 위치에 있고, 눈에 보이는 "이동"은 transform 뿐이다.
+  var SORT_FLIP_DURATION_MS = 320;
+
+  var root = document.getElementById('srtRoot');
+  var list = document.getElementById('srtList');
+  var sortBtn = document.getElementById('srtSortBtn');
+  var sortLabel = document.getElementById('srtSortLabel');
+  var status = document.getElementById('srtStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var byNewestOrder = ['c1', 'c2', 'c3', 'c4', 'c5'];
+  var popular = false;
+
+  function sortedIds() {
+    if (!popular) return byNewestOrder.slice();
+    var items = list.querySelectorAll('.srt__item');
+    var arr = [];
+    for (var i = 0; i < items.length; i += 1) arr.push(items[i]);
+    arr.sort(function (a, b) { return parseInt(b.getAttribute('data-likes'), 10) - parseInt(a.getAttribute('data-likes'), 10); });
+    return arr.map(function (el) { return el.getAttribute('data-id'); });
+  }
+
+  function applySort(animate, delayMs) {
+    var items = list.querySelectorAll('.srt__item');
+    var before = {};
+    for (var i = 0; i < items.length; i += 1) {
+      before[items[i].getAttribute('data-id')] = items[i].getBoundingClientRect();
+    }
+
+    var order = sortedIds();
+    var byId = {};
+    for (var j = 0; j < items.length; j += 1) byId[items[j].getAttribute('data-id')] = items[j];
+    for (var k = 0; k < order.length; k += 1) list.appendChild(byId[order[k]]);
+
+    if (!animate || reduce) return;
+
+    for (var m = 0; m < order.length; m += 1) {
+      var el = byId[order[m]];
+      var after = el.getBoundingClientRect();
+      var b = before[order[m]];
+      var dy = b.top - after.top;
+      if (Math.abs(dy) < 0.5) continue;
+      var sideX = (m % 2 === 0 ? 1 : -1) * Math.min(14, Math.abs(dy) * 0.12);
+      el.style.zIndex = String(10 - m);
+      el.animate(
+        [
+          { transform: 'translate(0px,' + dy + 'px)' },
+          { transform: 'translate(' + sideX + 'px,' + (dy * 0.4) + 'px)' },
+          { transform: 'translate(0px,0px)' }
+        ],
+        { duration: SORT_FLIP_DURATION_MS, delay: delayMs || 0, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'both' }
+      );
+    }
+  }
+
+  function setPopular(next, animate, delayMs) {
+    popular = next;
+    sortBtn.setAttribute('aria-pressed', String(popular));
+    sortLabel.textContent = popular ? '인기순' : '최신순';
+    status.textContent = popular ? '좋아요 많은 순으로 정렬했습니다.' : '최신 순으로 정렬했습니다.';
+    applySort(animate, delayMs);
+  }
+
+  sortBtn.addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    setPopular(!popular, true, 0);
+  });
+  sortBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortBtn.click(); }
+  });
+
+  var seqTimer = null;
+  function playSequence() {
+    if (seqTimer) { window.clearTimeout(seqTimer); seqTimer = null; }
+    setPopular(false, false, 0);
+    setPopular(true, true, 240);
+    seqTimer = window.setTimeout(function () {
+      setPopular(false, true, 0);
+    }, 1080);
+  }
+
+  if (reduce) {
+    setPopular(false, false, 0);
+  } else {
+    playSequence();
+    window.setInterval(function () {
+      if (!root.classList.contains('is-demo')) return;
+      setPopular(!popular, true, 0);
+    }, 2400);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The deleted comment's row height is measured and the row folds vertically by exactly that value while fading, and the comments below compute the vacated distance and spring up to fill it — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="del is-demo" id="delRoot">
+  <ul class="del__list" role="list" id="delList">
+    <li class="del__item" data-id="d1">
+      <span class="del__avatar" aria-hidden="true"></span>
+      <div class="del__body">
+        <p class="del__meta"><strong class="del__name">TealMap</strong><span class="del__time">8 min ago</span></p>
+        <p class="del__text">This is the first comment. Try deleting it.</p>
+      </div>
+      <button type="button" class="del__delBtn" id="delBtn1" data-target="d1" aria-label="Delete comment">
+        <svg class="del__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="M200 56v152a8 8 0 0 1-8 8H64a8 8 0 0 1-8-8V56Z" opacity=".2"/><path d="M216 48h-40v-8a24 24 0 0 0-24-24h-48a24 24 0 0 0-24 24v8H40a8 8 0 0 0 0 16h8v144a16 16 0 0 0 16 16h128a16 16 0 0 0 16-16V64h8a8 8 0 0 0 0-16M96 40a8 8 0 0 1 8-8h48a8 8 0 0 1 8 8v8H96Zm96 168H64V64h128Zm-80-104v64a8 8 0 0 1-16 0v-64a8 8 0 0 1 16 0m48 0v64a8 8 0 0 1-16 0v-64a8 8 0 0 1 16 0"/></g></svg>
+      </button>
+    </li>
+    <li class="del__item" data-id="d2">
+      <span class="del__avatar" aria-hidden="true"></span>
+      <div class="del__body">
+        <p class="del__meta"><strong class="del__name">SandHill</strong><span class="del__time">25 min ago</span></p>
+        <p class="del__text">Second comment — the shift grows larger further down.</p>
+      </div>
+    </li>
+    <li class="del__item" data-id="d3">
+      <span class="del__avatar" aria-hidden="true"></span>
+      <div class="del__body">
+        <p class="del__meta"><strong class="del__name">WaveSound</strong><span class="del__time">46 min ago</span></p>
+        <p class="del__text">Third comment — watch it settle via spring damping.</p>
+      </div>
+    </li>
+    <li class="del__item" data-id="d4">
+      <span class="del__avatar" aria-hidden="true"></span>
+      <div class="del__body">
+        <p class="del__meta"><strong class="del__name">MossGarden</strong><span class="del__time">1 hour ago</span></p>
+        <p class="del__text">Fourth comment — it rises by the full shifted distance.</p>
+      </div>
+    </li>
+  </ul>
+  <button type="button" class="del__resetBtn" id="delReset">Undo</button>
+  <p class="del__sr" id="delStatus" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 삭제 대상 행의 offsetHeight 를 실측해 그 픽셀값만큼 height 를 0 으로 접으며 사라지게
+  // 하고, 아래 행들은 First(삭제 전 rect)-Last(삭제 후 rect) 차이를 계산해 그 거리만큼
+  // 스프링 이징으로 transform 이동 뒤 0 으로 멎는다(FLIP + 스프링 감쇠).
+  // 스프링 강성 DELETE_SHIFT_SPRING_STIFFNESS 가 낮을수록(멀미는) 이동 시간이 길어진다.
+  var DELETE_SHIFT_SPRING_STIFFNESS = 220;
+
+  // $ease-lerp-settle 곡선(site/static/demo-tokens.scss)과 같은 샘플 — 1 을 넘겼다가(최대 1.126) 되돌아온다.
+  var SPRING_SETTLE_EASING = 'linear(0.0, 0.051, 0.176, 0.341, 0.518, 0.685, 0.831, 0.947, 1.032, 1.087, 1.117, 1.126, 1.121, 1.105, 1.085, 1.062, 1.041, 1.022, 1.008, 0.997, 1)';
+
+  var root = document.getElementById('delRoot');
+  var list = document.getElementById('delList');
+  var status = document.getElementById('delStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function shiftDuration(gapPx) {
+    // 강성이 높을수록 빨리 멎는다. 이동 거리가 커도 시간이 살짝 늘어난다.
+    return Math.round(60 + 100000 / DELETE_SHIFT_SPRING_STIFFNESS + Math.min(240, gapPx * 0.55));
+  }
+
+  function itemsAfter(id) {
+    var all = list.querySelectorAll('.del__item');
+    var seen = false;
+    var after = [];
+    for (var i = 0; i < all.length; i += 1) {
+      if (all[i].getAttribute('data-id') === id) { seen = true; continue; }
+      if (seen && all[i].getBoundingClientRect().height > 0) after.push(all[i]);
+    }
+    return after;
+  }
+
+  function removeRow(id, animate, delayMs) {
+    var row = list.querySelector('.del__item[data-id="' + id + '"]');
+    if (!row || row.getBoundingClientRect().height === 0) return;
+    var btn = row.querySelector('.del__delBtn');
+
+    // First: 아래 행들의 현재 위치.
+    var below = itemsAfter(id);
+    var before = below.map(function (el) { return el.getBoundingClientRect().top; });
+
+    var gap = row.offsetHeight + 8; // 행 높이 + 리스트 gap
+
+    if (!animate || reduce) {
+      row.style.display = 'none';
+      status.textContent = 'Comment deleted.';
+      return;
+    }
+
+    // 삭제 행 접기: 실측 높이에서 0 으로, 내용은 페이드.
+    var h = row.offsetHeight;
+    row.style.height = h + 'px';
+    row.style.overflow = 'hidden';
+    row.style.boxSizing = 'border-box';
+    row.style.marginTop = '0px';
+    row.style.marginBottom = '0px';
+    row.animate(
+      [{ height: h + 'px', opacity: 1 }, { height: '0px', opacity: 0 }],
+      { duration: 240, delay: delayMs || 0, easing: 'ease-in', fill: 'forwards' }
+    ).onfinish = function () { row.style.display = 'none'; };
+
+    // Last: 접힌 만큼 아래 행들이 실제로 올라온 위치와의 차이를 계산해 스프링으로 메운다.
+    // (여기서는 접기가 display:none 이 아니라 height:0 로 끝나므로, gap 픽셀만큼 아래 행들이
+    //  위로 밀린다 — 그 이동량을 transform 으로 역보정했다가 스프링으로 풀어준다.)
+    var dur = shiftDuration(gap);
+    below.forEach(function (el, i) {
+      var b = before[i];
+      el.animate(
+        [
+          { transform: 'translateY(0px)' },
+          { transform: 'translateY(' + gap + 'px)' },
+          { transform: 'translateY(0px)' }
+        ],
+        { duration: dur, delay: (delayMs || 0) + 240, easing: SPRING_SETTLE_EASING, fill: 'both' }
+      );
+    });
+
+    status.textContent = 'Comment deleted.';
+    if (btn) btn.disabled = true;
+  }
+
+  function restoreRows(animate) {
+    var rows = list.querySelectorAll('.del__item');
+    for (var i = 0; i < rows.length; i += 1) {
+      rows[i].getAnimations().forEach(function (a) { a.cancel(); });
+      rows[i].style.display = '';
+      rows[i].style.height = '';
+      rows[i].style.overflow = '';
+      rows[i].style.marginTop = '';
+      rows[i].style.marginBottom = '';
+      var btn = rows[i].querySelector('.del__delBtn');
+      if (btn) btn.disabled = false;
+    }
+    status.textContent = 'Deleted comment restored.';
+  }
+
+  document.getElementById('delBtn1').addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    removeRow('d1', true, 0);
+  });
+  document.getElementById('delBtn1').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('delBtn1').click(); }
+  });
+  document.getElementById('delReset').addEventListener('click', function () {
+    root.classList.remove('is-demo');
+    restoreRows(false);
+  });
+  document.getElementById('delReset').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('delReset').click(); }
+  });
+
+  if (reduce) {
+    // 초기 상태 그대로 — 입력 즉시 반영.
+  } else {
+    removeRow('d1', true, 220);
+  }
+})();
+</script>
+</body>
+</html>

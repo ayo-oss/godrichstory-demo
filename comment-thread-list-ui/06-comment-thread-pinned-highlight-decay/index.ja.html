@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>仮想時計がピン留めされた瞬間からの経過時間を計算して強調の明るさを比例的に減らし、一定時間が過ぎると控えめな固定色に確定してそれ以上は変化しない — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pin is-demo" id="pinRoot">
+  <div class="pin__list" role="list">
+    <div class="pin__item is-pinned" id="pinItem">
+      <svg class="pin__icon" viewBox="0 0 256 256" aria-hidden="true"><g fill="currentColor"><path d="m229.66 98.34l-57.27 57.46c11.46 22.93-1.72 45.86-10.11 57a8 8 0 0 1-12 .83L42.34 105.76A8 8 0 0 1 43 93.85c29.65-23.92 57.4-10 57.4-10l57.27-57.46a8 8 0 0 1 11.31 0L229.66 87a8 8 0 0 1 0 11.34" opacity=".2"/><path d="m235.32 81.37l-60.69-60.68a16 16 0 0 0-22.63 0l-53.63 53.8c-10.66-3.34-35-7.37-60.4 13.14a16 16 0 0 0-1.29 23.78L85 159.71l-42.66 42.63a8 8 0 0 0 11.32 11.32L96.29 171l48.29 48.29A16 16 0 0 0 155.9 224h1.13a15.93 15.93 0 0 0 11.64-6.33c19.64-26.1 17.75-47.32 13.19-60L235.33 104a16 16 0 0 0-.01-22.63M224 92.69l-57.27 57.46a8 8 0 0 0-1.49 9.22c9.46 18.93-1.8 38.59-9.34 48.62L48 100.08c12.08-9.74 23.64-12.31 32.48-12.31A40.1 40.1 0 0 1 96.81 91a8 8 0 0 0 9.25-1.51L163.32 32L224 92.68Z"/></g></svg>
+      <span class="pin__avatar" aria-hidden="true"></span>
+      <div class="pin__body">
+        <p class="pin__meta"><strong class="pin__name">湖の旅人</strong><span class="pin__time">固定済み</span></p>
+        <p class="pin__text">よくある質問はこのコメントをご確認ください。</p>
+      </div>
+      <span class="pin__decayBar"><i class="pin__decayFill" id="pinFill"></i></span>
+    </div>
+    <div class="pin__item">
+      <span class="pin__avatar" aria-hidden="true"></span>
+      <div class="pin__body">
+        <p class="pin__meta"><strong class="pin__name">野の花束</strong><span class="pin__time">52分前</span></p>
+        <p class="pin__text">固定コメントの色が少しずつ変わるのが面白いです。</p>
+      </div>
+    </div>
+    <div class="pin__item">
+      <span class="pin__avatar" aria-hidden="true"></span>
+      <div class="pin__body">
+        <p class="pin__meta"><strong class="pin__name">星を数える夜</strong><span class="pin__time">2時間前</span></p>
+        <p class="pin__text">時間が経つと控えめに落ち着くんですね。</p>
+      </div>
+    </div>
+  </div>
+  <p class="pin__sr" id="pinStatus" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: performance.now() 기반 가상 시계(Date 미사용). 핀이 걸린 순간부터 경과 시간을
+  // DECAY_DURATION_MS 까지 비례 계산해 강조 밝기·좌측 두께 바를 줄이고, 그 시간을 넘으면
+  // SETTLED_TINT 로 확정해 루프를 멈춘다(더는 변하지 않음). 가상 시계는 VIRTUAL_CLOCK_SCALE
+  // 로 실제 1초를 데모용 1초당 더 빠르게 재생한다.
+  var DECAY_DURATION_MS = 1400;
+  var VIRTUAL_CLOCK_SCALE = 1;
+  var START_DELAY_MS = 220;
+  var PEAK_GLOW = 0.55;
+  var SETTLED_GLOW = 0.12;
+
+  var root = document.getElementById('pinRoot');
+  var item = document.getElementById('pinItem');
+  var fill = document.getElementById('pinFill');
+  var status = document.getElementById('pinStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function decayAt(elapsedMs) {
+    if (elapsedMs <= 0) return PEAK_GLOW;
+    if (elapsedMs >= DECAY_DURATION_MS) return SETTLED_GLOW;
+    var t = elapsedMs / DECAY_DURATION_MS;
+    // 감쇠 곡선: 빠르게 시작해 천천히 수렴(지수 감쇠를 0..1 구간으로 정규화).
+    var eased = 1 - Math.exp(-4.2 * t) / (1 - Math.exp(-4.2));
+    return PEAK_GLOW + (SETTLED_GLOW - PEAK_GLOW) * eased;
+  }
+
+  function applyDecay(glow, progress) {
+    item.style.setProperty('--pin-glow', String(glow));
+    fill.style.transform = 'scaleX(' + Math.max(0, progress) + ')';
+  }
+
+  var rafId = 0;
+  var start = 0;
+
+  function step(now) {
+    if (!start) start = now;
+    var elapsedVirtual = (now - start) * VIRTUAL_CLOCK_SCALE;
+    var elapsed = elapsedVirtual - START_DELAY_MS;
+    if (elapsed < 0) elapsed = 0;
+    applyDecay(decayAt(elapsed), elapsed / DECAY_DURATION_MS);
+    if (elapsed >= DECAY_DURATION_MS) {
+      applyDecay(SETTLED_GLOW, 1);
+      status.textContent = '固定の強調が控えめな色に落ち着きました。';
+      return; // 확정 — 더는 변하지 않음
+    }
+    rafId = window.requestAnimationFrame(step);
+  }
+
+  if (reduce) {
+    applyDecay(SETTLED_GLOW, 1);
+    status.textContent = '固定の強調が控えめな色に落ち着きました。';
+  } else {
+    rafId = window.requestAnimationFrame(step);
+  }
+})();
+</script>
+</body>
+</html>
