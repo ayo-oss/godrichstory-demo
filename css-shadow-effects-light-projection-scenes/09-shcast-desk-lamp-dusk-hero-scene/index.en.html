@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Desk Hero Where the Sun Sets and a Lamp Turns On — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="The projection, blur and sun-height calculations meet in one scene: the sun shadow stretches and fades, then a lamp shadow takes over."></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">Demo running</p>
+  <button class="sc__btn" id="scBtn" type="button">Pause</button>
+  <p class="sc__caption">The projection, blur and sun-height calculations meet in one scene: the sun shadow stretches and fades, then a lamp shadow takes over.</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const REDUCE_START_MS = 1000;
+    const PERIOD_MS = 4000;
+    const KEY_STEP = 12;
+    const FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a.toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열
+    function mulberry32(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6D2B79F5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function polyPath(ctx, poly) {
+        ctx.beginPath();
+        for (let i = 0; i < poly.length; i += 1) {
+            if (i === 0) {
+                ctx.moveTo(poly[i][0], poly[i][1]);
+            }
+            else {
+                ctx.lineTo(poly[i][0], poly[i][1]);
+            }
+        }
+        ctx.closePath();
+    }
+    // 광원 (lx, ly, lh) 에서 점 (x, y, h) 를 바닥 높이 0 으로 내리는 투영 — 닮음비 lh / (lh - h)
+    function castPoint(lx, ly, lh, x, y, h) {
+        const k = lh / Math.max(lh - h, 8);
+        return [lx + (x - lx) * k, ly + (y - ly) * k];
+    }
+    // 볼록 껍질 (단조 체인) — 바닥 꼭짓점과 투영된 윗 꼭짓점을 한 덩어리 그림자로 묶는다
+    function hull(src) {
+        const p = src.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+        const lo = [];
+        for (let i = 0; i < p.length; i += 1) {
+            while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p[i]) <= 0) {
+                lo.pop();
+            }
+            lo.push(p[i]);
+        }
+        const up = [];
+        for (let i = p.length - 1; i >= 0; i -= 1) {
+            while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p[i]) <= 0) {
+                up.pop();
+            }
+            up.push(p[i]);
+        }
+        lo.pop();
+        up.pop();
+        return lo.concat(up);
+    }
+    // 직육면체 한 개의 그림자 다각형 — 바닥 네 꼭짓점과 높이 h 위 네 꼭짓점을 광원에서 투영한다
+    function boxShadow(lx, ly, lh, x0, y0, x1, y1, h) {
+        const base = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        const pts = base.slice();
+        for (let i = 0; i < base.length; i += 1) {
+            pts.push(castPoint(lx, ly, lh, base[i][0], base[i][1], h));
+        }
+        return hull(pts);
+    }
+    function fillShadow(ctx, poly, ink, alpha) {
+        polyPath(ctx, poly);
+        ctx.fillStyle = rgba(ink, alpha);
+        ctx.fill();
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = rgba(ink, alpha * 0.32);
+        ctx.stroke();
+    }
+    // 비스듬히 본 직육면체 — 윗면은 높이의 0.6 만큼 위로 밀고 앞면을 아래에 붙인다
+    function drawBlock(ctx, x0, y0, x1, y1, h, top, front) {
+        const vis = h * 0.6;
+        ctx.fillStyle = rgba(front, 1);
+        ctx.fillRect(x0, y1 - vis, x1 - x0, vis);
+        ctx.fillStyle = rgba(top, 1);
+        ctx.fillRect(x0, y0 - vis, x1 - x0, y1 - y0);
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.fillRect(x0, y0 - vis, x1 - x0, 2);
+    }
+    const DUSK_FRAMES = 125;
+    const LAMP_HEIGHT = 150;
+    const SUN_HEIGHT_NOON = 420;
+    const SUN_HEIGHT_DUSK = 70;
+    const LIGHT_LERP = 0.2;
+    const DUSK_MS = DUSK_FRAMES * FIXED_DT;
+    const DESK_DAY = [244, 226, 200];
+    const DESK_NIGHT = [52, 46, 92];
+    const INK_RGB = [66, 48, 112];
+    const SUN_RGB = [255, 206, 120];
+    const LAMP_RGB = [255, 214, 140];
+    const LAMP_SPOT = [404, 74];
+    const SUN_SPOT = [-60, 96];
+    const ITEMS = [[104, 168, 188, 218, 16], [236, 188, 270, 222, 40], [312, 128, 344, 160, 56]];
+    const ITEM_TOPS = [[255, 214, 204], [190, 226, 255], [180, 240, 216]];
+    const ITEM_FRONTS = [[226, 150, 140], [120, 176, 230], [110, 200, 160]];
+    function makeScene(ctx) {
+        let px = 0;
+        const scene = {
+            path: function (t) {
+                const c = (t / (DUSK_MS * 2)) % 1;
+                const tri = c < 0.5 ? c * 2 : 2 - c * 2;
+                return [W * smooth(tri), 150];
+            },
+            pos: function () { return [px, 150]; },
+            update: function (tx) { px = lerp(px, tx, LIGHT_LERP); },
+            snap: function (tx) { px = tx; },
+            draw: function () {
+                const p = clamp(px / W, 0, 1);
+                const night = smooth(p);
+                const lampOn = smooth((p - 0.35) / 0.4);
+                const sunAlpha = 1 - 0.9 * smooth((p - 0.55) / 0.45);
+                const desk = [lerp(DESK_DAY[0], DESK_NIGHT[0], night), lerp(DESK_DAY[1], DESK_NIGHT[1], night), lerp(DESK_DAY[2], DESK_NIGHT[2], night)];
+                ctx.fillStyle = rgba(desk, 1);
+                ctx.fillRect(0, 0, W, H);
+                glow(ctx, SUN_SPOT[0] + 20, SUN_SPOT[1], 380, SUN_RGB, 0.7 * sunAlpha);
+                glow(ctx, LAMP_SPOT[0], LAMP_SPOT[1], 280, LAMP_RGB, 0.9 * lampOn);
+                const sunH = lerp(SUN_HEIGHT_NOON, SUN_HEIGHT_DUSK, smooth(p));
+                for (let i = 0; i < ITEMS.length; i += 1) {
+                    const r = ITEMS[i];
+                    fillShadow(ctx, boxShadow(SUN_SPOT[0], SUN_SPOT[1], sunH, r[0], r[1], r[2], r[3], r[4]), INK_RGB, 0.4 * sunAlpha);
+                    fillShadow(ctx, boxShadow(LAMP_SPOT[0], LAMP_SPOT[1], LAMP_HEIGHT, r[0], r[1], r[2], r[3], r[4]), INK_RGB, 0.5 * lampOn);
+                }
+                for (let i = 0; i < ITEMS.length; i += 1) {
+                    const r = ITEMS[i];
+                    drawBlock(ctx, r[0], r[1], r[2], r[3], r[4], ITEM_TOPS[i], ITEM_FRONTS[i]);
+                }
+                // 램프 머리 — 켜지면 빛이 번진다
+                ctx.beginPath();
+                ctx.arc(LAMP_SPOT[0], LAMP_SPOT[1], 15, 0, PI2);
+                ctx.fillStyle = rgba([lerp(236, 255, lampOn), lerp(214, 244, lampOn), lerp(206, 186, lampOn)], 1);
+                ctx.fill();
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = 'rgba(200,170,120,0.95)';
+                ctx.stroke();
+                // 해의 높이를 알려 주는 창 표시
+                glow(ctx, 20, SUN_SPOT[1], 36, SUN_RGB, 0.9 * sunAlpha);
+                ctx.fillStyle = rgba(SUN_RGB, Math.max(sunAlpha, 0.15));
+                ctx.fillRect(0, SUN_SPOT[1] - 22, 8, 44);
+            }
+        };
+        return scene;
+    }
+    function main(rootEl, canvas, statusEl, btnEl) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        canvas.width = W;
+        canvas.height = H;
+        const scene = makeScene(ctx0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce) {
+            rootEl.classList.remove('is-demo');
+        }
+        let paused = false;
+        let autoplay = !reduce;
+        let elapsed = reduce ? REDUCE_START_MS : 0;
+        let rafId = 0;
+        let lastTs = null;
+        let accMs = 0;
+        let tgt = scene.path(elapsed);
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function setMode() {
+            if (reduce) {
+                statusEl.textContent = 'Stepping one scene at a time';
+                btnEl.textContent = 'Next scene';
+                return;
+            }
+            statusEl.textContent = !autoplay ? 'Manual control' : (paused ? 'Paused' : 'Demo running');
+            btnEl.textContent = (autoplay && !paused) ? 'Pause' : 'Play';
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        function takeOver() {
+            if (reduce || !autoplay) {
+                return;
+            }
+            autoplay = false;
+            paused = false;
+            rootEl.classList.remove('is-demo');
+            const p = scene.pos();
+            tgt = [p[0], p[1]];
+            setMode();
+        }
+        function afterInput() {
+            if (reduce) {
+                scene.snap(tgt[0], tgt[1]);
+                scene.draw(elapsed);
+            }
+        }
+        function onButton() {
+            if (reduce) {
+                elapsed += REDUCE_STEP_MS;
+                tgt = scene.path(elapsed);
+                scene.snap(tgt[0], tgt[1]);
+                scene.draw(elapsed);
+                return;
+            }
+            if (autoplay && !paused) {
+                paused = true;
+            }
+            else {
+                paused = false;
+                autoplay = true;
+                rootEl.classList.add('is-demo');
+            }
+            setMode();
+        }
+        function tick(ts) {
+            if (lastTs === null) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    elapsed += FIXED_DT;
+                    accMs -= FIXED_DT;
+                    if (autoplay) {
+                        tgt = scene.path(elapsed);
+                    }
+                    scene.update(tgt[0], tgt[1]);
+                }
+                scene.draw(elapsed);
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        listen(btnEl, 'click', function () { onButton(); });
+        listen(canvas, 'pointerdown', function (e) {
+            takeOver();
+            tgt = toLocal(e);
+            afterInput();
+        });
+        listen(canvas, 'pointermove', function (e) {
+            if (autoplay && !reduce) {
+                return;
+            }
+            tgt = toLocal(e);
+            afterInput();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                onButton();
+                return;
+            }
+            let dx = 0;
+            let dy = 0;
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            takeOver();
+            tgt = [clamp(tgt[0] + dx, 0, W), clamp(tgt[1] + dy, 0, H)];
+            afterInput();
+        });
+        if (reduce) {
+            scene.snap(tgt[0], tgt[1]);
+            scene.draw(elapsed);
+            setMode();
+        }
+        else {
+            scene.draw(elapsed);
+            setMode();
+            rafId = requestAnimationFrame(tick);
+        }
+        function destroy() {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        }
+        return destroy;
+    }
+    main(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'));
+})();
+</script>
+</body>
+</html>

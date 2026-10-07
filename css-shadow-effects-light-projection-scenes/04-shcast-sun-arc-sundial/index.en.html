@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Sundial Under a Virtual Sun on an Arc — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="The shadow length comes from height divided by the tangent of the sun elevation, and both direction and length follow a fixed arc."></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">Demo running</p>
+  <button class="sc__btn" id="scBtn" type="button">Pause</button>
+  <p class="sc__caption">The shadow length comes from height divided by the tangent of the sun elevation, and both direction and length follow a fixed arc.</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const REDUCE_START_MS = 1000;
+    const PERIOD_MS = 4000;
+    const KEY_STEP = 12;
+    const FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a.toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열
+    function mulberry32(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6D2B79F5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function polyPath(ctx, poly) {
+        ctx.beginPath();
+        for (let i = 0; i < poly.length; i += 1) {
+            if (i === 0) {
+                ctx.moveTo(poly[i][0], poly[i][1]);
+            }
+            else {
+                ctx.lineTo(poly[i][0], poly[i][1]);
+            }
+        }
+        ctx.closePath();
+    }
+    const SUN_ARC_DEG = 160;
+    const SHADOW_LEN_MAX = 140;
+    const GNOMON_HEIGHT = 60;
+    const DIAL_RADIUS = 112;
+    const SUN_RING_RADIUS = 134;
+    const ELEV_LOW_DEG = 14;
+    const ELEV_SPAN_DEG = 56;
+    const LIGHT_LERP = 0.2;
+    const DIAL_X = 240;
+    const DIAL_Y = 160;
+    const BG_RGB = [255, 244, 222];
+    const PLATE_RGB = [214, 232, 255];
+    const INK_RGB = [74, 56, 120];
+    const SUN_RGB = [255, 214, 120];
+    function makeScene(ctx) {
+        let ux = 0.04;
+        // 해의 진행 u (0 은 해 뜬 직후, 1 은 지기 직전) 를 화면 각도로 바꾼다
+        function sunAngle(u) {
+            const mid = 270;
+            return (mid - SUN_ARC_DEG / 2 + u * SUN_ARC_DEG) * Math.PI / 180;
+        }
+        function elevation(u) { return (ELEV_LOW_DEG + ELEV_SPAN_DEG * Math.sin(Math.PI * u)) * Math.PI / 180; }
+        const scene = {
+            path: function (t) {
+                const c = (t / PERIOD_MS) % 1;
+                const tri = c < 0.5 ? c * 2 : 2 - c * 2;
+                return [W * (0.04 + 0.92 * smooth(tri)), DIAL_Y];
+            },
+            pos: function () { return [ux * W, DIAL_Y]; },
+            update: function (tx) { ux = lerp(ux, clamp(tx / W, 0, 1), LIGHT_LERP); },
+            snap: function (tx) { ux = clamp(tx / W, 0, 1); },
+            draw: function () {
+                const phi = sunAngle(ux);
+                const e = elevation(ux);
+                const len = Math.min(SHADOW_LEN_MAX, GNOMON_HEIGHT / Math.tan(e));
+                ctx.fillStyle = rgba(BG_RGB, 1);
+                ctx.fillRect(0, 0, W, H);
+                // 해가 지나는 호
+                ctx.beginPath();
+                ctx.arc(DIAL_X, DIAL_Y, SUN_RING_RADIUS, sunAngle(0), sunAngle(1));
+                ctx.lineWidth = 2;
+                ctx.setLineDash([4, 6]);
+                ctx.strokeStyle = 'rgba(214,170,70,0.75)';
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // 해시계 판 — 해가 높을수록 밝다
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(DIAL_X, DIAL_Y, DIAL_RADIUS, 0, PI2);
+                ctx.fillStyle = rgba(PLATE_RGB, 1);
+                ctx.fill();
+                ctx.clip();
+                const sx = DIAL_X + Math.cos(phi) * SUN_RING_RADIUS;
+                const sy = DIAL_Y + Math.sin(phi) * SUN_RING_RADIUS;
+                glow(ctx, sx, sy, 230, SUN_RGB, 0.55 + 0.4 * Math.sin(Math.PI * ux));
+                ctx.restore();
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = 'rgba(150,170,230,0.9)';
+                ctx.beginPath();
+                ctx.arc(DIAL_X, DIAL_Y, DIAL_RADIUS, 0, PI2);
+                ctx.stroke();
+                // 눈금 — 해가 8 등분 지점에 있을 때 그림자 끝이 닿는 방향
+                for (let k = 0; k <= 8; k += 1) {
+                    const a = sunAngle(k / 8) + Math.PI;
+                    ctx.beginPath();
+                    ctx.moveTo(DIAL_X + Math.cos(a) * 92, DIAL_Y + Math.sin(a) * 92);
+                    ctx.lineTo(DIAL_X + Math.cos(a) * 106, DIAL_Y + Math.sin(a) * 106);
+                    ctx.lineWidth = k % 4 === 0 ? 4 : 2;
+                    ctx.strokeStyle = 'rgba(96,110,190,0.85)';
+                    ctx.stroke();
+                }
+                // 그림자 — 해 반대쪽으로 길이 = 막대 높이 / tan(고도)
+                const da = phi + Math.PI;
+                const tipX = DIAL_X + Math.cos(da) * len;
+                const tipY = DIAL_Y + Math.sin(da) * len;
+                const nx = -Math.sin(da) * 6;
+                const ny = Math.cos(da) * 6;
+                ctx.beginPath();
+                ctx.moveTo(DIAL_X + nx, DIAL_Y + ny);
+                ctx.lineTo(tipX, tipY);
+                ctx.lineTo(DIAL_X - nx, DIAL_Y - ny);
+                ctx.closePath();
+                ctx.fillStyle = rgba(INK_RGB, 0.52);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(tipX, tipY, 4, 0, PI2);
+                ctx.fillStyle = rgba(INK_RGB, 0.8);
+                ctx.fill();
+                // 막대 윗부분과 해
+                ctx.beginPath();
+                ctx.arc(DIAL_X, DIAL_Y - 4, 7, 0, PI2);
+                ctx.fillStyle = 'rgba(255,196,176,1)';
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = 'rgba(214,120,100,0.95)';
+                ctx.stroke();
+                glow(ctx, sx, sy, 34, SUN_RGB, 0.95);
+                ctx.beginPath();
+                ctx.arc(sx, sy, 10, 0, PI2);
+                ctx.fillStyle = 'rgba(255,240,186,1)';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(224,170,60,0.95)';
+                ctx.stroke();
+            }
+        };
+        return scene;
+    }
+    function main(rootEl, canvas, statusEl, btnEl) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        canvas.width = W;
+        canvas.height = H;
+        const scene = makeScene(ctx0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce) {
+            rootEl.classList.remove('is-demo');
+        }
+        let paused = false;
+        let autoplay = !reduce;
+        let elapsed = reduce ? REDUCE_START_MS : 0;
+        let rafId = 0;
+        let lastTs = null;
+        let accMs = 0;
+        let tgt = scene.path(elapsed);
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function setMode() {
+            if (reduce) {
+                statusEl.textContent = 'Stepping one scene at a time';
+                btnEl.textContent = 'Next scene';
+                return;
+            }
+            statusEl.textContent = !autoplay ? 'Manual control' : (paused ? 'Paused' : 'Demo running');
+            btnEl.textContent = (autoplay && !paused) ? 'Pause' : 'Play';
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        function takeOver() {
+            if (reduce || !autoplay) {
+                return;
+            }
+            autoplay = false;
+            paused = false;
+            rootEl.classList.remove('is-demo');
+            const p = scene.pos();
+            tgt = [p[0], p[1]];
+            setMode();
+        }
+        function afterInput() {
+            if (reduce) {
+                scene.snap(tgt[0], tgt[1]);
+                scene.draw(elapsed);
+            }
+        }
+        function onButton() {
+            if (reduce) {
+                elapsed += REDUCE_STEP_MS;
+                tgt = scene.path(elapsed);
+                scene.snap(tgt[0], tgt[1]);
+                scene.draw(elapsed);
+                return;
+            }
+            if (autoplay && !paused) {
+                paused = true;
+            }
+            else {
+                paused = false;
+                autoplay = true;
+                rootEl.classList.add('is-demo');
+            }
+            setMode();
+        }
+        function tick(ts) {
+            if (lastTs === null) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    elapsed += FIXED_DT;
+                    accMs -= FIXED_DT;
+                    if (autoplay) {
+                        tgt = scene.path(elapsed);
+                    }
+                    scene.update(tgt[0], tgt[1]);
+                }
+                scene.draw(elapsed);
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        listen(btnEl, 'click', function () { onButton(); });
+        listen(canvas, 'pointerdown', function (e) {
+            takeOver();
+            tgt = toLocal(e);
+            afterInput();
+        });
+        listen(canvas, 'pointermove', function (e) {
+            if (autoplay && !reduce) {
+                return;
+            }
+            tgt = toLocal(e);
+            afterInput();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                onButton();
+                return;
+            }
+            let dx = 0;
+            let dy = 0;
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            takeOver();
+            tgt = [clamp(tgt[0] + dx, 0, W), clamp(tgt[1] + dy, 0, H)];
+            afterInput();
+        });
+        if (reduce) {
+            scene.snap(tgt[0], tgt[1]);
+            scene.draw(elapsed);
+            setMode();
+        }
+        else {
+            scene.draw(elapsed);
+            setMode();
+            rafId = requestAnimationFrame(tick);
+        }
+        function destroy() {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        }
+        return destroy;
+    }
+    main(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'));
+})();
+</script>
+</body>
+</html>
