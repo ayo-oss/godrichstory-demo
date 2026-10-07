@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load More with a Remaining-Count Ring — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <button type="button" class="pg__more" id="pgMore" aria-describedby="pgSr">
+    <svg class="pg__ring" viewBox="0 0 96 96" aria-hidden="true" focusable="false">
+      <circle class="pg__track" cx="48" cy="48" r="42"></circle>
+      <circle class="pg__arc" id="pgArc" cx="48" cy="48" r="42"></circle>
+      <circle class="pg__sweep" id="pgSweep" cx="48" cy="48" r="42"></circle>
+    </svg>
+    <span class="pg__num" id="pgNum">36</span>
+    <span class="pg__label" id="pgLabel">Load more</span>
+  </button>
+  <div class="pg__grid" id="pgGrid" aria-hidden="true"></div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 링은 SVG 원의 stroke-dashoffset 으로 채운다. 채움 비율은 스프링으로 따라가 목표를 살짝 넘었다 돌아오고,
+  // Left 개수 숫자는 지수 보간으로 굴러 내려간다. 불러오는 동안(LOAD_MS)에는 호가 링을 한 바퀴씩 돈다.
+  var TOTAL_ITEMS = 48;
+  var PAGE_SIZE = 12;
+  var START_LOADED = 12;
+  var RING_R = 42;
+  var RING_STIFFNESS = 220;
+  var RING_DAMPING = 15;
+  var NUM_RATE = 12;
+  var LOAD_MS = 240;
+  var CELL_STAGGER = 24;
+  var POP_MS = 380;
+  var SUBSTEP = 1 / 240;
+  var CYCLE_MS = 1800;
+  var PRESS_AT = [100, 420, 740, 1060];
+  var TONES = ['is-sky', 'is-mint', 'is-lilac', 'is-pink'];
+  var CIRC = 2 * Math.PI * RING_R;
+
+  var root = document.getElementById('pgRoot');
+  var more = document.getElementById('pgMore');
+  var arc = document.getElementById('pgArc');
+  var sweep = document.getElementById('pgSweep');
+  var numEl = document.getElementById('pgNum');
+  var labelEl = document.getElementById('pgLabel');
+  var grid = document.getElementById('pgGrid');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  arc.style.strokeDasharray = CIRC.toFixed(2);
+  sweep.style.strokeDasharray = (CIRC * 0.16).toFixed(2) + ' ' + CIRC.toFixed(2);
+
+  var cells = [];
+  var born = [];
+  for (var i = 0; i < TOTAL_ITEMS; i += 1) {
+    var c = document.createElement('i');
+    c.className = 'pg__cell';
+    grid.appendChild(c);
+    cells.push(c);
+    born.push(-1);
+  }
+
+  var loaded = 0;
+  var pending = null;
+  var frac = 0;
+  var fv = 0;
+  var numShown = TOTAL_ITEMS;
+  var t0 = null;
+  var lastTs = null;
+  var cycleBase = 0;
+  var pi = 0;
+
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function paintCells() {
+    for (var s = 0; s < TOTAL_ITEMS; s += 1) {
+      cells[s].className = 'pg__cell' + (s < loaded ? ' is-on ' + TONES[Math.floor(s / PAGE_SIZE) % TONES.length] : '');
+    }
+  }
+
+  function finishLoad(now) {
+    var from = loaded;
+    loaded = Math.min(TOTAL_ITEMS, loaded + PAGE_SIZE);
+    for (var s = from; s < loaded; s += 1) born[s] = reduce ? -1 : now + (s - from) * CELL_STAGGER;
+    pending = null;
+    sweep.style.opacity = '0';
+    paintCells();
+    var remain = TOTAL_ITEMS - loaded;
+    var done = remain === 0;
+    labelEl.textContent = done ? 'Done' : 'Load more';
+    more.setAttribute('aria-disabled', done ? 'true' : 'false');
+    more.className = 'pg__more' + (done ? ' is-done' : '');
+    sr.textContent = done ? 'Done' : 'Left ' + remain + ' items';
+    if (reduce) { frac = loaded / TOTAL_ITEMS; numShown = remain; paintStatic(); }
+  }
+
+  function paintStatic() {
+    arc.style.strokeDashoffset = (CIRC * (1 - Math.min(1, frac))).toFixed(2);
+    numEl.textContent = loaded >= TOTAL_ITEMS ? '✓' : String(Math.round(numShown));
+  }
+
+  function press(byUser, now) {
+    if (byUser) root.classList.remove('is-demo');
+    if (pending !== null || loaded >= TOTAL_ITEMS) return;
+    if (reduce) { finishLoad(now); return; }
+    pending = now;
+    sweep.style.opacity = '1';
+  }
+
+  more.addEventListener('click', function () { press(true, perfNow()); });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var t = now - cycleBase;
+      while (pi < PRESS_AT.length && t >= PRESS_AT[pi]) { press(false, now); pi += 1; }
+      if (t >= CYCLE_MS) {
+        cycleBase = now; pi = 0; loaded = START_LOADED; frac = START_LOADED / TOTAL_ITEMS; fv = 0;
+        numShown = TOTAL_ITEMS - START_LOADED;
+        for (var q = 0; q < TOTAL_ITEMS; q += 1) born[q] = -1;
+        paintCells();
+        labelEl.textContent = 'Load more';
+        more.setAttribute('aria-disabled', 'false');
+        more.className = 'pg__more';
+      }
+    }
+    if (pending !== null) {
+      var ang = ((now - pending) / LOAD_MS) * 360;
+      sweep.style.transform = 'rotate(' + (ang - 90).toFixed(1) + 'deg)';
+      if (now - pending >= LOAD_MS) finishLoad(now);
+    }
+    var target = loaded / TOTAL_ITEMS;
+    var left = dt;
+    while (left > 0) {
+      var h = Math.min(SUBSTEP, left);
+      fv += (-RING_STIFFNESS * (frac - target) - RING_DAMPING * fv) * h;
+      frac += fv * h;
+      left -= h;
+    }
+    numShown += ((TOTAL_ITEMS - loaded) - numShown) * (1 - Math.exp(-dt * NUM_RATE));
+    paintStatic();
+    for (var s = 0; s < TOTAL_ITEMS; s += 1) {
+      if (born[s] < 0) continue;
+      var age = now - born[s];
+      var sc = age < 0 ? 0 : age >= POP_MS ? 1 : 1 - Math.exp(-age / 70) * Math.cos(age / 55);
+      cells[s].style.transform = sc === 1 ? '' : 'scale(' + sc.toFixed(3) + ')';
+      if (sc === 1) born[s] = -1;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  loaded = START_LOADED;
+  frac = START_LOADED / TOTAL_ITEMS;
+  numShown = TOTAL_ITEMS - START_LOADED;
+  sweep.style.opacity = '0';
+  paintCells();
+  paintStatic();
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

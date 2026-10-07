@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レールをなぞって選ぶ慣性スナップ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <div class="pg__card is-mint" id="pgCard" aria-hidden="true"><b class="pg__no" id="pgNo">1</b><i class="pg__row"></i><i class="pg__row pg__row--s"></i></div>
+  <div class="pg__rail" id="pgRail">
+    <div class="pg__ticks" id="pgTicks" aria-hidden="true"></div>
+    <div class="pg__fill" id="pgFill" aria-hidden="true"></div>
+    <div class="pg__thumb" id="pgThumb" role="slider" tabindex="0" aria-label="ページ移動" aria-valuemin="1" aria-valuemax="24" aria-valuenow="1">
+      <span class="pg__bubble" id="pgBubble" aria-hidden="true">1</span>
+    </div>
+  </div>
+  <div class="pg__read"><span class="pg__k">速度</span><b id="pgSpeed">0</b></div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 손잡이를 놓는 순간의 速度(최근 포인터 이동의 지수 평균)로 관성 미끄러짐을 계산하고,
+  // 속도가 SNAP_SPEED 아래로 떨어지면 가장 가까운 쪽 눈금으로 지수 보간해 붙는다.
+  var TOTAL_PAGES = 24;
+  var RAIL_W = 240;
+  var FRICTION = 3.4;
+  var SNAP_SPEED = 150;
+  var SNAP_RATE = 16;
+  var VELOCITY_BLEND = 0.4;
+  var TILT_GAIN = 0.014;
+  var TILT_MAX = 16;
+  var CYCLE_MS = 2700;
+  var TONES = ['is-mint', 'is-lilac', 'is-pink', 'is-sky'];
+
+  var root = document.getElementById('pgRoot');
+  var rail = document.getElementById('pgRail');
+  var ticksEl = document.getElementById('pgTicks');
+  var fill = document.getElementById('pgFill');
+  var thumb = document.getElementById('pgThumb');
+  var bubble = document.getElementById('pgBubble');
+  var card = document.getElementById('pgCard');
+  var noEl = document.getElementById('pgNo');
+  var speedEl = document.getElementById('pgSpeed');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  thumb.setAttribute('aria-valuemax', String(TOTAL_PAGES));
+
+  function tickX(page) { return ((page - 1) / (TOTAL_PAGES - 1)) * RAIL_W; }
+  function nearestPage(px) { return Math.max(1, Math.min(TOTAL_PAGES, Math.round((px / RAIL_W) * (TOTAL_PAGES - 1)) + 1)); }
+
+  for (var i = 1; i <= TOTAL_PAGES; i += 1) {
+    var tk = document.createElement('i');
+    tk.className = 'pg__tick';
+    tk.style.transform = 'translateX(' + tickX(i).toFixed(2) + 'px)';
+    ticksEl.appendChild(tk);
+  }
+
+  var x = 0;
+  var v = 0;
+  var mode = 'idle';
+  var lastX = 0;
+  var lastMoveTs = 0;
+  var page = 1;
+  var snapTo = 0;
+  var t0 = null;
+  var lastTs = null;
+  var cycleBase = 0;
+  var demoStage = 0;
+  var dragFrom = 0;
+
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function setPage(p, announce) {
+    if (p === page) return;
+    page = p;
+    noEl.textContent = String(p);
+    bubble.textContent = String(p);
+    thumb.setAttribute('aria-valuenow', String(p));
+    card.className = 'pg__card ' + TONES[p % TONES.length];
+    if (announce) sr.textContent = '現在 ' + p + ' / ' + TOTAL_PAGES;
+  }
+
+  function pointerMove(px, now) {
+    var nx = Math.max(0, Math.min(RAIL_W, px));
+    var dt = Math.max(0.004, (now - lastMoveTs) / 1000);
+    var inst = (nx - lastX) / dt;
+    v = v * (1 - VELOCITY_BLEND) + inst * VELOCITY_BLEND;
+    lastX = nx;
+    lastMoveTs = now;
+    x = nx;
+    mode = 'drag';
+  }
+
+  function release() {
+    if (mode !== 'drag') return;
+    if (reduce) { x = tickX(nearestPage(x)); v = 0; mode = 'idle'; return; }
+    mode = 'glide';
+  }
+
+  function localX(e) { return e.clientX - rail.getBoundingClientRect().left; }
+
+  rail.addEventListener('pointerdown', function (e) {
+    root.classList.remove('is-demo');
+    try { rail.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+    lastX = x;
+    lastMoveTs = perfNow();
+    v = 0;
+    pointerMove(localX(e), perfNow());
+  });
+  rail.addEventListener('pointermove', function (e) { if (mode === 'drag') pointerMove(localX(e), perfNow()); });
+  rail.addEventListener('pointerup', release);
+  rail.addEventListener('pointercancel', release);
+
+  thumb.addEventListener('keydown', function (e) {
+    var p = page;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') p += 1;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') p -= 1;
+    else if (e.key === 'PageUp') p += 5;
+    else if (e.key === 'PageDown') p -= 5;
+    else if (e.key === 'Home') p = 1;
+    else if (e.key === 'End') p = TOTAL_PAGES;
+    else return;
+    e.preventDefault();
+    root.classList.remove('is-demo');
+    p = Math.max(1, Math.min(TOTAL_PAGES, p));
+    v = 0;
+    snapTo = tickX(p);
+    mode = reduce ? 'idle' : 'snap';
+    if (reduce) x = snapTo;
+    setPage(p, true);
+  });
+
+  function demoDrive(now) {
+    var t = now - cycleBase;
+    if (t >= CYCLE_MS) { cycleBase = now; demoStage = 0; x = 0; v = 0; mode = 'idle'; setPage(1, false); return; }
+    if (t >= 100 && t < 450) {
+      var p1 = (t - 100) / 350;
+      if (mode !== 'drag') { lastX = x; lastMoveTs = now; v = 0; }
+      pointerMove(80 * p1 * p1, now);
+      demoStage = 1;
+    } else if (demoStage === 1 && t >= 450) {
+      release();
+      demoStage = 2;
+    } else if (t >= 900 && t < 1240) {
+      if (demoStage < 3) { demoStage = 3; lastX = x; lastMoveTs = now; v = 0; mode = 'drag'; dragFrom = x; }
+      var p2 = (t - 900) / 340;
+      pointerMove(dragFrom - 120 * p2 * p2, now);
+    } else if (demoStage === 3 && t >= 1240) {
+      release();
+      demoStage = 4;
+    }
+  }
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) demoDrive(now);
+    if (mode === 'glide') {
+      x += v * dt;
+      v *= Math.exp(-FRICTION * dt);
+      if (x <= 0) { x = 0; v = 0; }
+      if (x >= RAIL_W) { x = RAIL_W; v = 0; }
+      if (Math.abs(v) < SNAP_SPEED) { snapTo = tickX(nearestPage(x)); mode = 'snap'; }
+    }
+    if (mode === 'snap') {
+      v *= Math.exp(-FRICTION * 3 * dt);
+      x += (snapTo - x) * (1 - Math.exp(-SNAP_RATE * dt));
+      if (Math.abs(snapTo - x) < 0.25) { x = snapTo; v = 0; mode = 'idle'; }
+    }
+    if (mode === 'drag') v *= Math.exp(-6 * dt);
+    setPage(nearestPage(x), mode === 'idle' && !root.classList.contains('is-demo'));
+    thumb.style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+    fill.style.transform = 'scaleX(' + (x / RAIL_W).toFixed(4) + ')';
+    var tilt = Math.max(-TILT_MAX, Math.min(TILT_MAX, v * TILT_GAIN));
+    bubble.style.transform = 'translateX(-50%) rotate(' + tilt.toFixed(2) + 'deg)';
+    speedEl.textContent = String(Math.round(Math.abs(v)));
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    root.classList.remove('is-demo');
+    x = tickX(9);
+    setPage(9, false);
+    thumb.style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+    fill.style.transform = 'scaleX(' + (x / RAIL_W).toFixed(4) + ')';
+    bubble.style.transform = 'translateX(-50%)';
+    // reduce 에서도 눌러 끌면 바로 따라가고 놓으면 가장 가까운 눈금에 붙는다
+    var follow = function () {
+      setPage(nearestPage(x), true);
+      thumb.style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+      fill.style.transform = 'scaleX(' + (x / RAIL_W).toFixed(4) + ')';
+    };
+    rail.addEventListener('pointermove', follow);
+    rail.addEventListener('pointerup', follow);
+    thumb.addEventListener('keydown', follow);
+    rail.addEventListener('pointerdown', follow);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

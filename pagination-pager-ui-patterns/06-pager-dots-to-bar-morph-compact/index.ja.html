@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ドットが棒に伸びるモバイル用ページャー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <div class="pg__card is-mint" id="pgCard" aria-hidden="true"><b class="pg__no" id="pgNo">1</b><i class="pg__row"></i><i class="pg__row pg__row--s"></i></div>
+  <nav class="pg__nav" aria-label="ページ移動">
+    <button type="button" class="pg__b" id="pgPrev" aria-label="前のページ">‹</button>
+    <div class="pg__dots" aria-hidden="true"><div class="pg__strip" id="pgDots"></div></div>
+    <button type="button" class="pg__b" id="pgNext" aria-label="次のページ">›</button>
+  </nav>
+  <div class="pg__read"><b id="pgCur">1</b><span class="pg__sep">/</span><span id="pgTotal">40</span><span class="pg__k">ドット</span><b id="pgVis">7</b></div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 모든 쪽에 ドット 하나씩을 두고, 現在 쪽과의 거리(d)로 목표 폭·투명도를 계산한다.
+  // d=0 은 막대, d=1·2·3 은 단계적으로 작아지고 d>=4 는 투명이라 어느 쪽에서도 보이는 점은 7個(= 2 x DOT_REACH + 1)다.
+  var TOTAL_PAGES = 40;
+  var DOT_REACH = 3;
+  var BAR_W = 24;
+  var DOT_W = [BAR_W, 10, 8, 6];
+  var DOT_ALPHA = [1, 0.9, 0.7, 0.5];
+  var DOT_H = 8;
+  var DOT_GAP = 6;
+  var VIEW_W = 120;
+  var MORPH_RATE = 14;
+  var SLIDE_RATE = 10;
+  var STEP_MS = 170;
+  var START_MS = 100;
+  var DEMO_PAGES = [1, 2, 3, 4, 9, 10, 11, 20, 21, 22, 23, 24];
+
+  var root = document.getElementById('pgRoot');
+  var dotsEl = document.getElementById('pgDots');
+  var curEl = document.getElementById('pgCur');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('pgTotal').textContent = String(TOTAL_PAGES);
+  document.getElementById('pgVis').textContent = String(DOT_REACH * 2 + 1);
+
+  var dots = [];
+  var w = [];
+  var a = [];
+  for (var i = 0; i < TOTAL_PAGES; i += 1) {
+    var d = document.createElement('i');
+    d.className = 'pg__dot';
+    dotsEl.appendChild(d);
+    dots.push(d);
+    w.push(DOT_W[3]);
+    a.push(0);
+  }
+
+  var TONES = ['is-mint', 'is-lilac', 'is-pink', 'is-sky'];
+  var card = document.getElementById('pgCard');
+  var noEl = document.getElementById('pgNo');
+  var cur = 1;
+  var offset = 0;
+  var t0 = null;
+  var lastTs = null;
+  var lastStep = -1;
+
+  function targetW(dist) { return dist < DOT_W.length ? DOT_W[dist] : DOT_W[DOT_W.length - 1]; }
+  function targetA(dist) { return dist < DOT_ALPHA.length ? DOT_ALPHA[dist] : 0; }
+
+  function layout(k) {
+    var x = 0;
+    var centerX = 0;
+    for (var s = 0; s < TOTAL_PAGES; s += 1) {
+      var dist = Math.abs(s + 1 - cur);
+      if (k >= 1) { w[s] = targetW(dist); a[s] = targetA(dist); } else {
+        w[s] += (targetW(dist) - w[s]) * k;
+        a[s] += (targetA(dist) - a[s]) * k;
+      }
+      dots[s].style.width = w[s].toFixed(2) + 'px';
+      dots[s].style.opacity = a[s].toFixed(3);
+      dots[s].className = 'pg__dot' + (s + 1 === cur ? ' is-cur' : '');
+      dots[s].style.transform = 'translateX(' + x.toFixed(2) + 'px)';
+      if (s + 1 === cur) centerX = x;
+      x += w[s] + DOT_GAP;
+    }
+    return centerX;
+  }
+
+  function setCur(n, byUser) {
+    if (byUser) root.classList.remove('is-demo');
+    var next = Math.max(1, Math.min(TOTAL_PAGES, n));
+    if (next === cur) return;
+    cur = next;
+    curEl.textContent = String(cur);
+    noEl.textContent = String(cur);
+    card.className = 'pg__card ' + TONES[cur % TONES.length];
+    if (byUser) sr.textContent = '現在 ' + cur + ' / ' + TOTAL_PAGES;
+    if (reduce) { var c = layout(1); offset = c; dotsEl.style.transform = 'translateX(' + (VIEW_W / 2 - c - BAR_W / 2).toFixed(2) + 'px)'; }
+  }
+
+  document.getElementById('pgPrev').addEventListener('click', function () { setCur(cur - 1, true); });
+  document.getElementById('pgNext').addEventListener('click', function () { setCur(cur + 1, true); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); setCur(cur - 1, true); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); setCur(cur + 1, true); }
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var step = now < START_MS ? 0 : Math.floor((now - START_MS) / STEP_MS) % DEMO_PAGES.length;
+      if (step !== lastStep) { lastStep = step; setCur(DEMO_PAGES[step], false); }
+    }
+    var cx = layout(1 - Math.exp(-dt * MORPH_RATE));
+    offset += (cx - offset) * (1 - Math.exp(-dt * SLIDE_RATE));
+    dotsEl.style.transform = 'translateX(' + (VIEW_W / 2 - offset - BAR_W / 2).toFixed(2) + 'px)';
+    requestAnimationFrame(tick);
+  }
+
+  curEl.textContent = '1';
+  if (reduce) {
+    root.classList.remove('is-demo');
+    cur = 17;
+    curEl.textContent = '17';
+    noEl.textContent = '17';
+    card.className = 'pg__card ' + TONES[cur % TONES.length];
+    var c0 = layout(1);
+    offset = c0;
+    dotsEl.style.transform = 'translateX(' + (VIEW_W / 2 - c0 - BAR_W / 2).toFixed(2) + 'px)';
+  } else {
+    layout(1);
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

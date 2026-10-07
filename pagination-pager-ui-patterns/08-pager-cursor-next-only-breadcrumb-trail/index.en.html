@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Next-Only Cursor Pager with a Trail — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <div class="pg__card is-mint" id="pgCard" aria-hidden="true">
+    <b class="pg__no" id="pgNo">1</b>
+    <span class="pg__cursor" id="pgCursor">0000</span>
+  </div>
+  <nav class="pg__nav" aria-label="Page navigation">
+    <button type="button" class="pg__next" id="pgNext">Next</button>
+  </nav>
+  <div class="pg__trail" id="pgTrail" aria-label="Pages visited">
+    <i class="pg__line" id="pgLine" aria-hidden="true"></i>
+  </div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: Total 쪽수를 모르는 목록은 Next 커서만 받는다. 지나온 쪽을 점으로 남기고,
+  // 점이 늘어날수록 간격을 TRAIL_W / (Dots 수 - 1) 로 줄여 길이가 일정하게 유지된다. 새 점은 스프링으로 튄다.
+  var END_AT = 9;
+  var TRAIL_W = 232;
+  var MAX_GAP = 36;
+  var DOT_SIZE = 12;
+  var GAP_RATE = 12;
+  var POP_MS = 420;
+  var CYCLE_MS = 2700;
+  var PRESS_START = 140;
+  var PRESS_EVERY = 180;
+  var BACK_AT = 1980;
+  var BACK_TO = 3;
+  var TONES = ['is-mint', 'is-lilac', 'is-pink', 'is-sky'];
+
+  var root = document.getElementById('pgRoot');
+  var trail = document.getElementById('pgTrail');
+  var line = document.getElementById('pgLine');
+  var nextBtn = document.getElementById('pgNext');
+  var card = document.getElementById('pgCard');
+  var noEl = document.getElementById('pgNo');
+  var cursorEl = document.getElementById('pgCursor');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function cursorOf(n) { return (Math.imul(n, 2654435761) >>> 0).toString(16).slice(-4); }
+
+  var dots = [];
+  var born = [];
+  for (var i = 0; i < END_AT; i += 1) {
+    var d = document.createElement('button');
+    d.type = 'button';
+    d.className = 'pg__dot';
+    d.setAttribute('aria-label', String(i + 1));
+    d.tabIndex = -1;
+    trail.appendChild(d);
+    dots.push(d);
+    born.push(-1);
+  }
+
+  var cur = 1;
+  var reached = 1;
+  var gapShown = 0;
+  var t0 = null;
+  var lastTs = null;
+  var cycleBase = 0;
+  var pressed = 0;
+  var wentBack = false;
+
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function sync(now, announce) {
+    noEl.textContent = String(cur);
+    cursorEl.textContent = cursorOf(cur);
+    card.className = 'pg__card ' + TONES[cur % TONES.length];
+    var atEnd = cur === END_AT;
+    nextBtn.setAttribute('aria-disabled', atEnd ? 'true' : 'false');
+    nextBtn.textContent = atEnd ? 'End' : 'Next';
+    nextBtn.className = 'pg__next' + (atEnd ? ' is-end' : '');
+    for (var s = 0; s < END_AT; s += 1) {
+      var seen = s + 1 <= reached;
+      dots[s].className = 'pg__dot' + (seen ? ' is-seen' : '') + (s + 1 === cur ? ' is-cur' : '');
+      dots[s].tabIndex = seen ? 0 : -1;
+      dots[s].setAttribute('aria-hidden', seen ? 'false' : 'true');
+      if (s + 1 === cur) dots[s].setAttribute('aria-current', 'page'); else dots[s].removeAttribute('aria-current');
+    }
+    if (announce) sr.textContent = 'Page ' + cur;
+  }
+
+  function goNext(byUser, now) {
+    if (byUser) root.classList.remove('is-demo');
+    if (cur >= END_AT) return;
+    cur += 1;
+    if (cur > reached) { reached = cur; if (!reduce) born[cur - 1] = now; }
+    sync(now, byUser);
+  }
+
+  function goBack(page, byUser, now) {
+    if (byUser) root.classList.remove('is-demo');
+    if (page < 1 || page > reached || page === cur) return;
+    cur = page;
+    sync(now, byUser);
+  }
+
+  nextBtn.addEventListener('click', function () { goNext(true, perfNow()); });
+  trail.addEventListener('click', function (e) { var idx = dots.indexOf(e.target); if (idx >= 0) goBack(idx + 1, true, perfNow()); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); goNext(true, perfNow()); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); goBack(cur - 1, true, perfNow()); }
+  });
+
+  function popScale(age) {
+    if (age < 0 || age >= POP_MS) return 1;
+    return 1 - Math.exp(-age / 65) * Math.cos(age / 50);
+  }
+
+  function paint(now, dt) {
+    var n = Math.max(2, reached);
+    var targetGap = Math.min(MAX_GAP, TRAIL_W / (n - 1));
+    gapShown = reduce ? targetGap : gapShown + (targetGap - gapShown) * (1 - Math.exp(-dt * GAP_RATE));
+    for (var s = 0; s < END_AT; s += 1) {
+      var seen = s + 1 <= reached;
+      var sc = seen ? popScale(now - born[s]) : 0;
+      if (seen && sc === 1) born[s] = -1;
+      dots[s].style.opacity = seen ? '1' : '0';
+      dots[s].style.transform = 'translateX(' + (s * gapShown).toFixed(2) + 'px) scale(' + sc.toFixed(3) + ')';
+    }
+    line.style.transform = 'scaleX(' + (((reached - 1) * gapShown) / TRAIL_W).toFixed(4) + ')';
+  }
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var t = now - cycleBase;
+      while (pressed < END_AT - 1 && t >= PRESS_START + pressed * PRESS_EVERY) { goNext(false, now); pressed += 1; }
+      if (!wentBack && t >= BACK_AT) { wentBack = true; goBack(BACK_TO, false, now); }
+      if (t >= CYCLE_MS) {
+        cycleBase = now; pressed = 0; wentBack = false;
+        cur = 1; reached = 1; gapShown = 0;
+        for (var q = 0; q < END_AT; q += 1) born[q] = -1;
+        sync(now, false);
+      }
+    }
+    paint(now, dt);
+    requestAnimationFrame(tick);
+  }
+
+  sync(0, false);
+  if (reduce) {
+    root.classList.remove('is-demo');
+    paint(0, 1);
+  } else {
+    requestAnimationFrame(tick);
+  }
+  if (reduce) {
+    nextBtn.addEventListener('click', function () { paint(0, 1); });
+    trail.addEventListener('click', function () { paint(0, 1); });
+  }
+})();
+</script>
+</body>
+</html>

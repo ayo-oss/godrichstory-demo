@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Active Pill That Slides on a Spring — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <nav class="pg__nav" id="pgNav" aria-label="Page navigation">
+    <span class="pg__pill" id="pgPill" aria-hidden="true"></span>
+  </nav>
+  <div class="pg__read">
+    <span class="pg__k">Overshoot</span><b id="pgOver">0</b><span class="pg__u">%</span>
+  </div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 알약의 x 위치를 CSS 전환이 아니라 스프링 방정식으로 직접 적분한다.
+  // 가속도 = -강성 x (위치 - 목표) - 감쇠 x Speed. 속도가 클수록 알약이 진행 방향으로 늘어난다.
+  var PAGE_COUNT = 7;
+  var SLOT_W = 36;
+  var SLOT_GAP = 4;
+  var PILL_STIFFNESS = 320;
+  var PILL_DAMPING = 17;
+  var STRETCH_GAIN = 0.0011;
+  var STRETCH_MAX = 0.7;
+  var SUBSTEP = 1 / 240;
+  var STEP_MS = 400;
+  var START_MS = 150;
+  var DEMO_PAGES = [1, 7, 3, 6, 1, 4, 7];
+
+  var root = document.getElementById('pgRoot');
+  var nav = document.getElementById('pgNav');
+  var pill = document.getElementById('pgPill');
+  var overEl = document.getElementById('pgOver');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var btns = [];
+  for (var i = 0; i < PAGE_COUNT; i += 1) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pg__b';
+    b.textContent = String(i + 1);
+    nav.appendChild(b);
+    btns.push(b);
+  }
+
+  function slotX(page) { return (page - 1) * (SLOT_W + SLOT_GAP); }
+
+  var cur = 1;
+  var x = 0;
+  var v = 0;
+  var fromX = 0;
+  var peak = 0;
+  var lastTs = null;
+  var t0 = null;
+  var lastStep = -1;
+
+  function setCur(n, byUser) {
+    var next = Math.max(1, Math.min(PAGE_COUNT, n));
+    if (byUser) root.classList.remove('is-demo');
+    if (next === cur) return;
+    cur = next;
+    fromX = x;
+    peak = 0;
+    for (var s = 0; s < PAGE_COUNT; s += 1) {
+      if (s + 1 === cur) btns[s].setAttribute('aria-current', 'page'); else btns[s].removeAttribute('aria-current');
+    }
+    if (reduce) { x = slotX(cur); v = 0; paint(); }
+    if (byUser) sr.textContent = 'Page ' + cur + ' / ' + PAGE_COUNT;
+  }
+
+  function paint() {
+    var sx = 1 + Math.min(STRETCH_MAX, Math.abs(v) * STRETCH_GAIN);
+    var sy = 1 / Math.sqrt(sx);
+    pill.style.transform = 'translateX(' + x.toFixed(2) + 'px) scale(' + sx.toFixed(3) + ',' + sy.toFixed(3) + ')';
+    var near = Math.max(0, Math.min(PAGE_COUNT - 1, Math.round(x / (SLOT_W + SLOT_GAP))));
+    for (var s = 0; s < PAGE_COUNT; s += 1) btns[s].className = 'pg__b' + (s === near ? ' is-under' : '');
+  }
+
+  nav.addEventListener('click', function (e) {
+    var idx = btns.indexOf(e.target);
+    if (idx >= 0) setCur(idx + 1, true);
+  });
+  nav.addEventListener('keydown', function (e) {
+    var to = null;
+    if (e.key === 'ArrowRight') to = cur + 1;
+    else if (e.key === 'ArrowLeft') to = cur - 1;
+    else if (e.key === 'Home') to = 1;
+    else if (e.key === 'End') to = PAGE_COUNT;
+    if (to === null) return;
+    e.preventDefault();
+    setCur(to, true);
+    btns[Math.max(1, Math.min(PAGE_COUNT, to)) - 1].focus({ preventScroll: true });
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var step = now < START_MS ? 0 : Math.floor((now - START_MS) / STEP_MS) % DEMO_PAGES.length;
+      if (step !== lastStep) { lastStep = step; setCur(DEMO_PAGES[step], false); }
+    }
+    var target = slotX(cur);
+    var left = dt;
+    while (left > 0) {
+      var h = Math.min(SUBSTEP, left);
+      v += (-PILL_STIFFNESS * (x - target) - PILL_DAMPING * v) * h;
+      x += v * h;
+      left -= h;
+    }
+    var span = target - fromX;
+    if (span !== 0) {
+      var over = ((x - target) * Math.sign(span)) / Math.abs(span);
+      if (over > peak) peak = over;
+      overEl.textContent = String(Math.round(peak * 100));
+    }
+    paint();
+    requestAnimationFrame(tick);
+  }
+
+  btns[0].setAttribute('aria-current', 'page');
+  if (reduce) {
+    root.classList.remove('is-demo');
+    cur = 4;
+    x = slotX(cur);
+    for (var q = 0; q < PAGE_COUNT; q += 1) {
+      if (q + 1 === cur) btns[q].setAttribute('aria-current', 'page'); else btns[q].removeAttribute('aria-current');
+    }
+    paint();
+  } else {
+    paint();
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

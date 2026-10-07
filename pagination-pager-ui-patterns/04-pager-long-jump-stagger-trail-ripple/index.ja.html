@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>遠く飛ぶとき番号が順に光る軌跡 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <nav class="pg__nav" id="pgNav" aria-label="ページ移動"></nav>
+  <div class="pg__track" aria-hidden="true"><i class="pg__dot" id="pgDot"></i></div>
+  <div class="pg__read">
+    <b id="pgFrom">1</b><span class="pg__arrow">→</span><b id="pgTo">1</b>
+    <span class="pg__k">間隔</span><b id="pgSpan">0</b>
+  </div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 출발 쪽과 도착 쪽 사이를 칩 아홉 개로 나눠 보여 주고, 칩마다 (출발과의 쪽수 차 x STAGGER_STEP) 만큼 늦게 번쩍인다.
+  // 멀리 뛸수록 全体 궤적이 길어지고, 번쩍임은 attack 후 지수로 꺼지는 곡선이다.
+  var CHIP_COUNT = 9;
+  var TOTAL_PAGES = 40;
+  var STAGGER_STEP = 11;
+  var ATTACK_MS = 50;
+  var DECAY_MS = 220;
+  var SETTLE_MS = 160;
+  var START_MS = 100;
+  var DEMO_PAGES = [1, 40, 12, 33, 2, 25, 40];
+
+  var root = document.getElementById('pgRoot');
+  var nav = document.getElementById('pgNav');
+  var dot = document.getElementById('pgDot');
+  var fromEl = document.getElementById('pgFrom');
+  var toEl = document.getElementById('pgTo');
+  var spanEl = document.getElementById('pgSpan');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var CHIP_W = 28;
+  var CHIP_GAP = 4;
+
+  var chips = [];
+  for (var i = 0; i < CHIP_COUNT; i += 1) {
+    var c = document.createElement('button');
+    c.type = 'button';
+    c.className = 'pg__b';
+    nav.appendChild(c);
+    chips.push(c);
+  }
+
+  var cur = 1;
+  var from = 1;
+  var to = 1;
+  var labels = [];
+  var delays = [];
+  var tStart = 0;
+  var totalMs = 0;
+  var running = false;
+  var t0 = null;
+  var demoIdx = 0;
+  var nextAt = START_MS;
+
+  function setLabels(a, b) {
+    labels = [];
+    delays = [];
+    for (var s = 0; s < CHIP_COUNT; s += 1) {
+      var page = Math.round(a + ((b - a) * s) / (CHIP_COUNT - 1));
+      labels.push(page);
+      delays.push(Math.abs(page - a) * STAGGER_STEP);
+      chips[s].textContent = String(page);
+    }
+    totalMs = Math.abs(b - a) * STAGGER_STEP + ATTACK_MS + DECAY_MS;
+  }
+
+  function paintRest() {
+    for (var s = 0; s < CHIP_COUNT; s += 1) {
+      var on = labels[s] === cur && (s === CHIP_COUNT - 1 || s === 0);
+      chips[s].className = 'pg__b' + (on ? ' is-cur' : '');
+      chips[s].style.transform = '';
+      if (on) chips[s].setAttribute('aria-current', 'page'); else chips[s].removeAttribute('aria-current');
+    }
+    fromEl.textContent = String(from);
+    toEl.textContent = String(to);
+    spanEl.textContent = String(Math.abs(to - from));
+  }
+
+  function jumpTo(page, byUser, now) {
+    if (byUser) root.classList.remove('is-demo');
+    if (page === cur || page < 1 || page > TOTAL_PAGES) return;
+    from = cur;
+    to = page;
+    setLabels(from, to);
+    cur = page;
+    fromEl.textContent = String(from);
+    toEl.textContent = String(to);
+    spanEl.textContent = String(Math.abs(to - from));
+    if (byUser) sr.textContent = '現在 ' + cur + ' / ' + TOTAL_PAGES;
+    if (reduce) { setLabels(cur, cur); paintRest(); return; }
+    tStart = now;
+    running = true;
+  }
+
+  function pulseAt(age) {
+    if (age < 0) return 0;
+    if (age < ATTACK_MS) return age / ATTACK_MS;
+    return Math.exp(-(age - ATTACK_MS) / (DECAY_MS * 0.45));
+  }
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (root.classList.contains('is-demo') && now >= nextAt && !running) {
+      demoIdx = (demoIdx + 1) % DEMO_PAGES.length;
+      jumpTo(DEMO_PAGES[demoIdx], false, now);
+      nextAt = now + 1e9;
+    }
+    if (running) {
+      var elapsed = now - tStart;
+      for (var s = 0; s < CHIP_COUNT; s += 1) {
+        var p = pulseAt(elapsed - delays[s]);
+        var on = elapsed - delays[s] >= 0;
+        chips[s].className = 'pg__b' + (p > 0.02 ? ' is-lit' : '') + (on && s === CHIP_COUNT - 1 ? ' is-cur' : '');
+        chips[s].style.transform = p > 0.02 ? 'translateY(' + (-8 * p).toFixed(2) + 'px) scale(' + (1 + 0.22 * p).toFixed(3) + ')' : '';
+        chips[s].style.opacity = p > 0.02 ? '1' : (on ? '0.9' : '0.72');
+      }
+      var head = Math.min(1, elapsed / Math.max(1, totalMs - DECAY_MS));
+      dot.style.transform = 'translateX(' + (head * (CHIP_COUNT - 1) * (CHIP_W + CHIP_GAP)).toFixed(1) + 'px)';
+      if (elapsed >= totalMs + SETTLE_MS) {
+        running = false;
+        setLabels(cur, cur);
+        for (var q = 0; q < CHIP_COUNT; q += 1) chips[q].style.opacity = '';
+        dot.style.transform = 'translateX(0)';
+        paintRest();
+        if (root.classList.contains('is-demo')) nextAt = now + SETTLE_MS;
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  nav.addEventListener('click', function (e) {
+    var idx = chips.indexOf(e.target);
+    if (idx >= 0 && !running) jumpTo(labels[idx], true, t0 === null ? 0 : performance.now() - t0);
+  });
+  nav.addEventListener('keydown', function (e) {
+    var step = 0;
+    if (e.key === 'ArrowRight') step = 1;
+    else if (e.key === 'ArrowLeft') step = -1;
+    else if (e.key === 'PageDown') step = 10;
+    else if (e.key === 'PageUp') step = -10;
+    if (!step || running) return;
+    e.preventDefault();
+    jumpTo(Math.max(1, Math.min(TOTAL_PAGES, cur + step)), true, t0 === null ? 0 : performance.now() - t0);
+  });
+
+  setLabels(1, 1);
+  paintRest();
+  if (reduce) {
+    root.classList.remove('is-demo');
+    from = 1;
+    jumpTo(40, true, 0);
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

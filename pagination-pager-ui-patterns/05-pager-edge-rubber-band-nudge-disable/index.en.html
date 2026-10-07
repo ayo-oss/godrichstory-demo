@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prev/Next That Rubber-Bands at the Edges — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <div class="pg__card is-mint" id="pgCard" aria-hidden="true"><b class="pg__no" id="pgNo">1</b><i class="pg__row"></i><i class="pg__row pg__row--s"></i></div>
+  <nav class="pg__nav" aria-label="Page navigation">
+    <button type="button" class="pg__b" id="pgPrev" aria-label="Previous page">‹</button>
+    <span class="pg__count" id="pgCount"><b id="pgCur">1</b><span class="pg__sep">/</span><span id="pgTotal">6</span></span>
+    <button type="button" class="pg__b" id="pgNext" aria-label="Next page">›</button>
+  </nav>
+  <div class="pg__tension" aria-hidden="true"><i class="pg__tl" id="pgTl"></i><i class="pg__tr" id="pgTr"></i></div>
+  <div class="pg__read"><span class="pg__k">Tension</span><b id="pgForce">0</b><span class="pg__u">%</span></div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: End 쪽에서 누르면 페이지는 안 바뀌고, 눌림이 스프링 Speed(충격량)로 들어간다.
+  // 이미 많이 밀려 있을수록 충격량이 줄어(1 - 밀림/한계) 고무줄처럼 점점 뻑뻑해진다.
+  var TOTAL_PAGES = 6;
+  var PUSH_IMPULSE = 560;
+  var RUBBER_LIMIT = 26;
+  var EDGE_STIFFNESS = 260;
+  var EDGE_DAMPING = 15;
+  var LABEL_DRAG = 0.3;
+  var SUBSTEP = 1 / 240;
+  var CYCLE_MS = 2300;
+  // [시각 ms, 방향] 방향 -1 이전 · +1 Next
+  var DEMO_PRESSES = [[100, -1], [290, -1], [520, 1], [660, 1], [800, 1], [940, 1], [1080, 1], [1300, 1], [1460, 1], [1700, -1]];
+
+  var root = document.getElementById('pgRoot');
+  var prev = document.getElementById('pgPrev');
+  var next = document.getElementById('pgNext');
+  var count = document.getElementById('pgCount');
+  var curEl = document.getElementById('pgCur');
+  var forceEl = document.getElementById('pgForce');
+  var tl = document.getElementById('pgTl');
+  var tr = document.getElementById('pgTr');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('pgTotal').textContent = String(TOTAL_PAGES);
+
+  var TONES = ['is-mint', 'is-lilac', 'is-pink', 'is-sky'];
+  var CARD_DRAG = 0.7;
+  var card = document.getElementById('pgCard');
+  var noEl = document.getElementById('pgNo');
+  var cur = 1;
+  var x = [0, 0];
+  var v = [0, 0];
+  var lastTs = null;
+  var t0 = null;
+  var cycleBase = 0;
+  var evt = 0;
+
+  function syncEdges() {
+    prev.setAttribute('aria-disabled', cur === 1 ? 'true' : 'false');
+    next.setAttribute('aria-disabled', cur === TOTAL_PAGES ? 'true' : 'false');
+    prev.className = 'pg__b' + (cur === 1 ? ' is-edge' : '');
+    next.className = 'pg__b' + (cur === TOTAL_PAGES ? ' is-edge' : '');
+    curEl.textContent = String(cur);
+    noEl.textContent = String(cur);
+    card.className = 'pg__card ' + TONES[cur % TONES.length];
+  }
+
+  function press(dir, byUser) {
+    if (byUser) root.classList.remove('is-demo');
+    var side = dir < 0 ? 0 : 1;
+    var target = cur + dir;
+    if (target < 1 || target > TOTAL_PAGES) {
+      if (!reduce) {
+        var slack = Math.max(0, 1 - Math.abs(x[side]) / RUBBER_LIMIT);
+        v[side] += dir * PUSH_IMPULSE * slack;
+      }
+      if (byUser) sr.textContent = 'Page ' + cur + ' / ' + TOTAL_PAGES;
+      return;
+    }
+    cur = target;
+    syncEdges();
+    if (byUser) sr.textContent = 'Page ' + cur + ' / ' + TOTAL_PAGES;
+  }
+
+  prev.addEventListener('click', function () { press(-1, true); });
+  next.addEventListener('click', function () { press(1, true); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); press(-1, true); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); press(1, true); }
+  });
+
+  function step(side, dt) {
+    var left = dt;
+    while (left > 0) {
+      var h = Math.min(SUBSTEP, left);
+      v[side] += (-EDGE_STIFFNESS * x[side] - EDGE_DAMPING * v[side]) * h;
+      x[side] += v[side] * h;
+      left -= h;
+    }
+  }
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      while (evt < DEMO_PRESSES.length && now - cycleBase >= DEMO_PRESSES[evt][0]) {
+        press(DEMO_PRESSES[evt][1], false);
+        evt += 1;
+      }
+      if (now - cycleBase >= CYCLE_MS) { cycleBase = now; evt = 0; cur = 1; syncEdges(); }
+    }
+    step(0, dt);
+    step(1, dt);
+    prev.style.transform = 'translateX(' + x[0].toFixed(2) + 'px)';
+    next.style.transform = 'translateX(' + x[1].toFixed(2) + 'px)';
+    card.style.transform = 'translateX(' + ((x[0] + x[1]) * CARD_DRAG).toFixed(2) + 'px)';
+    count.style.transform = 'translateX(' + ((x[0] + x[1]) * LABEL_DRAG).toFixed(2) + 'px)';
+    tl.style.transform = 'scaleX(' + Math.min(1, Math.abs(x[0]) / RUBBER_LIMIT).toFixed(3) + ')';
+    tr.style.transform = 'scaleX(' + Math.min(1, Math.abs(x[1]) / RUBBER_LIMIT).toFixed(3) + ')';
+    forceEl.textContent = String(Math.round(Math.min(1, Math.max(Math.abs(x[0]), Math.abs(x[1])) / RUBBER_LIMIT) * 100));
+    requestAnimationFrame(tick);
+  }
+
+  syncEdges();
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

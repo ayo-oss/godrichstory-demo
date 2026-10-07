@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>자리 수가 고정된 페이지 창 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <nav class="pg__nav" id="pgNav" aria-label="페이지 이동"></nav>
+  <div class="pg__kinds" id="pgKinds" aria-hidden="true"></div>
+  <div class="pg__read">
+    <span class="pg__k">현재</span><b id="pgCur">1</b>
+    <span class="pg__k">전체</span><b id="pgTotal">40</b>
+    <span class="pg__k">칸</span><b id="pgSlots">7</b>
+  </div>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 어느 쪽에서도 버튼 칸 수(SLOT_COUNT)가 같도록 보이는 번호를 계산한다.
+  // 양끝(첫·끝 쪽)은 항상 남기고, 현재 쪽이 한쪽 끝 가까이면 말줄임 하나만, 가운데면 말줄임 둘을 둔다.
+  var SLOT_COUNT = 7;
+  var TOTAL_PAGES = 40;
+  var GAP = -1;
+  var STEP_MS = 230;
+  var START_MS = 120;
+  var DEMO_PAGES = [1, 2, 4, 5, 9, 17, 26, 35, 37, 40, 36, 21, 3];
+
+  function windowSlots(cur, total, slots) {
+    var out = [];
+    var i;
+    if (total <= slots) {
+      for (i = 1; i <= total; i += 1) out.push(i);
+      return out;
+    }
+    var inner = slots - 4;
+    if (cur <= slots - 3) {
+      for (i = 1; i <= slots - 2; i += 1) out.push(i);
+      out.push(GAP, total);
+      return out;
+    }
+    if (cur >= total - slots + 4) {
+      out.push(1, GAP);
+      for (i = total - slots + 3; i <= total; i += 1) out.push(i);
+      return out;
+    }
+    var lo = cur - Math.floor((inner - 1) / 2);
+    out.push(1, GAP);
+    for (i = 0; i < inner; i += 1) out.push(lo + i);
+    out.push(GAP, total);
+    return out;
+  }
+
+  var root = document.getElementById('pgRoot');
+  var nav = document.getElementById('pgNav');
+  var kindsEl = document.getElementById('pgKinds');
+  var curEl = document.getElementById('pgCur');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var btns = [];
+  var kinds = [];
+  var pulse = [];
+  var jump = [];
+  for (var i = 0; i < SLOT_COUNT; i += 1) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pg__b';
+    nav.appendChild(b);
+    btns.push(b);
+    var k = document.createElement('span');
+    k.className = 'pg__kind';
+    kindsEl.appendChild(k);
+    kinds.push(k);
+    pulse.push(-1);
+    jump.push(1);
+  }
+
+  document.getElementById('pgTotal').textContent = String(TOTAL_PAGES);
+  document.getElementById('pgSlots').textContent = String(SLOT_COUNT);
+  var cur = 1;
+  var t0 = null;
+  var lastStep = -1;
+  var wantFocus = false;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function render(now) {
+    var arr = windowSlots(cur, TOTAL_PAGES, SLOT_COUNT);
+    for (var s = 0; s < SLOT_COUNT; s += 1) {
+      var v = arr[s];
+      var el = btns[s];
+      var isGap = v === GAP;
+      var txt = isGap ? '…' : String(v);
+      if (el.textContent !== txt) {
+        el.textContent = txt;
+        if (!reduce) pulse[s] = now;
+      }
+      el.className = 'pg__b' + (isGap ? ' is-gap' : '') + (v === cur ? ' is-cur' : '');
+      if (v === cur) { el.setAttribute('aria-current', 'page'); } else { el.removeAttribute('aria-current'); }
+      el.setAttribute('aria-hidden', isGap ? 'true' : 'false');
+      el.tabIndex = isGap ? -1 : 0;
+      jump[s] = isGap ? Math.round((arr[s - 1] + arr[s + 1]) / 2) : v;
+      kinds[s].className = 'pg__kind ' + (isGap ? 'is-gap' : (v === 1 || v === TOTAL_PAGES) ? 'is-edge' : 'is-win');
+      if (v === cur && wantFocus) { el.focus({ preventScroll: true }); wantFocus = false; }
+    }
+    curEl.textContent = String(cur);
+  }
+
+  function go(n, byUser) {
+    var next = Math.max(1, Math.min(TOTAL_PAGES, n));
+    if (byUser) root.classList.remove('is-demo');
+    if (next === cur) return;
+    cur = next;
+    render(perfNow());
+    if (byUser) sr.textContent = '현재 ' + cur + ' / ' + TOTAL_PAGES;
+  }
+
+  nav.addEventListener('click', function (e) {
+    var el = e.target;
+    var idx = btns.indexOf(el);
+    if (idx < 0) return;
+    go(jump[idx], true);
+  });
+  nav.addEventListener('keydown', function (e) {
+    var key = e.key;
+    var to = null;
+    if (key === 'ArrowRight') to = cur + 1;
+    else if (key === 'ArrowLeft') to = cur - 1;
+    else if (key === 'Home') to = 1;
+    else if (key === 'End') to = TOTAL_PAGES;
+    if (to === null) return;
+    e.preventDefault();
+    wantFocus = true;
+    go(to, true);
+    wantFocus = false;
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (root.classList.contains('is-demo')) {
+      var step = now < START_MS ? 0 : Math.floor((now - START_MS) / STEP_MS) % DEMO_PAGES.length;
+      if (step !== lastStep) {
+        lastStep = step;
+        cur = DEMO_PAGES[step];
+        render(now);
+      }
+    }
+    for (var s = 0; s < SLOT_COUNT; s += 1) {
+      if (pulse[s] < 0) continue;
+      var age = now - pulse[s];
+      var sc = age >= 420 ? 1 : 1 - 0.5 * Math.exp(-age / 80) * Math.cos(age / 60);
+      btns[s].style.transform = sc === 1 ? '' : 'scale(' + sc.toFixed(3) + ')';
+      if (sc === 1) pulse[s] = -1;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    root.classList.remove('is-demo');
+    cur = 17;
+    render(0);
+  } else {
+    cur = DEMO_PAGES[0];
+    render(0);
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

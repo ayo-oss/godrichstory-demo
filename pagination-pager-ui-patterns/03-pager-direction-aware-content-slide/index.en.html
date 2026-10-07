@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Direction-Aware Content Swap — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pg is-demo" id="pgRoot">
+  <div class="pg__view" id="pgView">
+    <div class="pg__card" id="pgCardA" aria-hidden="true"></div>
+    <div class="pg__card" id="pgCardB"></div>
+  </div>
+  <nav class="pg__nav" aria-label="Page navigation">
+    <button type="button" class="pg__b pg__b--jump" id="pgM5" aria-label="−5">−5</button>
+    <button type="button" class="pg__b" id="pgPrev" aria-label="Previous page">‹</button>
+    <span class="pg__count"><b id="pgCur">1</b><span class="pg__sep">/</span><span id="pgTotal">12</span></span>
+    <button type="button" class="pg__b" id="pgNext" aria-label="Next page">›</button>
+    <button type="button" class="pg__b pg__b--jump" id="pgP5" aria-label="+5">+5</button>
+  </nav>
+  <p class="pg__sr" id="pgSr" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 이동한 방향(부호)과 건너뛴 쪽수(거리)로 슬라이드 폭·흐림·시간을 계산한다.
+  // 새 내용은 진행 방향 반대쪽에서 들어오고, 거리가 클수록 더 멀리·더 흐리게·더 오래 움직인다.
+  var TOTAL_PAGES = 12;
+  var BASE_SLIDE = 28;
+  var SLIDE_PER_PAGE = 14;
+  var SLIDE_MAX = 120;
+  var BLUR_PER_PAGE = 0.9;
+  var BLUR_MAX = 6;
+  var BASE_MS = 260;
+  var MS_PER_PAGE = 30;
+  var MS_MAX = 560;
+  var STEP_MS = 440;
+  var START_MS = 150;
+  var DEMO_MOVES = [1, 1, 6, -1, -7, 1, 8, -4];
+  var TONES = ['is-mint', 'is-lilac', 'is-pink', 'is-sky'];
+
+  var root = document.getElementById('pgRoot');
+  var cardA = document.getElementById('pgCardA');
+  var cardB = document.getElementById('pgCardB');
+  var curEl = document.getElementById('pgCur');
+  var sr = document.getElementById('pgSr');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('pgTotal').textContent = String(TOTAL_PAGES);
+
+  function fillCard(el, page) {
+    el.className = 'pg__card ' + TONES[page % TONES.length];
+    var rows = '';
+    for (var r = 0; r < 3; r += 1) {
+      var w = 44 + ((page * 37 + r * 53) % 50);
+      rows += '<i class="pg__row" style="width:' + w + '%"></i>';
+    }
+    el.innerHTML = '<b class="pg__no">' + page + '</b>' + rows;
+  }
+
+  var cur = 1;
+  var shown = 1;
+  var anim = null;
+  var lastStep = -1;
+  var t0 = null;
+  var lastTs = null;
+  fillCard(cardB, 1);
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  function easeOut(p) { return 1 - Math.pow(1 - p, 3); }
+
+  function move(delta, byUser, now) {
+    if (byUser) root.classList.remove('is-demo');
+    var next = Math.max(1, Math.min(TOTAL_PAGES, cur + delta));
+    if (next === cur) return;
+    var dir = next > cur ? 1 : -1;
+    var dist = Math.abs(next - cur);
+    var prevPage = cur;
+    cur = next;
+    curEl.textContent = String(cur);
+    if (byUser) sr.textContent = 'Page ' + cur + ' / ' + TOTAL_PAGES;
+    if (reduce) {
+      fillCard(cardB, cur);
+      cardB.style.transform = '';
+      cardB.style.opacity = '1';
+      cardB.style.filter = '';
+      cardA.style.opacity = '0';
+      return;
+    }
+    fillCard(cardA, prevPage);
+    fillCard(cardB, cur);
+    anim = {
+      t: now,
+      dir: dir,
+      slide: Math.min(SLIDE_MAX, BASE_SLIDE + dist * SLIDE_PER_PAGE),
+      blur: Math.min(BLUR_MAX, dist * BLUR_PER_PAGE),
+      ms: Math.min(MS_MAX, BASE_MS + dist * MS_PER_PAGE)
+    };
+  }
+
+  function paintAnim(now) {
+    if (!anim) return;
+    var p = Math.min(1, (now - anim.t) / anim.ms);
+    var e = easeOut(p);
+    cardB.style.transform = 'translateX(' + (anim.dir * anim.slide * (1 - e)).toFixed(1) + 'px)';
+    cardB.style.opacity = e.toFixed(3);
+    cardB.style.filter = anim.blur * (1 - e) > 0.05 ? 'blur(' + (anim.blur * (1 - e)).toFixed(2) + 'px)' : '';
+    cardA.style.transform = 'translateX(' + (-anim.dir * anim.slide * 0.5 * e).toFixed(1) + 'px)';
+    cardA.style.opacity = (1 - e).toFixed(3);
+    cardA.style.filter = anim.blur * e > 0.05 ? 'blur(' + (anim.blur * e).toFixed(2) + 'px)' : '';
+    if (p >= 1) { anim = null; cardA.style.opacity = '0'; cardB.style.transform = ''; cardB.style.filter = ''; }
+  }
+
+  document.getElementById('pgPrev').addEventListener('click', function () { move(-1, true, perfNow()); });
+  document.getElementById('pgNext').addEventListener('click', function () { move(1, true, perfNow()); });
+  document.getElementById('pgM5').addEventListener('click', function () { move(-5, true, perfNow()); });
+  document.getElementById('pgP5').addEventListener('click', function () { move(5, true, perfNow()); });
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); move(1, true, perfNow()); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); move(-1, true, perfNow()); }
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var step = now < START_MS ? -1 : Math.floor((now - START_MS) / STEP_MS);
+      if (step !== lastStep && step >= 0) {
+        lastStep = step;
+        var mv = DEMO_MOVES[step % DEMO_MOVES.length];
+        var dest = cur + mv;
+        if (dest < 1 || dest > TOTAL_PAGES) mv = -mv;
+        move(mv, false, now);
+      }
+    }
+    paintAnim(now);
+    requestAnimationFrame(tick);
+  }
+
+  cardA.style.opacity = '0';
+  if (reduce) {
+    root.classList.remove('is-demo');
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
