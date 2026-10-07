@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>優先対象が受付されると残りの番号との優先順位の差を計算してその位置に新しいバッジが割り込むように現れ、後ろの番号は押し出された分だけ計算されて下がる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wpl is-demo" id="wplRoot">
+  <ul class="wpl__list" id="wplList" role="list"></ul>
+  <p class="wpl__status" id="wplStatus" aria-live="polite"></p>
+  <div class="wpl__controls">
+    <button type="button" class="wpl__btn wpl__btn--primary" id="wplInsert">優先受付</button>
+    <button type="button" class="wpl__btn" id="wplReset">初期化</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 새 優先 대상의 우선순위 값과 기존 각 줄의 우선순위 값을 비교해 끼어들 자리(insertIndex)를
+  // 계산한다. 그 자리 뒤에 있던 줄들이 화면에서 실제로 얼마나 내려가는지(FLIP)를 실측해
+  // PRIORITY_SHIFT_SPRING_STIFFNESS 로 감쇠시키며 되돌리고, 새 배지는 확대+페이드로 끼어든다.
+  var PRIORITY_SHIFT_SPRING_STIFFNESS = 260;
+  var SPRING_SETTLE_EASING = 'linear(0.0, 0.051, 0.176, 0.341, 0.518, 0.685, 0.831, 0.947, 1.032, 1.087, 1.117, 1.126, 1.121, 1.105, 1.085, 1.062, 1.041, 1.022, 1.008, 0.997, 1)';
+
+  function shiftDuration(gapPx) {
+    return Math.round(60 + 100000 / PRIORITY_SHIFT_SPRING_STIFFNESS + Math.min(240, gapPx * 0.55));
+  }
+
+  var ORDER = [
+    { id: 'r1', ticket: '108番', note: '一般受付', weight: 0 },
+    { id: 'r2', ticket: '109番', note: '一般受付', weight: 0 },
+    { id: 'r3', ticket: '110番', note: '一般受付', weight: 0 },
+    { id: 'r4', ticket: '111番', note: '一般受付', weight: 0 }
+  ];
+  var priorityCount = 0;
+
+  var root = document.getElementById('wplRoot');
+  var listEl = document.getElementById('wplList');
+  var status = document.getElementById('wplStatus');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function buildRow(row) {
+    var li = document.createElement('li');
+    li.className = 'wpl__item' + (row.weight > 0 ? ' is-priority' : '');
+    li.id = 'wplRow-' + row.id;
+    function cell(cls, text) {
+      var sp = document.createElement('span');
+      sp.className = cls;
+      if (text) sp.textContent = text;
+      li.appendChild(sp);
+    }
+    if (row.weight > 0) cell('wpl__badge', '優先'); else cell('wpl__spacer', '');
+    cell('wpl__ticket', row.ticket);
+    cell('wpl__note', row.note);
+    return li;
+  }
+
+  ORDER.forEach(function (row) { listEl.appendChild(buildRow(row)); });
+
+  function priorityInsertIndex(newWeight) {
+    var idx = 0;
+    for (var i = 0; i < ORDER.length; i += 1) {
+      if (ORDER[i].weight >= newWeight) idx = i + 1; else break;
+    }
+    return idx;
+  }
+
+  function paintStatus(row, idx) {
+    status.textContent = row.ticket + ' 優先受付・' + (idx + 1) + '番目の位置に割り込みました。';
+  }
+
+  function insertPriority() {
+    priorityCount += 1;
+    var newRow = { id: 'p' + priorityCount, ticket: (301 + priorityCount - 1) + '番', note: '優先呼び出し', weight: 10 };
+    var idx = priorityInsertIndex(newRow.weight);
+
+    var below = Array.prototype.slice.call(listEl.children, idx);
+    var beforeTops = below.map(function (el) { return el.getBoundingClientRect().top; });
+
+    var li = buildRow(newRow);
+    li.classList.add('is-enter');
+    if (idx >= listEl.children.length) listEl.appendChild(li); else listEl.insertBefore(li, listEl.children[idx]);
+    ORDER.splice(idx, 0, newRow);
+
+    if (!reduce) {
+      requestAnimationFrame(function () {
+        var afterTops = below.map(function (el) { return el.getBoundingClientRect().top; });
+        below.forEach(function (el, i) {
+          var dy = beforeTops[i] - afterTops[i];
+          if (Math.abs(dy) < 0.5) return;
+          el.animate(
+            [{ transform: 'translateY(' + dy + 'px)' }, { transform: 'translateY(0px)' }],
+            { duration: shiftDuration(Math.abs(dy)), easing: SPRING_SETTLE_EASING }
+          );
+        });
+        li.animate(
+          [{ opacity: 0, transform: 'scale(.85)' }, { opacity: 1, transform: 'scale(1)' }],
+          { duration: 260, easing: 'ease-out' }
+        );
+        li.classList.remove('is-enter');
+      });
+    } else {
+      li.classList.remove('is-enter');
+    }
+
+    paintStatus(newRow, idx);
+  }
+
+  function resetAll() {
+    priorityCount = 0;
+    ORDER = [
+      { id: 'r1', ticket: '108番', note: '一般受付', weight: 0 },
+      { id: 'r2', ticket: '109番', note: '一般受付', weight: 0 },
+      { id: 'r3', ticket: '110番', note: '一般受付', weight: 0 },
+      { id: 'r4', ticket: '111番', note: '一般受付', weight: 0 }
+    ];
+    listEl.innerHTML = '';
+    ORDER.forEach(function (row) { listEl.appendChild(buildRow(row)); });
+    status.textContent = '待ちリストを初期化しました。';
+  }
+
+  var insertBtn = document.getElementById('wplInsert');
+  var resetBtn = document.getElementById('wplReset');
+
+  function onInsert() { root.classList.remove('is-demo'); insertPriority(); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(); }
+
+  insertBtn.addEventListener('click', onInsert);
+  insertBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onInsert(); } });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); } });
+
+  status.textContent = '優先対象が受付されると計算された位置に割り込みます。';
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+  var t0 = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce && root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+      if (priorityCount >= 2) { resetAll(); } else { insertPriority(); }
+      demoIndex += 1;
+      if (demoIndex >= demoSchedule.length) { demoIndex = 0; demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; }); }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

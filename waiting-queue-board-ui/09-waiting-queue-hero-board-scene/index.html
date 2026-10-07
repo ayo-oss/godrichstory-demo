@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 호출 번호 굴림, 04 목록 자리 이동, 07 전체 인원 카운터를 한 화면 위에 동시에 배치해 번호가 호출되고 목록이 당겨지고 인원 수가 바뀌는 완성 장면을 만든다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="whb is-demo" id="whbRoot">
+  <div class="whb__head">
+    <div class="whb__odometer" id="whbCallOdo" aria-hidden="true"></div>
+    <div class="whb__countWrap" aria-hidden="true">
+      <div class="whb__odometer whb__odometer--small" id="whbTotalOdo"></div>
+      <span class="whb__countUnit">명 대기중</span>
+    </div>
+  </div>
+  <ul class="whb__list" id="whbList" role="list"></ul>
+  <p class="whb__status" id="whbStatus" aria-live="polite"></p>
+  <div class="whb__controls">
+    <button type="button" class="whb__btn whb__btn--primary" id="whbCall">다음 호출</button>
+    <button type="button" class="whb__btn" id="whbJoin">입장</button>
+    <button type="button" class="whb__btn" id="whbReset">초기화</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법(합성): HERO_CALL_ROLL_MS 호출 번호 굴림(01) + HERO_LIST_SPRING_STIFFNESS 목록 자리 이동(04)
+  // + HERO_COUNT_ROLL_MS 전체 인원 카운터(07) 를 한 화면에서 같은 호출 하나로 동시에 계산한다.
+  // 호출되면: 맨 앞 행이 접히며 사라지고(04), 뒤 행들이 스프링 감쇠로 올라오고(04), 호출 번호가
+  // 굴러가고(01), 대기 인원이 그 차이만큼 굴러 내려간다(07). 입장 버튼은 인원만 올린다(07).
+  var HERO_CALL_ROLL_MS = 480;
+  var HERO_DIGIT_STAGGER_MS = 70;
+  var HERO_COUNT_ROLL_MS = 420;
+  var HERO_LIST_SPRING_STIFFNESS = 260;
+  var HERO_FLASH_MS = 520;
+  var SPRING_SETTLE_EASING = 'linear(0.0, 0.051, 0.176, 0.341, 0.518, 0.685, 0.831, 0.947, 1.032, 1.087, 1.117, 1.126, 1.121, 1.105, 1.085, 1.062, 1.041, 1.022, 1.008, 0.997, 1)';
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(434091);
+
+  function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  function shiftDuration(gapPx) {
+    return Math.round(60 + 100000 / HERO_LIST_SPRING_STIFFNESS + Math.min(240, gapPx * 0.55));
+  }
+
+  var HERO_CALL_BASE = 501;
+  var HERO_TOTAL_START = 18;
+  var HERO_ROWS_START = [
+    { id: 'h1', ticket: '501번', note: '대기 2분' },
+    { id: 'h2', ticket: '502번', note: '대기 6분' },
+    { id: 'h3', ticket: '503번', note: '대기 11분' },
+    { id: 'h4', ticket: '504번', note: '대기 15분' },
+    { id: 'h5', ticket: '505번', note: '대기 19분' }
+  ];
+
+  var root = document.getElementById('whbRoot');
+  var callOdo = document.getElementById('whbCallOdo');
+  var totalOdo = document.getElementById('whbTotalOdo');
+  var listEl = document.getElementById('whbList');
+  var status = document.getElementById('whbStatus');
+  var countWrap = document.querySelector('.whb__countWrap');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var callNum = HERO_CALL_BASE;
+  var frontIndex = 0;
+  var total = HERO_TOTAL_START;
+  var nextTicket = 506;
+
+  // ---- (01/07 공용) 자릿수 릴 ----
+  function buildOdometer(container, digitCount) {
+    container.innerHTML = '';
+    var digits = [];
+    for (var i = 0; i < digitCount; i += 1) {
+      var d = document.createElement('div');
+      d.className = 'whb__digit';
+      var reel = document.createElement('div');
+      reel.className = 'whb__reel';
+      d.appendChild(reel);
+      container.appendChild(d);
+      digits.push({ el: d, reel: reel, value: 0, from: 0, to: 0, start: 0, dur: 0 });
+    }
+    return digits;
+  }
+
+  var callDigits = buildOdometer(callOdo, 3);
+  var totalDigits = buildOdometer(totalOdo, 2);
+
+  function paintReel(digit, value) {
+    var reel = digit.reel;
+    if (reel.childElementCount !== 10) {
+      reel.innerHTML = '';
+      for (var n = 0; n < 10; n += 1) {
+        var i = document.createElement('i');
+        i.textContent = String(n);
+        reel.appendChild(i);
+      }
+    }
+    reel.style.transform = 'translateY(' + (-value * 10) + '%)';
+  }
+
+  function setDigitsImmediate(digits, num) {
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      digits[i].value = v; digits[i].from = v; digits[i].to = v; digits[i].dur = 0;
+      paintReel(digits[i], v);
+    }
+  }
+
+  function rollDigits(digits, num, nowMs, rollMs) {
+    if (reduce) { setDigitsImmediate(digits, num); return; }
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      if (v === digits[i].to) continue;
+      digits[i].from = digits[i].value;
+      digits[i].to = v;
+      digits[i].start = nowMs + i * HERO_DIGIT_STAGGER_MS;
+      digits[i].dur = rollMs;
+    }
+  }
+
+  function stepDigits(digits, nowMs) {
+    for (var i = 0; i < digits.length; i += 1) {
+      var d = digits[i];
+      if (d.value === d.to && nowMs >= d.start) continue;
+      if (nowMs < d.start) continue;
+      var t = Math.min(1, (nowMs - d.start) / d.dur);
+      var e = easeInOutCubic(t);
+      var span = d.to - d.from;
+      if (Math.abs(span) > 5) span = span > 0 ? span - 10 : span + 10;
+      var cur = d.from + span * e;
+      cur = ((cur % 10) + 10) % 10;
+      d.value = t >= 1 ? d.to : cur;
+      paintReel(d, cur);
+    }
+  }
+
+  // ---- (07) 인원 플래시 ----
+  var flashUntil = 0;
+  function flashTotal(dir, nowMs) {
+    countWrap.classList.remove('is-up', 'is-down');
+    if (dir > 0) countWrap.classList.add('is-up');
+    else if (dir < 0) countWrap.classList.add('is-down');
+    flashUntil = nowMs + HERO_FLASH_MS;
+  }
+
+  // ---- (04) 목록 ----
+  var rows = {};
+  function fillRow(li, ticket, note) {
+    var a = document.createElement('span');
+    a.className = 'whb__ticket';
+    a.textContent = ticket;
+    var n = document.createElement('span');
+    n.className = 'whb__note';
+    n.textContent = note;
+    li.appendChild(a);
+    li.appendChild(n);
+  }
+  HERO_ROWS_START.forEach(function (r, i) {
+    var li = document.createElement('li');
+    li.className = 'whb__item' + (i === 0 ? ' is-next' : '');
+    li.id = 'whbRow-' + r.id;
+    fillRow(li, r.ticket, r.note);
+    listEl.appendChild(li);
+    rows[r.id] = li;
+  });
+
+  function paintNextClass() {
+    var ids = Object.keys(rows);
+    ids.forEach(function (id, i) {
+      rows[id].classList.toggle('is-next', i === frontIndex);
+    });
+  }
+
+  function callFront(nowMs) {
+    var ids = Object.keys(rows);
+    if (frontIndex >= ids.length) return;
+    var id = ids[frontIndex];
+    var el = rows[id];
+    var gap = el.offsetHeight + 8;
+    if (!reduce) {
+      var h = el.offsetHeight;
+      el.style.height = h + 'px';
+      el.style.overflow = 'hidden';
+      el.style.boxSizing = 'border-box';
+      el.animate(
+        [{ height: h + 'px', opacity: 1 }, { height: '0px', opacity: 0 }],
+        { duration: 220, easing: 'ease-in', fill: 'forwards' }
+      );
+      var below = [];
+      for (var i = frontIndex + 1; i < ids.length; i += 1) below.push(rows[ids[i]]);
+      var dur = shiftDuration(gap);
+      below.forEach(function (rEl) {
+        rEl.animate(
+          [{ transform: 'translateY(' + gap + 'px)' }, { transform: 'translateY(0px)' }],
+          { duration: dur, delay: 0, easing: SPRING_SETTLE_EASING, fill: 'both' }
+        );
+      });
+    }
+    el.style.display = 'none';
+    frontIndex += 1;
+
+    // (01) 호출 번호 굴림 + (07) 인원 차이 계산
+    var servedTicket = HERO_ROWS_START.concat(pendingRows)[0];
+    void servedTicket;
+    callNum = HERO_CALL_BASE + (HERO_ROWS_START.length - listVisibleCount());
+    rollDigits(callDigits, callNum, nowMs, HERO_CALL_ROLL_MS);
+    var nextTotal = Math.max(0, total - 1);
+    var dir = nextTotal - total;
+    total = nextTotal;
+    rollDigits(totalDigits, total, nowMs, HERO_COUNT_ROLL_MS);
+    flashTotal(dir, nowMs);
+    paintNextClass();
+    paintStatus();
+  }
+
+  var pendingRows = [];
+  function listVisibleCount() {
+    var ids = Object.keys(rows);
+    var n = 0;
+    ids.forEach(function (id) { if (rows[id].style.display !== 'none') n += 1; });
+    return n;
+  }
+
+  function paintStatus() {
+    status.textContent = '호출 ' + callNum + '번 · 대기 ' + total + '명';
+  }
+
+  function joinQueue(nowMs) {
+    var ticket = nextTicket;
+    nextTicket += 1;
+    var id = 'j' + ticket;
+    var li = document.createElement('li');
+    li.className = 'whb__item';
+    li.id = 'whbRow-' + id;
+    fillRow(li, ticket + '번', '대기 접수');
+    listEl.appendChild(li);
+    rows[id] = li;
+    if (!reduce) {
+      li.animate(
+        [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'translateY(0px)' }],
+        { duration: 240, easing: 'ease-out' }
+      );
+    }
+    var nextTotal = Math.min(99, total + 1);
+    var dir = nextTotal - total;
+    total = nextTotal;
+    rollDigits(totalDigits, total, nowMs, HERO_COUNT_ROLL_MS);
+    flashTotal(dir, nowMs);
+    paintStatus();
+  }
+
+  function resetAll(nowMs) {
+    frontIndex = 0;
+    total = HERO_TOTAL_START;
+    callNum = HERO_CALL_BASE;
+    nextTicket = 506;
+    pendingRows = [];
+    Object.keys(rows).forEach(function (id) {
+      var el = rows[id];
+      el.getAnimations().forEach(function (a) { a.cancel(); });
+      el.remove();
+      delete rows[id];
+    });
+    HERO_ROWS_START.forEach(function (r, i) {
+      var li = document.createElement('li');
+      li.className = 'whb__item' + (i === 0 ? ' is-next' : '');
+      li.id = 'whbRow-' + r.id;
+      fillRow(li, r.ticket, r.note);
+      listEl.appendChild(li);
+      rows[r.id] = li;
+    });
+    rollDigits(callDigits, callNum, nowMs, HERO_CALL_ROLL_MS);
+    rollDigits(totalDigits, total, nowMs, HERO_COUNT_ROLL_MS);
+    countWrap.classList.remove('is-up', 'is-down');
+    paintStatus();
+  }
+
+  setDigitsImmediate(callDigits, HERO_CALL_BASE);
+  setDigitsImmediate(totalDigits, HERO_TOTAL_START);
+  paintStatus();
+
+  var callBtn = document.getElementById('whbCall');
+  var joinBtn = document.getElementById('whbJoin');
+  var resetBtn = document.getElementById('whbReset');
+
+  function onCall() { root.classList.remove('is-demo'); callFront(perfNow()); }
+  function onJoin() { root.classList.remove('is-demo'); joinQueue(perfNow()); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(perfNow()); }
+
+  callBtn.addEventListener('click', onCall);
+  callBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCall(); } });
+  joinBtn.addEventListener('click', onJoin);
+  joinBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onJoin(); } });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); } });
+
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  var demoSchedule = [200, 900, 1500];
+  var demoIndex = 0;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce) {
+      stepDigits(callDigits, now);
+      stepDigits(totalDigits, now);
+      if (flashUntil && now >= flashUntil) { countWrap.classList.remove('is-up', 'is-down'); flashUntil = 0; }
+      if (root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+        if (demoIndex % 2 === 0) callFront(now); else joinQueue(now);
+        demoIndex += 1;
+        if (demoIndex >= demoSchedule.length) { demoIndex = 0; demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; }); }
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) { paintStatus(); } else { requestAnimationFrame(tick); }
+})();
+</script>
+</body>
+</html>

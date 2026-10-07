@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>When a new number is called, the gap from the previous one is calculated so the remaining-count digits roll down place by place, and the large call number changes value per digit like a slot machine. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wcn is-demo" id="wcnRoot">
+  <div class="wcn__board">
+    <div class="wcn__odometer" id="wcnCallOdo" aria-hidden="true"></div>
+    <div class="wcn__remainWrap" aria-hidden="true">
+      <span class="wcn__remainLabel">Left:</span>
+      <div class="wcn__odometer wcn__odometer--small" id="wcnRemainOdo"></div>
+      <span class="wcn__remainUnit"> </span>
+    </div>
+  </div>
+  <p class="wcn__status" id="wcnStatus" aria-live="polite"></p>
+  <div class="wcn__controls">
+    <button type="button" class="wcn__btn" id="wcnReset">Start over</button>
+    <button type="button" class="wcn__btn wcn__btn--primary" id="wcnNext">Call next</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 새 순번이 호출될 때마다 Left: 대기 인원(총원 - 처리된 인원)을 다시 계산해, 그 차이를
+  // 자릿수 릴(디지트 릴)로 자리마다 순서대로 굴려 내린다. 순번 숫자 자체도 자리별 릴이며,
+  // CALL_NUMBER_ROLL_MS 는 한 자리가 다음 값으로 굴러가는 데 걸리는 시간, DIGIT_STAGGER_MS 는
+  // 자리마다 시작을 늦추는 간격이다 — CSS 트랜지션이 아니라 rAF 로 각 릴의 위치를 계산한다.
+  var CALL_NUMBER_ROLL_MS = 480;
+  var DIGIT_STAGGER_MS = 70;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(434011);
+
+  var TOTAL_PARTIES = 42;
+  var CALL_BASE = 101;
+  var callIndex = 0; // 지금까지 호출된 인원 수
+
+  var root = document.getElementById('wcnRoot');
+  var callOdo = document.getElementById('wcnCallOdo');
+  var remainOdo = document.getElementById('wcnRemainOdo');
+  var status = document.getElementById('wcnStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  // 자릿수 릴: 각 digit 은 {el, from, to, startMs, doneMs}
+  function buildOdometer(container, digitCount) {
+    container.innerHTML = '';
+    var digits = [];
+    for (var i = 0; i < digitCount; i += 1) {
+      var d = document.createElement('div');
+      d.className = 'wcn__digit';
+      var reel = document.createElement('div');
+      reel.className = 'wcn__reel';
+      d.appendChild(reel);
+      container.appendChild(d);
+      digits.push({ el: d, reel: reel, value: 0, from: 0, to: 0, start: 0, dur: 0 });
+    }
+    return digits;
+  }
+
+  var callDigits = buildOdometer(callOdo, 3);
+  var remainDigits = buildOdometer(remainOdo, 2);
+
+  function paintReel(digit, value) {
+    var reel = digit.reel;
+    if (reel.childElementCount !== 10) {
+      reel.innerHTML = '';
+      for (var n = 0; n < 10; n += 1) {
+        var i = document.createElement('i');
+        i.textContent = String(n);
+        reel.appendChild(i);
+      }
+    }
+    reel.style.transform = 'translateY(' + (-value * 10) + '%)';
+  }
+
+  function setDigitsImmediate(digits, num) {
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      digits[i].value = v;
+      digits[i].from = v;
+      digits[i].to = v;
+      digits[i].dur = 0;
+      paintReel(digits[i], v);
+    }
+  }
+
+  function flash(el) {
+    if (reduce) return;
+    el.classList.remove('is-flash');
+    void el.offsetWidth;
+    el.classList.add('is-flash');
+  }
+  function rollDigits(digits, num, nowMs) {
+    if (reduce) { setDigitsImmediate(digits, num); return; }
+    flash(callOdo.parentNode);
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      if (v === digits[i].to) continue;
+      digits[i].from = digits[i].value;
+      digits[i].to = v;
+      digits[i].start = nowMs + i * DIGIT_STAGGER_MS;
+      digits[i].dur = CALL_NUMBER_ROLL_MS;
+    }
+  }
+
+  function stepDigits(digits, nowMs) {
+    for (var i = 0; i < digits.length; i += 1) {
+      var d = digits[i];
+      if (d.value === d.to && nowMs >= d.start) continue;
+      if (nowMs < d.start) continue;
+      var t = Math.min(1, (nowMs - d.start) / d.dur);
+      var e = easeInOutCubic(t);
+      var span = d.to - d.from;
+      // 두 자리 사이를 최단 방향으로 굴린다(9→0 처럼 넘어가는 경우 고려).
+      if (Math.abs(span) > 5) span = span > 0 ? span - 10 : span + 10;
+      var cur = d.from + span * e;
+      cur = ((cur % 10) + 10) % 10;
+      d.value = t >= 1 ? d.to : cur;
+      paintReel(d, cur);
+    }
+  }
+
+  var callNum = CALL_BASE;
+  var remain = TOTAL_PARTIES;
+  setDigitsImmediate(callDigits, 0);
+  setDigitsImmediate(remainDigits, remain);
+
+  function paintStatus() {
+    status.textContent = 'Now calling ' + callNum + ' · ' + remain + ' ';
+  }
+
+  function callNext(nowMs) {
+    if (remain <= 0) { paintStatus(); return; }
+    callIndex += 1;
+    callNum = CALL_BASE + callIndex - 1;
+    remain = Math.max(0, TOTAL_PARTIES - callIndex);
+    rollDigits(callDigits, callNum, nowMs);
+    rollDigits(remainDigits, remain, nowMs);
+    paintStatus();
+  }
+
+  function resetAll(nowMs) {
+    callIndex = 0;
+    callNum = CALL_BASE;
+    remain = TOTAL_PARTIES;
+    rollDigits(callDigits, 0, nowMs);
+    rollDigits(remainDigits, remain, nowMs);
+    paintStatus();
+  }
+
+  var nextBtn = document.getElementById('wcnNext');
+  var resetBtn = document.getElementById('wcnReset');
+
+  function onNext() {
+    root.classList.remove('is-demo');
+    callNext(perfNow());
+  }
+  function onReset() {
+    root.classList.remove('is-demo');
+    resetAll(perfNow());
+  }
+
+  nextBtn.addEventListener('click', onNext);
+  nextBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNext(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  // 시연 스케줄: 첫 변화는 200ms 뒤, 이후 자연스러운 간격으로 반복.
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce) {
+      stepDigits(callDigits, now);
+      stepDigits(remainDigits, now);
+      if (root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+        if (remain <= 0) { resetAll(now); } else { callNext(now); }
+        demoIndex += 1;
+        if (demoIndex >= demoSchedule.length) demoIndex = 0, demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; });
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    paintStatus();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

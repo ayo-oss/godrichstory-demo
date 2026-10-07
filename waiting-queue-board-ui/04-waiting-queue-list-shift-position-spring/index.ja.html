@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>先頭の番号が抜けると各行が上へ移動する距離を計算してスプリング減衰で位置を変え、リスト最上位の行が少し大きくなって次の順番を知らせる。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wls is-demo" id="wlsRoot">
+  <ul class="wls__list" role="list" id="wlsList">
+    <li class="wls__item is-next" data-id="d1">
+      <span class="wls__ticket">101番</span>
+      <span class="wls__note">待ち3分</span>
+    </li>
+    <li class="wls__item" data-id="d2">
+      <span class="wls__ticket">102番</span>
+      <span class="wls__note">待ち9分</span>
+    </li>
+    <li class="wls__item" data-id="d3">
+      <span class="wls__ticket">103番</span>
+      <span class="wls__note">待ち14分</span>
+    </li>
+    <li class="wls__item" data-id="d4">
+      <span class="wls__ticket">104番</span>
+      <span class="wls__note">待ち18分</span>
+    </li>
+    <li class="wls__item" data-id="d5">
+      <span class="wls__ticket">105番</span>
+      <span class="wls__note">待ち22分</span>
+    </li>
+  </ul>
+  <div class="wls__controls">
+    <button type="button" class="wls__btn" id="wlsReset">元に戻す</button>
+    <button type="button" class="wls__btn wls__btn--primary" id="wlsCallBtn">呼び出し完了</button>
+  </div>
+  <p class="wls__status" id="wlsStatus" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 맨 앞 순번이 빠지면 그 행의 높이를 실측해 0 으로 접고, 아래 행들은 접힌 높이만큼
+  // 위로 이동할 거리를 First/Last 로 계산해 스프링 감쇠(LIST_SHIFT_SPRING_STIFFNESS)로 되돌아온다.
+  // 이동이 끝난 새 맨 앞 행에는 is-next 를 계산해 붙여 살짝 커지게 한다.
+  var LIST_SHIFT_SPRING_STIFFNESS = 260;
+  var SPRING_SETTLE_EASING = 'linear(0.0, 0.051, 0.176, 0.341, 0.518, 0.685, 0.831, 0.947, 1.032, 1.087, 1.117, 1.126, 1.121, 1.105, 1.085, 1.062, 1.041, 1.022, 1.008, 0.997, 1)';
+
+  var ORDER = ['d1', 'd2', 'd3', 'd4', 'd5'];
+
+  var root = document.getElementById('wlsRoot');
+  var list = document.getElementById('wlsList');
+  var status = document.getElementById('wlsStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var frontIndex = 0;
+
+  function shiftDuration(gapPx) {
+    return Math.round(60 + 100000 / LIST_SHIFT_SPRING_STIFFNESS + Math.min(240, gapPx * 0.55));
+  }
+
+  function visibleRows() {
+    var all = list.querySelectorAll('.wls__item');
+    var vis = [];
+    for (var i = 0; i < all.length; i += 1) {
+      if (all[i].getBoundingClientRect().height > 0 && all[i].style.display !== 'none') vis.push(all[i]);
+    }
+    return vis;
+  }
+
+  function callFront() {
+    if (frontIndex >= ORDER.length) { status.textContent = '待ちリストが空です。'; return; }
+    var id = ORDER[frontIndex];
+    var row = list.querySelector('.wls__item[data-id="' + id + '"]');
+    if (!row) return;
+    var ticket = row.querySelector('.wls__ticket').textContent;
+    row.classList.remove('is-next');
+
+    var below = visibleRows().filter(function (el) { return el !== row; });
+    var before = below.map(function (el) { return el.getBoundingClientRect().top; });
+    var gap = row.offsetHeight + 8;
+
+    if (reduce) {
+      row.style.display = 'none';
+    } else {
+      var h = row.offsetHeight;
+      row.style.height = h + 'px';
+      row.style.overflow = 'hidden';
+      row.style.boxSizing = 'border-box';
+      row.style.marginTop = '0px';
+      row.style.marginBottom = '0px';
+      row.animate(
+        [{ height: h + 'px', opacity: 1 }, { height: '0px', opacity: 0 }],
+        { duration: 220, easing: 'ease-in', fill: 'forwards' }
+      ).onfinish = function () { row.style.display = 'none'; };
+
+      var dur = shiftDuration(gap);
+      below.forEach(function (el, i) {
+        el.animate(
+          [
+            { transform: 'translateY(0px)' },
+            { transform: 'translateY(' + gap + 'px)' },
+            { transform: 'translateY(0px)' }
+          ],
+          { duration: dur, delay: 220, easing: SPRING_SETTLE_EASING, fill: 'both' }
+        );
+      });
+    }
+
+    frontIndex += 1;
+    var nextId = ORDER[frontIndex];
+    var nextTicket = '';
+    if (nextId) {
+      var nextRow = list.querySelector('.wls__item[data-id="' + nextId + '"]');
+      if (nextRow) { nextRow.classList.add('is-next'); nextTicket = nextRow.querySelector('.wls__ticket').textContent; }
+    }
+
+    var callBtn = document.getElementById('wlsCallBtn');
+    if (callBtn) callBtn.disabled = frontIndex >= ORDER.length;
+
+    status.textContent = nextTicket
+      ? ticket + ' 呼び出し完了・次は' + nextTicket
+      : ticket + ' 呼び出し完了・待ちリストが空になりました。';
+  }
+
+  function restoreAll() {
+    var all = list.querySelectorAll('.wls__item');
+    for (var i = 0; i < all.length; i += 1) {
+      all[i].getAnimations().forEach(function (a) { a.cancel(); });
+      all[i].style.display = '';
+      all[i].style.height = '';
+      all[i].style.overflow = '';
+      all[i].style.marginTop = '';
+      all[i].style.marginBottom = '';
+      all[i].classList.remove('is-next');
+    }
+    frontIndex = 0;
+    var firstRow = list.querySelector('.wls__item[data-id="' + ORDER[0] + '"]');
+    if (firstRow) firstRow.classList.add('is-next');
+    var callBtn = document.getElementById('wlsCallBtn');
+    if (callBtn) callBtn.disabled = false;
+    status.textContent = '待ちリストを元に戻しました。';
+  }
+
+  var callBtn = document.getElementById('wlsCallBtn');
+  var resetBtn = document.getElementById('wlsReset');
+
+  function onCall() { root.classList.remove('is-demo'); callFront(); }
+  function onReset() { root.classList.remove('is-demo'); restoreAll(); }
+
+  callBtn.addEventListener('click', onCall);
+  callBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCall(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+  var t0 = null;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce && root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+      if (frontIndex >= ORDER.length) { restoreAll(); } else { callFront(); }
+      demoIndex += 1;
+      if (demoIndex >= demoSchedule.length) { demoIndex = 0; demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; }); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  status.textContent = '101番が次の順番です。';
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

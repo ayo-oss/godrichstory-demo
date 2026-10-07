@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>各窓口のこれまでの処理人数と速度を計算して窓口ごとに次の予想処理時刻が違って表示され、最も速い窓口のバーがほのかに光る。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wmc is-demo" id="wmcRoot">
+  <ul class="wmc__list" id="wmcList" role="list"></ul>
+  <p class="wmc__status" id="wmcStatus" aria-live="polite"></p>
+  <div class="wmc__controls">
+    <button type="button" class="wmc__btn wmc__btn--primary" id="wmcNext">次の処理</button>
+    <button type="button" class="wmc__btn" id="wmcReset">初期化</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 창구마다 処理 로그(分)를 따로 쌓아 평균 속도를 계산하고, 그 평균으로 다음 예상 処理
+  // 시각(分後)을 계산해 표시한다. 막대 길이는 평균 속도(빠를수록 김)를 계산해 트윈으로 채우고,
+  // 세 창구 중 평균이 가장 짧은(=가장 빠른) 창구를 매 계산마다 다시 골라 은은하게 빛낸다.
+  var BAR_TWEEN_MS = 420;
+  var SERVICE_LOG_MAX = 8;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  var COUNTERS = [
+    { id: 'a', label: '1番窓口', seed: 434061, base: 2.4 },
+    { id: 'b', label: '2番窓口', seed: 434062, base: 3.6 },
+    { id: 'c', label: '3番窓口', seed: 434063, base: 3.0 }
+  ];
+
+  COUNTERS.forEach(function (c) {
+    c.rand = seedRand(c.seed);
+    c.log = [];
+    c.processed = 0;
+    c.shownRatio = 0;
+    c.anim = 0;
+    for (var i = 0; i < 4; i += 1) c.log.push(c.base + c.rand() * 1.4);
+  });
+
+  var root = document.getElementById('wmcRoot');
+  var listEl = document.getElementById('wmcList');
+  var status = document.getElementById('wmcStatus');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var rows = {};
+  COUNTERS.forEach(function (c) {
+    var li = document.createElement('li');
+    li.className = 'wmc__row';
+    li.id = 'wmcRow-' + c.id;
+    li.innerHTML =
+      '<span class="wmc__label">' + c.label + '</span>' +
+      '<div class="wmc__track" aria-hidden="true"><div class="wmc__bar" id="wmcBar-' + c.id + '"></div></div>' +
+      '<span class="wmc__meta" id="wmcMeta-' + c.id + '" aria-hidden="true"></span>';
+    listEl.appendChild(li);
+    rows[c.id] = li;
+  });
+
+  function avgMinutes(c) {
+    if (c.log.length === 0) return 0;
+    var sum = 0;
+    for (var i = 0; i < c.log.length; i += 1) sum += c.log[i];
+    return sum / c.log.length;
+  }
+
+  function maxAvg() {
+    var m = 0.0001;
+    COUNTERS.forEach(function (c) { m = Math.max(m, avgMinutes(c)); });
+    return m;
+  }
+
+  function fastestId() {
+    var best = COUNTERS[0];
+    COUNTERS.forEach(function (c) { if (avgMinutes(c) < avgMinutes(best)) best = c; });
+    return best.id;
+  }
+
+  function paintMeta(c) {
+    var avg = avgMinutes(c);
+    var metaEl = document.getElementById('wmcMeta-' + c.id);
+    metaEl.textContent = c.processed + '名処理・次の予想' + avg.toFixed(1) + '分後';
+  }
+
+  function paintFastest() {
+    var fid = fastestId();
+    COUNTERS.forEach(function (c) {
+      rows[c.id].classList.toggle('is-fastest', c.id === fid);
+    });
+  }
+
+  function tweenBar(c) {
+    if (c.anim) cancelAnimationFrame(c.anim);
+    var barEl = document.getElementById('wmcBar-' + c.id);
+    var mx = maxAvg();
+    var to = 1 - Math.min(1, avgMinutes(c) / mx) * 0.7;
+    var from = c.shownRatio;
+    if (reduce) { c.shownRatio = to; barEl.style.width = (to * 100).toFixed(1) + '%'; return; }
+    var start = 0;
+    function step(ts) {
+      if (start === 0) start = ts;
+      var t = Math.min(1, (ts - start) / BAR_TWEEN_MS);
+      var e = easeOutCubic(t);
+      var v = from + (to - from) * e;
+      c.shownRatio = v;
+      barEl.style.width = (v * 100).toFixed(1) + '%';
+      if (t < 1) { c.anim = requestAnimationFrame(step); } else { c.anim = 0; }
+    }
+    c.anim = requestAnimationFrame(step);
+  }
+
+  function recalcAll() {
+    COUNTERS.forEach(function (c) { tweenBar(c); paintMeta(c); });
+    paintFastest();
+  }
+
+  var turnIndex = 0;
+  function processNext() {
+    var c = COUNTERS[turnIndex % COUNTERS.length];
+    turnIndex += 1;
+    c.log.push(c.base + c.rand() * 1.4);
+    if (c.log.length > SERVICE_LOG_MAX) c.log.shift();
+    c.processed += 1;
+    recalcAll();
+    status.textContent = c.label + ' ' + c.processed + '名目の処理・次の予想' + avgMinutes(c).toFixed(1) + '分後。';
+  }
+
+  function resetAll() {
+    turnIndex = 0;
+    COUNTERS.forEach(function (c) {
+      c.rand = seedRand(c.seed);
+      c.log = [];
+      c.processed = 0;
+      for (var i = 0; i < 4; i += 1) c.log.push(c.base + c.rand() * 1.4);
+    });
+    recalcAll();
+    status.textContent = '窓口の状況を初期化しました。';
+  }
+
+  var nextBtn = document.getElementById('wmcNext');
+  var resetBtn = document.getElementById('wmcReset');
+
+  function onNext() { root.classList.remove('is-demo'); processNext(); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(); }
+
+  nextBtn.addEventListener('click', onNext);
+  nextBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNext(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+  var t0 = null;
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce && root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+      processNext();
+      demoIndex += 1;
+      if (demoIndex >= demoSchedule.length) {
+        demoIndex = 0;
+        demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; });
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  recalcAll();
+  status.textContent = '3つの窓口の処理速度を計算して次の予想時刻を表示します。';
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

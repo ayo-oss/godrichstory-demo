@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>これまでの平均処理時間に残り人数を掛けて予想待ち時間を再計算し、値が変わるたびに分の数字がなめらかに増えたり減ったりする。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wet is-demo" id="wetRoot">
+  <div class="wet__etaWrap">
+    <span class="wet__etaGlow" id="wetGlow" aria-hidden="true"></span>
+    <span class="wet__etaNum" id="wetEtaNum" aria-hidden="true">0</span>
+    <span class="wet__etaUnit" aria-hidden="true">分後の予想</span>
+  </div>
+  <p class="wet__avg" id="wetAvg" aria-hidden="true">1組あたり平均 0.0分</p>
+  <p class="wet__status" id="wetStatus" aria-live="polite"></p>
+  <div class="wet__controls">
+    <button type="button" class="wet__btn wet__btn--primary" id="wetProcess">次の処理</button>
+    <button type="button" class="wet__btn" id="wetReset">初期化</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 처리된 사례들의 소요 시간 로그에서 평균을 계산하고, 그 평균에 残り 대기 인원을
+  // 곱해 예상 대기 시간(分)을 다시 계산한다. 값이 바뀔 때마다 ETA_TWEEN_MS 동안 숫자를
+  // easeOutCubic 으로 보간하고, 변화 폭에 비례해 숫자 뒤 발광을 계산해 함께 전파한다.
+  // 실제 시각(Date) 은 쓰지 않고 rAF 타임스탬프로만 흐름을 계산하는 가상 시계다.
+  var ETA_TWEEN_MS = 420;
+  var SERVICE_LOG_MAX = 12;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(434021);
+  function randServiceMinutes() { return 2.5 + rand() * 3.5; }
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  var root = document.getElementById('wetRoot');
+  var etaNumEl = document.getElementById('wetEtaNum');
+  var glowEl = document.getElementById('wetGlow');
+  var avgEl = document.getElementById('wetAvg');
+  var status = document.getElementById('wetStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var INITIAL_REMAIN = 24;
+  var serviceLog = [];
+  for (var i = 0; i < 6; i += 1) serviceLog.push(randServiceMinutes());
+  var remain = INITIAL_REMAIN;
+
+  var shownEta = 0;
+  var etaAnim = null;
+
+  function avgMinutes() {
+    var sum = 0;
+    for (var i = 0; i < serviceLog.length; i += 1) sum += serviceLog[i];
+    return sum / serviceLog.length;
+  }
+
+  function targetEta() {
+    return avgMinutes() * remain;
+  }
+
+  function paintGlow(ratio) {
+    glowEl.style.opacity = (0.5 * ratio).toFixed(3);
+    glowEl.style.transform = 'translate(-50%, -50%) scale(' + (0.85 + ratio * 0.5).toFixed(3) + ')';
+  }
+
+  function flash(el) {
+    if (reduce) return;
+    el.classList.remove('is-flash');
+    void el.offsetWidth;
+    el.classList.add('is-flash');
+  }
+  function tweenEta(nowMs, from, to) {
+    flash(etaNumEl.parentNode);
+    if (etaAnim) cancelAnimationFrame(etaAnim);
+    var maxDelta = Math.max(1, avgMinutes() * 4);
+    var deltaRatio = Math.min(1, Math.abs(to - from) / maxDelta);
+    if (reduce) {
+      shownEta = to;
+      etaNumEl.textContent = Math.round(to);
+      paintGlow(0);
+      return;
+    }
+    var start = null;
+    function step(ts) {
+      if (start === null) start = ts;
+      var t = Math.min(1, (ts - start) / ETA_TWEEN_MS);
+      var e = easeOutCubic(t);
+      var v = from + (to - from) * e;
+      shownEta = v;
+      etaNumEl.textContent = Math.round(v);
+      paintGlow(deltaRatio * (1 - t));
+      if (t < 1) { etaAnim = requestAnimationFrame(step); } else { etaAnim = null; paintGlow(0); }
+    }
+    etaAnim = requestAnimationFrame(step);
+  }
+
+  function paintStatic() {
+    avgEl.textContent = '1組あたり平均 ' + avgMinutes().toFixed(1) + '分';
+  }
+
+  function paintStatus() {
+    status.textContent = '平均処理' + avgMinutes().toFixed(1) + '分・予想待ち時間' + Math.round(targetEta()) + '分';
+  }
+
+  function recalc(nowMs) {
+    var from = shownEta;
+    var to = targetEta();
+    tweenEta(nowMs, from, to);
+    paintStatic();
+    paintStatus();
+  }
+
+  function processNext(nowMs) {
+    if (remain <= 0) { paintStatus(); return; }
+    serviceLog.push(randServiceMinutes());
+    if (serviceLog.length > SERVICE_LOG_MAX) serviceLog.shift();
+    remain = Math.max(0, remain - 1);
+    recalc(nowMs);
+  }
+
+  function resetAll(nowMs) {
+    serviceLog = [];
+    for (var i = 0; i < 6; i += 1) serviceLog.push(randServiceMinutes());
+    remain = INITIAL_REMAIN;
+    shownEta = targetEta();
+    etaNumEl.textContent = Math.round(shownEta);
+    paintGlow(0);
+    paintStatic();
+    paintStatus();
+  }
+
+  var processBtn = document.getElementById('wetProcess');
+  var resetBtn = document.getElementById('wetReset');
+
+  function onProcess() { root.classList.remove('is-demo'); processNext(perfNow()); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(perfNow()); }
+
+  processBtn.addEventListener('click', onProcess);
+  processBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onProcess(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce && root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+      if (remain <= 0) { resetAll(now); } else { processNext(now); }
+      demoIndex += 1;
+      if (demoIndex >= demoSchedule.length) { demoIndex = 0; demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; }); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  shownEta = targetEta();
+  etaNumEl.textContent = Math.round(shownEta);
+  paintStatic();
+  paintStatus();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

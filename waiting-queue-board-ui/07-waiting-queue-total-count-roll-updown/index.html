@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>새 인원이 대기열에 들어오거나 빠지면 이전 값과의 차이를 계산해 전체 대기 인원 숫자가 그 차이만큼 굴러 오르내리고, 늘어날 때와 줄어들 때 색이 다르게 반짝인다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wtc is-demo" id="wtcRoot">
+  <div class="wtc__board" id="wtcBoard">
+    <div class="wtc__odometer" id="wtcOdo" aria-hidden="true"></div>
+    <span class="wtc__unit" aria-hidden="true">명 대기중</span>
+  </div>
+  <p class="wtc__status" id="wtcStatus" aria-live="polite"></p>
+  <div class="wtc__controls">
+    <button type="button" class="wtc__btn wtc__btn--primary" id="wtcJoin">입장</button>
+    <button type="button" class="wtc__btn" id="wtcLeave">퇴장</button>
+    <button type="button" class="wtc__btn" id="wtcReset">초기화</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 입장·퇴장이 있을 때마다 이전 값과 새 값의 차이를 계산해 그 차이만큼 자릿수 릴을
+  // 굴린다. 값이 늘면 wtc__board 에 is-up 을, 줄면 is-down 을 계산해 잠깐 켜 색으로 알린다.
+  var COUNT_ROLL_MS = 420;
+  var DIGIT_STAGGER_MS = 60;
+  var FLASH_MS = 520;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(434071);
+
+  var root = document.getElementById('wtcRoot');
+  var board = document.getElementById('wtcBoard');
+  var odo = document.getElementById('wtcOdo');
+  var status = document.getElementById('wtcStatus');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  function buildOdometer(container, digitCount) {
+    container.innerHTML = '';
+    var digits = [];
+    for (var i = 0; i < digitCount; i += 1) {
+      var d = document.createElement('div');
+      d.className = 'wtc__digit';
+      var reel = document.createElement('div');
+      reel.className = 'wtc__reel';
+      d.appendChild(reel);
+      container.appendChild(d);
+      digits.push({ el: d, reel: reel, value: 0, from: 0, to: 0, start: 0, dur: 0 });
+    }
+    return digits;
+  }
+
+  var digits = buildOdometer(odo, 2);
+
+  function paintReel(digit, value) {
+    var reel = digit.reel;
+    if (reel.childElementCount !== 10) {
+      reel.innerHTML = '';
+      for (var n = 0; n < 10; n += 1) {
+        var i = document.createElement('i');
+        i.textContent = String(n);
+        reel.appendChild(i);
+      }
+    }
+    reel.style.transform = 'translateY(' + (-value * 10) + '%)';
+  }
+
+  function setDigitsImmediate(num) {
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      digits[i].value = v; digits[i].from = v; digits[i].to = v; digits[i].dur = 0;
+      paintReel(digits[i], v);
+    }
+  }
+
+  function rollDigits(num, nowMs) {
+    if (reduce) { setDigitsImmediate(num); return; }
+    var s = String(num);
+    while (s.length < digits.length) s = '0' + s;
+    for (var i = 0; i < digits.length; i += 1) {
+      var v = Number(s[i]);
+      if (v === digits[i].to) continue;
+      digits[i].from = digits[i].value;
+      digits[i].to = v;
+      digits[i].start = nowMs + i * DIGIT_STAGGER_MS;
+      digits[i].dur = COUNT_ROLL_MS;
+    }
+  }
+
+  function stepDigits(nowMs) {
+    for (var i = 0; i < digits.length; i += 1) {
+      var d = digits[i];
+      if (d.value === d.to && nowMs >= d.start) continue;
+      if (nowMs < d.start) continue;
+      var t = Math.min(1, (nowMs - d.start) / d.dur);
+      var e = easeInOutCubic(t);
+      var span = d.to - d.from;
+      if (Math.abs(span) > 5) span = span > 0 ? span - 10 : span + 10;
+      var cur = d.from + span * e;
+      cur = ((cur % 10) + 10) % 10;
+      d.value = t >= 1 ? d.to : cur;
+      paintReel(d, cur);
+    }
+  }
+
+  var TOTAL = 18;
+  var flashUntil = 0;
+  setDigitsImmediate(TOTAL);
+
+  function paintStatus(delta) {
+    var word = delta > 0 ? (delta + '명 늘어 ' + TOTAL + '명') : delta < 0 ? ((-delta) + '명 줄어 ' + TOTAL + '명') : (TOTAL + '명 대기중');
+    status.textContent = word + '.';
+  }
+
+  function applyDelta(delta, nowMs) {
+    if (delta === 0) { paintStatus(0); return; }
+    var next = Math.max(0, Math.min(99, TOTAL + delta));
+    var actualDelta = next - TOTAL;
+    TOTAL = next;
+    rollDigits(TOTAL, nowMs);
+    board.classList.remove('is-up', 'is-down');
+    if (actualDelta > 0) board.classList.add('is-up');
+    else if (actualDelta < 0) board.classList.add('is-down');
+    flashUntil = nowMs + FLASH_MS;
+    paintStatus(actualDelta);
+  }
+
+  function join(nowMs) { applyDelta(1 + Math.floor(rand() * 3), nowMs); }
+  function leave(nowMs) { applyDelta(-(1 + Math.floor(rand() * 2)), nowMs); }
+  function resetAll(nowMs) {
+    TOTAL = 18;
+    rollDigits(TOTAL, nowMs);
+    board.classList.remove('is-up', 'is-down');
+    paintStatus(0);
+  }
+
+  var joinBtn = document.getElementById('wtcJoin');
+  var leaveBtn = document.getElementById('wtcLeave');
+  var resetBtn = document.getElementById('wtcReset');
+
+  function onJoin() { root.classList.remove('is-demo'); join(perfNow()); }
+  function onLeave() { root.classList.remove('is-demo'); leave(perfNow()); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(perfNow()); }
+
+  joinBtn.addEventListener('click', onJoin);
+  joinBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onJoin(); } });
+  leaveBtn.addEventListener('click', onLeave);
+  leaveBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onLeave(); } });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); } });
+
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce) {
+      stepDigits(now);
+      if (flashUntil && now >= flashUntil) { board.classList.remove('is-up', 'is-down'); flashUntil = 0; }
+      if (root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+        if (demoIndex % 2 === 0) join(now); else leave(now);
+        demoIndex += 1;
+        if (demoIndex >= demoSchedule.length) demoIndex = 0, demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; });
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) { paintStatus(0); } else { requestAnimationFrame(tick); }
+})();
+</script>
+</body>
+</html>

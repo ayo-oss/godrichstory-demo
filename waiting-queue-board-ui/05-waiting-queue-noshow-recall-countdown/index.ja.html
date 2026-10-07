@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>番号が呼ばれてから再呼び出しまでの残り時間を計算してゲージバーがその比率だけ縮み、時間切れになるとバーが赤く変わって短く震える。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wrc is-demo" id="wrcRoot">
+  <div class="wrc__panel" id="wrcPanel">
+    <span class="wrc__ticket" id="wrcTicket" aria-hidden="true">201番</span>
+    <span class="wrc__badge" id="wrcBadge" aria-hidden="true">待機中</span>
+    <div class="wrc__track" aria-hidden="true"><div class="wrc__gauge" id="wrcGauge"></div></div>
+    <span class="wrc__sec" id="wrcSec" aria-hidden="true">残り60秒</span>
+  </div>
+  <p class="wrc__status" id="wrcStatus" aria-live="polite"></p>
+  <div class="wrc__controls">
+    <button type="button" class="wrc__btn wrc__btn--primary" id="wrcCheckin">確認完了</button>
+    <button type="button" class="wrc__btn" id="wrcReset">初期化</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 번호가 호출된 시점(가상 시계 시작점)부터 지금까지 지난 시간을 계산해 残り 비율만큼
+  // 게이지 바 width 를 줄인다. 비율이 0 에 닿으면 만료로 계산해 배지를 바꾸고 흔들림을 한 番
+  // 계산해 재생한다. RECALL_COUNTDOWN_SEC 초 동안 진행되며, Date 없이 rAF 타임스탬프만 쓴다.
+  var RECALL_COUNTDOWN_SEC = 60;
+  var SHAKE_DURATION_MS = 380;
+
+  var root = document.getElementById('wrcRoot');
+  var panel = document.getElementById('wrcPanel');
+  var ticketEl = document.getElementById('wrcTicket');
+  var badgeEl = document.getElementById('wrcBadge');
+  var gaugeEl = document.getElementById('wrcGauge');
+  var secEl = document.getElementById('wrcSec');
+  var status = document.getElementById('wrcStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  var CALL_BASE = 201;
+  var ticketIndex = 0;
+  var callStartMs = 0;
+  var expired = false;
+  var shaken = false;
+
+  function ticketNum() { return CALL_BASE + ticketIndex; }
+
+  function paintGauge(ratio) {
+    gaugeEl.style.width = (ratio * 100).toFixed(1) + '%';
+    gaugeEl.classList.toggle('is-warn', ratio <= 0.34 && ratio > 0);
+    gaugeEl.classList.toggle('is-expired', ratio <= 0);
+  }
+
+  function shake() {
+    if (reduce) return;
+    panel.animate(
+      [
+        { transform: 'translateX(0px)' },
+        { transform: 'translateX(-6px)' },
+        { transform: 'translateX(6px)' },
+        { transform: 'translateX(-4px)' },
+        { transform: 'translateX(4px)' },
+        { transform: 'translateX(0px)' }
+      ],
+      { duration: SHAKE_DURATION_MS, easing: 'ease-out' }
+    );
+  }
+
+  function startTicket(nowMs) {
+    ticketEl.textContent = ticketNum() + '番';
+    badgeEl.textContent = '待機中';
+    badgeEl.classList.remove('is-expired');
+    callStartMs = nowMs;
+    expired = false;
+    shaken = false;
+    paintGauge(1);
+    secEl.textContent = RECALL_COUNTDOWN_SEC + '秒残り';
+    status.textContent = ticketNum() + '番呼び出し・' + RECALL_COUNTDOWN_SEC + '秒以内にご確認ください。';
+  }
+
+  function checkin(nowMs) {
+    status.textContent = ticketNum() + 'の確認が完了しました。';
+    ticketIndex += 1;
+    startTicket(nowMs);
+  }
+
+  function resetAll(nowMs) {
+    ticketIndex = 0;
+    startTicket(nowMs);
+    status.textContent = ticketNum() + '番呼び出し・' + RECALL_COUNTDOWN_SEC + '秒以内にご確認ください。';
+  }
+
+  function stepGauge(nowMs) {
+    var elapsedS = (nowMs - callStartMs) / 1000;
+    var ratio = Math.max(0, 1 - elapsedS / RECALL_COUNTDOWN_SEC);
+    paintGauge(ratio);
+    var remainSec = Math.max(0, Math.ceil(RECALL_COUNTDOWN_SEC - elapsedS));
+    secEl.textContent = remainSec + '秒残り';
+    if (ratio <= 0 && !expired) {
+      expired = true;
+      badgeEl.textContent = '期限切れ・再呼び出し必要';
+      badgeEl.classList.add('is-expired');
+      status.textContent = ticketNum() + 'の時間切れ・再呼び出しが必要です。';
+      if (!shaken) { shaken = true; shake(); }
+    }
+  }
+
+  var checkinBtn = document.getElementById('wrcCheckin');
+  var resetBtn = document.getElementById('wrcReset');
+
+  function onCheckin() { root.classList.remove('is-demo'); checkin(perfNow()); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(perfNow()); }
+
+  checkinBtn.addEventListener('click', onCheckin);
+  checkinBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCheckin(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var t0 = null;
+  function perfNow() { return t0 === null ? 0 : performance.now() - t0; }
+
+  // 데모 압축: 실제 60초 대신 시연에서는 흐름을 빠르게 계산해 보여준다(시계 자체는 여전히
+  // rAF 경과 시간 기반 — DEMO_TIME_SCALE 만큼 가속해 같은 비율 계산식을 통과시킨다).
+  // 렌더 캡처가 2 초뿐이라 60초 카운트다운을 1.5 초 안에 다 보이도록 40 배로 압축한다.
+  var DEMO_TIME_SCALE = 40;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce) {
+      var demoNow = root.classList.contains('is-demo') ? callStartMs + (now - callStartMs) * DEMO_TIME_SCALE : now;
+      stepGauge(demoNow);
+      if (root.classList.contains('is-demo') && expired) {
+        checkin(now);
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  startTicket(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

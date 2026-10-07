@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The served count divided by the total gives a ratio that fills the circular ring, and as fewer people remain, the ring color shifts in steps. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wpr is-demo" id="wprRoot">
+  <div class="wpr__ringWrap">
+    <svg class="wpr__ring" viewBox="0 0 120 120" aria-hidden="true">
+      <circle class="wpr__track" cx="60" cy="60" r="52"></circle>
+      <circle class="wpr__fill" id="wprFill" cx="60" cy="60" r="52"></circle>
+    </svg>
+    <div class="wpr__pct" id="wprPct" aria-hidden="true">0%</div>
+  </div>
+  <p class="wpr__status" id="wprStatus" aria-live="polite"></p>
+  <div class="wpr__controls">
+    <button type="button" class="wpr__btn wpr__btn--primary" id="wprProcess">Add served</button>
+    <button type="button" class="wpr__btn" id="wprReset">Reset</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 처리된 인원 수를 전체 인원으로 나눈 비율을 다시 계산해 원 둘레(2πr)에서 그 비율만큼을
+  // stroke-dashoffset 으로 채운다. 채워지는 동안 RING_FILL_DURATION_MS 로 easeOutCubic 보간하고,
+  // 비율 구간(0~1/3, 1/3~2/3, 2/3~1)에 따라 링 색을 세 단계로 계산해 함께 바꾼다.
+  var RING_FILL_DURATION_MS = 500;
+  var TOTAL = 30;
+  var RADIUS = 52;
+  var CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var rand = seedRand(434031);
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  var root = document.getElementById('wprRoot');
+  var fillEl = document.getElementById('wprFill');
+  var pctEl = document.getElementById('wprPct');
+  var status = document.getElementById('wprStatus');
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+
+  fillEl.style.strokeDasharray = CIRCUMFERENCE.toFixed(2);
+
+  var processed = 0;
+  var shownRatio = 0;
+  var ringAnim = null;
+
+  function stageOf(ratio) {
+    if (ratio >= 2 / 3) return 'is-late';
+    if (ratio >= 1 / 3) return 'is-mid';
+    return 'is-early';
+  }
+
+  function paintRing(ratio) {
+    var offset = CIRCUMFERENCE * (1 - ratio);
+    fillEl.style.strokeDashoffset = offset.toFixed(2);
+    fillEl.classList.remove('is-early', 'is-mid', 'is-late');
+    fillEl.classList.add(stageOf(ratio));
+    pctEl.textContent = Math.round(ratio * 100) + '%';
+  }
+
+  function flash(el) {
+    if (reduce) return;
+    el.classList.remove('is-flash');
+    void el.offsetWidth;
+    el.classList.add('is-flash');
+  }
+  function tweenRing(from, to) {
+    flash(fillEl.parentNode.parentNode);
+    if (ringAnim) cancelAnimationFrame(ringAnim);
+    if (reduce) { shownRatio = to; paintRing(to); return; }
+    var start = null;
+    function step(ts) {
+      if (start === null) start = ts;
+      var t = Math.min(1, (ts - start) / RING_FILL_DURATION_MS);
+      var e = easeOutCubic(t);
+      var v = from + (to - from) * e;
+      shownRatio = v;
+      paintRing(v);
+      if (t < 1) { ringAnim = requestAnimationFrame(step); } else { ringAnim = null; }
+    }
+    ringAnim = requestAnimationFrame(step);
+  }
+
+  function paintStatus() {
+    status.textContent = 'Served ' + processed + '/' + TOTAL + ' · ' + Math.round((processed / TOTAL) * 100) + '%';
+  }
+
+  function addProcessed() {
+    if (processed >= TOTAL) { paintStatus(); return; }
+    var step = 1 + Math.floor(rand() * 3);
+    processed = Math.min(TOTAL, processed + step);
+    tweenRing(shownRatio, processed / TOTAL);
+    paintStatus();
+  }
+
+  function resetAll() {
+    processed = 0;
+    shownRatio = 0;
+    paintRing(0);
+    paintStatus();
+  }
+
+  var processBtn = document.getElementById('wprProcess');
+  var resetBtn = document.getElementById('wprReset');
+
+  function onProcess() { root.classList.remove('is-demo'); addProcessed(); }
+  function onReset() { root.classList.remove('is-demo'); resetAll(); }
+
+  processBtn.addEventListener('click', onProcess);
+  processBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onProcess(); }
+  });
+  resetBtn.addEventListener('click', onReset);
+  resetBtn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReset(); }
+  });
+
+  var demoSchedule = [200, 1200];
+  var demoIndex = 0;
+  var t0 = null;
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    if (!reduce && root.classList.contains('is-demo') && demoIndex < demoSchedule.length && now >= demoSchedule[demoIndex]) {
+      if (processed >= TOTAL) { resetAll(); } else { addProcessed(); }
+      demoIndex += 1;
+      if (demoIndex >= demoSchedule.length) { demoIndex = 0; demoSchedule = demoSchedule.map(function (v) { return v + now + 2000; }); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  paintRing(0);
+  paintStatus();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
