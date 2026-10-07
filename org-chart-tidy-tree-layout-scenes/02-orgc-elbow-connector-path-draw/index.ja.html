@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>親の下で横に分かれて各子へ降りる折れ線を、経路全体の長さに対する割合で描き進める。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="oc is-demo" id="ocRoot">
+  <canvas class="oc__canvas" id="ocCanvas" width="480" height="300" tabindex="0" aria-label="親の下で横に分かれて各子へ降りる折れ線を、経路全体の長さに対する割合で描き進める。"></canvas>
+  <p class="oc__status" id="ocStatus" aria-live="polite">デモ実行中</p>
+  <button class="oc__btn" id="ocBtn" type="button">一時停止</button>
+  <p class="oc__caption">親の下で横に分かれて各子へ降りる折れ線を、経路全体の長さに対する割合で描き進める。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('ocRoot');
+  var canvas = document.getElementById('ocCanvas');
+  var statusEl = document.getElementById('ocStatus');
+  var btnEl = document.getElementById('ocBtn');
+  var inputEl = null;
+  function main(root0, canvas, statusEl, btnEl, inputEl) {
+      const ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      const ctx = ctx0;
+      const rootEl = root0;
+      const W = 480, H = 300;
+      const FIXED_DT = 16;
+      const REDUCE_STEP_MS = 900;
+      const MOVE_RATE = 0.09;
+      const FADE_RATE = 0.12;
+      const NODE_W = 56, NODE_H = 26, GAP_X = 8, LEVEL_DY = 72, TOP_Y = 44;
+      const BG = '#211d2b';
+      const INK = '#17141a';
+      const FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce) {
+          rootEl.classList.remove('is-demo');
+      }
+      let paused = false;
+      let autoplay = !reduce;
+      let interactive = false;
+      let elapsed = 0;
+      let rafId = 0;
+      const cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function lerp(a, b, k) { return a + (b - a) * k; }
+      function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      canvas.width = W;
+      canvas.height = H;
+      // 파스텔 가지 색 — 代表 버터 · 開発 하늘 · デザイン 라일락 · 運営 민트
+      const BRANCH_COL = [[255, 228, 130], [122, 200, 255], [182, 152, 255], [122, 222, 186]];
+      function rgba(c, a, mix) {
+          return 'rgba(' + Math.round(lerp(c[0], 255, mix)) + ',' + Math.round(lerp(c[1], 255, mix)) + ',' + Math.round(lerp(c[2], 255, mix)) + ',' + a.toFixed(3) + ')';
+      }
+      // 조직 データ — 이름과 부모 번호 (부모가 항상 먼저 나온다)
+      const ORG = [
+          ['代表', -1], ['開発', 0], ['デザイン', 0], ['運営', 0],
+          ['フロント', 1], ['サーバー', 1], ['データ', 1], ['ブランド', 2], ['製品', 2], ['営業', 3], ['サポート', 3]
+      ];
+      const nodes = [];
+      for (let i = 0; i < ORG.length; i += 1) {
+          const pi = ORG[i][1];
+          const p = pi >= 0 ? nodes[pi] : null;
+          const nd = {
+              id: i, label: ORG[i][0], kids: [], parent: p, depth: p ? p.depth + 1 : 0, branch: 0, open: true,
+              w: NODE_W, left: 0, tx: 0, ty: 0, x: 0, y: 0, alpha: 1, talpha: 1,
+              bw: NODE_W, bh: NODE_H, lit: 0, val: 0, tval: 0, total: 0
+          };
+          nd.branch = p ? (p.depth === 0 ? i : p.branch) : 0;
+          if (p) {
+              p.kids.push(nd);
+          }
+          nodes.push(nd);
+      }
+      const root = nodes[0];
+      function vis(n) { return n.open ? n.kids : []; }
+      function isShown(n) {
+          let p = n.parent;
+          while (p) {
+              if (!p.open) {
+                  return false;
+              }
+              p = p.parent;
+          }
+          return true;
+      }
+      function setDepth(n, d) {
+          n.depth = d;
+          for (let i = 0; i < n.kids.length; i += 1) {
+              setDepth(n.kids[i], d + 1);
+          }
+      }
+      // 가지 폭 재기 — 가장 아래 잎에서 위로 올라가며 폭을 더한다
+      function measure(n) {
+          const v = vis(n);
+          if (v.length === 0) {
+              n.w = n.bw;
+              return n.w;
+          }
+          let sum = GAP_X * (v.length - 1);
+          for (let i = 0; i < v.length; i += 1) {
+              sum += measure(v[i]);
+          }
+          n.w = Math.max(n.bw, sum);
+          return n.w;
+      }
+      // 자리 잡기 — 자식 무리를 왼쪽에서 오른쪽으로 놓고, 부모는 첫째와 마지막 자식의 가운데
+      function place(n, left) {
+          const v = vis(n);
+          n.left = left;
+          if (v.length === 0) {
+              n.tx = left + n.w / 2;
+              return;
+          }
+          let span = GAP_X * (v.length - 1);
+          for (let i = 0; i < v.length; i += 1) {
+              span += v[i].w;
+          }
+          let cur = left + (n.w - span) / 2;
+          for (let i = 0; i < v.length; i += 1) {
+              place(v[i], cur);
+              cur += v[i].w + GAP_X;
+          }
+          n.tx = (v[0].tx + v[v.length - 1].tx) / 2;
+      }
+      // 접힌 가지 안의 노드는 가장 가까운 보이는 조상 자리로 모인다
+      function gather(n, hidden, anchor) {
+          n.ty = TOP_Y + n.depth * LEVEL_DY;
+          if (hidden) {
+              n.tx = anchor.tx;
+              n.ty = anchor.ty;
+              n.talpha = 0;
+          }
+          else {
+              n.talpha = 1;
+          }
+          for (let i = 0; i < n.kids.length; i += 1) {
+              const kidHidden = hidden || !n.open;
+              gather(n.kids[i], kidHidden, hidden ? anchor : n);
+          }
+      }
+      function layout() {
+          measure(root);
+          place(root, (W - root.w) / 2);
+          gather(root, false, root);
+      }
+      function settleNodes(rate) {
+          for (let i = 0; i < nodes.length; i += 1) {
+              const n = nodes[i];
+              n.x += (n.tx - n.x) * rate;
+              n.y += (n.ty - n.y) * rate;
+              n.alpha += (n.talpha - n.alpha) * FADE_RATE;
+          }
+      }
+      function snapNodes() {
+          for (let i = 0; i < nodes.length; i += 1) {
+              const n = nodes[i];
+              n.x = n.tx;
+              n.y = n.ty;
+              n.alpha = n.talpha;
+          }
+      }
+      // 카메라 — 화면 좌표 = 세계 좌표 * s + (ox, oy)
+      const cam = { s: 1, ox: 0, oy: 0 };
+      function worldX(sx) { return (sx - cam.ox) / cam.s; }
+      function worldY(sy) { return (sy - cam.oy) / cam.s; }
+      // 그리기 도구
+      function rr(x, y, w, h, r) {
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.arcTo(x + w, y, x + w, y + h, r);
+          ctx.arcTo(x + w, y + h, x, y + h, r);
+          ctx.arcTo(x, y + h, x, y, r);
+          ctx.arcTo(x, y, x + w, y, r);
+          ctx.closePath();
+      }
+      function clearStage() {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = BG;
+          ctx.fillRect(0, 0, W, H);
+      }
+      function beginWorld() { ctx.setTransform(cam.s, 0, 0, cam.s, cam.ox, cam.oy); }
+      function endWorld() { ctx.setTransform(1, 0, 0, 1, 0, 0); }
+      function polyLen(q) {
+          let s = 0;
+          for (let i = 2; i < q.length; i += 2) {
+              s += Math.abs(q[i] - q[i - 2]) + Math.abs(q[i + 1] - q[i - 1]);
+          }
+          return s;
+      }
+      // 꺾은선 길이 대비 비율만큼만 긋는다 (점선 길이 = 전체 길이 * ratio)
+      function strokeLine(q, ratio, col, lw) {
+          if (ratio <= 0) {
+              return;
+          }
+          const total = polyLen(q);
+          ctx.beginPath();
+          ctx.moveTo(q[0], q[1]);
+          for (let i = 2; i < q.length; i += 2) {
+              ctx.lineTo(q[i], q[i + 1]);
+          }
+          ctx.lineWidth = lw;
+          ctx.strokeStyle = col;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.setLineDash(ratio >= 1 ? [] : [total * ratio, total * 2]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+      }
+      // 꺾은선 위에서 길이 비율 지점의 좌표
+      function pointAt(q, ratio) {
+          let left = polyLen(q) * clamp(ratio, 0, 1);
+          for (let i = 2; i < q.length; i += 2) {
+              const seg = Math.abs(q[i] - q[i - 2]) + Math.abs(q[i + 1] - q[i - 1]);
+              if (left <= seg || i === q.length - 2) {
+                  const f = seg > 0 ? Math.min(left / seg, 1) : 1;
+                  return [lerp(q[i - 2], q[i], f), lerp(q[i - 1], q[i + 1], f)];
+              }
+              left -= seg;
+          }
+          return [q[0], q[1]];
+      }
+      // 부모 아래에서 가로로 갈라져 자식으로 내려가는 꺾은선 (부모 아래 가운데, 가운데 높이, 자식 위 가운데)
+      function elbow(p, c) {
+          const ay = p.y + p.bh / 2;
+          const dy = c.y - c.bh / 2;
+          const my = (ay + dy) / 2;
+          return [p.x, ay, p.x, my, c.x, my, c.x, dy];
+      }
+      function drawBox(n, a, mix, dy = 1) {
+          if (a <= 0.01) {
+              return;
+          }
+          const col = BRANCH_COL[n.branch];
+          ctx.globalAlpha = clamp(a, 0, 1);
+          rr(n.x - n.bw / 2, n.y - n.bh / 2, n.bw, n.bh, 6);
+          ctx.fillStyle = rgba(col, 1, mix);
+          ctx.fill();
+          ctx.fillStyle = INK;
+          ctx.font = '600 10px ' + FONT;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(n.label, n.x, n.y + dy);
+          ctx.globalAlpha = 1;
+      }
+      function drawEdgesPlain(lineAlpha) {
+          for (let i = 1; i < nodes.length; i += 1) {
+              const n = nodes[i];
+              const p = n.parent;
+              if (!p) {
+                  continue;
+              }
+              const a = Math.min(p.alpha, n.alpha) * lineAlpha;
+              if (a <= 0.01) {
+                  continue;
+              }
+              strokeLine(elbow(p, n), 1, 'rgba(255,255,255,' + (0.55 * a).toFixed(3) + ')', 1.5);
+          }
+      }
+      function drawBoxesPlain() {
+          for (let d = 0; d < 4; d += 1) {
+              for (let i = 0; i < nodes.length; i += 1) {
+                  if (nodes[i].depth === d) {
+                      drawBox(nodes[i], nodes[i].alpha, d === 2 ? 0.34 : (d === 1 ? 0.1 : 0));
+                  }
+              }
+          }
+      }
+      function ring(n, col, pad) {
+          ctx.globalAlpha = 1;
+          rr(n.x - n.bw / 2 - pad, n.y - n.bh / 2 - pad, n.bw + pad * 2, n.bh + pad * 2, 8);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = col;
+          ctx.stroke();
+      }
+      // 키보드 탐색 — 방향키가 부모·자식·같은 높이의 이웃으로 옮긴다
+      let cursor = root;
+      let showCursor = false;
+      function moveCursor(k) {
+          let t = null;
+          if (k === 'ArrowDown') {
+              const v = vis(cursor);
+              t = v.length > 0 ? v[0] : null;
+          }
+          else if (k === 'ArrowUp') {
+              t = cursor.parent;
+          }
+          else if (k === 'ArrowLeft' || k === 'ArrowRight') {
+              const row = [];
+              for (let i = 0; i < nodes.length; i += 1) {
+                  if (nodes[i].depth === cursor.depth && isShown(nodes[i])) {
+                      row.push(nodes[i]);
+                  }
+              }
+              row.sort(function (a, b) { return a.tx - b.tx; });
+              const j = row.indexOf(cursor) + (k === 'ArrowRight' ? 1 : -1);
+              t = (j >= 0 && j < row.length) ? row[j] : null;
+          }
+          else if (k === 'Home') {
+              t = root;
+          }
+          else {
+              return false;
+          }
+          if (t) {
+              cursor = t;
+          }
+          return true;
+      }
+      function hitNode(sx, sy) {
+          const x = worldX(sx), y = worldY(sy);
+          let best = null;
+          for (let i = 0; i < nodes.length; i += 1) {
+              const n = nodes[i];
+              if (n.alpha > 0.3 && Math.abs(x - n.x) <= n.bw / 2 + 2 && Math.abs(y - n.y) <= n.bh / 2 + 2) {
+                  best = n;
+              }
+          }
+          return best;
+      }
+      function toLocal(e) {
+          const r = canvas.getBoundingClientRect();
+          return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height];
+      }
+      // 장면이 채우는 자리 — 시연 일정, 시간 함수 여부, 입력 처리
+      let script = [];
+      let period = 4000;
+      let timeScene = false;
+      let reduceMs = 0;
+      let stepFn = function () { return; };
+      let drawFn = function () { return; };
+      let actFn = function () { return; };
+      let snapFn = function () { return; };
+      let ptrFn = function () { return; };
+      let keyFn = function () { return false; };
+      layout();
+      snapNodes();
+      // 02 부모에서 자식으로 꺾여 그려지는 연결선 — 경로 길이 대비 비율(ratio)만큼만 긋는다
+      timeScene = true;
+      period = 3000;
+      reduceMs = 2000;
+      const DRAW_MS = 700;
+      const KID_GAP_MS = 150;
+      const RETRACT_START_MS = 2000;
+      const RETRACT_MS = 700;
+      const edgeStart = [];
+      for (let i = 0; i < nodes.length; i += 1) {
+          const n = nodes[i];
+          const p = n.parent;
+          n.x = n.tx;
+          n.y = n.ty;
+          if (!p) {
+              edgeStart.push(0);
+              continue;
+          }
+          const k = p.kids.indexOf(n);
+          edgeStart.push(p.depth === 0 ? 150 + k * 180 : edgeStart[p.id] + DRAW_MS * 0.7 + k * KID_GAP_MS);
+      }
+      drawFn = function () {
+          const t = elapsed % period;
+          const back = 1 - smooth((t - RETRACT_START_MS) / RETRACT_MS);
+          clearStage();
+          const heads = [];
+          const ratios = [];
+          for (let i = 0; i < nodes.length; i += 1) {
+              const n = nodes[i];
+              const p = n.parent;
+              const r = p ? smooth((t - edgeStart[i]) / DRAW_MS) * back : 1;
+              ratios.push(r);
+              if (p && r > 0.001) {
+                  const q = elbow(p, n);
+                  strokeLine(q, r, 'rgba(255,255,255,0.7)', 1.5);
+                  if (r < 0.999) {
+                      heads.push(pointAt(q, r).concat([r]));
+                  }
+              }
+          }
+          for (let d = 0; d < 3; d += 1) {
+              for (let i = 0; i < nodes.length; i += 1) {
+                  const n = nodes[i];
+                  if (n.depth !== d) {
+                      continue;
+                  }
+                  // 선이 거의 닿았을 때 상자가 떠오른다
+                  const a = d === 0 ? 1 : smooth((ratios[i] - 0.7) / 0.3);
+                  drawBox(n, a, d === 2 ? 0.34 : (d === 1 ? 0.1 : 0));
+              }
+          }
+          // 그리는 중인 선의 끝점과 진행 퍼센트
+          for (let i = 0; i < heads.length; i += 1) {
+              ctx.beginPath();
+              ctx.arc(heads[i][0], heads[i][1], 3.5, 0, Math.PI * 2);
+              ctx.fillStyle = '#ffffff';
+              ctx.fill();
+              ctx.font = '600 9px ' + FONT;
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillStyle = 'rgba(255,255,255,0.9)';
+              ctx.fillText(Math.round(heads[i][2] * 100) + '%', heads[i][0] + 7, heads[i][1]);
+          }
+      };
+      let lastTs = null;
+      let accMs = 0;
+      let prevCyc = 0;
+      let scriptIdx = 0;
+      function runScript() {
+          const cyc = elapsed % period;
+          for (let i = 0; i < script.length; i += 1) {
+              const at = script[i].at;
+              const due = prevCyc <= cyc ? (at > prevCyc && at <= cyc) : (at > prevCyc || at <= cyc);
+              if (due) {
+                  script[i].run();
+              }
+          }
+          prevCyc = cyc;
+      }
+      function setMode() {
+          if (reduce) {
+              setStatus('一場面ずつ送っています');
+              btnEl.textContent = '次の場面';
+              return;
+          }
+          setStatus(!autoplay ? '手動操作中' : (paused ? '一時停止中' : 'デモ実行中'));
+          btnEl.textContent = (autoplay && !paused) ? '一時停止' : '再生';
+      }
+      function takeOver() {
+          if (reduce || !autoplay) {
+              return;
+          }
+          autoplay = false;
+          paused = false;
+          rootEl.classList.remove('is-demo');
+          setMode();
+      }
+      function nextScene() {
+          if (timeScene) {
+              elapsed += REDUCE_STEP_MS;
+          }
+          else if (script.length > 0) {
+              script[scriptIdx % script.length].run();
+              scriptIdx += 1;
+          }
+          snapFn();
+          drawFn();
+      }
+      function afterInput() {
+          if (reduce) {
+              snapFn();
+              drawFn();
+          }
+      }
+      function onButton() {
+          if (reduce) {
+              nextScene();
+              setStatus('一場面ずつ送っています');
+              return;
+          }
+          if (autoplay && !paused) {
+              paused = true;
+          }
+          else {
+              paused = false;
+              autoplay = true;
+              prevCyc = elapsed % period;
+              rootEl.classList.add('is-demo');
+          }
+          setMode();
+      }
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          const frameDt = Math.min(ts - lastTs, 160);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  accMs -= FIXED_DT;
+                  if (autoplay) {
+                      runScript();
+                  }
+                  stepFn(FIXED_DT);
+              }
+              drawFn();
+          }
+          rafId = requestAnimationFrame(tick);
+      }
+      listen(btnEl, 'click', function () { onButton(); });
+      listen(canvas, 'pointerdown', function (e) {
+          if (!interactive) {
+              onButton();
+              return;
+          }
+          takeOver();
+          const p = toLocal(e);
+          ptrFn('down', p[0], p[1], 0);
+          afterInput();
+      });
+      listen(canvas, 'pointermove', function (e) {
+          if (!interactive) {
+              return;
+          }
+          const p = toLocal(e);
+          ptrFn('move', p[0], p[1], e.buttons);
+          afterInput();
+      });
+      listen(canvas, 'pointerup', function (e) {
+          if (!interactive) {
+              return;
+          }
+          const p = toLocal(e);
+          ptrFn('up', p[0], p[1], 0);
+          afterInput();
+      });
+      listen(canvas, 'wheel', function (e) {
+          if (!interactive) {
+              return;
+          }
+          e.preventDefault();
+          takeOver();
+          const p = toLocal(e);
+          ptrFn('wheel', p[0], p[1], e.deltaY);
+          afterInput();
+      });
+      listen(canvas, 'keydown', function (e) {
+          const k = e.key;
+          if (!interactive) {
+              if (k === 'Enter' || k === ' ') {
+                  e.preventDefault();
+                  onButton();
+              }
+              return;
+          }
+          takeOver();
+          if (keyFn(k)) {
+              e.preventDefault();
+          }
+          else if (k === 'Enter' || k === ' ') {
+              e.preventDefault();
+              actFn();
+          }
+          afterInput();
+      });
+      if (reduce) {
+          if (timeScene) {
+              elapsed = reduceMs;
+          }
+          else if (script.length > 0) {
+              script[0].run();
+              scriptIdx = 1;
+          }
+          snapFn();
+          drawFn();
+          setMode();
+      }
+      else {
+          drawFn();
+          setMode();
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (let i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl, inputEl);
+})();
+</script>
+</body>
+</html>
