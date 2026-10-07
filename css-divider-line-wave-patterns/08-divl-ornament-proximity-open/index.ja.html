@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マウスが近づくほど飾りが開き線が離れる区切り線 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="dv is-demo" id="dvRoot">
+  <div class="dv__field" id="dvField">
+    <div class="dv__row" id="dvRow" role="separator">
+      <span class="dv__line dv__line--left" id="dvLeft"></span>
+      <span class="dv__orn" id="dvOrn"></span>
+      <span class="dv__line dv__line--right" id="dvRight"></span>
+    </div>
+    <span class="dv__ghost" id="dvGhost"></span>
+  </div>
+  <div class="dv__bar">
+  <button class="dv__btn" id="dvBtn" type="button" aria-pressed="false">飾りを開く</button>
+  <p class="dv__meta"><span class="dv__tag">OPEN</span> <b id="dvOpen">0</b>%</p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 포인터와 장식 중심 사이 거리를 NEAR_RANGE 로 정규화해 목표 열림(0~1)을 만들고, 현재 열림은 매 프레임 남은 거리의 일부(OPEN_RATE)만 따라간다.
+  // 선 두 쪽은 OPEN_MAX_PX 만큼 벌어지고 장식은 열림에 따라 회전·확대된다. 데모는 가상 포인터(유령 점)가 좌우로 오간다.
+  var NEAR_RANGE = 120;
+  var OPEN_RATE = 9;
+  var OPEN_MAX_PX = 72;
+  var CYCLE_MS = 2000;
+
+  var root = document.getElementById('dvRoot');
+  var field = document.getElementById('dvField');
+  var orn = document.getElementById('dvOrn');
+  var left = document.getElementById('dvLeft');
+  var right = document.getElementById('dvRight');
+  var ghost = document.getElementById('dvGhost');
+  var btn = document.getElementById('dvBtn');
+  var openEl = document.getElementById('dvOpen');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var open = 0;
+  var pointer = null;
+  var pinned = false;
+  var lastTs = null;
+  var t0 = null;
+
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function paint() {
+    var half = OPEN_MAX_PX * open / 2;
+    left.style.transform = 'translateX(' + (-half).toFixed(2) + 'px)';
+    right.style.transform = 'translateX(' + half.toFixed(2) + 'px)';
+    orn.style.transform = 'rotate(' + (open * 135).toFixed(1) + 'deg) scale(' + (0.5 + open * 0.9).toFixed(3) + ')';
+    openEl.textContent = String(Math.round(open * 100));
+  }
+  function goalOf() {
+    if (pinned) return 1;
+    if (!pointer) return 0;
+    var box = orn.getBoundingClientRect();
+    var dx = pointer.x - (box.left + box.width / 2);
+    var dy = pointer.y - (box.top + box.height / 2);
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    return smooth(Math.min(1, Math.max(0, 1 - dist / NEAR_RANGE)));
+  }
+  function stopDemo() { root.classList.remove('is-demo'); ghost.style.opacity = '0'; }
+
+  document.addEventListener('pointermove', function (e) {
+    stopDemo();
+    pointer = { x: e.clientX, y: e.clientY };
+    if (reduce) { open = goalOf(); paint(); }
+  });
+  document.addEventListener('pointerleave', function () {
+    pointer = null;
+    if (reduce) { open = goalOf(); paint(); }
+  });
+  btn.addEventListener('click', function () {
+    stopDemo();
+    pinned = !pinned;
+    btn.setAttribute('aria-pressed', String(pinned));
+    if (reduce) { open = goalOf(); paint(); }
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo')) {
+      var fb = field.getBoundingClientRect();
+      var ob = orn.getBoundingClientRect();
+      var phase = ((ts - t0) % CYCLE_MS) / CYCLE_MS * Math.PI * 2;
+      var gx = ob.left + ob.width / 2 + 170 * Math.cos(phase);
+      var gy = ob.top + ob.height / 2 + 22 * Math.sin(phase);
+      pointer = { x: gx, y: gy };
+      ghost.style.transform = 'translate(' + (gx - fb.left - 6).toFixed(1) + 'px,' + (gy - fb.top - 6).toFixed(1) + 'px)';
+    }
+    var k = 1 - Math.exp(-dt * OPEN_RATE);
+    open += (goalOf() - open) * k;
+    paint();
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    paint();
+  } else {
+    ghost.style.opacity = '1';
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
