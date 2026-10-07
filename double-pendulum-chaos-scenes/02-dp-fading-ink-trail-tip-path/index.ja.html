@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>先端の位置を一歩ごとに積み、古い点ほど細く透明に描いて、通った道がインクの線のように続いて薄れていく。 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300" tabindex="0" aria-label="先端の位置を一歩ごとに積み、古い点ほど細く透明に描いて、通った道がインクの線のように続いて薄れていく。"></canvas>
+  <p class="bp__status" id="bpStatus" aria-live="polite">デモ実行中</p>
+  <button class="bp__btn" id="bpBtn" type="button">一時停止</button>
+  <p class="bp__caption">先端の位置を一歩ごとに積み、古い点ほど細く透明に描いて、通った道がインクの線のように続いて薄れていく。</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var statusEl = document.getElementById('bpStatus');
+  var btnEl = document.getElementById('bpBtn');
+  "use strict";
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var wrap = canvas.parentElement ? canvas.parentElement : root;
+      var CALC_W = 320, CALC_H = 200;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_FRAMES = 40;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var demo = !reduce;
+      if (!demo)
+          root.classList.remove('is-demo');
+      function stopDemo() { demo = false; root.classList.remove('is-demo'); }
+      var paused = false;
+      var ownInput = false;
+      var cw = 480, ch = 300, sc = 1.5, elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      function hsl(h, s, l, a) {
+          return 'hsla(' + (h % 360) + ',' + s + '%,' + l + '%,' + a + ')';
+      }
+      function canvasPoint(e) {
+          var r = canvas.getBoundingClientRect();
+          return { x: (e.clientX - r.left) / r.width * CALC_W, y: (e.clientY - r.top) / r.height * CALC_H };
+      }
+      // 배경 — 어두운 잉크색 위에 방사형 빛무리를 (gx, gy) 에 깐다
+      function beginDraw(inner, outer, gx, gy) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.fillStyle = '#1d1a2b';
+          ctx.fillRect(0, 0, cw, ch);
+          ctx.setTransform(sc, 0, 0, sc, 0, 0);
+          var g = ctx.createRadialGradient(gx, gy, 8, gx, gy, 230);
+          g.addColorStop(0, inner);
+          g.addColorStop(1, outer);
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, CALC_W, CALC_H);
+      }
+      function seg(x1, y1, x2, y2, w, col) {
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.lineCap = 'round';
+          ctx.lineWidth = w;
+          ctx.strokeStyle = col;
+          ctx.stroke();
+      }
+      function disc(x, y, r, col) {
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, 6.2832);
+          ctx.fillStyle = col;
+          ctx.fill();
+      }
+      function glow(x, y, r, rgb, a) {
+          var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+          g.addColorStop(0, 'rgba(' + rgb + ',' + a + ')');
+          g.addColorStop(1, 'rgba(' + rgb + ',0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+      function drawTrail(arr, rgb, w, alpha) {
+          ctx.lineCap = 'round';
+          for (var i = 1; i < arr.length; i += 1) {
+              var f = i / arr.length;
+              ctx.beginPath();
+              ctx.moveTo(arr[i - 1].x, arr[i - 1].y);
+              ctx.lineTo(arr[i].x, arr[i].y);
+              ctx.strokeStyle = 'rgba(' + rgb + ',' + (alpha * f * f) + ')';
+              ctx.lineWidth = w * (0.3 + 0.7 * f);
+              ctx.stroke();
+          }
+      }
+      function pushTrail(arr, x, y, max) {
+          arr.push({ x: x, y: y });
+          if (arr.length > max) {
+              arr.shift();
+          }
+      }
+      function defaultToggle() {
+          if (reduce) {
+              for (var i = 0; i < REDUCE_STEP_FRAMES; i += 1) {
+                  elapsed += FIXED_DT;
+                  stepFrame();
+              }
+              draw();
+              setStatus('一場面ずつ送っています');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? '再生' : '一時停止';
+          setStatus(paused ? '一時停止中' : 'デモ実行中');
+      }
+      var onButton = defaultToggle;
+      // 기법: 끝 추가의 위치를 걸음마다 배열에 쌓고, 오래된 점일수록 투명하고 가늘게 그려 잉크처럼 옅어지게 한다
+      var DT = 0.01;
+      var SUBSTEPS = 3;
+      var START_T1 = 2.3;
+      var START_T2 = 2.0;
+      var TRAIL_MAX = 560;
+      var INK_FADE_POWER = 1.6;
+      var L1 = 1.0;
+      var L2 = 1.0;
+      var M1 = 1.0;
+      var M2 = 1.0;
+      var G = 9.81;
+      var UNIT = 44, PIVOT_X = 160, PIVOT_Y = 84;
+      var PREROLL_FRAMES = 150;
+      // 라그랑주 운동방정식 — 각도는 아래 방향이 0, 시계 방향이 양수
+      function accTheta1(t1, t2, w1, w2) {
+          var d = t1 - t2;
+          var den = L1 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+          return (-G * (2 * M1 + M2) * Math.sin(t1) - M2 * G * Math.sin(t1 - 2 * t2)
+              - 2 * Math.sin(d) * M2 * (w2 * w2 * L2 + w1 * w1 * L1 * Math.cos(d))) / den;
+      }
+      function accTheta2(t1, t2, w1, w2) {
+          var d = t1 - t2;
+          var den = L2 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+          return (2 * Math.sin(d) * (w1 * w1 * L1 * (M1 + M2) + G * (M1 + M2) * Math.cos(t1)
+              + w2 * w2 * L2 * M2 * Math.cos(d))) / den;
+      }
+      // 룽게-쿠타 4단계 — 한 걸음을 네 번 기울기로 평균 낸다 (s = [t1, t2, w1, w2])
+      function rk4Step(s, h) {
+          var t1 = s[0], t2 = s[1], w1 = s[2], w2 = s[3];
+          var h2 = h * 0.5;
+          var k1a = w1, k1b = w2, k1c = accTheta1(t1, t2, w1, w2), k1d = accTheta2(t1, t2, w1, w2);
+          var u1 = t1 + h2 * k1a, u2 = t2 + h2 * k1b, u3 = w1 + h2 * k1c, u4 = w2 + h2 * k1d;
+          var k2a = u3, k2b = u4, k2c = accTheta1(u1, u2, u3, u4), k2d = accTheta2(u1, u2, u3, u4);
+          u1 = t1 + h2 * k2a;
+          u2 = t2 + h2 * k2b;
+          u3 = w1 + h2 * k2c;
+          u4 = w2 + h2 * k2d;
+          var k3a = u3, k3b = u4, k3c = accTheta1(u1, u2, u3, u4), k3d = accTheta2(u1, u2, u3, u4);
+          u1 = t1 + h * k3a;
+          u2 = t2 + h * k3b;
+          u3 = w1 + h * k3c;
+          u4 = w2 + h * k3d;
+          var k4a = u3, k4b = u4, k4c = accTheta1(u1, u2, u3, u4), k4d = accTheta2(u1, u2, u3, u4);
+          s[0] = t1 + h / 6 * (k1a + 2 * k2a + 2 * k3a + k4a);
+          s[1] = t2 + h / 6 * (k1b + 2 * k2b + 2 * k3b + k4b);
+          s[2] = w1 + h / 6 * (k1c + 2 * k2c + 2 * k3c + k4c);
+          s[3] = w2 + h / 6 * (k1d + 2 * k2d + 2 * k3d + k4d);
+      }
+      function bobOne(s, ox, oy) {
+          return { x: ox + UNIT * L1 * Math.sin(s[0]), y: oy + UNIT * L1 * Math.cos(s[0]) };
+      }
+      function bobTwo(s, ox, oy) {
+          var a = bobOne(s, ox, oy);
+          return { x: a.x + UNIT * L2 * Math.sin(s[1]), y: a.y + UNIT * L2 * Math.cos(s[1]) };
+      }
+      function drawArms(s, ox, oy, c1, c2, w) {
+          var a = bobOne(s, ox, oy), b = bobTwo(s, ox, oy);
+          seg(ox, oy, a.x, a.y, w, c1);
+          seg(a.x, a.y, b.x, b.y, w, c2);
+      }
+      var sim = [START_T1, START_T2, 0, 0];
+      var ink = [];
+      var armTrail = [];
+      function stepFrame() {
+          for (var i = 0; i < SUBSTEPS; i += 1) {
+              rk4Step(sim, DT);
+              var p = bobTwo(sim, PIVOT_X, PIVOT_Y);
+              var sp = Math.abs(sim[3]) + Math.abs(sim[2]) * 0.5;
+              ink.push({ x: p.x, y: p.y, sp: sp });
+              if (ink.length > TRAIL_MAX) {
+                  ink.shift();
+              }
+          }
+          var q = bobOne(sim, PIVOT_X, PIVOT_Y);
+          pushTrail(armTrail, q.x, q.y, 90);
+      }
+      function draw() {
+          var b = bobTwo(sim, PIVOT_X, PIVOT_Y);
+          beginDraw('#3f385f', '#251f3b', b.x, b.y);
+          glow(b.x, b.y, 80, '255,241,201', 0.2);
+          ctx.lineCap = 'round';
+          for (var i = 1; i < ink.length; i += 1) {
+              var f = Math.pow(i / ink.length, INK_FADE_POWER);
+              ctx.beginPath();
+              ctx.moveTo(ink[i - 1].x, ink[i - 1].y);
+              ctx.lineTo(ink[i].x, ink[i].y);
+              ctx.strokeStyle = hsl(250 + ink[i].sp * 7 + i * 0.12, 78, 80, 0.9 * f);
+              ctx.lineWidth = 0.5 + 3.4 * f;
+              ctx.stroke();
+          }
+          drawTrail(armTrail, '201,184,255', 2, 0.4);
+          drawArms(sim, PIVOT_X, PIVOT_Y, 'rgba(201,184,255,0.9)', 'rgba(159,216,255,0.9)', 3);
+          var a = bobOne(sim, PIVOT_X, PIVOT_Y);
+          disc(PIVOT_X, PIVOT_Y, 4, '#fff1c9');
+          disc(a.x, a.y, 5, '#c9b8ff');
+          glow(b.x, b.y, 18, '255,255,255', 0.8);
+          disc(b.x, b.y, 4, '#ffffff');
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, 8, 0, 6.2832);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+      }
+      function fit() {
+          var r = wrap.getBoundingClientRect();
+          cw = Math.max(1, Math.round(r.width));
+          ch = Math.max(1, Math.round(r.height));
+          canvas.width = cw;
+          canvas.height = ch;
+          sc = cw / CALC_W;
+          draw();
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  stepFrame();
+                  accMs -= FIXED_DT;
+              }
+          }
+          draw();
+          rafId = requestAnimationFrame(tick);
+      }
+      for (var w0 = 0; w0 < PREROLL_FRAMES; w0 += 1) {
+          elapsed += FIXED_DT;
+          stepFrame();
+      }
+      fit();
+      listen(window, 'resize', fit);
+      listen(btnEl, 'click', function () { onButton(); });
+      if (!ownInput) {
+          listen(canvas, 'pointerdown', function () { onButton(); });
+          listen(canvas, 'keydown', function (e) {
+              var k = e.key;
+              if (k === 'Enter' || k === ' ') {
+                  e.preventDefault();
+                  onButton();
+              }
+          });
+      }
+      if (reduce) {
+          if (!ownInput) {
+              btnEl.textContent = '次の場面';
+              setStatus('一場面ずつ送っています');
+          }
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>

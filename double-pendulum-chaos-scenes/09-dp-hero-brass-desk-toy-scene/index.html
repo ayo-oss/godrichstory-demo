@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>받침대에 매달린 황동 두 팔 장난감 위에서 끝 추가가 빛나는 궤적을 남기고 관절마다 높이에 맞춰 늘어나는 그림자가 바닥에 따라 움직이는 책상 위 장식품 한 장면으로 묶는다. — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bp is-demo" id="bpRoot">
+  <canvas class="bp__canvas" id="bpCanvas" width="480" height="300" tabindex="0" aria-label="받침대에 매달린 황동 두 팔 장난감 위에서 끝 추가가 빛나는 궤적을 남기고 관절마다 높이에 맞춰 늘어나는 그림자가 바닥에 따라 움직이는 책상 위 장식품 한 장면으로 묶는다."></canvas>
+  <p class="bp__status" id="bpStatus" aria-live="polite">시연 중</p>
+  <button class="bp__btn" id="bpBtn" type="button">멈춤</button>
+  <p class="bp__caption">받침대에 매달린 황동 두 팔 장난감 위에서 끝 추가가 빛나는 궤적을 남기고 관절마다 높이에 맞춰 늘어나는 그림자가 바닥에 따라 움직이는 책상 위 장식품 한 장면으로 묶는다.</p>
+</div>
+</main>
+<script>
+(function () {
+  var root = document.getElementById('bpRoot');
+  var canvas = document.getElementById('bpCanvas');
+  var statusEl = document.getElementById('bpStatus');
+  var btnEl = document.getElementById('bpBtn');
+  "use strict";
+  function main(root, canvas, statusEl, btnEl) {
+      var ctx0 = canvas.getContext('2d');
+      if (!ctx0) {
+          return function () { return; };
+      }
+      var ctx = ctx0;
+      var wrap = canvas.parentElement ? canvas.parentElement : root;
+      var CALC_W = 320, CALC_H = 200;
+      var FIXED_DT = 16;
+      var REDUCE_STEP_FRAMES = 40;
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var demo = !reduce;
+      if (!demo)
+          root.classList.remove('is-demo');
+      function stopDemo() { demo = false; root.classList.remove('is-demo'); }
+      var paused = false;
+      var ownInput = false;
+      var cw = 480, ch = 300, sc = 1.5, elapsed = 0, rafId = 0;
+      var cleaners = [];
+      function listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleaners.push(function () { target.removeEventListener(type, fn); });
+      }
+      function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+      function setStatus(msg) { statusEl.textContent = msg; }
+      function hsl(h, s, l, a) {
+          return 'hsla(' + (h % 360) + ',' + s + '%,' + l + '%,' + a + ')';
+      }
+      function canvasPoint(e) {
+          var r = canvas.getBoundingClientRect();
+          return { x: (e.clientX - r.left) / r.width * CALC_W, y: (e.clientY - r.top) / r.height * CALC_H };
+      }
+      // 배경 — 어두운 잉크색 위에 방사형 빛무리를 (gx, gy) 에 깐다
+      function beginDraw(inner, outer, gx, gy) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.fillStyle = '#1d1a2b';
+          ctx.fillRect(0, 0, cw, ch);
+          ctx.setTransform(sc, 0, 0, sc, 0, 0);
+          var g = ctx.createRadialGradient(gx, gy, 8, gx, gy, 230);
+          g.addColorStop(0, inner);
+          g.addColorStop(1, outer);
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, CALC_W, CALC_H);
+      }
+      function seg(x1, y1, x2, y2, w, col) {
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.lineCap = 'round';
+          ctx.lineWidth = w;
+          ctx.strokeStyle = col;
+          ctx.stroke();
+      }
+      function disc(x, y, r, col) {
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, 6.2832);
+          ctx.fillStyle = col;
+          ctx.fill();
+      }
+      function glow(x, y, r, rgb, a) {
+          var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+          g.addColorStop(0, 'rgba(' + rgb + ',' + a + ')');
+          g.addColorStop(1, 'rgba(' + rgb + ',0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+      function drawTrail(arr, rgb, w, alpha) {
+          ctx.lineCap = 'round';
+          for (var i = 1; i < arr.length; i += 1) {
+              var f = i / arr.length;
+              ctx.beginPath();
+              ctx.moveTo(arr[i - 1].x, arr[i - 1].y);
+              ctx.lineTo(arr[i].x, arr[i].y);
+              ctx.strokeStyle = 'rgba(' + rgb + ',' + (alpha * f * f) + ')';
+              ctx.lineWidth = w * (0.3 + 0.7 * f);
+              ctx.stroke();
+          }
+      }
+      function pushTrail(arr, x, y, max) {
+          arr.push({ x: x, y: y });
+          if (arr.length > max) {
+              arr.shift();
+          }
+      }
+      function defaultToggle() {
+          if (reduce) {
+              for (var i = 0; i < REDUCE_STEP_FRAMES; i += 1) {
+                  elapsed += FIXED_DT;
+                  stepFrame();
+              }
+              draw();
+              setStatus('한 장면씩 넘기는 중');
+              return;
+          }
+          paused = !paused;
+          btnEl.textContent = paused ? '재생' : '멈춤';
+          setStatus(paused ? '일시정지됨' : '시연 중');
+      }
+      var onButton = defaultToggle;
+      // 기법: 같은 RK4 진자 위에 황동 질감(그라디언트 구체·선형 하이라이트)과 높이에 비례한 바닥 그림자, 가산 합성 궤적을 얹는다
+      var DT = 0.01;
+      var SUBSTEPS = 3;
+      var START_T1 = 2.1;
+      var START_T2 = 2.7;
+      var GLOW_TRAIL_MAX = 300;
+      var SHADOW_SKEW = 0.42;
+      var DESK_Y = 164;
+      var L1 = 1.0;
+      var L2 = 1.0;
+      var M1 = 1.0;
+      var M2 = 1.0;
+      var G = 9.81;
+      var UNIT = 36, PIVOT_X = 186, PIVOT_Y = 74;
+      var PREROLL_FRAMES = 90;
+      // 라그랑주 운동방정식 — 각도는 아래 방향이 0, 시계 방향이 양수
+      function accTheta1(t1, t2, w1, w2) {
+          var d = t1 - t2;
+          var den = L1 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+          return (-G * (2 * M1 + M2) * Math.sin(t1) - M2 * G * Math.sin(t1 - 2 * t2)
+              - 2 * Math.sin(d) * M2 * (w2 * w2 * L2 + w1 * w1 * L1 * Math.cos(d))) / den;
+      }
+      function accTheta2(t1, t2, w1, w2) {
+          var d = t1 - t2;
+          var den = L2 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+          return (2 * Math.sin(d) * (w1 * w1 * L1 * (M1 + M2) + G * (M1 + M2) * Math.cos(t1)
+              + w2 * w2 * L2 * M2 * Math.cos(d))) / den;
+      }
+      // 룽게-쿠타 4단계 — 한 걸음을 네 번 기울기로 평균 낸다 (s = [t1, t2, w1, w2])
+      function rk4Step(s, h) {
+          var t1 = s[0], t2 = s[1], w1 = s[2], w2 = s[3];
+          var h2 = h * 0.5;
+          var k1a = w1, k1b = w2, k1c = accTheta1(t1, t2, w1, w2), k1d = accTheta2(t1, t2, w1, w2);
+          var u1 = t1 + h2 * k1a, u2 = t2 + h2 * k1b, u3 = w1 + h2 * k1c, u4 = w2 + h2 * k1d;
+          var k2a = u3, k2b = u4, k2c = accTheta1(u1, u2, u3, u4), k2d = accTheta2(u1, u2, u3, u4);
+          u1 = t1 + h2 * k2a;
+          u2 = t2 + h2 * k2b;
+          u3 = w1 + h2 * k2c;
+          u4 = w2 + h2 * k2d;
+          var k3a = u3, k3b = u4, k3c = accTheta1(u1, u2, u3, u4), k3d = accTheta2(u1, u2, u3, u4);
+          u1 = t1 + h * k3a;
+          u2 = t2 + h * k3b;
+          u3 = w1 + h * k3c;
+          u4 = w2 + h * k3d;
+          var k4a = u3, k4b = u4, k4c = accTheta1(u1, u2, u3, u4), k4d = accTheta2(u1, u2, u3, u4);
+          s[0] = t1 + h / 6 * (k1a + 2 * k2a + 2 * k3a + k4a);
+          s[1] = t2 + h / 6 * (k1b + 2 * k2b + 2 * k3b + k4b);
+          s[2] = w1 + h / 6 * (k1c + 2 * k2c + 2 * k3c + k4c);
+          s[3] = w2 + h / 6 * (k1d + 2 * k2d + 2 * k3d + k4d);
+      }
+      function bobOne(s, ox, oy) {
+          return { x: ox + UNIT * L1 * Math.sin(s[0]), y: oy + UNIT * L1 * Math.cos(s[0]) };
+      }
+      function bobTwo(s, ox, oy) {
+          var a = bobOne(s, ox, oy);
+          return { x: a.x + UNIT * L2 * Math.sin(s[1]), y: a.y + UNIT * L2 * Math.cos(s[1]) };
+      }
+      function drawArms(s, ox, oy, c1, c2, w) {
+          var a = bobOne(s, ox, oy), b = bobTwo(s, ox, oy);
+          seg(ox, oy, a.x, a.y, w, c1);
+          seg(a.x, a.y, b.x, b.y, w, c2);
+      }
+      var sim = [START_T1, START_T2, 0, 0];
+      var glowTrail = [];
+      function stepFrame() {
+          for (var i = 0; i < SUBSTEPS; i += 1) {
+              rk4Step(sim, DT);
+              var p = bobTwo(sim, PIVOT_X, PIVOT_Y);
+              glowTrail.push({ x: p.x, y: p.y });
+              if (glowTrail.length > GLOW_TRAIL_MAX) {
+                  glowTrail.shift();
+              }
+          }
+      }
+      function shadowOf(p, r) {
+          var h = clamp(DESK_Y - p.y, 0, 200);
+          var sx = p.x + h * SHADOW_SKEW;
+          var sy = DESK_Y + 8 + h * 0.07;
+          var k = 1 + h * 0.012;
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.scale(1, 0.28);
+          ctx.beginPath();
+          ctx.arc(0, 0, r * k, 0, 6.2832);
+          ctx.fillStyle = 'rgba(8,6,16,' + (0.42 / k) + ')';
+          ctx.fill();
+          ctx.restore();
+      }
+      function brassSeg(x1, y1, x2, y2, w) {
+          seg(x1, y1, x2, y2, w + 2, '#6f5630');
+          seg(x1, y1, x2, y2, w, '#d4b077');
+          var dx = x2 - x1, dy = y2 - y1;
+          var len = Math.hypot(dx, dy) || 1;
+          var nx = -dy / len, ny = dx / len;
+          seg(x1 + nx * w * 0.22, y1 + ny * w * 0.22, x2 + nx * w * 0.22, y2 + ny * w * 0.22, w * 0.3, '#f6e7c1');
+      }
+      function brassBall(x, y, r) {
+          var g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+          g.addColorStop(0, '#fff6d9');
+          g.addColorStop(0.45, '#e2bd7c');
+          g.addColorStop(1, '#8a6a38');
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, 6.2832);
+          ctx.fillStyle = g;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(60,40,16,0.55)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+      }
+      function draw() {
+          var a = bobOne(sim, PIVOT_X, PIVOT_Y), b = bobTwo(sim, PIVOT_X, PIVOT_Y);
+          beginDraw('#4a3f64', '#241f38', b.x, b.y);
+          // 책상 면과 받침대
+          var desk = ctx.createLinearGradient(0, DESK_Y, 0, CALC_H);
+          desk.addColorStop(0, '#3b3150');
+          desk.addColorStop(1, '#262038');
+          ctx.fillStyle = desk;
+          ctx.fillRect(0, DESK_Y, CALC_W, CALC_H - DESK_Y);
+          seg(0, DESK_Y, CALC_W, DESK_Y, 1, 'rgba(255,241,201,0.2)');
+          shadowOf({ x: PIVOT_X, y: PIVOT_Y }, 5);
+          shadowOf(a, 7);
+          shadowOf(b, 9);
+          var armShadowA = Math.hypot(a.x - PIVOT_X, a.y - PIVOT_Y);
+          if (armShadowA > 0) {
+              var hs = clamp(DESK_Y - PIVOT_Y, 0, 200);
+              ctx.beginPath();
+              ctx.moveTo(PIVOT_X + hs * SHADOW_SKEW, DESK_Y + 8 + hs * 0.07);
+              ctx.lineTo(a.x + clamp(DESK_Y - a.y, 0, 200) * SHADOW_SKEW, DESK_Y + 8 + clamp(DESK_Y - a.y, 0, 200) * 0.07);
+              ctx.lineTo(b.x + clamp(DESK_Y - b.y, 0, 200) * SHADOW_SKEW, DESK_Y + 8 + clamp(DESK_Y - b.y, 0, 200) * 0.07);
+              ctx.strokeStyle = 'rgba(8,6,16,0.28)';
+              ctx.lineWidth = 3;
+              ctx.lineJoin = 'round';
+              ctx.stroke();
+          }
+          ctx.save();
+          ctx.translate(96, DESK_Y + 8);
+          ctx.scale(1, 0.26);
+          ctx.beginPath();
+          ctx.arc(0, 0, 54, 0, 6.2832);
+          ctx.fillStyle = 'rgba(8,6,16,0.45)';
+          ctx.fill();
+          ctx.restore();
+          ctx.save();
+          ctx.translate(96, DESK_Y + 2);
+          ctx.scale(1, 0.26);
+          ctx.beginPath();
+          ctx.arc(0, 0, 48, 0, 6.2832);
+          var baseG = ctx.createLinearGradient(-48, 0, 48, 0);
+          baseG.addColorStop(0, '#8a6a38');
+          baseG.addColorStop(0.35, '#f1dba6');
+          baseG.addColorStop(1, '#a8834a');
+          ctx.fillStyle = baseG;
+          ctx.fill();
+          ctx.restore();
+          brassSeg(96, DESK_Y, 96, PIVOT_Y, 6);
+          brassSeg(96, PIVOT_Y, PIVOT_X, PIVOT_Y, 5);
+          // 발광 궤적 — 가산 합성
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.lineCap = 'round';
+          for (var i = 1; i < glowTrail.length; i += 1) {
+              var f = i / glowTrail.length;
+              ctx.beginPath();
+              ctx.moveTo(glowTrail[i - 1].x, glowTrail[i - 1].y);
+              ctx.lineTo(glowTrail[i].x, glowTrail[i].y);
+              ctx.strokeStyle = hsl(40 + f * 20, 90, 70, 0.55 * f * f);
+              ctx.lineWidth = 1 + 4 * f;
+              ctx.stroke();
+          }
+          ctx.globalCompositeOperation = 'source-over';
+          glow(b.x, b.y, 56, '255,214,150', 0.4);
+          brassSeg(PIVOT_X, PIVOT_Y, a.x, a.y, 4.5);
+          brassSeg(a.x, a.y, b.x, b.y, 4.5);
+          brassBall(PIVOT_X, PIVOT_Y, 5.5);
+          brassBall(a.x, a.y, 7.5);
+          brassBall(b.x, b.y, 10);
+          glow(b.x, b.y, 18, '255,244,214', 0.5);
+      }
+      function fit() {
+          var r = wrap.getBoundingClientRect();
+          cw = Math.max(1, Math.round(r.width));
+          ch = Math.max(1, Math.round(r.height));
+          canvas.width = cw;
+          canvas.height = ch;
+          sc = cw / CALC_W;
+          draw();
+      }
+      var lastTs = null;
+      var accMs = 0;
+      function tick(ts) {
+          if (lastTs === null) {
+              lastTs = ts;
+          }
+          var frameDt = Math.min(ts - lastTs, 48);
+          lastTs = ts;
+          if (!paused) {
+              accMs += frameDt;
+              while (accMs >= FIXED_DT) {
+                  elapsed += FIXED_DT;
+                  stepFrame();
+                  accMs -= FIXED_DT;
+              }
+          }
+          draw();
+          rafId = requestAnimationFrame(tick);
+      }
+      for (var w0 = 0; w0 < PREROLL_FRAMES; w0 += 1) {
+          elapsed += FIXED_DT;
+          stepFrame();
+      }
+      fit();
+      listen(window, 'resize', fit);
+      listen(btnEl, 'click', function () { onButton(); });
+      if (!ownInput) {
+          listen(canvas, 'pointerdown', function () { onButton(); });
+          listen(canvas, 'keydown', function (e) {
+              var k = e.key;
+              if (k === 'Enter' || k === ' ') {
+                  e.preventDefault();
+                  onButton();
+              }
+          });
+      }
+      if (reduce) {
+          if (!ownInput) {
+              btnEl.textContent = '다음 장면';
+              setStatus('한 장면씩 넘기는 중');
+          }
+      }
+      else {
+          rafId = requestAnimationFrame(tick);
+      }
+      function destroy() {
+          cancelAnimationFrame(rafId);
+          for (var i = 0; i < cleaners.length; i += 1) {
+              cleaners[i]();
+          }
+      }
+      return destroy;
+  }
+  main(root, canvas, statusEl, btnEl);
+})();
+</script>
+</body>
+</html>
