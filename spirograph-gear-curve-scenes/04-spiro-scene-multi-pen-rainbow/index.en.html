@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assigns a different color to each of several pen holes on the same gear and calculates each hole's coordinates separately, drawing several offset, overlapping layers of the pattern at once in a single rotation — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp4 is-demo" id="sp4Root" tabindex="0">
+  <canvas class="sp4__canvas" id="sp4Canvas" width="480" height="300"></canvas>
+  <p class="sp4__caption">Assigns a different color to each of several pen holes on the same gear and calculates each hole's coordinates separately, drawing several offset, overlapping layers of the pattern at once in a single rotation</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 같은 링·톱니 조합에서 펜 구멍마다 반지름 비율(d)과 시작 위상을 달리해
+  // 좌표를 따로 계산한다. 위상은 seedRand(결정적 LCG) 로 고정해 매번 같은 그림이 나온다.
+  var root = document.getElementById('sp4Root');
+  var canvas = document.getElementById('sp4Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  var CALC_DIM = 200;
+  var GEAR_RING_TEETH = 78;
+  var GEAR_ROLL_TEETH = 21;
+  var TOOTH_UNIT = 0.7;
+  var SEGMENTS_PER_TURN = 260;
+  var PEN_RATIOS = [0.35, 0.5, 0.65, 0.8];
+  var PEN_COLORS = ['rgba(230,90,120,.85)', 'rgba(50,175,135,.85)', 'rgba(70,130,230,.85)', 'rgba(228,150,45,.85)'];
+
+  function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) { var t = b; b = a % b; a = t; } return a; }
+
+  var R = GEAR_RING_TEETH * TOOTH_UNIT;
+  var r = GEAR_ROLL_TEETH * TOOTH_UNIT;
+  var g = gcd(GEAR_RING_TEETH, GEAR_ROLL_TEETH);
+  var TURNS = GEAR_ROLL_TEETH / g;
+  var TOTAL_T = TURNS * Math.PI * 2;
+  var CYCLE_SECONDS = 7;
+  var SPEED = TOTAL_T / CYCLE_SECONDS;
+
+  var phaseRand = seedRand(43304);
+  var PEN_PHASE = PEN_RATIOS.map(function () { return phaseRand() * Math.PI * 2; });
+
+  function point(t, d) {
+    var k = (R - r) / r;
+    return {
+      x: (R - r) * Math.cos(t) + d * Math.cos(k * t),
+      y: (R - r) * Math.sin(t) - d * Math.sin(k * t)
+    };
+  }
+
+  var cw = 480, ch = 300, scale = 1, cx = 240, cy = 150;
+  function fit() {
+    var rect = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width));
+    ch = Math.max(1, Math.round(rect.height));
+    canvas.width = cw; canvas.height = ch;
+    scale = Math.min(cw, ch) / CALC_DIM * 0.92;
+    cx = cw / 2; cy = ch / 2;
+  }
+
+  function toScreen(p) { return { x: cx + p.x * scale, y: cy + p.y * scale }; }
+
+  function drawPen(idx, tMax) {
+    var d = r * PEN_RATIOS[idx];
+    var phase = PEN_PHASE[idx];
+    ctx.strokeStyle = PEN_COLORS[idx];
+    ctx.lineWidth = Math.max(2.4, scale * 0.032);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    var steps = Math.max(2, Math.round((tMax / (Math.PI * 2)) * SEGMENTS_PER_TURN));
+    ctx.beginPath();
+    for (var i = 0; i <= steps; i += 1) {
+      var t = (i / steps) * tMax;
+      var s = toScreen(point(t + phase, d));
+      if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+    }
+    ctx.stroke();
+    ctx.save();
+    ctx.fillStyle = PEN_COLORS[idx].replace('.85', '.13');
+    ctx.fill('evenodd');
+    ctx.restore();
+    if (tMax > 0.001) {
+      var tip = toScreen(point(tMax + phase, d));
+      ctx.fillStyle = PEN_COLORS[idx];
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, Math.max(2.6, scale * 0.042), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawFull(tMax) {
+    ctx.clearRect(0, 0, cw, ch);
+    var tipW = toScreen(point(tMax + PEN_PHASE[0], r * PEN_RATIOS[0]));
+    var wash = ctx.createRadialGradient(tipW.x, tipW.y, 0, tipW.x, tipW.y, Math.max(cw, ch) * 0.9);
+    wash.addColorStop(0, 'rgba(255,200,215,.55)');
+    wash.addColorStop(0.5, 'rgba(190,225,255,.32)');
+    wash.addColorStop(1, 'rgba(200,240,215,.16)');
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, cw, ch);
+    for (var i = 0; i < PEN_RATIOS.length; i += 1) drawPen(i, tMax);
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  fit();
+
+  if (reduce) {
+    drawFull(TOTAL_T);
+  } else {
+    var elapsed = 0.3;
+    var lastTs = null;
+    function tick(ts) {
+      if (lastTs === null) lastTs = ts;
+      var dt = Math.min(ts - lastTs, 48);
+      lastTs = ts;
+      elapsed += dt / 1000;
+      var t = elapsed * SPEED;
+      if (t > TOTAL_T) { elapsed = 0; t = 0; }
+      drawFull(t);
+      requestAnimationFrame(tick);
+    }
+    drawFull(elapsed * SPEED);
+    window.addEventListener('resize', function () { fit(); drawFull(elapsed * SPEED); });
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

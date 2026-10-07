@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지난 프레임의 선을 프레임마다 조금씩 투명하게 덮어쓰고 새 궤적을 맨 앞에 얹어, 펜이 지나간 자리가 시간에 따라 옅어지는 그리기 장면을 만든다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp5 is-demo" id="sp5Root" tabindex="0">
+  <canvas class="sp5__canvas" id="sp5Canvas" width="480" height="300"></canvas>
+  <p class="sp5__caption">지난 프레임의 선을 프레임마다 조금씩 투명하게 덮어쓰고 새 궤적을 맨 앞에 얹어, 펜이 지나간 자리가 시간에 따라 옅어지는 그리기 장면을 만든다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 고정 시간 스텝(STEP_MS)마다 캔버스 전체를 반투명 무대색으로 덮어써 지난 궤적을
+  // 서서히 지우고, 그 위에 새 구간만 불투명하게 얹는다. TRAIL_FADE_FRAMES 스텝이 지나면
+  // 한 지점의 흔적이 실질적으로 사라지도록 감쇠 알파를 그 값에서 역산한다.
+  var root = document.getElementById('sp5Root');
+  var canvas = document.getElementById('sp5Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_DIM = 200;
+  var GEAR_RING_TEETH = 54;
+  var GEAR_ROLL_TEETH = 20;
+  var PEN_TIP_RATIO = 0.6;
+  var TOOTH_UNIT = 0.9;
+  var TRAIL_FADE_FRAMES = 240;
+  var STEP_MS = 1000 / 60;
+  var ANGLE_SPEED = 4.2;
+  var FADE_ALPHA = Math.min(1, 3.0 / TRAIL_FADE_FRAMES);
+
+  var R = GEAR_RING_TEETH * TOOTH_UNIT;
+  var r = GEAR_ROLL_TEETH * TOOTH_UNIT;
+  var d = r * PEN_TIP_RATIO;
+
+  function point(t) {
+    var k = (R - r) / r;
+    return {
+      x: (R - r) * Math.cos(t) + d * Math.cos(k * t),
+      y: (R - r) * Math.sin(t) - d * Math.sin(k * t)
+    };
+  }
+
+  var cw = 480, ch = 300, scale = 1, cx = 240, cy = 150;
+  function fit() {
+    var rect = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width));
+    ch = Math.max(1, Math.round(rect.height));
+    canvas.width = cw; canvas.height = ch;
+    scale = Math.min(cw, ch) / CALC_DIM * 0.92;
+    cx = cw / 2; cy = ch / 2;
+  }
+
+  function toScreen(p) { return { x: cx + p.x * scale, y: cy + p.y * scale }; }
+
+  var t = 0;
+  var prev = null;
+
+  function resetCanvas() {
+    ctx.fillStyle = '#17141a';
+    ctx.fillRect(0, 0, cw, ch);
+    prev = toScreen(point(t));
+  }
+
+  function simStep() {
+    ctx.fillStyle = 'rgba(23,20,26,' + FADE_ALPHA + ')';
+    ctx.fillRect(0, 0, cw, ch);
+    t += ANGLE_SPEED * (STEP_MS / 1000);
+    var p = toScreen(point(t));
+    ctx.strokeStyle = 'rgba(255,247,230,.95)';
+    ctx.shadowColor = 'rgba(255,214,200,.7)';
+    ctx.shadowBlur = Math.max(8, scale * 0.14);
+    ctx.lineWidth = Math.max(3, scale * 0.045);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(prev.x, prev.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    var halo = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, Math.max(cw, ch) * 0.34);
+    halo.addColorStop(0, 'rgba(255,200,215,.075)');
+    halo.addColorStop(0.5, 'rgba(190,225,255,.04)');
+    halo.addColorStop(1, 'rgba(190,225,255,0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, cw, ch);
+    prev = p;
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  fit();
+  resetCanvas();
+
+  if (reduce) {
+    var warm = TRAIL_FADE_FRAMES * 2.4;
+    for (var w = 0; w < warm; w += 1) simStep();
+  } else {
+    var acc = 0;
+    var lastTs = null;
+    function tick(ts) {
+      if (lastTs === null) lastTs = ts;
+      var dt = Math.min(ts - lastTs, 48);
+      lastTs = ts;
+      acc += dt;
+      var guard = 0;
+      while (acc >= STEP_MS && guard < 6) {
+        simStep();
+        acc -= STEP_MS;
+        guard += 1;
+      }
+      requestAnimationFrame(tick);
+    }
+    window.addEventListener('resize', function () { fit(); resetCanvas(); });
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>포인터가 화면 중심에서 멀어지는 만큼 톱니 이빨 수 값을 다시 계산해, 포인터를 움직이는 동안 무늬의 꽃잎 수와 촘촘함이 그 값에 따라 함께 바뀐다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp7 is-demo" id="sp7Root" tabindex="0">
+  <canvas class="sp7__canvas" id="sp7Canvas" width="480" height="300"></canvas>
+  <p class="sp7__hint" id="sp7Hint">← →</p>
+  <p class="sp7__caption">포인터가 화면 중심에서 멀어지는 만큼 톱니 이빨 수 값을 다시 계산해, 포인터를 움직이는 동안 무늬의 꽃잎 수와 촘촘함이 그 값에 따라 함께 바뀐다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 포인터·화살표 키가 공유하는 하나의 handlePointer(비율)로 톱니 수를 다시 계산해
+  // 패턴 전체를 즉시 다시 그린다. 자동 시연도 가상 좌표를 만들어 같은 함수를 부른다.
+  var root = document.getElementById('sp7Root');
+  var canvas = document.getElementById('sp7Canvas');
+  var hint = document.getElementById('sp7Hint');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_DIM = 200;
+  var RING_TEETH = 60;
+  var ROLL_TEETH_MIN = 14;
+  var ROLL_TEETH_MAX = 34;
+  var PEN_TIP_RATIO = 0.6;
+  var TOOTH_UNIT = 1.2;
+  var SEGMENTS_PER_TURN = 170;
+  var POINTER_MAX_DIST = 90;
+  var ROTATE_SPEED = 0.15;
+  var DEMO_CYCLE = 10;
+  var KEY_STEP = 0.08;
+
+  function gcd(a, b) { while (b) { var t = b; b = a % b; a = t; } return a; }
+
+  function computePath(rollTeeth) {
+    var R = RING_TEETH * TOOTH_UNIT;
+    var r = rollTeeth * TOOTH_UNIT;
+    var d = r * PEN_TIP_RATIO;
+    var K = (R - r) / r;
+    var g = gcd(RING_TEETH, rollTeeth);
+    var turns = rollTeeth / g;
+    var maxT = 2 * Math.PI * turns;
+    var step = (2 * Math.PI) / SEGMENTS_PER_TURN;
+    var pts = [];
+    for (var t = 0; t <= maxT; t += step) {
+      pts.push({
+        x: (R - r) * Math.cos(t) + d * Math.cos(K * t),
+        y: (R - r) * Math.sin(t) - d * Math.sin(K * t)
+      });
+    }
+    return pts;
+  }
+
+  var ratioParam = 0.5;
+  var currentRoll = -1;
+  var pathData = [];
+  var markerAngle = -Math.PI / 2;
+  var markerDist = POINTER_MAX_DIST * 0.5;
+
+  function rebuildForRatio(ratio) {
+    ratioParam = Math.max(0, Math.min(1, ratio));
+    var newRoll = Math.round(ROLL_TEETH_MIN + ratioParam * (ROLL_TEETH_MAX - ROLL_TEETH_MIN));
+    if (newRoll !== currentRoll) {
+      currentRoll = newRoll;
+      pathData = computePath(currentRoll);
+    }
+  }
+
+  function handlePointer(px, py) {
+    var dist = Math.hypot(px, py);
+    markerAngle = Math.atan2(py, px);
+    markerDist = Math.min(POINTER_MAX_DIST, dist);
+    rebuildForRatio(dist / POINTER_MAX_DIST);
+  }
+
+  rebuildForRatio(ratioParam);
+
+  var cw = 480, ch = 300, scale = 1, cx = 240, cy = 150;
+  function fit() {
+    var rect = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width));
+    ch = Math.max(1, Math.round(rect.height));
+    canvas.width = cw; canvas.height = ch;
+    scale = Math.min(cw, ch) / CALC_DIM * 0.86;
+    cx = cw / 2; cy = ch / 2;
+  }
+
+  var rot = 0;
+
+  function render() {
+    ctx.fillStyle = '#ff4d1f';
+    ctx.fillRect(0, 0, cw, ch);
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, POINTER_MAX_DIST * scale, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,247,230,.28)';
+    ctx.lineWidth = Math.max(1, scale * 0.014);
+    ctx.setLineDash([scale * 0.05, scale * 0.06]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    var cosR = Math.cos(rot), sinR = Math.sin(rot);
+    ctx.beginPath();
+    for (var i = 0; i < pathData.length; i += 1) {
+      var p = pathData[i];
+      var rx = p.x * cosR - p.y * sinR;
+      var ry = p.x * sinR + p.y * cosR;
+      var sx = cx + rx * scale, sy = cy + ry * scale;
+      if (i === 0) { ctx.moveTo(sx, sy); } else { ctx.lineTo(sx, sy); }
+    }
+    ctx.strokeStyle = 'rgba(255,247,230,.95)';
+    ctx.lineWidth = Math.max(2, scale * 0.026);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke();
+
+    var mx = cx + Math.cos(markerAngle) * markerDist * scale;
+    var my = cy + Math.sin(markerAngle) * markerDist * scale;
+    ctx.beginPath();
+    ctx.arc(mx, my, Math.max(4, scale * 0.06), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(23,20,26,.9)';
+    ctx.fill();
+  }
+
+  function onPointerMove(e) {
+    root.classList.remove('is-demo');
+    var rect = canvas.getBoundingClientRect();
+    var localX = (e.clientX - rect.left) - cw / 2;
+    var localY = (e.clientY - rect.top) - ch / 2;
+    handlePointer(localX / scale, localY / scale);
+    if (reduce) render();
+  }
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerdown', onPointerMove);
+
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      root.classList.remove('is-demo');
+      e.preventDefault();
+      var next = ratioParam + (e.key === 'ArrowRight' ? KEY_STEP : -KEY_STEP);
+      rebuildForRatio(next);
+      markerDist = ratioParam * POINTER_MAX_DIST;
+      if (reduce) render();
+    }
+  });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  fit();
+
+  if (reduce) {
+    root.classList.remove('is-demo');
+    render();
+  } else {
+    var startTs = null;
+    var lastTs = null;
+    function tick(ts) {
+      if (startTs === null) { startTs = ts; lastTs = ts; }
+      var dt = Math.min(ts - lastTs, 48);
+      lastTs = ts;
+      rot += ROTATE_SPEED * (dt / 1000);
+
+      if (root.classList.contains('is-demo')) {
+        var elapsed = (ts - startTs) / 1000;
+        var theta = elapsed * (2 * Math.PI / DEMO_CYCLE);
+        var wave = (Math.sin(elapsed * (2 * Math.PI / (DEMO_CYCLE * 0.5))) + 1) / 2;
+        var vx = Math.cos(theta) * wave * POINTER_MAX_DIST;
+        var vy = Math.sin(theta) * wave * POINTER_MAX_DIST;
+        handlePointer(vx, vy);
+      }
+
+      render();
+      requestAnimationFrame(tick);
+    }
+    window.addEventListener('resize', fit);
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

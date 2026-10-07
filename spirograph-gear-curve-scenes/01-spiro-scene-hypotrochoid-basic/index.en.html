@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>As a small gear slides around the inside of a large ring, the pen position is calculated as an angle from the ring's center, stacking up a curve that curls inward — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp1 is-demo" id="sp1Root" tabindex="0">
+  <canvas class="sp1__canvas" id="sp1Canvas" width="480" height="300"></canvas>
+  <p class="sp1__caption">As a small gear slides around the inside of a large ring, the pen position is calculated as an angle from the ring's center, stacking up a curve that curls inward</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 하이포트로코이드(내접 톱니) 파라메트릭 좌표를 매 프레임 각도 t 만큼 전진시켜 점진적으로
+  // 이어 그린다. R = 링 반지름, r = 안쪽 톱니 반지름, d = 펜 구멍이 톱니 중심에서 떨어진 거리.
+  // x(t) = (R-r)cos(t) + d cos(((R-r)/r) t) · y(t) = (R-r)sin(t) - d sin(((R-r)/r) t)
+  var root = document.getElementById('sp1Root');
+  var canvas = document.getElementById('sp1Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var CALC_DIM = 200;
+  var GEAR_RING_TEETH = 72;
+  var GEAR_ROLL_TEETH = 27;
+  var PEN_TIP_RATIO = 0.6;
+  var TOOTH_UNIT = 1.4;
+  var SEGMENTS_PER_TURN = 220;
+
+  function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) { var t = b; b = a % b; a = t; } return a; }
+
+  var R = GEAR_RING_TEETH * TOOTH_UNIT;
+  var r = GEAR_ROLL_TEETH * TOOTH_UNIT;
+  var d = r * PEN_TIP_RATIO;
+  var g = gcd(GEAR_RING_TEETH, GEAR_ROLL_TEETH);
+  var TURNS = GEAR_ROLL_TEETH / g;
+  var TOTAL_T = TURNS * Math.PI * 2;
+  var CYCLE_SECONDS = 6;
+  var SPEED = TOTAL_T / CYCLE_SECONDS;
+
+  function point(t) {
+    var k = (R - r) / r;
+    return {
+      x: (R - r) * Math.cos(t) + d * Math.cos(k * t),
+      y: (R - r) * Math.sin(t) - d * Math.sin(k * t)
+    };
+  }
+
+  var cw = 480, ch = 300, scale = 1, cx = 240, cy = 150;
+  function fit() {
+    var rect = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width));
+    ch = Math.max(1, Math.round(rect.height));
+    canvas.width = cw; canvas.height = ch;
+    scale = Math.min(cw, ch) / CALC_DIM * 0.92;
+    cx = cw / 2; cy = ch / 2;
+  }
+
+  function toScreen(p) { return { x: cx + p.x * scale, y: cy + p.y * scale }; }
+
+  function drawFull(tMax) {
+    ctx.clearRect(0, 0, cw, ch);
+    var tipW = toScreen(point(tMax));
+    var wash = ctx.createRadialGradient(tipW.x, tipW.y, 0, tipW.x, tipW.y, Math.max(cw, ch) * 0.85);
+    wash.addColorStop(0, 'rgba(255,214,200,.55)');
+    wash.addColorStop(0.5, 'rgba(200,190,255,.28)');
+    wash.addColorStop(1, 'rgba(160,230,220,.10)');
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, cw, ch);
+    var fillSteps = Math.max(2, Math.round((tMax / (Math.PI * 2)) * SEGMENTS_PER_TURN));
+    ctx.beginPath();
+    for (var fi = 0; fi <= fillSteps; fi += 1) {
+      var fs = toScreen(point((fi / fillSteps) * tMax));
+      if (fi === 0) ctx.moveTo(fs.x, fs.y); else ctx.lineTo(fs.x, fs.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,247,230,.16)';
+    ctx.fill('evenodd');
+    ctx.lineWidth = Math.max(3, scale * 0.04);
+    ctx.strokeStyle = 'rgba(255,247,230,.94)';
+    ctx.shadowColor = 'rgba(255,247,230,.55)';
+    ctx.shadowBlur = Math.max(8, scale * 0.12);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    var steps = Math.max(2, Math.round((tMax / (Math.PI * 2)) * SEGMENTS_PER_TURN));
+    ctx.beginPath();
+    for (var i = 0; i <= steps; i += 1) {
+      var t = (i / steps) * tMax;
+      var s = toScreen(point(t));
+      if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    if (tMax > 0.001) {
+      var tip = toScreen(point(tMax));
+      ctx.fillStyle = 'rgba(255,247,230,1)';
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, Math.max(3, scale * 0.05), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) root.classList.remove('is-demo');
+  fit();
+
+  if (reduce) {
+    drawFull(TOTAL_T);
+  } else {
+    var elapsed = 0.35;
+    var lastTs = null;
+    function tick(ts) {
+      if (lastTs === null) lastTs = ts;
+      var dt = Math.min(ts - lastTs, 48);
+      lastTs = ts;
+      elapsed += dt / 1000;
+      var t = elapsed * SPEED;
+      if (t > TOTAL_T) { elapsed = 0; t = 0; }
+      drawFull(t);
+      requestAnimationFrame(tick);
+    }
+    drawFull(elapsed * SPEED);
+    window.addEventListener('resize', function () { fit(); drawFull(elapsed * SPEED); });
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

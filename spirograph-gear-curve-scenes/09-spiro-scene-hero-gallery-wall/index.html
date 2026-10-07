@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이빨 비율이 다른 곡선 여러 개를 같은 화면 격자에 놓고 각자 다른 속도로 그리게 해, 한눈에 무늬 사이의 차이를 비교하는 히어로 장면을 만든다 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sp9 is-demo" id="sp9Root" tabindex="0">
+  <canvas class="sp9__canvas" id="sp9Canvas" width="480" height="300"></canvas>
+  <p class="sp9__caption">이빨 비율이 다른 곡선 여러 개를 같은 화면 격자에 놓고 각자 다른 속도로 그리게 해, 한눈에 무늬 사이의 차이를 비교하는 히어로 장면을 만든다</p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 항목 01(단일 진행 곡선)·04(다중 펜 색 어긋남)·05(잔상 페이드)를 한 격자의
+  // 네 칸에 나눠 배정하고, 칸마다 다른 속도로 동시에 그려 비교 갤러리를 만든다.
+  var root = document.getElementById('sp9Root');
+  var canvas = document.getElementById('sp9Canvas');
+  var ctx = canvas.getContext('2d');
+  var wrap = canvas.parentElement;
+
+  var HERO_CELL_COUNT = 4;
+  var HERO_RING_TEETH = [60, 54, 48, 66];
+  var HERO_ROLL_TEETH = [23, 19, 17, 25];
+  var HERO_PEN_RATIO = 0.6;
+  var HERO_TOOTH_UNIT = 0.62;
+  var HERO_SPEED = [2.8, 3.4, 3.2, 3.8];
+  var HERO_TRAIL_FADE_FRAMES = 180;
+  var HERO_PEN_RATIOS = [0.35, 0.5, 0.65, 0.8];
+  var HERO_PEN_COLORS = ['rgba(230,90,120,.85)', 'rgba(50,175,135,.85)', 'rgba(70,130,230,.85)', 'rgba(228,150,45,.85)'];
+  var HERO_STEP_MS = 1000 / 60;
+  var HERO_FADE_ALPHA = Math.min(1, 3.0 / HERO_TRAIL_FADE_FRAMES);
+  var HERO_GAP_FRACTION = 0.03;
+
+  function gcd(a, b) { while (b) { var t = b; b = a % b; a = t; } return a; }
+
+  function makeCurve(ringTeeth, rollTeeth, penRatio) {
+    var R = ringTeeth * HERO_TOOTH_UNIT;
+    var r = rollTeeth * HERO_TOOTH_UNIT;
+    var d = r * penRatio;
+    var K = (R - r) / r;
+    var g = gcd(ringTeeth, rollTeeth);
+    var turns = rollTeeth / g;
+    return { R: R, r: r, d: d, K: K, turns: turns, maxT: 2 * Math.PI * turns, patternRadius: R + d };
+  }
+  function pointOn(curve, t) {
+    return {
+      x: (curve.R - curve.r) * Math.cos(t) + curve.d * Math.cos(curve.K * t),
+      y: (curve.R - curve.r) * Math.sin(t) - curve.d * Math.sin(curve.K * t)
+    };
+  }
+
+  var curveA = makeCurve(HERO_RING_TEETH[0], HERO_ROLL_TEETH[0], HERO_PEN_RATIO);
+  var curveB = makeCurve(HERO_RING_TEETH[1], HERO_ROLL_TEETH[1], HERO_PEN_RATIO);
+  var curveC = makeCurve(HERO_RING_TEETH[2], HERO_ROLL_TEETH[2], HERO_PEN_RATIO);
+  var curveD = makeCurve(HERO_RING_TEETH[3], HERO_ROLL_TEETH[3], HERO_PEN_RATIO);
+
+  function seedRand(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  var randB = seedRand(43309);
+  var penPhasesB = [];
+  for (var pb = 0; pb < 4; pb += 1) penPhasesB.push(randB() * Math.PI * 2);
+
+  var cw = 480, ch = 300;
+  var cellW = 240, cellH = 150, gap = 6;
+  var cellPix = [];
+  var trailCanvas = document.createElement('canvas');
+  var trailCtx = trailCanvas.getContext('2d');
+
+  function fit() {
+    var rect = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width));
+    ch = Math.max(1, Math.round(rect.height));
+    canvas.width = cw; canvas.height = ch;
+    cellW = cw / 2; cellH = ch / 2;
+    gap = Math.min(cw, ch) * HERO_GAP_FRACTION;
+    cellPix = [];
+    var curves = [curveA, curveB, curveC, curveD];
+    for (var k = 0; k < HERO_CELL_COUNT; k += 1) {
+      var col = k % 2, row = Math.floor(k / 2);
+      var pw = cellW - gap * 2, ph = cellH - gap * 2;
+      var target = Math.min(pw, ph) / 2 * 0.88;
+      var sc = target / (curves[k].patternRadius * 1.05);
+      cellPix.push({
+        x: col * cellW + cellW / 2,
+        y: row * cellH + cellH / 2,
+        w: pw, h: ph,
+        scale: sc
+      });
+    }
+    trailCanvas.width = Math.max(1, Math.round(cellPix[2].w));
+    trailCanvas.height = Math.max(1, Math.round(cellPix[2].h));
+    trailCtx.fillStyle = '#17141a';
+    trailCtx.fillRect(0, 0, trailCanvas.width, trailCanvas.height);
+  }
+
+  function drawProgressive(curve, cell, t, strokeStyle) {
+    ctx.save();
+    ctx.translate(cell.x, cell.y);
+    ctx.beginPath();
+    var step = (2 * Math.PI) / 140;
+    var first = true;
+    for (var tt = 0; tt <= t; tt += step) {
+      var p = pointOn(curve, tt);
+      var sx = p.x * cell.scale, sy = p.y * cell.scale;
+      if (first) { ctx.moveTo(sx, sy); first = false; } else { ctx.lineTo(sx, sy); }
+    }
+    var tipP = pointOn(curve, t);
+    var wg = ctx.createRadialGradient(tipP.x * cell.scale, tipP.y * cell.scale, 0, tipP.x * cell.scale, tipP.y * cell.scale, Math.max(cell.w, cell.h) * 0.8);
+    wg.addColorStop(0, 'rgba(255,200,215,.42)');
+    wg.addColorStop(0.5, 'rgba(190,225,255,.24)');
+    wg.addColorStop(1, 'rgba(190,225,255,.06)');
+    ctx.save();
+    ctx.fillStyle = wg;
+    ctx.fillRect(-cell.w / 2, -cell.h / 2, cell.w, cell.h);
+    ctx.fillStyle = 'rgba(255,247,230,.14)';
+    ctx.fill('evenodd');
+    ctx.restore();
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = Math.max(2.4, cell.scale * 0.045);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawMultiPen(curve, cell, t) {
+    ctx.save();
+    ctx.translate(cell.x, cell.y);
+    var step = (2 * Math.PI) / 140;
+    var wb = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(cellPix[1].w, cellPix[1].h) * (0.45 + 0.2 * Math.sin(t * 0.9)));
+    wb.addColorStop(0, 'rgba(255,200,215,.40)');
+    wb.addColorStop(1, 'rgba(190,225,255,.08)');
+    ctx.fillStyle = wb;
+    ctx.fillRect(-cellPix[1].w / 2, -cellPix[1].h / 2, cellPix[1].w, cellPix[1].h);
+    for (var pIdx = 0; pIdx < HERO_PEN_RATIOS.length; pIdx += 1) {
+      var localCurve = { R: curve.R, r: curve.r, d: curve.r * HERO_PEN_RATIOS[pIdx], K: curve.K };
+      var phase = penPhasesB[pIdx];
+      ctx.beginPath();
+      var first = true;
+      for (var tt = 0; tt <= t; tt += step) {
+        var tp = tt + phase;
+        var px = (localCurve.R - localCurve.r) * Math.cos(tp) + localCurve.d * Math.cos(localCurve.K * tp);
+        var py = (localCurve.R - localCurve.r) * Math.sin(tp) - localCurve.d * Math.sin(localCurve.K * tp);
+        var sx = px * cell.scale, sy = py * cell.scale;
+        if (first) { ctx.moveTo(sx, sy); first = false; } else { ctx.lineTo(sx, sy); }
+      }
+      ctx.strokeStyle = HERO_PEN_COLORS[pIdx];
+      ctx.lineWidth = Math.max(2.2, cell.scale * 0.04);
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  var trailAngle = 0;
+  function trailStep() {
+    trailCtx.fillStyle = 'rgba(23,20,26,' + HERO_FADE_ALPHA + ')';
+    trailCtx.fillRect(0, 0, trailCanvas.width, trailCanvas.height);
+    trailAngle += HERO_SPEED[2] * (HERO_STEP_MS / 1000);
+    var p = pointOn(curveC, trailAngle);
+    var cell = cellPix[2];
+    var sx = trailCanvas.width / 2 + p.x * cell.scale;
+    var sy = trailCanvas.height / 2 + p.y * cell.scale;
+    if (!trailStep.prev) trailStep.prev = { x: sx, y: sy };
+    trailCtx.strokeStyle = 'rgba(255,247,230,.95)';
+    trailCtx.lineWidth = Math.max(2.6, cell.scale * 0.05);
+    trailCtx.lineJoin = 'round'; trailCtx.lineCap = 'round';
+    trailCtx.beginPath();
+    trailCtx.moveTo(trailStep.prev.x, trailStep.prev.y);
+    trailCtx.lineTo(sx, sy);
+    trailCtx.stroke();
+    var th = trailCtx.createRadialGradient(sx, sy, 0, sx, sy, Math.max(trailCanvas.width, trailCanvas.height) * 0.4);
+    th.addColorStop(0, 'rgba(255,200,215,.09)');
+    th.addColorStop(1, 'rgba(190,225,255,0)');
+    trailCtx.fillStyle = th;
+    trailCtx.fillRect(0, 0, trailCanvas.width, trailCanvas.height);
+    trailStep.prev = { x: sx, y: sy };
+  }
+
+  function render(elapsed, dtMs) {
+    ctx.fillStyle = '#17141a';
+    ctx.fillRect(0, 0, cw, ch);
+
+    var tA = (elapsed * HERO_SPEED[0]) % curveA.maxT;
+    drawProgressive(curveA, cellPix[0], tA, 'rgba(255,247,230,.95)');
+
+    var tB = (elapsed * HERO_SPEED[1]) % curveB.maxT;
+    drawMultiPen(curveB, cellPix[1], tB);
+
+    if (dtMs !== null) {
+      var acc = render.acc || 0;
+      acc += dtMs;
+      var guard = 0;
+      while (acc >= HERO_STEP_MS && guard < 6) { trailStep(); acc -= HERO_STEP_MS; guard += 1; }
+      render.acc = acc;
+    }
+    ctx.drawImage(trailCanvas, cellPix[2].x - cellPix[2].w / 2, cellPix[2].y - cellPix[2].h / 2, cellPix[2].w, cellPix[2].h);
+
+    var tD = (elapsed * HERO_SPEED[3]) % curveD.maxT;
+    drawProgressive(curveD, cellPix[3], tD, 'rgba(91,140,248,.95)');
+  }
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  fit();
+
+  if (reduce) {
+    root.classList.remove('is-demo');
+    for (var warm = 0; warm < HERO_TRAIL_FADE_FRAMES * 1.4; warm += 1) trailStep();
+    render(curveA.maxT * 0.94, null);
+  } else {
+    var startTs = null;
+    var lastTs = null;
+    function tick(ts) {
+      if (startTs === null) { startTs = ts; lastTs = ts; }
+      var dt = Math.min(ts - lastTs, 48);
+      lastTs = ts;
+      var elapsed = (ts - startTs) / 1000;
+      render(elapsed, dt);
+      requestAnimationFrame(tick);
+    }
+    window.addEventListener('resize', fit);
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
