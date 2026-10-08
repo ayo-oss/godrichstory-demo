@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3×3 타일에서 같은 무늬를 골라 누르면 타일이 뒤집혀 표시되는 선택판 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cp is-demo" id="cp">
+  <canvas class="cp__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="3×3 타일에서 같은 무늬를 골라 누르면 타일이 뒤집혀 표시되는 선택판"></canvas>
+  <p class="cp__status" data-role="status" aria-live="polite">시연 준비 중</p>
+  <button class="cp__btn" data-role="btn" type="button">멈춤</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cp");
+    if (!root)
+        return;
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '멈춤';
+    const BTN_PLAY = '재생';
+    const BTN_NEXT = '다음 장면';
+    // 파스텔 팔레트 - 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PANEL = [44, 40, 68];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabdefghmnqrt23456789';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function easeOutBack(x) { const c = clamp(x, 0, 1) - 1; return 1 + c * c * (2.7 * c + 1.7); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 - 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 시드로 뜻 없는 글자열을 만든다
+    function glyphStr(seed, n) {
+        const r = lcg(seed * 7919 + 13);
+        let s = '';
+        for (let i = 0; i < n; i += 1) {
+            s += CHARSET.charAt(Math.floor(r() * CHARSET.length));
+        }
+        return s;
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function mount(root, make) {
+        const canvas = root.querySelector('[data-role="canvas"]');
+        const statusEl = root.querySelector('[data-role="status"]');
+        const btnEl = root.querySelector('[data-role="btn"]');
+        if (!canvas || !statusEl || !btnEl) {
+            return function () { return; };
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return function () { return; };
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { idle: 99999, focus: false, key: false };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        let lastLabelTick = -999;
+        let lastLive = 'polite';
+        let tickN = 0;
+        let clk = 0;
+        let wasAuto = true;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            // 시연이 혼자 돌 때는 낭독을 끄고, 사람이 만지는 동안은 값이 바뀌어도 0.7초에 한 번만 갱신한다
+            const live = (reduce || inp.idle <= IDLE_TICKS) ? 'polite' : 'off';
+            if (live !== lastLive) {
+                lastLive = live;
+                statusEl.setAttribute('aria-live', live);
+            }
+            const t = scene.label();
+            if (t !== lastLabel && (reduce || live === 'off' || tickN - lastLabelTick >= 44)) {
+                lastLabel = t;
+                lastLabelTick = tickN;
+                statusEl.textContent = t;
+            }
+        }
+        // 고정 간격 한 틱 - 입력이 없으면 시연 스크립트가 같은 입구로 입력을 대신 넣는다
+        function advance() {
+            inp.idle += 1;
+            tickN += 1;
+            const a = inp.idle > IDLE_TICKS;
+            if (a && !wasAuto) {
+                scene.reset();
+                clk = 0;
+            }
+            wasAuto = a;
+            if (a) {
+                clk += 1;
+                scene.auto(clk);
+                if (clk >= scene.CYCLE) {
+                    clk = 0;
+                    scene.reset();
+                }
+            }
+            scene.step();
+        }
+        // 움직임 줄이기: 틱을 몰아서 돌린 뒤 한 번만 그린다 (중간 보간 장면은 화면에 나오지 않는다)
+        function settle(n) {
+            for (let i = 0; i < n; i += 1) {
+                inp.idle = 0;
+                tickN += 1;
+                scene.step();
+            }
+            show();
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    advance();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        function point(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            for (let i = 0; i < scene.REDUCE_TICKS; i += 1) {
+                advance();
+            }
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                if (scene.next) {
+                    scene.next();
+                    show();
+                    return;
+                }
+                const n = Math.round(scene.CYCLE / 3);
+                inp.idle = 99999;
+                wasAuto = true;
+                for (let i = 0; i < n; i += 1) {
+                    advance();
+                }
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'focus', function () { inp.focus = true; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'blur', function () { inp.focus = false; inp.key = false; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            try {
+                canvas.setPointerCapture(e.pointerId);
+            }
+            catch (err) { /* 캡처가 안 되는 환경은 그냥 넘어간다 */ }
+            scene.down(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            scene.move(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointerup', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            scene.up(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'keydown', function (e) {
+            inp.idle = 0;
+            inp.key = true;
+            if (scene.key(e.key)) {
+                e.preventDefault();
+            }
+            if (reduce) {
+                settle(30);
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const TILE_N = 3; // 한 변의 칸 수
+    const FLIP_MS = 340; // 뒤집힘 한 번에 걸리는 시간
+    const MATCH_MIN = 3; // 맞아야 하는 칸 수 (이만큼 골라야 확인한다)
+    const SHIMMER = 0.4; // 뒤집힌 뒤 지나가는 반짝임 세기
+    const ANGLE_TOL = 12; // 기준 각도와 이만큼 안이면 같은 줄무늬로 본다
+    const TILE = 76;
+    const GAP = 8;
+    const GX = 214;
+    const GY = 20;
+    const REF_X = 34;
+    const REF_Y = 84;
+    const REF = 124;
+    const TXT_PICK = '고른 칸 {n} · 맞는 칸 {m}';
+    const TXT_OK = '고른 칸이 기준 줄무늬와 모두 맞는다';
+    const TXT_BAD = '맞지 않는 칸이 섞였다 — 다시 고른다';
+    // PURE-BEGIN
+    // 두 줄무늬 각도의 차이 (줄무늬는 180도마다 같은 모양이라 180 으로 접는다)
+    function angleGap(a, b) {
+        let d = (a - b) % 180;
+        if (d < 0) {
+            d += 180;
+        }
+        return d > 90 ? 180 - d : d;
+    }
+    // 시드로 기준 각도와 칸마다 각도를 만든다 - 맞는 칸 수는 nMatch 로 고정
+    function tileAngles(seed, n, nMatch, tol) {
+        const r = lcg(seed * 977 + 31);
+        const target = Math.floor(r() * 12) * 15;
+        const total = n * n;
+        const order = [];
+        for (let i = 0; i < total; i += 1) {
+            order.push(i);
+        }
+        for (let i = total - 1; i > 0; i -= 1) {
+            const j = Math.floor(r() * (i + 1));
+            const t = order[i];
+            order[i] = order[j];
+            order[j] = t;
+        }
+        const angles = [];
+        const match = [];
+        for (let i = 0; i < total; i += 1) {
+            angles.push(0);
+            match.push(false);
+        }
+        for (let k = 0; k < total; k += 1) {
+            const i = order[k];
+            if (k < nMatch) {
+                angles[i] = target + (r() - 0.5) * tol;
+                match[i] = true;
+            }
+            else {
+                const sign = r() < 0.5 ? -1 : 1;
+                angles[i] = target + sign * (tol * 1.6 + r() * 60);
+            }
+        }
+        return { target: target, angles: angles, match: match };
+    }
+    // PURE-END
+    const make = (inp, reduce) => {
+        const TOTAL = TILE_N * TILE_N;
+        const PAL = [SKY, PINK, MINT, PEACH, LILAC];
+        let seed = 3;
+        let data = tileAngles(seed, TILE_N, MATCH_MIN, ANGLE_TOL);
+        let sel = [];
+        let fp = [];
+        let bad = [];
+        let verdict = 0;
+        let cur = 4;
+        let cycleN = 1;
+        let t = 0;
+        function clear() {
+            sel = [];
+            fp = [];
+            bad = [];
+            for (let i = 0; i < TOTAL; i += 1) {
+                sel.push(false);
+                fp.push(0);
+                bad.push(0);
+            }
+            verdict = 0;
+        }
+        clear();
+        function toggle(i) {
+            if (i < 0 || i >= TOTAL) {
+                return;
+            }
+            if (verdict === 1) {
+                // 통과한 판을 다시 누르면 새 판으로 넘어간다
+                seed += 1;
+                data = tileAngles(seed, TILE_N, MATCH_MIN, ANGLE_TOL);
+                clear();
+                return;
+            }
+            sel[i] = !sel[i];
+            verdict = 0;
+        }
+        function verify() {
+            let n = 0;
+            let ok = true;
+            for (let i = 0; i < TOTAL; i += 1) {
+                if (sel[i]) {
+                    n += 1;
+                }
+                if (sel[i] !== data.match[i]) {
+                    ok = false;
+                }
+            }
+            if (n < MATCH_MIN) {
+                return;
+            }
+            if (ok) {
+                verdict = 1;
+            }
+            else {
+                verdict = 2;
+                for (let i = 0; i < TOTAL; i += 1) {
+                    if (sel[i] && !data.match[i]) {
+                        bad[i] = 40;
+                    }
+                }
+            }
+        }
+        function stripes(ctx, cx, cy, size, ang, col, alpha) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(cx - size / 2, cy - size / 2, size, size);
+            ctx.clip();
+            ctx.translate(cx, cy);
+            ctx.rotate(ang * Math.PI / 180);
+            ctx.strokeStyle = rgba(col, alpha);
+            ctx.lineWidth = Math.max(3, size / 16);
+            const sp = Math.max(9, size / 7);
+            for (let k = -size; k <= size; k += sp) {
+                ctx.beginPath();
+                ctx.moveTo(-size, k);
+                ctx.lineTo(size, k);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+        function tileCenter(i) {
+            return [GX + (i % TILE_N) * (TILE + GAP) + TILE / 2, GY + Math.floor(i / TILE_N) * (TILE + GAP) + TILE / 2];
+        }
+        function hit(x, y) {
+            for (let i = 0; i < TOTAL; i += 1) {
+                const c = tileCenter(i);
+                if (Math.abs(x - c[0]) <= TILE / 2 && Math.abs(y - c[1]) <= TILE / 2) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        function pickable() {
+            const wrong = [];
+            const right = [];
+            for (let i = 0; i < TOTAL; i += 1) {
+                if (data.match[i]) {
+                    right.push(i);
+                }
+                else {
+                    wrong.push(i);
+                }
+            }
+            return [right, wrong];
+        }
+        const scene = {
+            CYCLE: 124,
+            REDUCE_TICKS: 100,
+            reset() {
+                cycleN += 1;
+                seed += 1;
+                data = tileAngles(seed, TILE_N, MATCH_MIN, ANGLE_TOL);
+                clear();
+                t = 0;
+            },
+            auto(clk) {
+                const pw = pickable();
+                const withWrong = cycleN % 2 === 0;
+                const seq = [];
+                seq.push(pw[0][0]);
+                if (withWrong) {
+                    seq.push(pw[1][0]);
+                }
+                for (let k = 1; k < pw[0].length; k += 1) {
+                    seq.push(pw[0][k]);
+                }
+                const first = 8;
+                const gap = 14;
+                for (let k = 0; k < seq.length; k += 1) {
+                    if (clk === first + k * gap) {
+                        cur = seq[k];
+                        toggle(seq[k]);
+                    }
+                }
+                if (clk === first + seq.length * gap + 6) {
+                    verify();
+                }
+                if (verdict === 2 && clk === first + seq.length * gap + 36) {
+                    for (let i = 0; i < TOTAL; i += 1) {
+                        if (sel[i] && !data.match[i]) {
+                            sel[i] = false;
+                        }
+                    }
+                    verdict = 0;
+                }
+            },
+            step() {
+                t += 1;
+                const rate = FIXED_DT / FLIP_MS;
+                for (let i = 0; i < TOTAL; i += 1) {
+                    const goal = sel[i] ? 1 : 0;
+                    if (fp[i] < goal) {
+                        fp[i] = Math.min(goal, fp[i] + rate);
+                    }
+                    else if (fp[i] > goal) {
+                        fp[i] = Math.max(goal, fp[i] - rate);
+                    }
+                    if (bad[i] > 0) {
+                        bad[i] -= 1;
+                    }
+                }
+            },
+            draw(ctx) {
+                ctx.fillStyle = rgba(BG, 1);
+                ctx.fillRect(0, 0, W, H);
+                // 기준 줄무늬
+                ctx.fillStyle = rgba(PANEL, 1);
+                rrect(ctx, REF_X, REF_Y, REF, REF, 14);
+                ctx.fill();
+                stripes(ctx, REF_X + REF / 2, REF_Y + REF / 2, REF - 8, data.target, CREAM, 0.95);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = rgba(verdict === 1 ? MINT : CREAM, 0.9);
+                rrect(ctx, REF_X, REF_Y, REF, REF, 14);
+                ctx.stroke();
+                for (let i = 0; i < TOTAL; i += 1) {
+                    const c = tileCenter(i);
+                    const p = fp[i];
+                    const sy = Math.max(0.04, Math.abs(Math.cos(Math.PI * p)));
+                    const back = p > 0.5;
+                    const col = PAL[(i + seed) % PAL.length];
+                    ctx.save();
+                    ctx.translate(c[0], c[1]);
+                    ctx.scale(1, sy);
+                    const face = back ? mix(PANEL, col, 0.28) : PANEL;
+                    ctx.fillStyle = rgba(face, 1);
+                    rrect(ctx, -TILE / 2, -TILE / 2, TILE, TILE, 10);
+                    ctx.fill();
+                    stripes(ctx, 0, 0, TILE - 6, back ? -data.angles[i] : data.angles[i], col, back ? 1 : 0.85);
+                    if (back) {
+                        // 반짝임 - 뒤집힌 직후 대각선 띠가 한 번 지나간다
+                        const k = clamp((p - 0.5) * 2, 0, 1);
+                        const sh = Math.sin(k * Math.PI) * SHIMMER;
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(-TILE / 2, -TILE / 2, TILE, TILE);
+                        ctx.clip();
+                        ctx.rotate(0.6);
+                        ctx.fillStyle = rgba(CREAM, sh);
+                        ctx.fillRect(lerp(-TILE, TILE, k) - 8, -TILE, 16, TILE * 2);
+                        ctx.restore();
+                    }
+                    const edge = bad[i] > 0 && Math.floor(bad[i] / 5) % 2 === 0 ? PINK : (verdict === 1 && sel[i] ? MINT : (sel[i] ? LILAC : CREAM));
+                    ctx.lineWidth = sel[i] ? 4 : 2;
+                    ctx.strokeStyle = rgba(edge, sel[i] || bad[i] > 0 ? 1 : 0.35);
+                    rrect(ctx, -TILE / 2, -TILE / 2, TILE, TILE, 10);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+                if (inp.key && inp.focus) {
+                    const c = tileCenter(cur);
+                    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+                    ctx.lineWidth = 2.5;
+                    rrect(ctx, c[0] - TILE / 2 - 4, c[1] - TILE / 2 - 4, TILE + 8, TILE + 8, 12);
+                    ctx.stroke();
+                }
+            },
+            label() {
+                if (verdict === 1) {
+                    return TXT_OK;
+                }
+                if (verdict === 2) {
+                    return TXT_BAD;
+                }
+                let n = 0;
+                for (let i = 0; i < TOTAL; i += 1) {
+                    if (sel[i]) {
+                        n += 1;
+                    }
+                }
+                return TXT_PICK.replace('{n}', String(n)).replace('{m}', String(MATCH_MIN));
+            },
+            down(x, y) {
+                const i = hit(x, y);
+                if (i >= 0) {
+                    cur = i;
+                    toggle(i);
+                }
+            },
+            move() { return; },
+            up() { return; },
+            key(k) {
+                const r = Math.floor(cur / TILE_N);
+                const c = cur % TILE_N;
+                if (k === 'ArrowLeft') {
+                    cur = r * TILE_N + Math.max(0, c - 1);
+                    return true;
+                }
+                if (k === 'ArrowRight') {
+                    cur = r * TILE_N + Math.min(TILE_N - 1, c + 1);
+                    return true;
+                }
+                if (k === 'ArrowUp') {
+                    cur = Math.max(0, r - 1) * TILE_N + c;
+                    return true;
+                }
+                if (k === 'ArrowDown') {
+                    cur = Math.min(TILE_N - 1, r + 1) * TILE_N + c;
+                    return true;
+                }
+                if (k === ' ') {
+                    toggle(cur);
+                    return true;
+                }
+                if (k === 'Enter') {
+                    verify();
+                    return true;
+                }
+                return false;
+            },
+        };
+        return scene;
+    };
+    return mount(root, make);
+})();
+</script>
+</body>
+</html>

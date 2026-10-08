@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>問題の有効時間がリングで縮み、尽きると更新アイコンが回って新しい問題に替わる確認 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cp is-demo" id="cp">
+  <canvas class="cp__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="問題の有効時間がリングで縮み、尽きると更新アイコンが回って新しい問題に替わる確認"></canvas>
+  <p class="cp__status" data-role="status" aria-live="polite">デモを準備中</p>
+  <button class="cp__btn" data-role="btn" type="button">一時停止</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cp");
+    if (!root)
+        return;
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    // 파스텔 팔레트 - 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PANEL = [44, 40, 68];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabdefghmnqrt23456789';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function easeOutBack(x) { const c = clamp(x, 0, 1) - 1; return 1 + c * c * (2.7 * c + 1.7); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 - 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 시드로 뜻 없는 글자열을 만든다
+    function glyphStr(seed, n) {
+        const r = lcg(seed * 7919 + 13);
+        let s = '';
+        for (let i = 0; i < n; i += 1) {
+            s += CHARSET.charAt(Math.floor(r() * CHARSET.length));
+        }
+        return s;
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function mount(root, make) {
+        const canvas = root.querySelector('[data-role="canvas"]');
+        const statusEl = root.querySelector('[data-role="status"]');
+        const btnEl = root.querySelector('[data-role="btn"]');
+        if (!canvas || !statusEl || !btnEl) {
+            return function () { return; };
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return function () { return; };
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { idle: 99999, focus: false, key: false };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        let lastLabelTick = -999;
+        let lastLive = 'polite';
+        let tickN = 0;
+        let clk = 0;
+        let wasAuto = true;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            // 시연이 혼자 돌 때는 낭독을 끄고, 사람이 만지는 동안은 값이 바뀌어도 0.7초에 한 번만 갱신한다
+            const live = (reduce || inp.idle <= IDLE_TICKS) ? 'polite' : 'off';
+            if (live !== lastLive) {
+                lastLive = live;
+                statusEl.setAttribute('aria-live', live);
+            }
+            const t = scene.label();
+            if (t !== lastLabel && (reduce || live === 'off' || tickN - lastLabelTick >= 44)) {
+                lastLabel = t;
+                lastLabelTick = tickN;
+                statusEl.textContent = t;
+            }
+        }
+        // 고정 간격 한 틱 - 입력이 없으면 시연 스크립트가 같은 입구로 입력을 대신 넣는다
+        function advance() {
+            inp.idle += 1;
+            tickN += 1;
+            const a = inp.idle > IDLE_TICKS;
+            if (a && !wasAuto) {
+                scene.reset();
+                clk = 0;
+            }
+            wasAuto = a;
+            if (a) {
+                clk += 1;
+                scene.auto(clk);
+                if (clk >= scene.CYCLE) {
+                    clk = 0;
+                    scene.reset();
+                }
+            }
+            scene.step();
+        }
+        // 움직임 줄이기: 틱을 몰아서 돌린 뒤 한 번만 그린다 (중간 보간 장면은 화면에 나오지 않는다)
+        function settle(n) {
+            for (let i = 0; i < n; i += 1) {
+                inp.idle = 0;
+                tickN += 1;
+                scene.step();
+            }
+            show();
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    advance();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        function point(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            for (let i = 0; i < scene.REDUCE_TICKS; i += 1) {
+                advance();
+            }
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                if (scene.next) {
+                    scene.next();
+                    show();
+                    return;
+                }
+                const n = Math.round(scene.CYCLE / 3);
+                inp.idle = 99999;
+                wasAuto = true;
+                for (let i = 0; i < n; i += 1) {
+                    advance();
+                }
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'focus', function () { inp.focus = true; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'blur', function () { inp.focus = false; inp.key = false; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            try {
+                canvas.setPointerCapture(e.pointerId);
+            }
+            catch (err) { /* 캡처가 안 되는 환경은 그냥 넘어간다 */ }
+            scene.down(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            scene.move(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointerup', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            scene.up(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'keydown', function (e) {
+            inp.idle = 0;
+            inp.key = true;
+            if (scene.key(e.key)) {
+                e.preventDefault();
+            }
+            if (reduce) {
+                settle(30);
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const TTL_MS = 1300; // 새 글자판이 유효한 시간 (시연 길이에 맞춘 값 - 쓸 때는 늘려 쓴다)
+    const WARN_FRAC = 0.3; // 남은 비율이 이 밑으로 내려가면 경고색
+    const REFRESH_SPIN_MS = 360; // 새로고침 아이콘이 반 바퀴 도는 시간
+    const RING_W = 12; // 고리 두께 (px)
+    const RX = 384;
+    const RY = 150;
+    const RR = 78;
+    const TXT_LEFT = '更新 {n} 回 · 有効 {s} 秒';
+    const TXT_WARN = 'まもなく期限切れ · 更新 {n} 回';
+    const TXT_EXPIRED = '期限切れ · 更新中';
+    const TXT_BOARD_OFF = '期限切れ';
+    // PURE-BEGIN
+    // 남은 시간 비율 - 고리 호의 길이가 된다
+    function ringFrac(elapsedMs, ttlMs) {
+        const f = 1 - elapsedMs / ttlMs;
+        return f < 0 ? 0 : (f > 1 ? 1 : f);
+    }
+    // 경고 구간 안에서 0 에서 1 로 올라가는 색 섞음 비율
+    function warnMix(frac, warn) {
+        if (frac >= warn) {
+            return 0;
+        }
+        const k = 1 - frac / warn;
+        return k > 1 ? 1 : k;
+    }
+    // PURE-END
+    const make = (inp, reduce) => {
+        let seed = 31;
+        let elapsed = 0;
+        let spinT = -1;
+        let refreshes = 0;
+        let fillAnim = 1;
+        let stage = 0;
+        let t = 0;
+        function startRefresh() {
+            if (reduce) {
+                seed += 1;
+                refreshes += 1;
+                elapsed = 0;
+                return;
+            }
+            if (spinT < 0) {
+                spinT = 0;
+            }
+        }
+        function easeSpin(x) {
+            const c = clamp(x, 0, 1);
+            return c < 0.5 ? 4 * c * c * c : 1 - Math.pow(-2 * c + 2, 3) / 2;
+        }
+        const scene = {
+            CYCLE: 1000,
+            REDUCE_TICKS: 0,
+            reset() { return; },
+            auto() { return; },
+            next() {
+                stage = (stage + 1) % 3;
+                if (stage === 0) {
+                    elapsed = 0;
+                }
+                if (stage === 1) {
+                    elapsed = TTL_MS * (1 - WARN_FRAC * 0.5);
+                }
+                if (stage === 2) {
+                    seed += 1;
+                    refreshes += 1;
+                    elapsed = 0;
+                    stage = 0;
+                }
+            },
+            step() {
+                t += 1;
+                if (reduce) {
+                    return;
+                }
+                if (spinT >= 0) {
+                    spinT += FIXED_DT / REFRESH_SPIN_MS;
+                    if (spinT >= 1) {
+                        spinT = -1;
+                        seed += 1;
+                        refreshes += 1;
+                        elapsed = 0;
+                        fillAnim = 0;
+                    }
+                }
+                else {
+                    elapsed += FIXED_DT;
+                    if (elapsed >= TTL_MS) {
+                        elapsed = TTL_MS;
+                        spinT = 0;
+                    }
+                }
+                if (fillAnim < 1) {
+                    fillAnim = Math.min(1, fillAnim + FIXED_DT / 220);
+                }
+            },
+            draw(ctx) {
+                ctx.fillStyle = rgba(BG, 1);
+                ctx.fillRect(0, 0, W, H);
+                const frac0 = ringFrac(elapsed, TTL_MS);
+                const frac = spinT >= 0 ? 0 : Math.min(frac0, smooth(fillAnim));
+                const wm = warnMix(frac0, WARN_FRAC);
+                const expired = spinT >= 0;
+                // 글자판
+                ctx.fillStyle = rgba(PANEL, 1);
+                rrect(ctx, 20, 62, 276, 176, 18);
+                ctx.fill();
+                const text = glyphStr(seed, 5);
+                const r = lcg(seed * 29 + 3);
+                ctx.save();
+                ctx.globalAlpha = expired ? 0.28 : 1;
+                ctx.font = 'bold 54px "Segoe UI", "Noto Sans KR", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const cols = [MINT, SKY, PINK, PEACH, CREAM];
+                for (let i = 0; i < 5; i += 1) {
+                    ctx.save();
+                    ctx.translate(58 + i * 47, 150 + (r() - 0.5) * 22 + Math.sin(t * 0.07 + i * 1.9) * 3);
+                    ctx.rotate((r() - 0.5) * 0.5);
+                    ctx.fillStyle = rgba(cols[(i + seed) % cols.length], 1);
+                    ctx.fillText(text.charAt(i), 0, 0);
+                    ctx.restore();
+                }
+                ctx.strokeStyle = rgba(CREAM, 0.7);
+                ctx.lineWidth = 2;
+                for (let i = 0; i < 3; i += 1) {
+                    const y0 = 90 + r() * 120;
+                    ctx.beginPath();
+                    ctx.moveTo(30, y0);
+                    ctx.bezierCurveTo(100, y0 - 40, 200, y0 + 40, 286, 90 + r() * 120);
+                    ctx.stroke();
+                }
+                ctx.restore();
+                if (expired) {
+                    ctx.fillStyle = rgba(PINK, 1);
+                    ctx.font = 'bold 26px "Segoe UI", "Noto Sans KR", sans-serif';
+                    ctx.fillText(TXT_BOARD_OFF, 158, 150);
+                }
+                // 고리 - 호 길이가 남은 시간
+                const col = mix(MINT, PINK, wm);
+                ctx.lineCap = 'round';
+                ctx.lineWidth = RING_W;
+                ctx.strokeStyle = rgba(CREAM, 0.18);
+                ctx.beginPath();
+                ctx.arc(RX, RY, RR, 0, PI2);
+                ctx.stroke();
+                if (frac > 0.002) {
+                    ctx.strokeStyle = rgba(col, 1);
+                    ctx.beginPath();
+                    ctx.arc(RX, RY, RR, -Math.PI / 2, -Math.PI / 2 + PI2 * frac);
+                    ctx.stroke();
+                    const ha = -Math.PI / 2 + PI2 * frac;
+                    ctx.fillStyle = rgba(CREAM, 1);
+                    ctx.beginPath();
+                    ctx.arc(RX + Math.cos(ha) * RR, RY + Math.sin(ha) * RR, 5 + wm * Math.abs(Math.sin(t * 0.25)) * 2, 0, PI2);
+                    ctx.fill();
+                }
+                // 새로고침 아이콘 - 만료되면 반 바퀴 돈다
+                const ang = spinT >= 0 ? Math.PI * easeSpin(spinT) : 0;
+                ctx.save();
+                ctx.translate(RX, RY);
+                ctx.rotate(ang);
+                ctx.strokeStyle = rgba(spinT >= 0 ? PINK : CREAM, 1);
+                ctx.lineWidth = 7;
+                ctx.beginPath();
+                ctx.arc(0, 0, 26, 0.35 * Math.PI, 1.75 * Math.PI);
+                ctx.stroke();
+                ctx.fillStyle = rgba(spinT >= 0 ? PINK : CREAM, 1);
+                ctx.beginPath();
+                ctx.moveTo(26 * Math.cos(1.75 * Math.PI) - 10, 26 * Math.sin(1.75 * Math.PI) - 12);
+                ctx.lineTo(26 * Math.cos(1.75 * Math.PI) + 12, 26 * Math.sin(1.75 * Math.PI) - 2);
+                ctx.lineTo(26 * Math.cos(1.75 * Math.PI) - 4, 26 * Math.sin(1.75 * Math.PI) + 12);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+                if (inp.key && inp.focus) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+                    ctx.lineWidth = 2.5;
+                    ctx.beginPath();
+                    ctx.arc(RX, RY, RR + 14, 0, PI2);
+                    ctx.stroke();
+                }
+            },
+            label() {
+                if (spinT >= 0) {
+                    return TXT_EXPIRED;
+                }
+                const ttl = String(Math.round(TTL_MS / 100) / 10);
+                if (warnMix(ringFrac(elapsed, TTL_MS), WARN_FRAC) > 0) {
+                    return TXT_WARN.replace('{n}', String(refreshes));
+                }
+                return TXT_LEFT.replace('{s}', ttl).replace('{n}', String(refreshes));
+            },
+            down(x, y) {
+                if (Math.hypot(x - RX, y - RY) <= RR + 16) {
+                    startRefresh();
+                }
+            },
+            move() { return; },
+            up() { return; },
+            key(k) {
+                if (k === 'Enter' || k === ' ' || k === 'r' || k === 'R') {
+                    startRefresh();
+                    return true;
+                }
+                return false;
+            },
+        };
+        return scene;
+    };
+    return mount(root, make);
+})();
+</script>
+</body>
+</html>

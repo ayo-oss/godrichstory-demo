@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Check Where the Pointer Trail Drawn Along a Winding Guide Becomes a Score From Its Mean Distance to That Guide — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cp is-demo" id="cp">
+  <canvas class="cp__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="A Check Where the Pointer Trail Drawn Along a Winding Guide Becomes a Score From Its Mean Distance to That Guide"></canvas>
+  <p class="cp__status" data-role="status" aria-live="polite">Starting the demo</p>
+  <button class="cp__btn" data-role="btn" type="button">Pause</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cp");
+    if (!root)
+        return;
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = 'Pause';
+    const BTN_PLAY = 'Play';
+    const BTN_NEXT = 'Next scene';
+    // 파스텔 팔레트 - 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PANEL = [44, 40, 68];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabdefghmnqrt23456789';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function easeOutBack(x) { const c = clamp(x, 0, 1) - 1; return 1 + c * c * (2.7 * c + 1.7); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 - 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 시드로 뜻 없는 글자열을 만든다
+    function glyphStr(seed, n) {
+        const r = lcg(seed * 7919 + 13);
+        let s = '';
+        for (let i = 0; i < n; i += 1) {
+            s += CHARSET.charAt(Math.floor(r() * CHARSET.length));
+        }
+        return s;
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function mount(root, make) {
+        const canvas = root.querySelector('[data-role="canvas"]');
+        const statusEl = root.querySelector('[data-role="status"]');
+        const btnEl = root.querySelector('[data-role="btn"]');
+        if (!canvas || !statusEl || !btnEl) {
+            return function () { return; };
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return function () { return; };
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { idle: 99999, focus: false, key: false };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        let lastLabelTick = -999;
+        let lastLive = 'polite';
+        let tickN = 0;
+        let clk = 0;
+        let wasAuto = true;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            // 시연이 혼자 돌 때는 낭독을 끄고, 사람이 만지는 동안은 값이 바뀌어도 0.7초에 한 번만 갱신한다
+            const live = (reduce || inp.idle <= IDLE_TICKS) ? 'polite' : 'off';
+            if (live !== lastLive) {
+                lastLive = live;
+                statusEl.setAttribute('aria-live', live);
+            }
+            const t = scene.label();
+            if (t !== lastLabel && (reduce || live === 'off' || tickN - lastLabelTick >= 44)) {
+                lastLabel = t;
+                lastLabelTick = tickN;
+                statusEl.textContent = t;
+            }
+        }
+        // 고정 간격 한 틱 - 입력이 없으면 시연 스크립트가 같은 입구로 입력을 대신 넣는다
+        function advance() {
+            inp.idle += 1;
+            tickN += 1;
+            const a = inp.idle > IDLE_TICKS;
+            if (a && !wasAuto) {
+                scene.reset();
+                clk = 0;
+            }
+            wasAuto = a;
+            if (a) {
+                clk += 1;
+                scene.auto(clk);
+                if (clk >= scene.CYCLE) {
+                    clk = 0;
+                    scene.reset();
+                }
+            }
+            scene.step();
+        }
+        // 움직임 줄이기: 틱을 몰아서 돌린 뒤 한 번만 그린다 (중간 보간 장면은 화면에 나오지 않는다)
+        function settle(n) {
+            for (let i = 0; i < n; i += 1) {
+                inp.idle = 0;
+                tickN += 1;
+                scene.step();
+            }
+            show();
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    advance();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        function point(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            for (let i = 0; i < scene.REDUCE_TICKS; i += 1) {
+                advance();
+            }
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                if (scene.next) {
+                    scene.next();
+                    show();
+                    return;
+                }
+                const n = Math.round(scene.CYCLE / 3);
+                inp.idle = 99999;
+                wasAuto = true;
+                for (let i = 0; i < n; i += 1) {
+                    advance();
+                }
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'focus', function () { inp.focus = true; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'blur', function () { inp.focus = false; inp.key = false; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            try {
+                canvas.setPointerCapture(e.pointerId);
+            }
+            catch (err) { /* 캡처가 안 되는 환경은 그냥 넘어간다 */ }
+            scene.down(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            scene.move(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointerup', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            scene.up(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'keydown', function (e) {
+            inp.idle = 0;
+            inp.key = true;
+            if (scene.key(e.key)) {
+                e.preventDefault();
+            }
+            if (reduce) {
+                settle(30);
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const GUIDE_AMP = 46; // 안내선이 위아래로 오르내리는 폭 (px)
+    const TOL_PX = 12; // 안내선에서 이만큼 안이면 허용 띠 안
+    const SCORE_PASS = 60; // 이 점수 이상이면 통과로 친다 (시연 규칙)
+    const SAMPLE_STEP = 6; // 궤적을 이만큼 움직일 때마다 한 점씩 표본으로 남긴다 (px)
+    const X0 = 40;
+    const X1 = 440;
+    const TXT_READY = 'Trace along the guide line';
+    const TXT_TRACE = 'Tracing · {n} samples';
+    const TXT_PASS = 'Score {s} · mean {m}px, passes the demo rule';
+    const TXT_FAIL = 'Score {s} · {m}px off the guide on average';
+    // PURE-BEGIN
+    // 안내선을 4px 간격 점으로 표본화한다
+    function guidePoints(seed, amp) {
+        const r = lcg(seed * 389 + 9);
+        const p1 = r() * PI2;
+        const p2 = r() * PI2;
+        const pts = [];
+        for (let x = 40; x <= 440; x += 4) {
+            const u = (x - 40) / 400;
+            pts.push([x, 172 + amp * (0.6 * Math.sin(u * PI2 + p1) + 0.4 * Math.sin(u * PI2 * 2.3 + p2))]);
+        }
+        return pts;
+    }
+    // 점 하나에서 안내선 표본까지 가장 가까운 거리
+    function nearest(px, py, guide) {
+        let best = 1e9;
+        for (let i = 0; i < guide.length; i += 1) {
+            const dx = guide[i][0] - px;
+            const dy = guide[i][1] - py;
+            const d = dx * dx + dy * dy;
+            if (d < best) {
+                best = d;
+            }
+        }
+        return Math.sqrt(best);
+    }
+    // 궤적 표본마다 가장 가까운 안내선 거리를 평균해 점수로 바꾼다 (평균이 허용치의 두 배면 0점)
+    function scoreTrail(samples, guide, tol) {
+        if (samples.length === 0) {
+            return { mean: 0, score: 0 };
+        }
+        let sum = 0;
+        for (let i = 0; i < samples.length; i += 1) {
+            sum += nearest(samples[i][0], samples[i][1], guide);
+        }
+        const mean = sum / samples.length;
+        const score = Math.round(100 * Math.min(1, Math.max(0, 1 - mean / (tol * 2))));
+        return { mean: mean, score: score };
+    }
+    // PURE-END
+    const make = (inp, reduce) => {
+        let seed = 4;
+        let guide = guidePoints(seed, GUIDE_AMP);
+        let trail = [];
+        let dist = [];
+        let drawing = false;
+        let res = null;
+        let cycleN = 1;
+        let kx = X0;
+        let ky = 172;
+        let kdown = false;
+        let t = 0;
+        function begin(x, y) {
+            trail = [];
+            dist = [];
+            res = null;
+            drawing = true;
+            addPoint(x, y, true);
+        }
+        function addPoint(x, y, force) {
+            if (!drawing) {
+                return;
+            }
+            const last = trail.length ? trail[trail.length - 1] : null;
+            if (force || !last || Math.hypot(x - last[0], y - last[1]) >= SAMPLE_STEP) {
+                trail.push([x, y]);
+                dist.push(nearest(x, y, guide));
+            }
+        }
+        function end() {
+            if (!drawing) {
+                return;
+            }
+            drawing = false;
+            res = scoreTrail(trail, guide, TOL_PX);
+        }
+        const scene = {
+            CYCLE: 124,
+            REDUCE_TICKS: 100,
+            reset() {
+                cycleN += 1;
+                seed += 1;
+                guide = guidePoints(seed, GUIDE_AMP);
+                trail = [];
+                dist = [];
+                drawing = false;
+                res = null;
+                kdown = false;
+                kx = X0;
+                ky = guide[0][1];
+            },
+            auto(clk) {
+                // 짝수 바퀴는 손이 떨려 허용 띠를 벗어나고 홀수 바퀴는 안쪽에서 따라간다
+                const shaky = cycleN % 2 === 0;
+                if (clk >= 10 && clk <= 84) {
+                    const u = (clk - 10) / 74;
+                    const x = lerp(X0, X1, u);
+                    const gi = Math.min(guide.length - 1, Math.round((x - X0) / 4));
+                    const wob = (shaky ? 26 : 6) * Math.sin(u * 17 + cycleN) * (0.4 + 0.6 * Math.sin(u * 6.3 + 1));
+                    if (clk === 10) {
+                        begin(x, guide[gi][1] + wob);
+                    }
+                    addPoint(x, guide[gi][1] + wob, false);
+                }
+                if (clk === 86) {
+                    end();
+                }
+            },
+            step() { t += 1; },
+            draw(ctx) {
+                ctx.fillStyle = rgba(BG, 1);
+                ctx.fillRect(0, 0, W, H);
+                ctx.fillStyle = rgba(PANEL, 1);
+                rrect(ctx, 14, 40, W - 28, H - 54, 14);
+                ctx.fill();
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                // 허용 띠
+                ctx.strokeStyle = rgba(SKY, 0.2);
+                ctx.lineWidth = TOL_PX * 2;
+                ctx.beginPath();
+                for (let i = 0; i < guide.length; i += 1) {
+                    if (i === 0) {
+                        ctx.moveTo(guide[i][0], guide[i][1]);
+                    }
+                    else {
+                        ctx.lineTo(guide[i][0], guide[i][1]);
+                    }
+                }
+                ctx.stroke();
+                // 안내선
+                ctx.strokeStyle = rgba(CREAM, 0.75);
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 6]);
+                ctx.lineDashOffset = -t * 0.4;
+                ctx.beginPath();
+                for (let i = 0; i < guide.length; i += 1) {
+                    if (i === 0) {
+                        ctx.moveTo(guide[i][0], guide[i][1]);
+                    }
+                    else {
+                        ctx.lineTo(guide[i][0], guide[i][1]);
+                    }
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // 궤적 - 허용 띠 밖으로 나간 마디는 분홍
+                ctx.lineWidth = 6;
+                for (let i = 1; i < trail.length; i += 1) {
+                    ctx.strokeStyle = rgba(dist[i] <= TOL_PX ? MINT : PINK, 1);
+                    ctx.beginPath();
+                    ctx.moveTo(trail[i - 1][0], trail[i - 1][1]);
+                    ctx.lineTo(trail[i][0], trail[i][1]);
+                    ctx.stroke();
+                }
+                ctx.fillStyle = rgba(PEACH, 1);
+                ctx.beginPath();
+                ctx.arc(guide[0][0], guide[0][1], 7, 0, PI2);
+                ctx.fill();
+                ctx.fillStyle = rgba(LILAC, 1);
+                ctx.beginPath();
+                ctx.arc(guide[guide.length - 1][0], guide[guide.length - 1][1], 7, 0, PI2);
+                ctx.fill();
+                if (drawing && trail.length) {
+                    const p = trail[trail.length - 1];
+                    ctx.fillStyle = rgba(CREAM, 1);
+                    ctx.beginPath();
+                    ctx.arc(p[0], p[1], 8 + Math.sin(t * 0.3) * 1.5, 0, PI2);
+                    ctx.fill();
+                }
+                // 점수 막대
+                const sc = res ? res.score : 0;
+                ctx.fillStyle = rgba(CREAM, 0.25);
+                rrect(ctx, 264, 20, 200, 12, 6);
+                ctx.fill();
+                ctx.fillStyle = rgba(sc >= SCORE_PASS ? MINT : PINK, 1);
+                rrect(ctx, 264, 20, Math.max(0, 200 * sc / 100), 12, 6);
+                ctx.fill();
+                ctx.fillStyle = rgba(CREAM, 0.9);
+                ctx.fillRect(264 + 200 * SCORE_PASS / 100 - 1, 16, 2, 20);
+                if (inp.key && inp.focus) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+                    ctx.lineWidth = 2.5;
+                    ctx.beginPath();
+                    ctx.arc(kx, ky, 12, 0, PI2);
+                    ctx.stroke();
+                }
+            },
+            label() {
+                if (drawing) {
+                    return TXT_TRACE.replace('{n}', String(trail.length));
+                }
+                if (res) {
+                    const m = String(Math.round(res.mean * 10) / 10);
+                    return (res.score >= SCORE_PASS ? TXT_PASS : TXT_FAIL).replace('{s}', String(res.score)).replace('{m}', m);
+                }
+                return TXT_READY;
+            },
+            down(x, y) { begin(x, y); },
+            move(x, y) { addPoint(x, y, false); },
+            up() { end(); },
+            key(k) {
+                const dx = k === 'ArrowLeft' ? -SAMPLE_STEP * 1.5 : (k === 'ArrowRight' ? SAMPLE_STEP * 1.5 : 0);
+                const dy = k === 'ArrowUp' ? -SAMPLE_STEP * 1.5 : (k === 'ArrowDown' ? SAMPLE_STEP * 1.5 : 0);
+                if (dx !== 0 || dy !== 0) {
+                    kx = clamp(kx + dx, 20, W - 20);
+                    ky = clamp(ky + dy, 50, H - 20);
+                    addPoint(kx, ky, false);
+                    return true;
+                }
+                if (k === ' ') {
+                    kdown = !kdown;
+                    if (kdown) {
+                        begin(kx, ky);
+                    }
+                    else {
+                        end();
+                    }
+                    return true;
+                }
+                if (k === 'Enter') {
+                    kdown = false;
+                    end();
+                    return true;
+                }
+                return false;
+            },
+        };
+        scene.reset();
+        return scene;
+    };
+    return mount(root, make);
+})();
+</script>
+</body>
+</html>

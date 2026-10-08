@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ノイズの中に隠れた文字がしきい値を上げるほどくっきり浮かぶ確認 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cp is-demo" id="cp">
+  <canvas class="cp__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="ノイズの中に隠れた文字がしきい値を上げるほどくっきり浮かぶ確認"></canvas>
+  <p class="cp__status" data-role="status" aria-live="polite">デモを準備中</p>
+  <button class="cp__btn" data-role="btn" type="button">一時停止</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cp");
+    if (!root)
+        return;
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    // 파스텔 팔레트 - 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PANEL = [44, 40, 68];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabdefghmnqrt23456789';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function easeOutBack(x) { const c = clamp(x, 0, 1) - 1; return 1 + c * c * (2.7 * c + 1.7); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 - 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 시드로 뜻 없는 글자열을 만든다
+    function glyphStr(seed, n) {
+        const r = lcg(seed * 7919 + 13);
+        let s = '';
+        for (let i = 0; i < n; i += 1) {
+            s += CHARSET.charAt(Math.floor(r() * CHARSET.length));
+        }
+        return s;
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function mount(root, make) {
+        const canvas = root.querySelector('[data-role="canvas"]');
+        const statusEl = root.querySelector('[data-role="status"]');
+        const btnEl = root.querySelector('[data-role="btn"]');
+        if (!canvas || !statusEl || !btnEl) {
+            return function () { return; };
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return function () { return; };
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { idle: 99999, focus: false, key: false };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        let lastLabelTick = -999;
+        let lastLive = 'polite';
+        let tickN = 0;
+        let clk = 0;
+        let wasAuto = true;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            // 시연이 혼자 돌 때는 낭독을 끄고, 사람이 만지는 동안은 값이 바뀌어도 0.7초에 한 번만 갱신한다
+            const live = (reduce || inp.idle <= IDLE_TICKS) ? 'polite' : 'off';
+            if (live !== lastLive) {
+                lastLive = live;
+                statusEl.setAttribute('aria-live', live);
+            }
+            const t = scene.label();
+            if (t !== lastLabel && (reduce || live === 'off' || tickN - lastLabelTick >= 44)) {
+                lastLabel = t;
+                lastLabelTick = tickN;
+                statusEl.textContent = t;
+            }
+        }
+        // 고정 간격 한 틱 - 입력이 없으면 시연 스크립트가 같은 입구로 입력을 대신 넣는다
+        function advance() {
+            inp.idle += 1;
+            tickN += 1;
+            const a = inp.idle > IDLE_TICKS;
+            if (a && !wasAuto) {
+                scene.reset();
+                clk = 0;
+            }
+            wasAuto = a;
+            if (a) {
+                clk += 1;
+                scene.auto(clk);
+                if (clk >= scene.CYCLE) {
+                    clk = 0;
+                    scene.reset();
+                }
+            }
+            scene.step();
+        }
+        // 움직임 줄이기: 틱을 몰아서 돌린 뒤 한 번만 그린다 (중간 보간 장면은 화면에 나오지 않는다)
+        function settle(n) {
+            for (let i = 0; i < n; i += 1) {
+                inp.idle = 0;
+                tickN += 1;
+                scene.step();
+            }
+            show();
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    advance();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        function point(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            for (let i = 0; i < scene.REDUCE_TICKS; i += 1) {
+                advance();
+            }
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                if (scene.next) {
+                    scene.next();
+                    show();
+                    return;
+                }
+                const n = Math.round(scene.CYCLE / 3);
+                inp.idle = 99999;
+                wasAuto = true;
+                for (let i = 0; i < n; i += 1) {
+                    advance();
+                }
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'focus', function () { inp.focus = true; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'blur', function () { inp.focus = false; inp.key = false; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            try {
+                canvas.setPointerCapture(e.pointerId);
+            }
+            catch (err) { /* 캡처가 안 되는 환경은 그냥 넘어간다 */ }
+            scene.down(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            inp.key = false;
+            scene.move(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'pointerup', function (e) {
+            const p = point(e);
+            inp.idle = 0;
+            scene.up(p[0], p[1]);
+            if (reduce) {
+                settle(30);
+            }
+        });
+        listen(canvas, 'keydown', function (e) {
+            inp.idle = 0;
+            inp.key = true;
+            if (scene.key(e.key)) {
+                e.preventDefault();
+            }
+            if (reduce) {
+                settle(30);
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const THRESH = 0.86; // 글자가 가장 또렷한 문턱 (이 값 위쪽만 켜진다)
+    const NOISE_SCALE = 0.11; // 저해상도 화소 하나당 노이즈 좌표 증가량
+    const OCTAVES = 3; // 노이즈를 겹치는 층 수
+    const GRAIN = 0.045; // 문턱 주변 경계가 부드러워지는 폭
+    const BOOST = 0.42; // 글자 마스크 안쪽에만 더하는 값
+    const LW = 160;
+    const LH = 100;
+    const T_LOW = 0.36;
+    const GLYPH_N = 5;
+    const TXT_LIT = 'しきい値 {t} · 点灯した画素 文字内 {a}% 外 {b}%';
+    // PURE-BEGIN
+    // 격자점 해시를 부드럽게 섞는 값 노이즈 (0 이상 1 미만)
+    function vnoise(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = x - xi;
+        const fy = y - yi;
+        const u = fx * fx * (3 - 2 * fx);
+        const v = fy * fy * (3 - 2 * fy);
+        const a = hash2(xi, yi, seed);
+        const b = hash2(xi + 1, yi, seed);
+        const c = hash2(xi, yi + 1, seed);
+        const d = hash2(xi + 1, yi + 1, seed);
+        return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+    }
+    // 여러 층을 절반씩 줄여 가며 겹친 값 (0 이상 1 이하)
+    function fbm(x, y, seed, oct) {
+        let sum = 0;
+        let amp = 1;
+        let norm = 0;
+        let f = 1;
+        for (let o = 0; o < oct; o += 1) {
+            sum += amp * vnoise(x * f + o * 17.3, y * f - o * 9.1, seed + o);
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    // 값이 문턱을 넘은 정도를 0~1 로 (grain 폭 안에서 부드럽게 올라간다)
+    function litAmount(v, thresh, grain) {
+        const k = (v - thresh) / grain + 0.5;
+        return k <= 0 ? 0 : (k >= 1 ? 1 : k * k * (3 - 2 * k));
+    }
+    // PURE-END
+    const make = (inp, reduce) => {
+        const mk = document.createElement('canvas');
+        mk.width = LW;
+        mk.height = LH;
+        const mctx = mk.getContext('2d', { willReadFrequently: true });
+        const lo = document.createElement('canvas');
+        lo.width = LW;
+        lo.height = LH;
+        const lctx = lo.getContext('2d');
+        if (!mctx || !lctx) {
+            return { CYCLE: 1, REDUCE_TICKS: 0, reset() { return; }, auto() { return; }, step() { return; }, draw() { return; }, label() { return ''; }, down() { return; }, move() { return; }, up() { return; }, key() { return false; } };
+        }
+        const img = lctx.createImageData(LW, LH);
+        let mask = new Float32Array(LW * LH);
+        let maskTotal = 1;
+        let seed = 11;
+        let tNow = T_LOW;
+        let manual = false;
+        let mT = THRESH;
+        let t = 0;
+        let inPct = 0;
+        let outPct = 0;
+        function bakeMask() {
+            mctx.fillStyle = '#000';
+            mctx.fillRect(0, 0, LW, LH);
+            mctx.fillStyle = '#fff';
+            mctx.font = 'bold 50px "Segoe UI", "Noto Sans KR", sans-serif';
+            mctx.textAlign = 'center';
+            mctx.textBaseline = 'middle';
+            const s = glyphStr(seed + 90, GLYPH_N);
+            const stepX = (LW - 16) / GLYPH_N;
+            const r = lcg(seed * 19 + 3);
+            for (let i = 0; i < GLYPH_N; i += 1) {
+                mctx.save();
+                mctx.translate(8 + stepX * (i + 0.5), LH / 2 + (r() - 0.5) * 8);
+                mctx.rotate((r() - 0.5) * 0.3);
+                mctx.fillText(s.charAt(i), 0, 0);
+                mctx.restore();
+            }
+            const d = mctx.getImageData(0, 0, LW, LH).data;
+            mask = new Float32Array(LW * LH);
+            maskTotal = 0;
+            for (let i = 0; i < LW * LH; i += 1) {
+                mask[i] = d[i * 4] / 255;
+                maskTotal += mask[i] > 0.5 ? 1 : 0;
+            }
+            if (maskTotal < 1) {
+                maskTotal = 1;
+            }
+        }
+        bakeMask();
+        function curT() { return manual ? mT : tNow; }
+        const scene = {
+            CYCLE: 124,
+            REDUCE_TICKS: 80,
+            reset() { seed += 1; bakeMask(); manual = false; tNow = T_LOW; },
+            auto(clk) {
+                if (clk < 72) {
+                    tNow = lerp(T_LOW, THRESH, smooth(clk / 72));
+                }
+                else if (clk < 100) {
+                    tNow = THRESH;
+                }
+                else {
+                    tNow = lerp(THRESH, T_LOW, smooth((clk - 100) / 22));
+                }
+            },
+            step() { t += 1; },
+            draw(ctx) {
+                const T = curT();
+                const o = img.data;
+                const dx = t * 0.35;
+                const dy = t * 0.18;
+                let litIn = 0;
+                let litOut = 0;
+                for (let y = 0; y < LH; y += 1) {
+                    for (let x = 0; x < LW; x += 1) {
+                        const i = y * LW + x;
+                        const n = fbm(x * NOISE_SCALE + dx * NOISE_SCALE, y * NOISE_SCALE + dy * NOISE_SCALE, seed, OCTAVES);
+                        const m = mask[i];
+                        const v = n + m * BOOST;
+                        const k = litAmount(v, T, GRAIN);
+                        // 밝은 쪽 색 - 값이 클수록 연보라에서 하늘, 민트, 크림으로
+                        const q = clamp((v - 0.3) / 0.9, 0, 1);
+                        let c;
+                        if (q < 0.45) {
+                            c = mix(LILAC, SKY, q / 0.45);
+                        }
+                        else if (q < 0.8) {
+                            c = mix(SKY, MINT, (q - 0.45) / 0.35);
+                        }
+                        else {
+                            c = mix(MINT, CREAM, (q - 0.8) / 0.2);
+                        }
+                        const bg = mix(BG, PANEL, n * 0.9);
+                        const j = i * 4;
+                        o[j] = lerp(bg[0], c[0], k);
+                        o[j + 1] = lerp(bg[1], c[1], k);
+                        o[j + 2] = lerp(bg[2], c[2], k);
+                        o[j + 3] = 255;
+                        if (k > 0.5) {
+                            if (m > 0.5) {
+                                litIn += 1;
+                            }
+                            else {
+                                litOut += 1;
+                            }
+                        }
+                    }
+                }
+                lctx.putImageData(img, 0, 0);
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(lo, 0, 0, W, H);
+                inPct = Math.round(100 * litIn / maskTotal);
+                outPct = Math.round(100 * litOut / (LW * LH - maskTotal));
+                // 문턱 눈금
+                ctx.fillStyle = 'rgba(29,26,44,0.75)';
+                rrect(ctx, 14, H - 30, 132, 18, 9);
+                ctx.fill();
+                ctx.fillStyle = rgba(MINT, 1);
+                rrect(ctx, 18, H - 26, Math.max(6, 124 * clamp((T - 0.3) / 0.7, 0, 1)), 10, 5);
+                ctx.fill();
+                if (inp.key && inp.focus) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+                    ctx.lineWidth = 2.5;
+                    ctx.strokeRect(6, 6, W - 12, H - 12);
+                }
+            },
+            label() { return TXT_LIT.replace('{t}', (Math.round(curT() * 100) / 100).toFixed(2)).replace('{a}', String(inPct)).replace('{b}', String(outPct)); },
+            down() { manual = true; },
+            move(x) { manual = true; mT = lerp(0.3, 1.0, clamp(x / W, 0, 1)); },
+            up() { return; },
+            key(k) {
+                if (k === 'ArrowRight' || k === 'ArrowUp') {
+                    manual = true;
+                    mT = clamp(curT() + 0.04, 0.3, 1.0);
+                    return true;
+                }
+                if (k === 'ArrowLeft' || k === 'ArrowDown') {
+                    manual = true;
+                    mT = clamp(curT() - 0.04, 0.3, 1.0);
+                    return true;
+                }
+                if (k === 'Enter' || k === ' ') {
+                    seed += 1;
+                    bakeMask();
+                    return true;
+                }
+                return false;
+            },
+        };
+        return scene;
+    };
+    return mount(root, make);
+})();
+</script>
+</body>
+</html>
