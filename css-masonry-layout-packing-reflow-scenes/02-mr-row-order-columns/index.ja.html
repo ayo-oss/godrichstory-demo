@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>左から右へ読めるように順を直した列配置 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mr is-demo" id="mr" data-demo="1">
+  <div class="mr__bar">
+    <div class="mr__btns"><button class="mr__btn" type="button" data-r="m0" aria-pressed="true">縦に埋める</button><button class="mr__btn" type="button" data-r="m1" aria-pressed="false">横の順</button><button class="mr__btn" type="button" data-r="m2" aria-pressed="false">均衡</button></div>
+    <p class="mr__live" data-r="live" aria-live="off" aria-atomic="true"><span class="mr__k">下端の差</span> <b data-r="spread">0</b>px</p>
+  </div>
+  <div class="mr__wall" data-r="wall"></div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("mr");
+    const CLS = { card: "mr__card" };
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let last = -1;
+    let ready = false;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    const wall = q("[data-r=wall]");
+    const live = q("[data-r=live]");
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(function () {
+            el.removeEventListener(type, fn);
+        });
+    }
+    function stopDemo() {
+        if (!demo) return;
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+        live.setAttribute("aria-live", "polite");
+    }
+    if (reduce) live.setAttribute("aria-live", "polite");
+    // カード: 시드 LCG 로 비율을 뽑는다. 이미지 파일은 없고 그라디언트와 번호만 있다.
+    function makeCards(n, seed, lo, hi) {
+        const rng = makeRng(seed);
+        const list = [];
+        for (let i = 0; i < n; i += 1) {
+            const el = document.createElement("div");
+            el.className = CLS.card;
+            el.setAttribute("data-c", String(i % 6));
+            el.innerHTML = "<i>" + (i + 1) + "</i>";
+            wall.appendChild(el);
+            list.push({
+                el: el, ratio: lo + rng() * (hi - lo), cat: Math.floor(rng() * 3),
+                x: 0, y: 0, w: 0, h: 0, tx: 0, ty: 0, tw: 0, th: 0,
+                s: 1, ds: 1, o: 1, dop: 1, vx: 0, vy: 0,
+                ox: 0, oy: 0, osx: 0, osy: 0, ovx: 0, ovy: 0, ovsx: 0, ovsy: 0,
+                fx: 0, fy: 0, fs: 1, fo: 1, t0: 0, sq: 0, rest: 0, wait: 0
+            });
+        }
+        return list;
+    }
+    function colW(cols, gap) {
+        return (wall.clientWidth - gap * (cols - 1)) / cols;
+    }
+    // 최단 列 배치: 카드를 순서대로 읽으며 지금 가장 낮은 列 끝에 얹고 그 列 높이에 カード 높이와 간격을 더한다.
+    function pack(hs, cols, cw, gap) {
+        const colH = [];
+        for (let k = 0; k < cols; k += 1) colH.push(0);
+        const out = [];
+        for (let i = 0; i < hs.length; i += 1) {
+            let best = 0;
+            for (let k = 1; k < cols; k += 1) {
+                if (colH[k] < colH[best] - 0.5) best = k;
+            }
+            out.push({ x: best * (cw + gap), y: colH[best] });
+            colH[best] += hs[i] + gap;
+        }
+        return out;
+    }
+    function put(c, x, y, sx, sy) {
+        const st = c.el.style;
+        st.width = c.w.toFixed(1) + "px";
+        st.height = c.h.toFixed(1) + "px";
+        st.transform = "translate3d(" + x.toFixed(2) + "px," + y.toFixed(2) + "px,0) scale(" + sx.toFixed(3) + "," + sy.toFixed(3) + ")";
+    }
+    function frame(ts) {
+        const dt = last < 0 ? 0.016 : Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        if (demo) script(ts);
+        step(dt, ts);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    const ro = new ResizeObserver(function () {
+        relayout();
+    });
+    ro.observe(root);
+
+    // 기법: 열을 정하는 규칙만 바꾼다. 세로 채움은 번호 ÷ 열당 장수, 가로 순서는 번호 % 列 수, 균형은 가로 순서로 가다가 열이 너무 높으면 가장 낮은 열로 보낸다.
+    const COLUMNS = 3;
+    const GAP = 8;
+    const BALANCE = 0.3;
+    const FOLLOW = 10;
+    const SEED = 16;
+    const COUNT = 9;
+    const cards = makeCards(COUNT, SEED, 0.22, 0.5);
+    const modeBtns = [q("[data-r=m0]"), q("[data-r=m1]"), q("[data-r=m2]")];
+    const spreadEl = q("[data-r=spread]");
+    let mode = 0;
+    function setMode(m) {
+        if (m === mode && ready) return;
+        mode = m;
+        for (let i = 0; i < 3; i += 1) modeBtns[i].setAttribute("aria-pressed", i === m ? "true" : "false");
+        relayout();
+    }
+    function relayout() {
+        const cw = colW(COLUMNS, GAP);
+        const colH = [];
+        for (let k = 0; k < COLUMNS; k += 1) colH.push(0);
+        const perCol = Math.ceil(cards.length / COLUMNS);
+        for (let i = 0; i < cards.length; i += 1) {
+            const c = cards[i];
+            const h = c.ratio * cw;
+            let col = i % COLUMNS;
+            if (mode === 0) {
+                col = Math.min(COLUMNS - 1, Math.floor(i / perCol));
+            } else if (mode === 2) {
+                let low = 0;
+                for (let k = 1; k < COLUMNS; k += 1) {
+                    if (colH[k] < colH[low]) low = k;
+                }
+                if (colH[col] - colH[low] > BALANCE * h) col = low;
+            }
+            c.w = cw;
+            c.h = h;
+            c.tx = col * (cw + GAP);
+            c.ty = colH[col];
+            colH[col] += h + GAP;
+            if (!ready || reduce) {
+                c.x = c.tx;
+                c.y = c.ty;
+            }
+        }
+        spreadEl.textContent = String(Math.round(Math.max.apply(null, colH) - Math.min.apply(null, colH)));
+        ready = true;
+        if (reduce) render();
+    }
+    function script(ts) {
+        setMode(Math.floor((ts % 2100) / 700));
+    }
+    function step(dt, ts) {
+        const k = 1 - Math.exp(-FOLLOW * dt);
+        for (let i = 0; i < cards.length; i += 1) {
+            cards[i].x += (cards[i].tx - cards[i].x) * k;
+            cards[i].y += (cards[i].ty - cards[i].y) * k;
+        }
+    }
+    function render() {
+        for (let i = 0; i < cards.length; i += 1) put(cards[i], cards[i].x, cards[i].y, 1, 1);
+    }
+    for (let i = 0; i < 3; i += 1) {
+        on(modeBtns[i], "click", function () {
+            stopDemo();
+            setMode(i);
+        });
+    }
+    modeBtns[0].setAttribute("aria-pressed", "true");
+
+    relayout();
+    if (reduce) {
+        render();
+    } else {
+        raf = requestAnimationFrame(frame);
+    }
+
+})();
+</script>
+</body>
+</html>
