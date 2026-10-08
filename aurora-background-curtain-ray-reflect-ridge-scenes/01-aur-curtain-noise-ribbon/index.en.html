@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An Aurora Curtain That Sways on Layered Noise — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="au is-demo" id="au">
+  <canvas class="au__canvas" data-role="canvas" width="480" height="300" aria-hidden="true"></canvas>
+  <button class="au__pause" data-role="pause" type="button" aria-pressed="false">Pause motion</button>
+  <p class="au__status" data-role="status" aria-live="off">The curtain sways along the noise</p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("au");
+    if (!root) return;
+    // 장면 좌표 — 캔버스 내부는 이 크기 x 배율(dpr)로 잡고, 그림은 늘 480x300 좌표로 그린다
+    const W = 480;
+    const H = 300;
+    // 고정 틱(ms) — 화면 주사율과 상관없이 같은 빠르기로 흐른다
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 동작 줄이기에서 멈춰 둘 장면 시각(ms) — 이 시각의 한 장면만 그린다
+    const STILL_MS = 5200;
+    // 밤하늘 — 위는 짙은 남색, 지평선 쪽은 한 단계 밝은 남보라
+    const SKY_TOP = [8, 10, 24];
+    const SKY_LOW = [24, 28, 60];
+    // 오로라 빛 — 채도를 낮춘 파스텔이지만 어두운 하늘과의 명도 차는 크게 둔다
+    const MINT = [150, 240, 200];
+    const TEAL = [126, 214, 236];
+    const VIOLET = [192, 168, 255];
+    const PINK = [255, 178, 214];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 부드러운 계단 3x² - 2x³ — 0 과 1 에서 기울기가 0 이라 이음매가 보이지 않는다
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 배치가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자점 해시 — 정수 좌표 (ix, iy) 와 시드에서 0..1 값 하나를 만든다. 같은 점은 언제나 같은 값
+    function hash2(ix, iy, seed) {
+        let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1013904223)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 값 노이즈 — 정수 격자점마다 해시 값을 두고, 칸 안에서는 네 모서리 값을 부드러운 계단으로 보간한다. 결과 0..1
+    function noise2(x, y, seed) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const u = fx * fx * (3 - 2 * fx);
+        const v = fy * fy * (3 - 2 * fy);
+        const a = hash2(ix, iy, seed);
+        const b = hash2(ix + 1, iy, seed);
+        const c = hash2(ix, iy + 1, seed);
+        const d = hash2(ix + 1, iy + 1, seed);
+        return lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    // 옥타브 합 — 주파수를 두 배로, 세기를 절반으로 줄여 가며 n 겹 더한 뒤 세기 합으로 나눈다. 결과 0..1
+    function octaves(x, y, n, seed) {
+        let sum = 0;
+        let amp = 0.5;
+        let norm = 0;
+        let f = 1;
+        for (let k = 0; k < n; k += 1) {
+            sum += amp * noise2(x * f + k * 17.13, y * f + k * 9.71, seed + k * 31);
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    function textOf(el) { return (el.textContent || '').trim(); }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const pauseBtn = pauseEl;
+    // 화면 글자는 DOM 에 있다 — 문구를 바꾸면 버튼·상태 줄도 같이 바뀐다
+    const STATUS0 = textOf(status);
+    const PAUSE_LABEL = textOf(pauseBtn);
+    const RESUME_LABEL = 'Resume motion';
+    const TXT_PAUSED = 'Paused — use the button to resume';
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 아래 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 사람이 멈춤 버튼을 눌렀는가
+    let paused = false;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    // 캔버스 배율 — 화면 배율을 따르되 2 에서 자른다(배율 3 기기에서 픽셀 일이 2.25배로 늘지 않게)
+    let dpr = 1;
+    function fitCanvas() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+    }
+    function begin() {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+    }
+    // 작은 픽셀 버퍼 — 계산은 이 크기에서 하고 화면에는 늘려 그린다
+    function makeBuffer(w, h) {
+        const b = document.createElement('canvas');
+        b.width = w;
+        b.height = h;
+        const c = b.getContext('2d');
+        return { cv: b, c: c, img: c.createImageData(w, h), w: w, h: h };
+    }
+    // 버퍼를 무대 크기로 키워 더한다 — 늘릴 때 브라우저의 이미지 보간이 칸 사이를 메우고, 'lighter' 는 밤하늘 위에 빛을 더한다
+    function blitBuffer(b, x, y, w, h) {
+        b.c.putImageData(b.img, 0, 0);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.drawImage(b.cv, x, y, w, h);
+        ctx.restore();
+    }
+    // 높이 y 에서 하늘 색 — 버퍼 계산에서 밝기를 잴 때도 같은 식을 쓴다
+    function skyAt(y, h) { return mix(SKY_TOP, SKY_LOW, clamp(y / h, 0, 1)); }
+    function drawSky(c, w, h) {
+        const g = c.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, rgba(SKY_TOP, 1));
+        g.addColorStop(1, rgba(SKY_LOW, 1));
+        c.fillStyle = g;
+        c.fillRect(0, 0, w, h);
+    }
+    // 장면 시계(ms) — rAF 루프가 고정 틱으로만 늘린다. 동작 줄이기에서는 STILL_MS 에 멈춘다
+    let simMs = 0;
+    function nowS() { return simMs / 1000; }
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) / Math.max(1, r.width) * W, (ev.clientY - r.top) / Math.max(1, r.height) * H];
+    }
+    // 겹치는 DOM 층의 자리 — 장면 좌표를 무대 백분율로 바꿔 넣는다
+    function place(el, r) {
+        el.style.left = (r.x / W * 100).toFixed(3) + '%';
+        el.style.top = (r.y / H * 100).toFixed(3) + '%';
+        el.style.width = (r.w / W * 100).toFixed(3) + '%';
+        el.style.height = (r.h / H * 100).toFixed(3) + '%';
+    }
+    // 커튼 겹 수 — 겹마다 중심선 높이·노이즈 시드·밝기가 다르다
+    const CURTAIN_LAYERS = 3;
+    // 노이즈 결 — 장면 1px 당 노이즈 좌표가 움직이는 양. 작을수록 주름이 넓고 느긋하다
+    const NOISE_SCALE = 0.004;
+    // 세로 감쇠(1px 당) — 중심선에서 위로 d px 올라간 곳의 알파 = exp(-RAY_FALLOFF x d)
+    const RAY_FALLOFF = 0.018;
+    // 세로 줄 간격(px) — 줄마다 세로 그라데이션 하나
+    const STROKE_STEP = 3;
+    // 중심선 높이 — 옥타브 합(3겹) 값 노이즈 0..1 을 -1..1 로 펴서 진폭을 곱한다. 시간은 노이즈 둘째 좌표로 흘린다
+    function curtainCenter(o, layer, x, t) {
+        const n = octaves(x * NOISE_SCALE + t * o.speed * 0.4, t * o.speed + layer * 3.7, 3, o.seed + layer * 11);
+        return o.base - layer * 16 + (n - 0.5) * 2 * o.amp;
+    }
+    // 주름 밝기 — 결을 2.6배 잘게 읽은 노이즈를 문턱 0.25 위로 펴고 1.8 제곱해 밝은 주름과 어두운 틈을 가른다
+    function curtainFold(o, layer, x, t) {
+        const n = octaves(x * NOISE_SCALE * 2.6 - t * o.speed * 0.9, layer * 5.1 + t * o.speed * 0.5, 2, o.seed + 50 + layer);
+        return Math.pow(smooth((n - 0.25) / 0.6), 1.8);
+    }
+    // 커튼 — 겹마다 STROKE_STEP 간격으로 세로 줄을 긋는다. 줄의 아래 끝이 중심선, 위로 갈수록 지수로 옅어진다
+    function drawCurtain(c, o, t, w) {
+        c.save();
+        c.globalCompositeOperation = 'lighter';
+        for (let layer = 0; layer < CURTAIN_LAYERS; layer += 1) {
+            const k = CURTAIN_LAYERS > 1 ? layer / (CURTAIN_LAYERS - 1) : 0;
+            const layerAlpha = o.alpha * (1 - 0.35 * k);
+            for (let x = -STROKE_STEP; x <= w + STROKE_STEP; x += STROKE_STEP) {
+                const fold = curtainFold(o, layer, x, t);
+                if (fold < 0.02) {
+                    continue;
+                }
+                const yc = curtainCenter(o, layer, x, t);
+                const len = o.len * (0.55 + 0.75 * fold) * (1 - 0.25 * k);
+                const top = yc - len;
+                const g = c.createLinearGradient(0, yc + 6, 0, top);
+                g.addColorStop(0, rgba(o.low, 0));
+                // 아래 가장자리 6px — 짧게 밝아져 커튼 밑단이 또렷하다
+                g.addColorStop(6 / (len + 6), rgba(o.low, layerAlpha * fold));
+                for (let s = 1; s <= 4; s += 1) {
+                    const d = len * s / 4;
+                    g.addColorStop((6 + d) / (len + 6), rgba(mix(o.low, o.high, s / 4), layerAlpha * fold * Math.exp(-RAY_FALLOFF * d)));
+                }
+                c.fillStyle = g;
+                c.fillRect(x, top, STROKE_STEP + 0.6, len + 6);
+            }
+        }
+        c.restore();
+    }
+    // 땅 실루엣 — 값 노이즈 한 겹으로 낮은 언덕 선을 만들고 그 아래를 짙게 채운다
+    const GROUND = [6, 7, 16];
+    function drawGround(c, y0, rough, seed) {
+        c.beginPath();
+        c.moveTo(0, H);
+        for (let x = 0; x <= W; x += 8) {
+            c.lineTo(x, y0 + (noise2(x * 0.012, 0.5, seed) - 0.5) * rough);
+        }
+        c.lineTo(W, H);
+        c.closePath();
+        c.fillStyle = rgba(GROUND, 1);
+        c.fill();
+    }
+    // 01 커튼 — 아래 끝은 민트, 위로 라일락. 땅 바로 위에서 흔들린다
+    const CURTAIN_01 = { base: 226, amp: 44, len: 165, low: MINT, high: VIOLET, alpha: 0.62, speed: 0.24, seed: 101 };
+    function itemInit() { }
+    function itemStep(dt) { }
+    function itemDraw() {
+        drawSky(ctx, W, H);
+        drawCurtain(ctx, CURTAIN_01, nowS(), W);
+        drawGround(ctx, 270, 16, 131);
+    }
+    function itemDemo(t) { }
+    function itemStatus() { return STATUS0; }
+    function itemSnap() { }
+    function itemPointer(p, on) { return false; }
+    function itemKey(key) { return false; }
+    function render() {
+        begin();
+        itemDraw();
+        if (!paused) {
+            say(itemStatus());
+        }
+    }
+    // 루프가 멈춰 있을 때(동작 줄이기·멈춤) 입력이 들어오면 — 움직이던 값을 목표로 바로 옮겨 한 장 그린다
+    function after() {
+        if (rafId) {
+            return;
+        }
+        itemSnap();
+        render();
+    }
+    function setPaused(p) {
+        paused = p;
+        pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+        pauseBtn.textContent = p ? RESUME_LABEL : PAUSE_LABEL;
+        if (p) {
+            stopLoop();
+            say(TXT_PAUSED);
+        }
+        else {
+            say(itemStatus());
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); });
+    cv.addEventListener('pointermove', function (ev) {
+        if (itemPointer(toScene(ev), true)) {
+            wake();
+            after();
+        }
+    });
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        if (itemPointer(toScene(ev), true)) {
+            after();
+        }
+    });
+    cv.addEventListener('pointerleave', function () { itemPointer([W / 2, H / 2], false); });
+    root.addEventListener('keydown', function (ev) {
+        if (ev.target !== root) {
+            return;
+        }
+        if (itemKey(ev.key)) {
+            ev.preventDefault();
+            wake();
+            after();
+        }
+    });
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    itemInit();
+    window.addEventListener('resize', onResize);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            simMs += FIXED_DT;
+            if (demo) {
+                itemDemo(simMs);
+            }
+            itemStep(FIXED_DT);
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        if (n === 6) {
+            acc = 0;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId || still || paused) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 그 순간 한 장면으로, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        pauseBtn.hidden = still;
+        if (still) {
+            stopLoop();
+            itemSnap();
+            render();
+        }
+        else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    pauseBtn.hidden = still;
+    if (still) {
+        // 동작 줄이기 — 노이즈 시간을 STILL_MS 에 세운 한 장면. 입력은 after() 가 그 자리에서 반영한다
+        simMs = STILL_MS;
+        itemSnap();
+        render();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        stopLoop();
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>
