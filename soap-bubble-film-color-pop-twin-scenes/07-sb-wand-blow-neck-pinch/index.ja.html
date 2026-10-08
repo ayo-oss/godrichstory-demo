@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>輪に張った膜を風でふくらませ、首がくびれて離れていく玉 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="輪に張った膜を吹いてふくらませ、伸びた長さが輪の周を超えると首がくびれて玉が離れていく場面。押し続けるともっと吹きます"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">膜をふくらませています</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="blow" type="button" aria-pressed="false">吹く</button>
+    <button class="hs__btn" data-role="new" type="button">新しい膜</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막을 얹어 명도 차로 방울이 읽힌다 (막의 무지갯빛은 이 표가 아니라 두께 계산에서 나온다)
+    const BG = [29, 26, 44];
+    const DEEP = [44, 39, 64];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 장면이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 왼쪽 칸의 수치 — 이름표 한 줄 + 값 한 줄
+    function panelRow(row, label, value) {
+        const y = 112 + row * 34;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.62);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, 16, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 15px sans-serif';
+        ctx.fillText(value, 16, y + 18);
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 막의 굴절률 — 비눗물 막을 물과 같은 값으로 둔다
+    const FILM_N = 1.33;
+    // 세 파장(nm) — 화면의 빨강·초록·파랑 채널을 이 파장 하나씩으로 대신한다
+    const WAVE_RGB_NM = [650, 530, 450];
+    // 표를 만들 두께 범위(nm) — 1nm 눈금마다 세 채널 값을 미리 구해 둔다
+    const LUT_D_MAX = 1600;
+    const filmLut = new Float32Array((LUT_D_MAX + 1) * 3);
+    // 막 앞면과 뒷면에서 튕긴 두 빛이 두께만큼 어긋나 파장마다 남는 몫 — sin²(2π·n·d/λ).
+    // 앞면에서 튕긴 빛만 위상이 뒤집히므로 두께 0 이면 세 채널이 모두 0(검은 막). 값은 0~1 로 맞춘 비율이지 실제 반사율(몇 %)이 아니다
+    function reflectRGB(dNm) {
+        const out = [0, 0, 0];
+        for (let c = 0; c < 3; c += 1) {
+            const s = Math.sin(2 * Math.PI * FILM_N * dNm / WAVE_RGB_NM[c]);
+            out[c] = s * s;
+        }
+        return out;
+    }
+    for (let d = 0; d <= LUT_D_MAX; d += 1) {
+        const r = reflectRGB(d);
+        filmLut[d * 3] = r[0];
+        filmLut[d * 3 + 1] = r[1];
+        filmLut[d * 3 + 2] = r[2];
+    }
+    // 비스듬히 보면 빛이 막 안에서 꺾여 지나므로 어긋남이 cos(꺾인 각)배로 줄어든다 — cosView 는 시선과 법선 사이 각의 cos
+    function insideCos(cosView) {
+        const s2 = (1 - cosView * cosView) / (FILM_N * FILM_N);
+        return Math.sqrt(1 - s2);
+    }
+    // 두께 d(nm) 에서 채널 c 의 몫 — 표를 1nm 사이에서 선형 보간해 읽는다
+    function filmAt(dNm, c) {
+        const d = clamp(dNm, 0, LUT_D_MAX - 1);
+        const i = Math.floor(d);
+        const f = d - i;
+        return filmLut[i * 3 + c] * (1 - f) + filmLut[(i + 1) * 3 + c] * f;
+    }
+    // 캔버스 선·면에 쓸 막 색 — 어두운 무대 위에 세 채널 몫을 밝기로 얹는다
+    function filmColor(dNm, gain) {
+        return [BG[0] + filmAt(dNm, 0) * 235 * gain, BG[1] + filmAt(dNm, 1) * 235 * gain, BG[2] + filmAt(dNm, 2) * 235 * gain];
+    }
+    // 화소 하나를 막 색으로 — under 는 방울 뒤 바탕색, nx·ny·z 는 구면 위 법선(z 는 시선 쪽 성분)
+    function shadeFilm(px, o, dNm, nx, ny, z, under, alpha) {
+        const dEff = dNm * insideCos(z);
+        // 가장자리일수록 시선이 막을 비스듬히 지나 색이 진하다 — 가운데는 뒤 바탕이 비쳐 보이게 낮춘다
+        const amp = 0.22 + 0.78 * Math.pow(1 - z, 0.6);
+        // 왼쪽 위에서 오는 빛 하나의 반짝임
+        const hl = Math.pow(Math.max(0, nx * -0.42 + ny * -0.5 + z * 0.76), 60);
+        for (let c = 0; c < 3; c += 1) {
+            const v = under[c] + filmAt(dEff, c) * 235 * amp + hl * 220;
+            px[o + c] = under[c] + (v - under[c]) * alpha;
+        }
+        px[o + 3] = 255;
+    }
+    // 07 — 링에 맺힌 막에 부는 만큼 넓이를 더하고, 늘어난 막 길이가 링 둘레를 넘으면 목을 조여 떨어뜨린다
+    // 부는 빠르기 — 막 안 넓이(px²)가 초마다 이만큼 는다
+    const BLOW_RATE = 7200;
+    // 링 반지름(px)
+    const RING_R = 40;
+    // 首の半径 / 輪 반지름이 이 비율 아래로 조이면 방울이 떨어져 나간다
+    const PINCH_RATIO = 0.3;
+    // 목이 조이는 빠르기 — 초마다 링 반지름 × NECK_RATE × (넘친 길이 비율 + NECK_BASE)
+    const NECK_RATE = 3.0;
+    const NECK_BASE = 0.35;
+    // 링에 평평하게 맺힌 膜の厚さ(nm) — 막이 늘어난 길이에 반비례해 얇아진다
+    const D_FLAT = 900;
+    // 한 번 훅 불 때 더하는 넓이(px²)
+    const PUFF = 1500;
+    // 시연은 이만큼 부풀린 막에서 시작한다 — 2초 안에 목이 조여 떨어지는 순간이 들어오게
+    const DEMO_AREA = 7600;
+    const RX = 200;
+    const RY = 140;
+    const CIRC = 2 * Math.PI * RING_R;
+    const TXT_BLOW = '膜をふくらませています';
+    const TXT_NECK = '首がくびれています';
+    const TXT_FREE = '離れました — 輪に新しい膜';
+    const TXT_IDLE = '吹くのを止めました';
+    const blowBtn = root.querySelector('[data-role="blow"]');
+    const newBtn = root.querySelector('[data-role="new"]');
+    const free = [];
+    let area = 0;
+    let neck = RING_R;
+    // 0 둥근 막 · 1 목 조임
+    let stage = 0;
+    let released = 0;
+    let blowing = true;
+    let holdBlow = false;
+    let freeMs = -1;
+    let tSec = 0;
+    // 링 두 끝을 지나고 중심이 링에서 c 만큼 오른쪽인 원 — 링 오른쪽에 든 넓이
+    function domeArea(c) {
+        const rho = Math.hypot(RING_R, c);
+        return rho * rho * Math.acos(-c / rho) + c * RING_R;
+    }
+    // 넓이에서 c 를 거꾸로 — 넓이는 c 에 따라 늘기만 하므로 반씩 좁혀 찾는다
+    function solveC(a) {
+        let lo = -4000;
+        let hi = 800;
+        for (let k = 0; k < 50; k += 1) {
+            const mid = (lo + hi) / 2;
+            if (domeArea(mid) < a) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return (lo + hi) / 2;
+    }
+    function shape() {
+        if (area < 1) {
+            return { c: -1e6, rho: 1e6, arc: 2 * RING_R, neckLen: 0, len: 2 * RING_R };
+        }
+        const c = solveC(area);
+        const rho = Math.hypot(RING_R, c);
+        const arc = 2 * rho * Math.acos(-c / rho);
+        const neckLen = stage === 1 ? (1 - neck / RING_R) * RING_R * 1.3 : 0;
+        return { c: c, rho: rho, arc: arc, neckLen: neckLen, len: arc + 2 * neckLen };
+    }
+    function filmD(len) { return D_FLAT * (2 * RING_R) / len; }
+    function release(s) {
+        free.push({ x: RX + s.c + s.neckLen, y: RY, r: s.rho, vx: 70, vy: -18, d: filmD(s.len), age: 0 });
+        area = 0;
+        neck = RING_R;
+        stage = 0;
+        released += 1;
+        freeMs = 0;
+    }
+    function simulate(dt, blow) {
+        tSec += dt;
+        if (blow) {
+            area += BLOW_RATE * dt;
+        }
+        const s = shape();
+        if (stage === 0 && s.len >= CIRC) {
+            stage = 1;
+        }
+        if (stage === 1) {
+            neck -= NECK_RATE * RING_R * ((s.len - CIRC) / CIRC + NECK_BASE) * dt;
+            if (neck / RING_R < PINCH_RATIO) {
+                release(shape());
+            }
+        }
+        for (const b of free) {
+            b.age += dt;
+            b.x += b.vx * dt;
+            b.y += b.vy * dt + Math.sin(b.age * 3) * 0.3;
+            b.d = Math.max(b.d - 20 * dt, 60);
+        }
+        for (let i = free.length - 1; i >= 0; i -= 1) {
+            if (free[i].x - free[i].r > W + 4 || free[i].age > 8) {
+                free.splice(i, 1);
+            }
+        }
+        if (freeMs >= 0) {
+            freeMs += dt * 1000;
+            if (freeMs > 700) {
+                freeMs = -1;
+            }
+        }
+    }
+    function step() {
+        simulate(FIXED_DT / 1000, blowing || holdBlow);
+        report();
+    }
+    function settle() {
+        freeMs = -1;
+        report();
+    }
+    function report() {
+        if (freeMs >= 0) {
+            say(TXT_FREE);
+        }
+        else if (!(blowing || holdBlow)) {
+            say(TXT_IDLE);
+        }
+        else if (stage === 1) {
+            say(TXT_NECK);
+        }
+        else {
+            say(TXT_BLOW);
+        }
+    }
+    function demoTick(t) {
+        if (t < 0) {
+            area = 0;
+        }
+    }
+    function filmStroke(d, top, bottom) {
+        const g = ctx.createLinearGradient(0, top, 0, bottom);
+        g.addColorStop(0, rgba(filmColor(d * 0.75, 1.3), 1));
+        g.addColorStop(0.5, rgba(filmColor(d, 1.3), 1));
+        g.addColorStop(1, rgba(filmColor(d * 1.25, 1.3), 1));
+        return g;
+    }
+    function drawFree(b) {
+        ctx.fillStyle = rgba(LILAC, 0.14);
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = filmStroke(b.d, b.y - b.r, b.y + b.r);
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = rgba(PAPER, 0.8);
+        ctx.beginPath();
+        ctx.ellipse(b.x - b.r * 0.4, b.y - b.r * 0.45, b.r * 0.12, b.r * 0.07, -0.7, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    function draw() {
+        clearStage();
+        const s = shape();
+        if (blowing || holdBlow) {
+            // 부는 바람 — 링 왼쪽에서 흘러드는 짧은 선
+            const off = (tSec * 120) % 40;
+            ctx.strokeStyle = rgba(SKY, 0.5);
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            for (const dy of [-14, 0, 14]) {
+                ctx.moveTo(RX - 74 + off, RY + dy);
+                ctx.lineTo(RX - 50 + off, RY + dy);
+            }
+            ctx.stroke();
+            ctx.lineCap = 'butt';
+        }
+        for (const b of free) {
+            drawFree(b);
+        }
+        const d = filmD(s.len);
+        ctx.beginPath();
+        if (area < 1) {
+            ctx.moveTo(RX, RY - RING_R);
+            ctx.lineTo(RX, RY + RING_R);
+        }
+        else {
+            const xb = RX + s.c + s.neckLen;
+            if (stage === 0) {
+                ctx.moveTo(RX, RY - RING_R);
+                ctx.arc(xb, RY, s.rho, Math.atan2(-RING_R, -s.c), Math.atan2(RING_R, -s.c));
+                ctx.closePath();
+            }
+            else {
+                // 목 조임 — 링 끝 → 조인 목 → 몸통 원에 닿는 점을 곡선으로 잇는다
+                const nx = RX + s.neckLen * 0.6;
+                const beta = Math.asin(Math.min(neck / s.rho, 0.98));
+                const bx = xb - s.rho * Math.cos(beta);
+                const by = s.rho * Math.sin(beta);
+                ctx.moveTo(RX, RY - RING_R);
+                ctx.bezierCurveTo(RX + 6, RY - RING_R, nx - 6, RY - neck, nx, RY - neck);
+                ctx.bezierCurveTo(nx + 8, RY - neck, bx - 8, RY - by, bx, RY - by);
+                ctx.arc(xb, RY, s.rho, -Math.PI + beta, Math.PI - beta);
+                ctx.bezierCurveTo(bx - 8, RY + by, nx + 8, RY + neck, nx, RY + neck);
+                ctx.bezierCurveTo(nx - 6, RY + neck, RX + 6, RY + RING_R, RX, RY + RING_R);
+                ctx.closePath();
+            }
+            ctx.fillStyle = rgba(LILAC, 0.16);
+            ctx.fill();
+        }
+        ctx.strokeStyle = filmStroke(d, RY - Math.max(s.rho, RING_R), RY + Math.max(s.rho, RING_R));
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // 링과 손잡이
+        ctx.strokeStyle = rgba(PEACH, 1);
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.ellipse(RX, RY, 7, RING_R + 3, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(RX, RY + RING_R + 3);
+        ctx.lineTo(RX - 10, H + 6);
+        ctx.stroke();
+        panelRow(0, '伸びた長さ / 輪の周', (s.len / CIRC).toFixed(2));
+        panelRow(1, '首の半径 / 輪', (neck / RING_R).toFixed(2));
+        panelRow(2, '離れた玉', String(released));
+    }
+    function after() {
+        report();
+        draw();
+    }
+    function setBlowing(v) {
+        blowing = v;
+        if (blowBtn) {
+            blowBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+        after();
+    }
+    // 훅 吹く — 움직임 줄이기에서는 0.4초만큼을 한 번에 계산해 부푼 모양 한 장을 그린다
+    function puff() {
+        if (still) {
+            for (let k = 0; k < 25; k += 1) {
+                simulate(FIXED_DT / 1000, true);
+            }
+            freeMs = -1;
+        }
+        else {
+            area += PUFF;
+        }
+        after();
+    }
+    function freshFilm() {
+        area = 0;
+        neck = RING_R;
+        stage = 0;
+        after();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        wake();
+        holdBlow = true;
+        puff();
+    });
+    function endHold() { holdBlow = false; }
+    cv.addEventListener('pointerup', endHold);
+    cv.addEventListener('pointercancel', endHold);
+    cv.addEventListener('pointerleave', endHold);
+    cv.addEventListener('keydown', function (ev) {
+        if (ev.key === ' ' || ev.key === 'Spacebar') {
+            ev.preventDefault();
+            wake();
+            setBlowing(!blowing);
+        }
+        else if (ev.key === 'ArrowRight') {
+            ev.preventDefault();
+            wake();
+            puff();
+        }
+        else if (ev.key === 'Home' || ev.key === 'Enter') {
+            ev.preventDefault();
+            wake();
+            freshFilm();
+        }
+    });
+    if (blowBtn) {
+        blowBtn.setAttribute('aria-pressed', 'true');
+        blowBtn.addEventListener('click', function () { wake(); setBlowing(!blowing); });
+    }
+    if (newBtn) {
+        newBtn.addEventListener('click', function () { wake(); freshFilm(); });
+    }
+    if (demo && !still) {
+        area = DEMO_AREA;
+    }
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    let looping = false;
+    function frame(ts) {
+        if (!looping) {
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (looping) {
+            return;
+        }
+        looping = true;
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        looping = false;
+        window.cancelAnimationFrame(rafId);
+    }
+    // 움직임 줄이기 설정을 페이지를 연 채로 바꿔도 바로 따른다 — 켜면 루프를 멈추고 끝난 장면 한 장, 끄면 다시 돈다
+    function applyMotion() {
+        still = reduceQuery.matches;
+        if (still) {
+            stopLoop();
+            settle();
+            draw();
+        }
+        else {
+            startLoop();
+        }
+    }
+    reduceQuery.addEventListener('change', applyMotion);
+    applyMotion();
+    return function () {
+        stopLoop();
+        reduceQuery.removeEventListener('change', applyMotion);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

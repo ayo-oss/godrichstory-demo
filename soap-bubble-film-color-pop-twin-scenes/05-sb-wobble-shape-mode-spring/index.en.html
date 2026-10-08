@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Bubble Whose Outline Wobbles on Layered Spring Modes and Settles — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="A bubble whose outline sways as the sum of the second, third and fourth wobble modes, each settling with its own speed and damping. Press to flick it from that direction"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">Settled</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="poke" type="button">Flick</button>
+    <button class="hs__btn" data-role="rest" type="button">Calm down</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막을 얹어 명도 차로 방울이 읽힌다 (막의 무지갯빛은 이 표가 아니라 두께 계산에서 나온다)
+    const BG = [29, 26, 44];
+    const DEEP = [44, 39, 64];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 장면이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 왼쪽 칸의 수치 — 이름표 한 줄 + 값 한 줄
+    function panelRow(row, label, value) {
+        const y = 112 + row * 34;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.62);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, 16, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 15px sans-serif';
+        ctx.fillText(value, 16, y + 18);
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 막의 굴절률 — 비눗물 막을 물과 같은 값으로 둔다
+    const FILM_N = 1.33;
+    // 세 파장(nm) — 화면의 빨강·초록·파랑 채널을 이 파장 하나씩으로 대신한다
+    const WAVE_RGB_NM = [650, 530, 450];
+    // 표를 만들 두께 범위(nm) — 1nm 눈금마다 세 채널 값을 미리 구해 둔다
+    const LUT_D_MAX = 1600;
+    const filmLut = new Float32Array((LUT_D_MAX + 1) * 3);
+    // 막 앞면과 뒷면에서 튕긴 두 빛이 두께만큼 어긋나 파장마다 남는 몫 — sin²(2π·n·d/λ).
+    // 앞면에서 튕긴 빛만 위상이 뒤집히므로 두께 0 이면 세 채널이 모두 0(검은 막). 값은 0~1 로 맞춘 비율이지 실제 반사율(몇 %)이 아니다
+    function reflectRGB(dNm) {
+        const out = [0, 0, 0];
+        for (let c = 0; c < 3; c += 1) {
+            const s = Math.sin(2 * Math.PI * FILM_N * dNm / WAVE_RGB_NM[c]);
+            out[c] = s * s;
+        }
+        return out;
+    }
+    for (let d = 0; d <= LUT_D_MAX; d += 1) {
+        const r = reflectRGB(d);
+        filmLut[d * 3] = r[0];
+        filmLut[d * 3 + 1] = r[1];
+        filmLut[d * 3 + 2] = r[2];
+    }
+    // 비스듬히 보면 빛이 막 안에서 꺾여 지나므로 어긋남이 cos(꺾인 각)배로 줄어든다 — cosView 는 시선과 법선 사이 각의 cos
+    function insideCos(cosView) {
+        const s2 = (1 - cosView * cosView) / (FILM_N * FILM_N);
+        return Math.sqrt(1 - s2);
+    }
+    // 두께 d(nm) 에서 채널 c 의 몫 — 표를 1nm 사이에서 선형 보간해 읽는다
+    function filmAt(dNm, c) {
+        const d = clamp(dNm, 0, LUT_D_MAX - 1);
+        const i = Math.floor(d);
+        const f = d - i;
+        return filmLut[i * 3 + c] * (1 - f) + filmLut[(i + 1) * 3 + c] * f;
+    }
+    // 캔버스 선·면에 쓸 막 색 — 어두운 무대 위에 세 채널 몫을 밝기로 얹는다
+    function filmColor(dNm, gain) {
+        return [BG[0] + filmAt(dNm, 0) * 235 * gain, BG[1] + filmAt(dNm, 1) * 235 * gain, BG[2] + filmAt(dNm, 2) * 235 * gain];
+    }
+    // 화소 하나를 막 색으로 — under 는 방울 뒤 바탕색, nx·ny·z 는 구면 위 법선(z 는 시선 쪽 성분)
+    function shadeFilm(px, o, dNm, nx, ny, z, under, alpha) {
+        const dEff = dNm * insideCos(z);
+        // 가장자리일수록 시선이 막을 비스듬히 지나 색이 진하다 — 가운데는 뒤 바탕이 비쳐 보이게 낮춘다
+        const amp = 0.22 + 0.78 * Math.pow(1 - z, 0.6);
+        // 왼쪽 위에서 오는 빛 하나의 반짝임
+        const hl = Math.pow(Math.max(0, nx * -0.42 + ny * -0.5 + z * 0.76), 60);
+        for (let c = 0; c < 3; c += 1) {
+            const v = under[c] + filmAt(dEff, c) * 235 * amp + hl * 220;
+            px[o + c] = under[c] + (v - under[c]) * alpha;
+        }
+        px[o + 3] = 255;
+    }
+    // 05 — 둘레 반지름을 2·3·4번째 출렁임의 합으로 두고, 출렁임마다 고유한 빠르기·감쇠의 스프링으로 진폭을 갱신한다
+    // 계산에 넣는 가장 높은 출렁임 번호(2번부터)
+    const MODE_MAX = 4;
+    const MODE_MIN = 2;
+    // 감쇠(1/s) — 번호의 제곱에 비례: γn = MODE_DAMP × n²/4. 높은 출렁임일수록 빨리 죽는다
+    const MODE_DAMP = 0.55;
+    // 툭 칠 때 출렁임마다 더하는 진폭 빠르기(반지름 비율/초)
+    const POKE_IMPULSE = 0.9;
+    // 2번 출렁임의 고유 빠르기(rad/s) — n번은 √((n−1)·n·(n+2)/8) 배 (막의 당기는 힘으로 떠는 방울 모양 진동의 근사)
+    const OMEGA_2 = 8.5;
+    // 한 출렁임의 진폭 상한(반지름 비율)
+    const AMP_CAP = 0.3;
+    // 늘어나지 않은 Film thickness(nm) — 둘레가 늘어난 곳은 넓이 비율의 제곱만큼 얇아진다
+    const D_FILM = 420;
+    const BCX = 318;
+    const BCY = 150;
+    const R0 = 100;
+    const SAMPLES = 180;
+    const TXT_WOBBLE = 'Higher modes settling first';
+    const TXT_CALM = 'Settled';
+    const MODE_LABELS = ['Mode 2', 'Mode 3', 'Mode 4'];
+    const pokeBtn = root.querySelector('[data-role="poke"]');
+    const restBtn = root.querySelector('[data-role="rest"]');
+    const ampC = new Float64Array(MODE_MAX + 1);
+    const ampS = new Float64Array(MODE_MAX + 1);
+    const velC = new Float64Array(MODE_MAX + 1);
+    const velS = new Float64Array(MODE_MAX + 1);
+    let tSec = 0;
+    let lastPsi = -Math.PI / 2;
+    let flashMs = -1;
+    let btnPokes = 0;
+    function omega(n) { return OMEGA_2 * Math.sqrt((n - 1) * n * (n + 2) / 8); }
+    function gamma(n) { return MODE_DAMP * n * n / 4; }
+    // 감쇠 스프링 한 스텝 — 가속 = −ω²·진폭 − 2γ·빠르기. 빠르기를 먼저 바꾸고 그 빠르기로 진폭을 옮긴다
+    function springStep(dt) {
+        for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+            const w = omega(n);
+            const g = gamma(n);
+            velC[n] += (-w * w * ampC[n] - 2 * g * velC[n]) * dt;
+            velS[n] += (-w * w * ampS[n] - 2 * g * velS[n]) * dt;
+            ampC[n] = clamp(ampC[n] + velC[n] * dt, -AMP_CAP, AMP_CAP);
+            ampS[n] = clamp(ampS[n] + velS[n] * dt, -AMP_CAP, AMP_CAP);
+        }
+    }
+    // ψ 방향을 안쪽으로 툭 — 그 방향에서 cos(n(φ−ψ)) 가 1 이 되도록 출렁임마다 빠르기를 뺀다
+    function poke(psi) {
+        lastPsi = psi;
+        flashMs = 0;
+        if (still) {
+            // 움직임 줄이기 — 흔들림 대신 그 자리가 들어간 모양 한 장
+            for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+                ampC[n] = -0.05 * Math.cos(n * psi);
+                ampS[n] = -0.05 * Math.sin(n * psi);
+                velC[n] = 0;
+                velS[n] = 0;
+            }
+            return;
+        }
+        for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+            velC[n] -= POKE_IMPULSE * Math.cos(n * psi);
+            velS[n] -= POKE_IMPULSE * Math.sin(n * psi);
+        }
+    }
+    function rest() {
+        ampC.fill(0);
+        ampS.fill(0);
+        velC.fill(0);
+        velS.fill(0);
+    }
+    function radiusAt(phi) {
+        let s = 1;
+        for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+            s += ampC[n] * Math.cos(n * phi) + ampS[n] * Math.sin(n * phi);
+        }
+        return R0 * s;
+    }
+    function modeAmp(n) { return Math.hypot(ampC[n], ampS[n]); }
+    function maxAmp() {
+        let m = 0;
+        for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+            m = Math.max(m, modeAmp(n));
+        }
+        return m;
+    }
+    function step() {
+        const dt = FIXED_DT / 1000;
+        tSec += dt;
+        springStep(dt / 2);
+        springStep(dt / 2);
+        if (flashMs >= 0) {
+            flashMs += FIXED_DT;
+            if (flashMs > 500) {
+                flashMs = -1;
+            }
+        }
+        report();
+    }
+    function settle() {
+        flashMs = -1;
+        report();
+    }
+    function report() {
+        say(maxAmp() > 0.004 ? TXT_WOBBLE : TXT_CALM);
+    }
+    // 시연 — 220ms 에 첫 툭, 그 뒤 780·700ms 간격으로 방향을 바꿔 가며
+    const DEMO_POKES = [200, 20, 110, 290];
+    let demoNext = 220;
+    let demoIdx = 0;
+    function demoTick(t) {
+        if (t >= demoNext) {
+            poke(DEMO_POKES[demoIdx % DEMO_POKES.length] * Math.PI / 180);
+            demoNext = t + (demoIdx % 2 === 0 ? 780 : 700);
+            demoIdx += 1;
+        }
+    }
+    const xs = new Float64Array(SAMPLES);
+    const ys = new Float64Array(SAMPLES);
+    const rs = new Float64Array(SAMPLES);
+    function draw() {
+        clearStage();
+        ctx.fillStyle = rgba(DEEP, 0.9);
+        ctx.beginPath();
+        ctx.ellipse(BCX, BCY + R0 + 26, R0 * 0.6, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.setLineDash([3, 5]);
+        ctx.strokeStyle = rgba(PAPER, 0.18);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(BCX, BCY, R0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        for (let k = 0; k < SAMPLES; k += 1) {
+            const phi = k / SAMPLES * Math.PI * 2;
+            const r = radiusAt(phi);
+            rs[k] = r;
+            xs[k] = BCX + Math.cos(phi) * r;
+            ys[k] = BCY + Math.sin(phi) * r;
+        }
+        const g = ctx.createRadialGradient(BCX - 30, BCY - 34, 6, BCX, BCY, R0 * 1.2);
+        g.addColorStop(0, rgba(PAPER, 0.08));
+        g.addColorStop(1, rgba(LILAC, 0.2));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(xs[0], ys[0]);
+        for (let k = 1; k < SAMPLES; k += 1) {
+            ctx.lineTo(xs[k], ys[k]);
+        }
+        ctx.closePath();
+        ctx.fill();
+        // 둘레 조각마다 Film thickness = D_FILM × (R0/r)² — 늘어난 곳은 얇아져 색이 바뀐다
+        ctx.lineWidth = 4.5;
+        ctx.lineCap = 'round';
+        for (let k = 0; k < SAMPLES; k += 1) {
+            const k2 = (k + 1) % SAMPLES;
+            const phi = (k + 0.5) / SAMPLES * Math.PI * 2;
+            const rr = (rs[k] + rs[k2]) / 2;
+            const d = D_FILM * (R0 / rr) * (R0 / rr) * (1 + 0.22 * Math.sin(phi - 1.2));
+            ctx.strokeStyle = rgba(filmColor(d, 1.3), 0.95);
+            ctx.beginPath();
+            ctx.moveTo(xs[k], ys[k]);
+            ctx.lineTo(xs[k2], ys[k2]);
+            ctx.stroke();
+        }
+        ctx.lineCap = 'butt';
+        ctx.fillStyle = rgba(PAPER, 0.8);
+        ctx.beginPath();
+        ctx.ellipse(BCX - R0 * 0.42, BCY - R0 * 0.45, 9, 5, -0.7, 0, Math.PI * 2);
+        ctx.fill();
+        if (flashMs >= 0) {
+            const k = flashMs / 500;
+            const px = BCX + Math.cos(lastPsi) * (R0 + 22);
+            const py = BCY + Math.sin(lastPsi) * (R0 + 22);
+            ctx.strokeStyle = rgba(MINT, 0.9 * (1 - k));
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(px, py, 5 + k * 14, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        for (let n = MODE_MIN; n <= MODE_MAX; n += 1) {
+            const row = n - MODE_MIN;
+            const a = modeAmp(n);
+            panelRow(row, MODE_LABELS[row], (a * 100).toFixed(1) + ' %');
+            const y = 112 + row * 34 + 8;
+            ctx.fillStyle = rgba(INK, 1);
+            ctx.fillRect(84, y, 76, 5);
+            ctx.fillStyle = rgba(n === 2 ? MINT : (n === 3 ? SKY : PINK), 1);
+            ctx.fillRect(84, y, 76 * Math.min(a / 0.12, 1), 5);
+        }
+    }
+    function after() {
+        report();
+        draw();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        wake();
+        const p = toScene(ev);
+        poke(Math.atan2(p[1] - BCY, p[0] - BCX));
+        after();
+    });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        let psi = NaN;
+        if (k === 'ArrowLeft') {
+            psi = Math.PI;
+        }
+        else if (k === 'ArrowRight') {
+            psi = 0;
+        }
+        else if (k === 'ArrowUp') {
+            psi = -Math.PI / 2;
+        }
+        else if (k === 'ArrowDown') {
+            psi = Math.PI / 2;
+        }
+        else if (k === 'Enter' || k === ' ' || k === 'Spacebar') {
+            psi = lastPsi + 2.4;
+        }
+        if (!isNaN(psi)) {
+            ev.preventDefault();
+            wake();
+            poke(psi);
+            after();
+        }
+        else if (k === 'Home') {
+            ev.preventDefault();
+            wake();
+            rest();
+            after();
+        }
+    });
+    if (pokeBtn) {
+        pokeBtn.addEventListener('click', function () {
+            wake();
+            btnPokes += 1;
+            poke(btnPokes * 2.4);
+            after();
+        });
+    }
+    if (restBtn) {
+        restBtn.addEventListener('click', function () { wake(); rest(); after(); });
+    }
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    let looping = false;
+    function frame(ts) {
+        if (!looping) {
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (looping) {
+            return;
+        }
+        looping = true;
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        looping = false;
+        window.cancelAnimationFrame(rafId);
+    }
+    // 움직임 줄이기 설정을 페이지를 연 채로 바꿔도 바로 따른다 — 켜면 루프를 멈추고 끝난 장면 한 장, 끄면 다시 돈다
+    function applyMotion() {
+        still = reduceQuery.matches;
+        if (still) {
+            stopLoop();
+            settle();
+            draw();
+        }
+        else {
+            startLoop();
+        }
+    }
+    reduceQuery.addEventListener('change', applyMotion);
+    applyMotion();
+    return function () {
+        stopLoop();
+        reduceQuery.removeEventListener('change', applyMotion);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

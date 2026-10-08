@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>野原の上を風に乗って流れる十四個のシャボン玉が、それぞれ色と反射を計算する場面 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="野原の上を風に乗って流れる玉ごとに膜の色と反射、太陽のハイライトを計算し、寿命が来ると縁から割れる場面。玉を押すと割れ、空いた所を押すと太陽が移ります"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">風に乗って流れ、寿命が来ると割れています</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="sun" type="button">太陽を動かす</button>
+    <button class="hs__btn" data-role="pause" type="button" aria-pressed="false">停止</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막을 얹어 명도 차로 방울이 읽힌다 (막의 무지갯빛은 이 표가 아니라 두께 계산에서 나온다)
+    const BG = [29, 26, 44];
+    const DEEP = [44, 39, 64];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 장면이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 왼쪽 칸의 수치 — 이름표 한 줄 + 값 한 줄
+    function panelRow(row, label, value) {
+        const y = 112 + row * 34;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.62);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, 16, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 15px sans-serif';
+        ctx.fillText(value, 16, y + 18);
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 2D 값 노이즈 — 정수 격자 꼭짓점마다 시드 난수 값(−1~1)을 두고 그 사이를 부드러운 곡선으로 잇는다
+    const NOISE_SEED = 465;
+    const noisePerm = new Uint8Array(512);
+    const noiseVal = new Float32Array(256);
+    {
+        const nr = makeRng(NOISE_SEED);
+        for (let i = 0; i < 256; i += 1) {
+            noisePerm[i] = i;
+            noiseVal[i] = nr() * 2 - 1;
+        }
+        for (let i = 255; i > 0; i -= 1) {
+            const j = Math.floor(nr() * (i + 1));
+            const t = noisePerm[i];
+            noisePerm[i] = noisePerm[j];
+            noisePerm[j] = t;
+        }
+        for (let i = 0; i < 256; i += 1) {
+            noisePerm[i + 256] = noisePerm[i];
+        }
+    }
+    function noiseHash(ix, iy) {
+        return noiseVal[noisePerm[noisePerm[ix & 255] + (iy & 255)]];
+    }
+    function noise2(x, y) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = x - xi;
+        const fy = y - yi;
+        const u = fx * fx * (3 - 2 * fx);
+        const v = fy * fy * (3 - 2 * fy);
+        const a = noiseHash(xi, yi);
+        const b = noiseHash(xi + 1, yi);
+        const c = noiseHash(xi, yi + 1);
+        const d = noiseHash(xi + 1, yi + 1);
+        return lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    // 막의 굴절률 — 비눗물 막을 물과 같은 값으로 둔다
+    const FILM_N = 1.33;
+    // 세 파장(nm) — 화면의 빨강·초록·파랑 채널을 이 파장 하나씩으로 대신한다
+    const WAVE_RGB_NM = [650, 530, 450];
+    // 표를 만들 두께 범위(nm) — 1nm 눈금마다 세 채널 값을 미리 구해 둔다
+    const LUT_D_MAX = 1600;
+    const filmLut = new Float32Array((LUT_D_MAX + 1) * 3);
+    // 막 앞면과 뒷면에서 튕긴 두 빛이 두께만큼 어긋나 파장마다 남는 몫 — sin²(2π·n·d/λ).
+    // 앞면에서 튕긴 빛만 위상이 뒤집히므로 두께 0 이면 세 채널이 모두 0(검은 막). 값은 0~1 로 맞춘 비율이지 실제 반사율(몇 %)이 아니다
+    function reflectRGB(dNm) {
+        const out = [0, 0, 0];
+        for (let c = 0; c < 3; c += 1) {
+            const s = Math.sin(2 * Math.PI * FILM_N * dNm / WAVE_RGB_NM[c]);
+            out[c] = s * s;
+        }
+        return out;
+    }
+    for (let d = 0; d <= LUT_D_MAX; d += 1) {
+        const r = reflectRGB(d);
+        filmLut[d * 3] = r[0];
+        filmLut[d * 3 + 1] = r[1];
+        filmLut[d * 3 + 2] = r[2];
+    }
+    // 비스듬히 보면 빛이 막 안에서 꺾여 지나므로 어긋남이 cos(꺾인 각)배로 줄어든다 — cosView 는 시선과 법선 사이 각의 cos
+    function insideCos(cosView) {
+        const s2 = (1 - cosView * cosView) / (FILM_N * FILM_N);
+        return Math.sqrt(1 - s2);
+    }
+    // 두께 d(nm) 에서 채널 c 의 몫 — 표를 1nm 사이에서 선형 보간해 읽는다
+    function filmAt(dNm, c) {
+        const d = clamp(dNm, 0, LUT_D_MAX - 1);
+        const i = Math.floor(d);
+        const f = d - i;
+        return filmLut[i * 3 + c] * (1 - f) + filmLut[(i + 1) * 3 + c] * f;
+    }
+    // 캔버스 선·면에 쓸 막 색 — 어두운 무대 위에 세 채널 몫을 밝기로 얹는다
+    function filmColor(dNm, gain) {
+        return [BG[0] + filmAt(dNm, 0) * 235 * gain, BG[1] + filmAt(dNm, 1) * 235 * gain, BG[2] + filmAt(dNm, 2) * 235 * gain];
+    }
+    // 화소 하나를 막 색으로 — under 는 방울 뒤 바탕색, nx·ny·z 는 구면 위 법선(z 는 시선 쪽 성분)
+    function shadeFilm(px, o, dNm, nx, ny, z, under, alpha) {
+        const dEff = dNm * insideCos(z);
+        // 가장자리일수록 시선이 막을 비스듬히 지나 색이 진하다 — 가운데는 뒤 바탕이 비쳐 보이게 낮춘다
+        const amp = 0.22 + 0.78 * Math.pow(1 - z, 0.6);
+        // 왼쪽 위에서 오는 빛 하나의 반짝임
+        const hl = Math.pow(Math.max(0, nx * -0.42 + ny * -0.5 + z * 0.76), 60);
+        for (let c = 0; c < 3; c += 1) {
+            const v = under[c] + filmAt(dEff, c) * 235 * amp + hl * 220;
+            px[o + c] = under[c] + (v - under[c]) * alpha;
+        }
+        px[o + 3] = 255;
+    }
+    function makePix(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const pc = c.getContext('2d');
+        if (!pc) {
+            return null;
+        }
+        const img = pc.createImageData(w, h);
+        return { cvs: c, pc: pc, img: img, px: img.data, w: w, h: h };
+    }
+    // putImageData 는 캔버스 변환(배율)을 무시한다 — 작은 캔버스에 올린 뒤 drawImage 로 장면 좌표에 그린다
+    function showPix(p, x, y) {
+        p.pc.putImageData(p.img, 0, 0);
+        ctx.drawImage(p.cvs, x, y, p.w, p.h);
+    }
+    // 바람 — 노이즈 값을 흐름 함수로 보고 그 기울기를 90도 돌려 소용돌이 장을 만든다.
+    // 흘러드는 곳·빠져나가는 곳이 없는 장이라 방울이 한 점에 몰리지 않고 같은 소용돌이를 함께 탄다
+    // 노이즈 격자 한 칸 = 1/WIND_SCALE px — 소용돌이 하나의 크기가 이 칸만 하다
+    const WIND_SCALE = 0.004;
+    // 바람 세기(px/s) — 흐름 함수의 기울기(노이즈 격자 단위)에 곱한다. 격자 크기를 바꿔도 세기는 그대로다
+    const WIND_SPEED = 52;
+    // 장 전체가 오른쪽으로 밀려가는 바탕 바람(px/s)
+    const WIND_BASE_X = 16;
+    // 노이즈 장이 시간에 따라 흘러가는 빠르기(격자 칸/초)
+    const WIND_DRIFT = 0.16;
+    function windAt(x, y, tSec, scale) {
+        const z = tSec * WIND_DRIFT;
+        const gx = x * scale;
+        const gy = y * scale;
+        const e = 0.01;
+        // 흐름 함수 ψ 의 기울기를 격자 단위로 — (∂ψ/∂y, −∂ψ/∂x) 가 소용돌이 바람
+        const dy = (noise2(gx + z, gy + e) - noise2(gx + z, gy - e)) / (2 * e);
+        const dx = (noise2(gx + z + e, gy) - noise2(gx + z - e, gy)) / (2 * e);
+        return [WIND_BASE_X + dy * WIND_SPEED, -dx * WIND_SPEED];
+    }
+    // 무게에서 부력을 뺀 아주 약한 落ち着きました(px/s²) — 아래(+y)로 끈다
+    const NET_SINK = 9;
+    // 공기 저항(1/s) — 방울 속도와 바람 속도의 차에 비례해 그 차를 줄인다
+    const DRAG_K = 1.6;
+    // 한 스텝 적분 — 가속 = 落ち着きました + 저항×(바람 − 속도). 속도를 먼저 바꾸고 그 속도로 위치를 옮긴다
+    function driftStep(b, dt, tSec, scale) {
+        const w = windAt(b.x, b.y, tSec, scale);
+        b.vx += DRAG_K * (w[0] - b.vx) * dt;
+        b.vy += (NET_SINK + DRAG_K * (w[1] - b.vy)) * dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+    }
+    // 09 — 들판 위 방울마다 膜の厚さ 색·흘러내림·노이즈 바람·가장자리 반사·해 하이라이트를 함께 계산하고, 수명이 다하면 가장자리부터 터뜨린다
+    // 장면의 방울 수
+    const BUBBLE_N = 14;
+    // 해의 방향(도) — 0 은 오른쪽, 90 은 바로 위. 하이라이트는 이 방향 빛의 반사로 계산한다
+    const SUN_DEG = 38;
+    // 방울 평균 수명(초) — 방울마다 0.7~1.3배로 흩는다
+    const LIFE_S = 6.5;
+    // 가장자리에서 열린 구멍이 넓어지는 빠르기(px/s)
+    const HOLE_V = 420;
+    // 터질 때 튀는 물방울 수와 중력(px/s²)
+    const SPRAY_N = 8;
+    const SPRAY_G = 700;
+    const SEED = 465;
+    const SKY_TOP = [150, 200, 250];
+    const SKY_LOW = [255, 226, 204];
+    const HILL_FAR = [178, 214, 196];
+    const GRASS = [128, 196, 150];
+    const GRASS_DEEP = [84, 150, 118];
+    const TXT_FLOW = '風に乗って流れ、寿命が来ると割れています';
+    const TXT_SUN = '太陽の向きを動かしました';
+    const TXT_POPPED = '玉をひとつ割りました';
+    const TXT_PAUSE = '停止';
+    const sunBtn = root.querySelector('[data-role="sun"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const bubbles = [];
+    const sprays = [];
+    const back = makePix(W, H);
+    const frameBuf = makePix(W, H);
+    let rnd = makeRng(SEED);
+    let tSec = 0;
+    let sunDeg = SUN_DEG;
+    let paused = false;
+    let popped = 0;
+    let lastText = TXT_FLOW;
+    function hillFar(x) { return 168 + 20 * noise2(x * 0.008, 3.3); }
+    function hillNear(x) { return 206 + 22 * noise2(x * 0.006 + 7, 1.1); }
+    // 들판 — 한 번 화소로 구워 둔다(하늘 그라디언트·먼 언덕·가까운 풀밭·구름·꽃점)
+    function bakeMeadow() {
+        if (!back) {
+            return;
+        }
+        const px = back.px;
+        for (let x = 0; x < W; x += 1) {
+            const yf = hillFar(x);
+            const yn = hillNear(x);
+            for (let y = 0; y < H; y += 1) {
+                let c;
+                if (y > yn) {
+                    const k = smooth((y - yn) / 90);
+                    c = mix(GRASS, GRASS_DEEP, k);
+                    const t = noise2(x * 0.3, y * 0.09) * 10;
+                    c = [c[0] + t, c[1] + t, c[2] + t];
+                }
+                else if (y > yf) {
+                    c = mix(HILL_FAR, GRASS, smooth((y - yf) / 60) * 0.4);
+                }
+                else {
+                    c = mix(SKY_TOP, SKY_LOW, smooth(y / 190));
+                    const cl = smooth((noise2(x * 0.011, y * 0.035 + 2) - 0.15) * 2.2);
+                    c = mix(c, PAPER, cl * 0.55);
+                }
+                const o = (y * W + x) * 4;
+                px[o] = c[0];
+                px[o + 1] = c[1];
+                px[o + 2] = c[2];
+                px[o + 3] = 255;
+            }
+        }
+        const fr = makeRng(SEED + 7);
+        const FLOWERS = [PINK, PAPER, PEACH, LILAC];
+        for (let i = 0; i < 70; i += 1) {
+            const x = Math.floor(fr() * W);
+            const y = Math.floor(hillNear(x) + 6 + fr() * (H - hillNear(x) - 8));
+            const c = FLOWERS[i % FLOWERS.length];
+            for (let dy = 0; dy < 2; dy += 1) {
+                for (let dx = 0; dx < 2; dx += 1) {
+                    const o = ((Math.min(y + dy, H - 1)) * W + Math.min(x + dx, W - 1)) * 4;
+                    px[o] = c[0];
+                    px[o + 1] = c[1];
+                    px[o + 2] = c[2];
+                }
+            }
+        }
+    }
+    function spawn(b, first, i) {
+        b.r = 10 + rnd() * 22;
+        b.d0 = 300 + rnd() * 400;
+        b.ph = rnd() * 10;
+        b.life = LIFE_S * (0.7 + 0.6 * rnd());
+        b.pop = -1;
+        b.vx = 0;
+        b.vy = 0;
+        if (first) {
+            b.x = 30 + (i + rnd() * 0.8) / BUBBLE_N * 420;
+            b.y = 40 + rnd() * 140;
+            // 처음 장면부터 0.35초 뒤·0.42초 간격으로 차례로 수명이 다하게 나이를 흩어 둔다
+            b.age = Math.max(b.life - (0.35 + i * 0.42), 0);
+        }
+        else {
+            b.x = -b.r - rnd() * 40;
+            b.y = 40 + rnd() * 140;
+            b.age = 0;
+        }
+    }
+    function reset() {
+        rnd = makeRng(SEED);
+        bubbles.length = 0;
+        sprays.length = 0;
+        for (let i = 0; i < BUBBLE_N; i += 1) {
+            const b = { x: 0, y: 0, vx: 0, vy: 0, r: 0, d0: 0, ph: 0, age: 0, life: 1, pop: -1, hx: 0, hy: 0 };
+            spawn(b, true, i);
+            bubbles.push(b);
+        }
+        popped = 0;
+    }
+    // 가장자리부터 터뜨리기 — 위쪽 테두리 한 점에 구멍을 열고 물방울을 흩뿌린다
+    function startPop(b) {
+        if (b.pop >= 0) {
+            return;
+        }
+        const a = -Math.PI / 2 + (rnd() - 0.5) * 1.6;
+        b.hx = Math.cos(a) * 0.92;
+        b.hy = Math.sin(a) * 0.92;
+        b.pop = 0;
+        for (let k = 0; k < SPRAY_N; k += 1) {
+            const s = a + (k / SPRAY_N - 0.5) * 2.4;
+            sprays.push({ x: b.x + Math.cos(s) * b.r, y: b.y + Math.sin(s) * b.r, vx: Math.cos(s) * 90, vy: Math.sin(s) * 90 - 40, life: 0.9 });
+        }
+    }
+    function finishPop(b) {
+        popped += 1;
+        spawn(b, false, 0);
+    }
+    function step() {
+        if (paused) {
+            return;
+        }
+        const dt = FIXED_DT / 1000;
+        tSec += dt;
+        for (const b of bubbles) {
+            driftStep(b, dt, tSec, WIND_SCALE);
+            b.age += dt;
+            if (b.x > W + b.r) {
+                b.x = -b.r;
+            }
+            if (b.y > H + b.r || b.y < -b.r - 60) {
+                finishPop(b);
+                continue;
+            }
+            if (b.pop < 0 && b.age >= b.life) {
+                startPop(b);
+            }
+            if (b.pop >= 0) {
+                b.pop += FIXED_DT;
+                if (HOLE_V * b.pop / 1000 > b.r * 2.1) {
+                    finishPop(b);
+                }
+            }
+        }
+        for (let i = sprays.length - 1; i >= 0; i -= 1) {
+            const s = sprays[i];
+            s.vy += SPRAY_G * dt;
+            s.x += s.vx * dt;
+            s.y += s.vy * dt;
+            s.life -= dt;
+            if (s.life <= 0) {
+                sprays.splice(i, 1);
+            }
+        }
+    }
+    function settle() {
+        for (const b of bubbles) {
+            if (b.pop >= 0) {
+                finishPop(b);
+            }
+        }
+        sprays.length = 0;
+        say(lastText);
+    }
+    function demoTick(t) {
+        // 시연 — 해가 38° 를 가운데로 ±25° 오가며 하이라이트 자리를 옮긴다
+        sunDeg = SUN_DEG + 25 * Math.sin(t / 900);
+    }
+    function paintBubble(b, px, lx, ly, lz) {
+        const fade = b.pop < 0 ? smooth(b.age / 0.4) : 1;
+        const rr = b.r * (0.6 + 0.4 * fade);
+        const x0 = Math.max(Math.floor(b.x - rr), 0);
+        const x1 = Math.min(Math.ceil(b.x + rr), W - 1);
+        const y0 = Math.max(Math.floor(b.y - rr), 0);
+        const y1 = Math.min(Math.ceil(b.y + rr), H - 1);
+        const popR = b.pop >= 0 ? HOLE_V * b.pop / 1000 : -1;
+        const hx = b.x + b.hx * rr;
+        const hy = b.y + b.hy * rr;
+        const drain = b.age / b.life;
+        for (let y = y0; y <= y1; y += 1) {
+            const ny = (y + 0.5 - b.y) / rr;
+            for (let x = x0; x <= x1; x += 1) {
+                const nx = (x + 0.5 - b.x) / rr;
+                const r2 = nx * nx + ny * ny;
+                if (r2 >= 1) {
+                    continue;
+                }
+                const o = (y * W + x) * 4;
+                if (popR >= 0) {
+                    const dh = Math.hypot(x + 0.5 - hx, y + 0.5 - hy);
+                    if (dh < popR) {
+                        continue;
+                    }
+                    if (dh < popR + 2) {
+                        px[o] = 252;
+                        px[o + 1] = 250;
+                        px[o + 2] = 244;
+                        continue;
+                    }
+                }
+                const z = Math.sqrt(1 - r2);
+                // 膜の厚さ — 아래가 두껍고, 나이가 들수록 위쪽부터 얇아진다(흘러내림), 노이즈로 얼룩
+                const d = Math.max(b.d0 * (1 + 0.3 * ny) * Math.exp(-1.1 * drain * (1 - ny) * 0.5) + 50 * noise2(nx * 2 + b.ph + tSec * 0.3, ny * 2), 0);
+                const dEff = d * insideCos(z);
+                // 가장자리 반사 — 반사 방향이 위를 보면 하늘, 아래를 보면 풀빛
+                const m = 1 - z;
+                const f = 0.04 + 0.96 * m * m * m * m * m;
+                const rx = 2 * z * nx;
+                const ry = 2 * z * ny;
+                const rz = 2 * z * z - 1;
+                const up = -ry;
+                const envC = up > 0 ? mix(SKY_LOW, SKY_TOP, Math.min(up, 1)) : GRASS;
+                const spec = Math.pow(Math.max(rx * lx + ry * ly + rz * lz, 0), 140);
+                const amp = 0.3 + 0.6 * Math.pow(m, 0.6);
+                const edge = clamp((1 - Math.sqrt(r2)) * rr, 0, 1) * fade;
+                for (let c = 0; c < 3; c += 1) {
+                    const v = px[o + c] * (1 - f * 0.8) + envC[c] * f + filmAt(dEff, c) * 200 * amp + spec * 255;
+                    px[o + c] = px[o + c] + (v - px[o + c]) * edge;
+                }
+            }
+        }
+    }
+    function draw() {
+        if (!back || !frameBuf) {
+            clearStage();
+            return;
+        }
+        frameBuf.px.set(back.px);
+        const s = sunDeg * Math.PI / 180;
+        // 해 쪽 방향(화면 아래가 +y, 보는 사람 쪽이 +z)
+        const lx = Math.cos(s) * 0.75;
+        const ly = -Math.sin(s) * 0.75;
+        const lz = 0.66;
+        for (const b of bubbles) {
+            paintBubble(b, frameBuf.px, lx, ly, lz);
+        }
+        showPix(frameBuf, 0, 0);
+        const sx = 240 + Math.cos(s) * 200;
+        const sy = 168 - Math.sin(s) * 140;
+        const g = ctx.createRadialGradient(sx, sy, 4, sx, sy, 70);
+        g.addColorStop(0, rgba(PAPER, 0.95));
+        g.addColorStop(0.2, rgba(PEACH, 0.45));
+        g.addColorStop(1, rgba(PEACH, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(sx - 70, sy - 70, 140, 140);
+        ctx.fillStyle = rgba(SKY, 0.95);
+        for (const sp of sprays) {
+            ctx.beginPath();
+            ctx.arc(sp.x, sp.y, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(INK, 0.75);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText('太陽の角度 · 割れた玉', W - 14, H - 34);
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.font = '700 14px sans-serif';
+        ctx.fillText(String(Math.round(sunDeg)) + '° · ' + String(popped), W - 14, H - 16);
+    }
+    function after(text) {
+        lastText = text;
+        say(text);
+        draw();
+    }
+    function setSun(deg) {
+        sunDeg = clamp(deg, 15, 165);
+        after(TXT_SUN);
+    }
+    function popNow(b) {
+        if (still) {
+            finishPop(b);
+        }
+        else {
+            startPop(b);
+        }
+        after(TXT_POPPED);
+    }
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+        after(v ? TXT_PAUSE : TXT_FLOW);
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        wake();
+        const p = toScene(ev);
+        for (const b of bubbles) {
+            if (b.pop < 0 && Math.hypot(p[0] - b.x, p[1] - b.y) < b.r + 4) {
+                popNow(b);
+                return;
+            }
+        }
+        // 방울이 아닌 곳 — 화면 아래 가운데에서 본 그 자리 방향이 해의 방향이 된다
+        setSun(Math.atan2(300 - p[1], p[0] - 240) * 180 / Math.PI);
+    });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k === 'ArrowLeft') {
+            ev.preventDefault();
+            wake();
+            setSun(sunDeg + 10);
+        }
+        else if (k === 'ArrowRight') {
+            ev.preventDefault();
+            wake();
+            setSun(sunDeg - 10);
+        }
+        else if (k === 'Enter') {
+            ev.preventDefault();
+            wake();
+            let best = null;
+            for (const b of bubbles) {
+                if (b.pop < 0 && (!best || b.age / b.life > best.age / best.life)) {
+                    best = b;
+                }
+            }
+            if (best) {
+                popNow(best);
+            }
+        }
+        else if (k === ' ' || k === 'Spacebar') {
+            ev.preventDefault();
+            wake();
+            setPaused(!paused);
+        }
+        else if (k === 'Home') {
+            ev.preventDefault();
+            wake();
+            reset();
+            sunDeg = SUN_DEG;
+            after(TXT_FLOW);
+        }
+    });
+    if (sunBtn) {
+        sunBtn.addEventListener('click', function () { wake(); setSun(sunDeg + 30 > 160 ? 20 : sunDeg + 30); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); });
+    }
+    bakeMeadow();
+    reset();
+    say(TXT_FLOW);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    let looping = false;
+    function frame(ts) {
+        if (!looping) {
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (looping) {
+            return;
+        }
+        looping = true;
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        looping = false;
+        window.cancelAnimationFrame(rafId);
+    }
+    // 움직임 줄이기 설정을 페이지를 연 채로 바꿔도 바로 따른다 — 켜면 루프를 멈추고 끝난 장면 한 장, 끄면 다시 돈다
+    function applyMotion() {
+        still = reduceQuery.matches;
+        if (still) {
+            stopLoop();
+            settle();
+            draw();
+        }
+        else {
+            startLoop();
+        }
+    }
+    reduceQuery.addEventListener('change', applyMotion);
+    applyMotion();
+    return function () {
+        stopLoop();
+        reduceQuery.removeEventListener('change', applyMotion);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>
