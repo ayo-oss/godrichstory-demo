@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Progress Ring Set by Card Moves — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="kb is-demo" id="kb"><div class="kb__row"><div class="kb__board" data-role="board"><div class="kb__track" data-role="track"><div class="kb__col" data-role="col"><div class="kb__head"><span class="kb__name">Left</span></div></div><div class="kb__col" data-role="col"><div class="kb__head"><span class="kb__name">Done</span></div></div><button class="kb__card" type="button" data-role="card" data-tone="0"><span class="kb__label" data-role="label">Login screen</span></button><button class="kb__card" type="button" data-role="card" data-tone="1"><span class="kb__label" data-role="label">Payment link</span></button><button class="kb__card" type="button" data-role="card" data-tone="2"><span class="kb__label" data-role="label">Alert settings</span></button><button class="kb__card" type="button" data-role="card" data-tone="3"><span class="kb__label" data-role="label">Search filter</span></button></div><div class="kb__cursor" data-role="cursor"></div></div><div class="kb__ringbox"><div class="kb__dial"><svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><circle class="kb__arc kb__arc--bg" cx="32" cy="32" r="24"></circle><circle class="kb__arc kb__arc--a" data-role="arc-a" cx="32" cy="32" r="24"></circle><circle class="kb__arc kb__arc--b" data-role="arc-b" cx="32" cy="32" r="24"></circle></svg><span class="kb__pct" data-role="pct"></span></div><span class="kb__ringname">Progress</span><span class="kb__ringdone" data-role="done"></span></div></div><p class="kb__meta" data-role="meta"></p></div>
+</main>
+<script>
+(function () {
+
+  var root = document.getElementById('kb');
+  var CLS = { demo: 'is-demo', held: 'is-held' };
+  var off = [];
+  var raf = 0;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function q(sel) {
+    return root.querySelector(sel);
+  }
+  function qa(sel) {
+    return Array.prototype.slice.call(root.querySelectorAll(sel));
+  }
+  function on(target, type, fn) {
+    target.addEventListener(type, fn);
+    off.push(function () { target.removeEventListener(type, fn); });
+  }
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  // 칸 크기는 화면 높이에 맞춰 U(4 또는 6) 한 단위로 정한다
+  var U = 4;
+  var CARD_H = 24;
+  var STEP = 28;
+  var HEAD = 20;
+  var PAD = 4;
+  var GAP = 8;
+  var onUnit = function () { };
+  function setUnit() {
+    U = window.innerHeight >= 260 ? 6 : 4;
+    CARD_H = 6 * U;
+    STEP = 7 * U;
+    HEAD = 5 * U;
+    PAD = U;
+    GAP = 2 * PAD;
+    onUnit();
+  }
+  var CYCLE_MS = 2000;
+
+  var board = q('[data-role="board"]');
+  var cursorEl = q('[data-role="cursor"]');
+  var metaEl = q('[data-role="meta"]');
+  var colEls = qa('[data-role="col"]');
+  var COLS = colEls.length;
+  var boardW = 0;
+  var boardH = 0;
+  var colW = 0;
+  var cols = [];
+  var cards = qa('[data-role="card"]').map(function (el, i) {
+    return { el: el, i: i, x: 0, y: 0, vx: 0, vy: 0, rot: 0, sc: 1, lift: 0 };
+  });
+  var demo = !reduce;
+  var nowMs = 0;
+  var lastMeta = '';
+  var onStop = function () { };
+  var afterStep = function (dt) { };
+  var extraSettle = function () { };
+
+  function slotX(c) {
+    return c * (colW + GAP) + PAD;
+  }
+  function slotY(r) {
+    return HEAD + 2 * PAD + r * STEP;
+  }
+  function measure() {
+    setUnit();
+    boardW = board.clientWidth;
+    colW = FIXED_COL > 0 ? FIXED_COL : (boardW - GAP * (COLS - 1)) / COLS;
+    boardH = slotY(ROWS - 1) + CARD_H + PAD;
+    board.style.height = boardH + 'px';
+    board.style.setProperty('--head', HEAD + 'px');
+    colEls.forEach(function (el, c) {
+      el.style.left = c * (colW + GAP) + 'px';
+      el.style.width = colW + 'px';
+      el.style.height = boardH + 'px';
+    });
+    cards.forEach(function (c) {
+      c.el.style.width = (colW - 2 * PAD) + 'px';
+      c.el.style.height = CARD_H + 'px';
+    });
+  }
+  function locate(i) {
+    for (var c = 0; c < cols.length; c++) {
+      var r = cols[c].indexOf(i);
+      if (r >= 0) return { c: c, r: r };
+    }
+    return { c: 0, r: 0 };
+  }
+  function spring(c, tx, ty, k, d, dt) {
+    c.vx += (k * (tx - c.x) - d * c.vx) * dt;
+    c.x += c.vx * dt;
+    c.vy += (k * (ty - c.y) - d * c.vy) * dt;
+    c.y += c.vy * dt;
+  }
+  function draw() {
+    cards.forEach(function (c) {
+      c.el.style.transform = 'translate3d(' + c.x.toFixed(2) + 'px,' + c.y.toFixed(2) + 'px,0) rotate(' + c.rot.toFixed(2) + 'deg) scale(' + c.sc.toFixed(3) + ')';
+    });
+  }
+  function cardAt(t) {
+    var n = t;
+    while (n && n !== board) {
+      for (var k = 0; k < cards.length; k++) {
+        if (cards[k].el === n) return cards[k];
+      }
+      n = n.parentElement;
+    }
+    return null;
+  }
+  function showCursor(p) {
+    if (!p) { cursorEl.style.opacity = '0'; return; }
+    cursorEl.style.opacity = '1';
+    cursorEl.style.transform = 'translate3d(' + p.x.toFixed(1) + 'px,' + p.y.toFixed(1) + 'px,0)';
+  }
+  // keys: [시각 ms, x, y] 목록. 키 사이는 smoothstep 으로 잇는다
+  function keyAt(t, keys) {
+    var i = 0;
+    while (i < keys.length - 2 && t > keys[i + 1][0]) i++;
+    var a = keys[i];
+    var b = keys[i + 1];
+    var u = clamp((t - a[0]) / (b[0] - a[0]), 0, 1);
+    u = u * u * (3 - 2 * u);
+    return { x: a[1] + (b[1] - a[1]) * u, y: a[2] + (b[2] - a[2]) * u };
+  }
+  // 열·행 소수 좌표를 보드 픽셀로 바꾼다 (행 r 의 카드 중심선이 소수 r)
+  function pathPoint(t, keys) {
+    var k = keyAt(t, keys);
+    return { x: k.x * (colW + GAP) + colW / 2, y: slotY(0) + k.y * STEP + CARD_H / 2 };
+  }
+  function settleNow() {
+    cards.forEach(function (c) {
+      var t = targetOf(c);
+      c.x = t.x; c.y = t.y; c.vx = 0; c.vy = 0; c.rot = 0; c.sc = 1; c.lift = 0;
+    });
+    extraSettle();
+  }
+  // reduce: 보간 없이 입력 직후 목표 위치를 바로 그린다
+  function sync() {
+    if (!reduce) return;
+    settleNow();
+    draw();
+    report();
+  }
+  function report() {
+    var m = metaText();
+    if (m !== lastMeta) { lastMeta = m; metaEl.textContent = m; }
+  }
+  function stopDemo() {
+    if (!demo) return;
+    demo = false;
+    root.classList.remove(CLS.demo);
+    showCursor(null);
+    onStop();
+  }
+  function settleClass(c, h) {
+    if (c.el.classList.contains(CLS.held) && Math.abs(c.x - h.x) + Math.abs(c.y - h.y) < 1.5 && Math.abs(c.vx) + Math.abs(c.vy) < 30) {
+      c.el.classList.remove(CLS.held);
+    }
+  }
+  var t0 = -1;
+  var lastTs = 0;
+  var prevT = 0;
+  function frame(ts) {
+    if (t0 < 0) { t0 = ts; lastTs = ts; }
+    var dt = clamp((ts - lastTs) / 1000, 0.001, 0.033);
+    lastTs = ts;
+    nowMs = ts;
+    var t = (ts - t0) % CYCLE_MS;
+    if (demo) {
+      if (t < prevT) demoReset();
+      demoAt(t);
+    }
+    prevT = t;
+    cards.forEach(function (c) { stepCard(c, dt); });
+    afterStep(dt);
+    draw();
+    report();
+    raf = requestAnimationFrame(frame);
+  }
+  function boot() {
+    measure();
+    cols = initialCols();
+    settleNow();
+    draw();
+    report();
+    on(window, 'resize', function () { measure(); settleNow(); draw(); });
+    if (reduce) {
+      root.classList.remove(CLS.demo);
+    } else {
+      raf = requestAnimationFrame(frame);
+    }
+  }
+
+  var RING_RADIUS = 24;
+  var RING_LERP = 0.12;
+  var DONE_COLUMN = 1;
+  var ARC_START = -90;
+  var ROWS = 4;
+  var FIXED_COL = 0;
+  var CIRC = 2 * Math.PI * RING_RADIUS;
+  var arcA = q('[data-role="arc-a"]');
+  var arcB = q('[data-role="arc-b"]');
+  var pctEl = q('[data-role="pct"]');
+  var doneEl = q('[data-role="done"]');
+  var ring = 0;
+  var MOVES = [[250, 0], [650, 1], [1050, 2], [1450, 3]];
+  var demoN = 0;
+  [arcA, arcB].forEach(function (a) {
+    a.setAttribute('r', String(RING_RADIUS));
+    a.style.strokeDasharray = CIRC.toFixed(2);
+    a.style.transform = 'rotate(' + ARC_START + 'deg)';
+  });
+
+  function initialCols() {
+    return [[0, 1, 2], [3]];
+  }
+  function targetOf(c) {
+    var s = locate(c.i);
+    return { x: slotX(s.c), y: slotY(s.r) };
+  }
+  function toggleCard(c) {
+    var s = locate(c.i);
+    cols[s.c].splice(s.r, 1);
+    cols[1 - s.c].push(c.i);
+  }
+  function stepCard(c, dt) {
+    var h = targetOf(c);
+    spring(c, h.x, h.y, 170, 21, dt);
+  }
+  // 핵심: 호의 길이 = Done 열 카드 수 ÷ 전체 카드 수. 목표가 바뀌면 RING_LERP 만큼씩 따라간다
+  function goal() {
+    return cols[DONE_COLUMN].length / cards.length;
+  }
+  function paintRing() {
+    var rest = CIRC * (1 - ring);
+    arcA.style.strokeDashoffset = rest.toFixed(2);
+    arcB.style.strokeDashoffset = rest.toFixed(2);
+    arcB.style.opacity = (ring * ring).toFixed(3);
+    pctEl.textContent = Math.round(ring * 100) + '%';
+    doneEl.textContent = cols[DONE_COLUMN].length + '/' + cards.length;
+  }
+  afterStep = function (dt) {
+    ring += (goal() - ring) * (1 - Math.pow(1 - RING_LERP, dt * 60));
+    paintRing();
+  };
+  extraSettle = function () {
+    ring = goal();
+    paintRing();
+  };
+  on(board, 'click', function (e) {
+    var c = cardAt(e.target);
+    if (!c) return;
+    stopDemo();
+    toggleCard(c);
+    sync();
+  });
+  function demoAt(t) {
+    while (demoN < MOVES.length && t >= MOVES[demoN][0]) {
+      toggleCard(cards[MOVES[demoN][1]]);
+      demoN++;
+    }
+  }
+  function demoReset() {
+    demoN = 0;
+    cols = initialCols();
+  }
+  function metaText() {
+    return 'RING_LERP ' + RING_LERP + ' · arc ' + (ring * 360).toFixed(0) + ' deg';
+  }
+
+  boot();
+
+})();
+</script>
+</body>
+</html>
