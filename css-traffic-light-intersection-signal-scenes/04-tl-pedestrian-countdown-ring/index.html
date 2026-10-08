@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>남은 초를 줄어드는 호로 보여 주는 보행 신호 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="남은 초를 줄어드는 호로 보여 주는 보행 신호"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">초록불 — 진행</p>
+  <button class="sc__btn" id="scBtn" type="button">멈춤</button>
+  <p class="sc__caption">남은 초를 줄어드는 호로 보여 주는 보행 신호</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const REDUCE_START_MS = 1200;
+    const KEY_STEP = 12;
+    const FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    const SIG_GREEN = 0;
+    const SIG_YELLOW = 1;
+    const SIG_RED = 2;
+    const GREEN_RGB = [61, 214, 140];
+    const YELLOW_RGB = [255, 200, 64];
+    const RED_RGB = [255, 92, 102];
+    const SIGNAL_RGBS = [GREEN_RGB, YELLOW_RGB, RED_RGB];
+    const SKY_RGB = [226, 238, 252];
+    const GRASS_RGB = [206, 236, 214];
+    const ROAD_RGB = [188, 192, 212];
+    const ROAD_EDGE_RGB = [162, 166, 192];
+    const MARK_RGB = [250, 250, 255];
+    const INK_RGB = [58, 52, 84];
+    const CAR_RGBS = [[255, 184, 196], [170, 208, 255], [196, 176, 255], [158, 232, 200], [255, 222, 150], [255, 196, 224]];
+    const TXT_GO = '초록불 — 진행';
+    const TXT_READY = '노란불 — 정지 준비';
+    const TXT_STOP = '빨간불 — 정지';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a.toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열
+    function mulberry32(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6D2B79F5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자 점의 값 — 정수 두 개를 섞어 0..1 로 (같은 입력은 언제나 같은 값)
+    function hash2(ix, iy) {
+        let h = Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263);
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+    // 2차원 값 잡음 — 네 격자 점을 부드럽게 보간
+    function vnoise(x, y) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = smooth(x - ix);
+        const fy = smooth(y - iy);
+        return lerp(lerp(hash2(ix, iy), hash2(ix + 1, iy), fx), lerp(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), fx), fy);
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+    // 주기 [초록, 노랑, 빨강] 프레임 수에서 프레임 f 의 신호 상태
+    function phaseAt(f, g, y, r) {
+        const total = g + y + r;
+        const m = ((f % total) + total) % total;
+        return m < g ? SIG_GREEN : (m < g + y ? SIG_YELLOW : SIG_RED);
+    }
+    function stateText(state) {
+        return state === SIG_GREEN ? TXT_GO : (state === SIG_YELLOW ? TXT_READY : TXT_STOP);
+    }
+    // 신호 상태 -> 빨강·노랑·초록 렌즈 밝기 (위에서 아래)
+    function litOf(state) {
+        return [state === SIG_RED ? 1 : 0, state === SIG_YELLOW ? 1 : 0, state === SIG_GREEN ? 1 : 0];
+    }
+    const LENS_RGBS = [RED_RGB, YELLOW_RGB, GREEN_RGB];
+    // 세로 신호등 머리 — 렌즈 세 개와 켜진 렌즈의 빛 번짐
+    function drawHead(ctx, cx, cy, r, lit) {
+        const step = r * 2.5;
+        rrect(ctx, cx - r * 1.45, cy - step - r * 1.45, r * 2.9, step * 2 + r * 2.9, r * 0.9);
+        ctx.fillStyle = rgba(INK_RGB, 1);
+        ctx.fill();
+        for (let i = 0; i < 3; i += 1) {
+            const ly = cy + (i - 1) * step;
+            ctx.beginPath();
+            ctx.arc(cx, ly, r, 0, PI2);
+            ctx.fillStyle = rgba(LENS_RGBS[i], 0.2 + 0.8 * lit[i]);
+            ctx.fill();
+            if (lit[i] > 0.02) {
+                glow(ctx, cx, ly, r * 3.2, LENS_RGBS[i], 0.55 * lit[i]);
+            }
+        }
+    }
+    // 위에서 본 차 — 앞 범퍼가 x, 가운데가 y. 제동 중이면 뒷등이 켜진다
+    function drawCar(ctx, x, y, len, wid, rgb, braking) {
+        const x0 = x - len;
+        rrect(ctx, x0, y - wid / 2, len, wid, 6);
+        ctx.fillStyle = rgba(rgb, 1);
+        ctx.fill();
+        rrect(ctx, x - len * 0.62, y - wid / 2 + 3, len * 0.34, wid - 6, 3);
+        ctx.fillStyle = 'rgba(255,255,255,0.62)';
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,248,214,1)';
+        ctx.fillRect(x - 3, y - wid / 2 + 2, 3, 4);
+        ctx.fillRect(x - 3, y + wid / 2 - 6, 3, 4);
+        ctx.fillStyle = braking ? rgba(RED_RGB, 1) : 'rgba(150,120,150,0.8)';
+        ctx.fillRect(x0, y - wid / 2 + 2, 3, 4);
+        ctx.fillRect(x0, y + wid / 2 - 6, 3, 4);
+        if (braking) {
+            glow(ctx, x0, y, 12, RED_RGB, 0.45);
+        }
+    }
+    // 한 줄 도로 장면의 바탕 — 잔디 위에 도로띠 하나, 정지선과 횡단보도
+    function drawLaneBackdrop(ctx, roadY, roadH, stopX, seedTrees) {
+        ctx.fillStyle = rgba(GRASS_RGB, 1);
+        ctx.fillRect(0, 0, W, H);
+        const rnd = mulberry32(seedTrees);
+        for (let i = 0; i < 14; i += 1) {
+            const tx = 16 + rnd() * (W - 32);
+            const up = rnd() < 0.5;
+            const ty = up ? roadY - roadH / 2 - 22 - rnd() * 26 : roadY + roadH / 2 + 22 + rnd() * 26;
+            ctx.beginPath();
+            ctx.arc(tx, ty, 9 + rnd() * 6, 0, PI2);
+            ctx.fillStyle = 'rgba(160,214,184,0.9)';
+            ctx.fill();
+        }
+        ctx.fillStyle = rgba(ROAD_RGB, 1);
+        ctx.fillRect(0, roadY - roadH / 2, W, roadH);
+        ctx.fillStyle = rgba(ROAD_EDGE_RGB, 1);
+        ctx.fillRect(0, roadY - roadH / 2, W, 2);
+        ctx.fillRect(0, roadY + roadH / 2 - 2, W, 2);
+        ctx.fillStyle = rgba(MARK_RGB, 0.8);
+        for (let x = 6; x < W; x += 36) {
+            ctx.fillRect(x, roadY - 1, 18, 2);
+        }
+        for (let k = 0; k < 5; k += 1) {
+            ctx.fillRect(stopX + 5, roadY - roadH / 2 + 3 + k * (roadH - 6) / 5, 12, (roadH - 6) / 5 - 3);
+        }
+        ctx.fillRect(stopX - 2, roadY - roadH / 2, 3, roadH);
+    }
+    // 한 줄 차량 흐름 — 앞차 간격(IDM)과 정지선을 같은 식으로 다룬다. 차는 앞쪽부터 0번이다
+    class Lane {
+        constructor(seed, p) {
+            this.cars = [];
+            this.nextAt = 0;
+            this.made = 0;
+            this.p = p;
+            this.rnd = mulberry32(seed);
+        }
+        accelFor(v, s, vL, g0) {
+            const p = this.p;
+            const sStar = g0 + Math.max(0, v * p.headway + v * (v - vL) / (2 * Math.sqrt(p.accel * p.brake)));
+            return p.accel * (1 - Math.pow(v / p.vmax, p.delta) - Math.pow(sStar / Math.max(s, 0.5), 2));
+        }
+        // f 프레임에, 뒤쪽이 비어 있고 때가 됐으면 한 대 들여보낸다
+        maybeSpawn(f, minGap, maxGap, v0) {
+            if (f < this.nextAt) {
+                return false;
+            }
+            const last = this.cars.length > 0 ? this.cars[this.cars.length - 1] : null;
+            if (last && last.x - last.len < this.p.gap + 10) {
+                return false;
+            }
+            const rgb = CAR_RGBS[this.made % CAR_RGBS.length];
+            this.cars.push({ x: -2, v: v0, len: this.p.len, rgb: rgb, go: false, decided: false, sigK: -1, brake: false, id: this.made });
+            this.made += 1;
+            this.nextAt = f + minGap + Math.floor(this.rnd() * (maxGap - minGap + 1));
+            return true;
+        }
+        // 신호 목록은 x 오름차순. 한 번 호출 = 한 프레임. 정지선을 넘은 차(detect 용) id 를 돌려준다
+        step(sigs, onCross, watchX) {
+            const p = this.p;
+            for (let i = 0; i < this.cars.length; i += 1) {
+                const c = this.cars[i];
+                let acc = this.accelFor(c.v, 1e6, c.v, p.gap);
+                if (i > 0) {
+                    const L = this.cars[i - 1];
+                    acc = Math.min(acc, this.accelFor(c.v, (L.x - L.len) - c.x, L.v, p.gap));
+                }
+                let k = -1;
+                for (let j = 0; j < sigs.length; j += 1) {
+                    if (sigs[j].x >= c.x) {
+                        k = j;
+                        break;
+                    }
+                }
+                let clampX = 1e9;
+                if (k >= 0) {
+                    const sg = sigs[k];
+                    if (c.sigK !== k) {
+                        c.sigK = k;
+                        c.decided = false;
+                        c.go = false;
+                    }
+                    if (sg.state === SIG_GREEN) {
+                        c.decided = false;
+                        c.go = false;
+                    }
+                    else {
+                        if (!c.decided) {
+                            c.decided = true;
+                            c.go = c.v * c.v / (2 * p.brake) > sg.x - c.x;
+                        }
+                        if (!c.go) {
+                            acc = Math.min(acc, this.accelFor(c.v, sg.x - c.x - 2, 0, p.lineGap));
+                            clampX = sg.x - 1.5;
+                        }
+                    }
+                }
+                acc = Math.max(acc, -p.brake * 3);
+                const prevX = c.x;
+                c.v = Math.max(0, c.v + acc);
+                c.x += c.v;
+                if (c.x > clampX && prevX <= clampX) {
+                    c.x = clampX;
+                    c.v = 0;
+                }
+                c.brake = acc < -0.012 || c.v < 0.05;
+                if (prevX < watchX && c.x >= watchX) {
+                    onCross(c, watchX);
+                }
+            }
+            while (this.cars.length > 0 && this.cars[0].x - this.cars[0].len > W + 20) {
+                this.cars.shift();
+            }
+        }
+        // 정지선 뒤에서 서 있는 차 수
+        waiting(stopX) {
+            let n = 0;
+            for (let i = 0; i < this.cars.length; i += 1) {
+                const c = this.cars[i];
+                if (c.v < 0.25 && c.x < stopX + 2 && c.x > stopX - 260) {
+                    n += 1;
+                }
+            }
+            return n;
+        }
+    }
+    function main(rootEl, canvas, statusEl, btnEl) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        canvas.width = W;
+        canvas.height = H;
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const scene = makeScene(ctx0, reduce);
+        if (reduce) {
+            rootEl.classList.remove('is-demo');
+        }
+        let paused = false;
+        let rafId = 0;
+        let lastTs = null;
+        let accMs = 0;
+        let lastLabel = '';
+        let px = W / 2;
+        let py = H / 2;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw();
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                scene.step();
+            }
+        }
+        function setButton() {
+            btnEl.textContent = reduce ? '다음 장면' : (paused ? '재생' : '멈춤');
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        function moved() {
+            if (scene.point) {
+                scene.point(px, py);
+            }
+            if (reduce) {
+                show();
+            }
+        }
+        function onButton() {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                rootEl.classList.remove('is-demo');
+            }
+            else {
+                rootEl.classList.add('is-demo');
+            }
+            setButton();
+        }
+        function onAction() {
+            if (scene.tap) {
+                scene.tap();
+                if (reduce) {
+                    show();
+                }
+                return;
+            }
+            onButton();
+        }
+        function tick(ts) {
+            if (lastTs === null) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        listen(btnEl, 'click', function () { onButton(); });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = toLocal(e);
+            px = p[0];
+            py = p[1];
+            moved();
+            if (scene.tap) {
+                scene.tap();
+                if (reduce) {
+                    show();
+                }
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = toLocal(e);
+            px = p[0];
+            py = p[1];
+            moved();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                onAction();
+                return;
+            }
+            let dx = 0;
+            let dy = 0;
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            px = clamp(px + dx, 0, W);
+            py = clamp(py + dy, 0, H);
+            moved();
+        });
+        advance(REDUCE_START_MS);
+        setButton();
+        show();
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        function destroy() {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        }
+        return destroy;
+    }
+    const WALK_SECONDS = 12;
+    const FLASH_AT = 5;
+    const SECOND_FRAMES = 26;
+    const RING_R = 58;
+    const RING_CIRCUMFERENCE = PI2 * RING_R;
+    const TICK_STEP = PI2 / WALK_SECONDS;
+    const SEG_GAP = 5;
+    const WAIT_FRAMES = 230;
+    const WALK_SPEED = 0.8;
+    const HURRY_SPEED = 1.5;
+    const RING_X = 118;
+    const RING_Y = 142;
+    const ROAD_X0 = 258;
+    const ROAD_X1 = 452;
+    const WALK_Y0 = 96;
+    const WALK_Y1 = 204;
+    const PED_COUNT = 9;
+    const SEED = 446;
+    function makeScene(ctx, reduce) {
+        const walkFrames = WALK_SECONDS * SECOND_FRAMES;
+        const cycle = walkFrames + WAIT_FRAMES;
+        const rnd = mulberry32(SEED);
+        const peds = [];
+        for (let i = 0; i < PED_COUNT; i += 1) {
+            const dir = i % 2 === 0 ? 1 : -1;
+            peds.push({
+                x: dir > 0 ? ROAD_X0 - 12 : ROAD_X1 + 12,
+                y: WALK_Y0 + 12 + (i % 5) * 20 + (i >= 5 ? 6 : 0),
+                dir: dir,
+                crossing: false,
+                startAt: Math.floor(rnd() * 150),
+                rgb: CAR_RGBS[i % CAR_RGBS.length]
+            });
+        }
+        // 걷기가 시작되고 7 초 뒤부터 보게 시작 — 곧 깜빡임 구간이 온다
+        let f = WAIT_FRAMES + 5 * SECOND_FRAMES;
+        let lastWalkStart = WAIT_FRAMES;
+        function inWalk() { return (f % cycle) >= WAIT_FRAMES; }
+        function secondsLeft() {
+            if (!inWalk()) {
+                return 0;
+            }
+            return (cycle - (f % cycle)) / SECOND_FRAMES;
+        }
+        function flashing() { return inWalk() && secondsLeft() <= FLASH_AT; }
+        const scene = {
+            step: function () {
+                f += 1;
+                const m = f % cycle;
+                if (m === WAIT_FRAMES) {
+                    lastWalkStart = f;
+                    for (let i = 0; i < peds.length; i += 1) {
+                        if (!peds[i].crossing) {
+                            peds[i].startAt = f + Math.floor(rnd() * 200);
+                        }
+                    }
+                }
+                for (let i = 0; i < peds.length; i += 1) {
+                    const p = peds[i];
+                    if (!p.crossing) {
+                        if (inWalk() && !flashing() && f >= p.startAt) {
+                            p.crossing = true;
+                        }
+                    }
+                    else {
+                        p.x += p.dir * (flashing() || !inWalk() ? HURRY_SPEED : WALK_SPEED);
+                        const done = p.dir > 0 ? p.x >= ROAD_X1 + 12 : p.x <= ROAD_X0 - 12;
+                        if (done) {
+                            p.crossing = false;
+                            p.dir = -p.dir;
+                            p.x = p.dir > 0 ? ROAD_X0 - 12 : ROAD_X1 + 12;
+                            p.startAt = lastWalkStart + 99999;
+                        }
+                    }
+                }
+            },
+            label: function () {
+                if (!inWalk()) {
+                    return '기다리세요 — 보행 정지';
+                }
+                return flashing() ? '서두르세요 — 곧 끝남' : '건너세요 — 남은 시간 충분';
+            },
+            draw: function () {
+                ctx.fillStyle = rgba(GRASS_RGB, 1);
+                ctx.fillRect(0, 0, W, H);
+                // 오른쪽 도로와 횡단보도
+                ctx.fillStyle = rgba(ROAD_RGB, 1);
+                ctx.fillRect(ROAD_X0, 0, ROAD_X1 - ROAD_X0, H);
+                ctx.fillStyle = rgba(!inWalk() ? RED_RGB : (flashing() ? (Math.floor(f / 9) % 2 === 0 ? RED_RGB : YELLOW_RGB) : GREEN_RGB), inWalk() ? 0.3 : 0.16);
+                ctx.fillRect(ROAD_X0, WALK_Y0 - 6, ROAD_X1 - ROAD_X0, WALK_Y1 - WALK_Y0 + 12);
+                ctx.fillStyle = rgba(MARK_RGB, 1);
+                for (let y = WALK_Y0; y < WALK_Y1; y += 14) {
+                    ctx.fillRect(ROAD_X0 + 6, y, ROAD_X1 - ROAD_X0 - 12, 8);
+                }
+                ctx.fillStyle = rgba(ROAD_EDGE_RGB, 1);
+                ctx.fillRect(ROAD_X0, 0, 3, H);
+                ctx.fillRect(ROAD_X1 - 3, 0, 3, H);
+                // 보행자
+                for (let i = 0; i < peds.length; i += 1) {
+                    const p = peds[i];
+                    const wob = p.crossing ? Math.sin(f * 0.3 + i) * 1.5 : 0;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y + wob, 6.5, 0, PI2);
+                    ctx.fillStyle = rgba(p.rgb, 1);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(p.x + p.dir * 2, p.y + wob, 3.2, 0, PI2);
+                    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                    ctx.fill();
+                }
+                // 보행 신호 원판
+                const left = secondsLeft();
+                const walk = inWalk();
+                const blink = flashing() && (Math.floor(f / 9) % 2 === 0);
+                ctx.beginPath();
+                ctx.arc(RING_X, RING_Y, RING_R + 14, 0, PI2);
+                ctx.fillStyle = rgba(INK_RGB, 1);
+                ctx.fill();
+                ctx.lineWidth = 9;
+                ctx.lineCap = 'butt';
+                ctx.setLineDash([RING_CIRCUMFERENCE / WALK_SECONDS - SEG_GAP, SEG_GAP]);
+                ctx.lineDashOffset = -SEG_GAP / 2;
+                ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+                ctx.beginPath();
+                ctx.arc(RING_X, RING_Y, RING_R, -Math.PI / 2, -Math.PI / 2 + PI2);
+                ctx.stroke();
+                if (walk) {
+                    ctx.strokeStyle = rgba(flashing() ? (blink ? RED_RGB : YELLOW_RGB) : GREEN_RGB, 1);
+                    ctx.beginPath();
+                    ctx.arc(RING_X, RING_Y, RING_R, -Math.PI / 2, -Math.PI / 2 + TICK_STEP * left);
+                    ctx.stroke();
+                }
+                ctx.setLineDash([]);
+                ctx.lineDashOffset = 0;
+                if (walk) {
+                    glow(ctx, RING_X, RING_Y, 56, flashing() ? RED_RGB : GREEN_RGB, blink ? 0.35 : 0.18);
+                    ctx.fillStyle = rgba(blink ? RED_RGB : [255, 255, 255], 1);
+                    ctx.font = '700 44px ' + FONT;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(String(Math.ceil(left)), RING_X, RING_Y + 2);
+                }
+                else {
+                    glow(ctx, RING_X, RING_Y, 56, RED_RGB, 0.25);
+                    ctx.lineWidth = 9;
+                    ctx.lineCap = 'round';
+                    ctx.strokeStyle = rgba(RED_RGB, 1);
+                    ctx.beginPath();
+                    ctx.moveTo(RING_X - 18, RING_Y - 18);
+                    ctx.lineTo(RING_X + 18, RING_Y + 18);
+                    ctx.moveTo(RING_X + 18, RING_Y - 18);
+                    ctx.lineTo(RING_X - 18, RING_Y + 18);
+                    ctx.stroke();
+                    ctx.lineCap = 'butt';
+                }
+                ctx.textBaseline = 'alphabetic';
+            }
+        };
+        if (reduce) {
+            f = WAIT_FRAMES + 5 * SECOND_FRAMES;
+        }
+        return scene;
+    }
+    main(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'));
+})();
+</script>
+</body>
+</html>

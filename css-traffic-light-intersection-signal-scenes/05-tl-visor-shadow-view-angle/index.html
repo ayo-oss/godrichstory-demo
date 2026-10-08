@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>보는 각도에 따라 챙 그림자가 렌즈를 덮는 신호등 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="보는 각도에 따라 챙 그림자가 렌즈를 덮는 신호등"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">초록불 — 진행</p>
+  <button class="sc__btn" id="scBtn" type="button">멈춤</button>
+  <p class="sc__caption">보는 각도에 따라 챙 그림자가 렌즈를 덮는 신호등</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const REDUCE_START_MS = 1200;
+    const KEY_STEP = 12;
+    const FONT = '-apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    const SIG_GREEN = 0;
+    const SIG_YELLOW = 1;
+    const SIG_RED = 2;
+    const GREEN_RGB = [61, 214, 140];
+    const YELLOW_RGB = [255, 200, 64];
+    const RED_RGB = [255, 92, 102];
+    const SIGNAL_RGBS = [GREEN_RGB, YELLOW_RGB, RED_RGB];
+    const SKY_RGB = [226, 238, 252];
+    const GRASS_RGB = [206, 236, 214];
+    const ROAD_RGB = [188, 192, 212];
+    const ROAD_EDGE_RGB = [162, 166, 192];
+    const MARK_RGB = [250, 250, 255];
+    const INK_RGB = [58, 52, 84];
+    const CAR_RGBS = [[255, 184, 196], [170, 208, 255], [196, 176, 255], [158, 232, 200], [255, 222, 150], [255, 196, 224]];
+    const TXT_GO = '초록불 — 진행';
+    const TXT_READY = '노란불 — 정지 준비';
+    const TXT_STOP = '빨간불 — 정지';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a.toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열
+    function mulberry32(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6D2B79F5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자 점의 값 — 정수 두 개를 섞어 0..1 로 (같은 입력은 언제나 같은 값)
+    function hash2(ix, iy) {
+        let h = Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263);
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+    // 2차원 값 잡음 — 네 격자 점을 부드럽게 보간
+    function vnoise(x, y) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = smooth(x - ix);
+        const fy = smooth(y - iy);
+        return lerp(lerp(hash2(ix, iy), hash2(ix + 1, iy), fx), lerp(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), fx), fy);
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+    // 주기 [초록, 노랑, 빨강] 프레임 수에서 프레임 f 의 신호 상태
+    function phaseAt(f, g, y, r) {
+        const total = g + y + r;
+        const m = ((f % total) + total) % total;
+        return m < g ? SIG_GREEN : (m < g + y ? SIG_YELLOW : SIG_RED);
+    }
+    function stateText(state) {
+        return state === SIG_GREEN ? TXT_GO : (state === SIG_YELLOW ? TXT_READY : TXT_STOP);
+    }
+    // 신호 상태 -> 빨강·노랑·초록 렌즈 밝기 (위에서 아래)
+    function litOf(state) {
+        return [state === SIG_RED ? 1 : 0, state === SIG_YELLOW ? 1 : 0, state === SIG_GREEN ? 1 : 0];
+    }
+    const LENS_RGBS = [RED_RGB, YELLOW_RGB, GREEN_RGB];
+    // 세로 신호등 머리 — 렌즈 세 개와 켜진 렌즈의 빛 번짐
+    function drawHead(ctx, cx, cy, r, lit) {
+        const step = r * 2.5;
+        rrect(ctx, cx - r * 1.45, cy - step - r * 1.45, r * 2.9, step * 2 + r * 2.9, r * 0.9);
+        ctx.fillStyle = rgba(INK_RGB, 1);
+        ctx.fill();
+        for (let i = 0; i < 3; i += 1) {
+            const ly = cy + (i - 1) * step;
+            ctx.beginPath();
+            ctx.arc(cx, ly, r, 0, PI2);
+            ctx.fillStyle = rgba(LENS_RGBS[i], 0.2 + 0.8 * lit[i]);
+            ctx.fill();
+            if (lit[i] > 0.02) {
+                glow(ctx, cx, ly, r * 3.2, LENS_RGBS[i], 0.55 * lit[i]);
+            }
+        }
+    }
+    // 위에서 본 차 — 앞 범퍼가 x, 가운데가 y. 제동 중이면 뒷등이 켜진다
+    function drawCar(ctx, x, y, len, wid, rgb, braking) {
+        const x0 = x - len;
+        rrect(ctx, x0, y - wid / 2, len, wid, 6);
+        ctx.fillStyle = rgba(rgb, 1);
+        ctx.fill();
+        rrect(ctx, x - len * 0.62, y - wid / 2 + 3, len * 0.34, wid - 6, 3);
+        ctx.fillStyle = 'rgba(255,255,255,0.62)';
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,248,214,1)';
+        ctx.fillRect(x - 3, y - wid / 2 + 2, 3, 4);
+        ctx.fillRect(x - 3, y + wid / 2 - 6, 3, 4);
+        ctx.fillStyle = braking ? rgba(RED_RGB, 1) : 'rgba(150,120,150,0.8)';
+        ctx.fillRect(x0, y - wid / 2 + 2, 3, 4);
+        ctx.fillRect(x0, y + wid / 2 - 6, 3, 4);
+        if (braking) {
+            glow(ctx, x0, y, 12, RED_RGB, 0.45);
+        }
+    }
+    // 한 줄 도로 장면의 바탕 — 잔디 위에 도로띠 하나, 정지선과 횡단보도
+    function drawLaneBackdrop(ctx, roadY, roadH, stopX, seedTrees) {
+        ctx.fillStyle = rgba(GRASS_RGB, 1);
+        ctx.fillRect(0, 0, W, H);
+        const rnd = mulberry32(seedTrees);
+        for (let i = 0; i < 14; i += 1) {
+            const tx = 16 + rnd() * (W - 32);
+            const up = rnd() < 0.5;
+            const ty = up ? roadY - roadH / 2 - 22 - rnd() * 26 : roadY + roadH / 2 + 22 + rnd() * 26;
+            ctx.beginPath();
+            ctx.arc(tx, ty, 9 + rnd() * 6, 0, PI2);
+            ctx.fillStyle = 'rgba(160,214,184,0.9)';
+            ctx.fill();
+        }
+        ctx.fillStyle = rgba(ROAD_RGB, 1);
+        ctx.fillRect(0, roadY - roadH / 2, W, roadH);
+        ctx.fillStyle = rgba(ROAD_EDGE_RGB, 1);
+        ctx.fillRect(0, roadY - roadH / 2, W, 2);
+        ctx.fillRect(0, roadY + roadH / 2 - 2, W, 2);
+        ctx.fillStyle = rgba(MARK_RGB, 0.8);
+        for (let x = 6; x < W; x += 36) {
+            ctx.fillRect(x, roadY - 1, 18, 2);
+        }
+        for (let k = 0; k < 5; k += 1) {
+            ctx.fillRect(stopX + 5, roadY - roadH / 2 + 3 + k * (roadH - 6) / 5, 12, (roadH - 6) / 5 - 3);
+        }
+        ctx.fillRect(stopX - 2, roadY - roadH / 2, 3, roadH);
+    }
+    // 한 줄 차량 흐름 — 앞차 간격(IDM)과 정지선을 같은 식으로 다룬다. 차는 앞쪽부터 0번이다
+    class Lane {
+        constructor(seed, p) {
+            this.cars = [];
+            this.nextAt = 0;
+            this.made = 0;
+            this.p = p;
+            this.rnd = mulberry32(seed);
+        }
+        accelFor(v, s, vL, g0) {
+            const p = this.p;
+            const sStar = g0 + Math.max(0, v * p.headway + v * (v - vL) / (2 * Math.sqrt(p.accel * p.brake)));
+            return p.accel * (1 - Math.pow(v / p.vmax, p.delta) - Math.pow(sStar / Math.max(s, 0.5), 2));
+        }
+        // f 프레임에, 뒤쪽이 비어 있고 때가 됐으면 한 대 들여보낸다
+        maybeSpawn(f, minGap, maxGap, v0) {
+            if (f < this.nextAt) {
+                return false;
+            }
+            const last = this.cars.length > 0 ? this.cars[this.cars.length - 1] : null;
+            if (last && last.x - last.len < this.p.gap + 10) {
+                return false;
+            }
+            const rgb = CAR_RGBS[this.made % CAR_RGBS.length];
+            this.cars.push({ x: -2, v: v0, len: this.p.len, rgb: rgb, go: false, decided: false, sigK: -1, brake: false, id: this.made });
+            this.made += 1;
+            this.nextAt = f + minGap + Math.floor(this.rnd() * (maxGap - minGap + 1));
+            return true;
+        }
+        // 신호 목록은 x 오름차순. 한 번 호출 = 한 프레임. 정지선을 넘은 차(detect 용) id 를 돌려준다
+        step(sigs, onCross, watchX) {
+            const p = this.p;
+            for (let i = 0; i < this.cars.length; i += 1) {
+                const c = this.cars[i];
+                let acc = this.accelFor(c.v, 1e6, c.v, p.gap);
+                if (i > 0) {
+                    const L = this.cars[i - 1];
+                    acc = Math.min(acc, this.accelFor(c.v, (L.x - L.len) - c.x, L.v, p.gap));
+                }
+                let k = -1;
+                for (let j = 0; j < sigs.length; j += 1) {
+                    if (sigs[j].x >= c.x) {
+                        k = j;
+                        break;
+                    }
+                }
+                let clampX = 1e9;
+                if (k >= 0) {
+                    const sg = sigs[k];
+                    if (c.sigK !== k) {
+                        c.sigK = k;
+                        c.decided = false;
+                        c.go = false;
+                    }
+                    if (sg.state === SIG_GREEN) {
+                        c.decided = false;
+                        c.go = false;
+                    }
+                    else {
+                        if (!c.decided) {
+                            c.decided = true;
+                            c.go = c.v * c.v / (2 * p.brake) > sg.x - c.x;
+                        }
+                        if (!c.go) {
+                            acc = Math.min(acc, this.accelFor(c.v, sg.x - c.x - 2, 0, p.lineGap));
+                            clampX = sg.x - 1.5;
+                        }
+                    }
+                }
+                acc = Math.max(acc, -p.brake * 3);
+                const prevX = c.x;
+                c.v = Math.max(0, c.v + acc);
+                c.x += c.v;
+                if (c.x > clampX && prevX <= clampX) {
+                    c.x = clampX;
+                    c.v = 0;
+                }
+                c.brake = acc < -0.012 || c.v < 0.05;
+                if (prevX < watchX && c.x >= watchX) {
+                    onCross(c, watchX);
+                }
+            }
+            while (this.cars.length > 0 && this.cars[0].x - this.cars[0].len > W + 20) {
+                this.cars.shift();
+            }
+        }
+        // 정지선 뒤에서 서 있는 차 수
+        waiting(stopX) {
+            let n = 0;
+            for (let i = 0; i < this.cars.length; i += 1) {
+                const c = this.cars[i];
+                if (c.v < 0.25 && c.x < stopX + 2 && c.x > stopX - 260) {
+                    n += 1;
+                }
+            }
+            return n;
+        }
+    }
+    function main(rootEl, canvas, statusEl, btnEl) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        canvas.width = W;
+        canvas.height = H;
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const scene = makeScene(ctx0, reduce);
+        if (reduce) {
+            rootEl.classList.remove('is-demo');
+        }
+        let paused = false;
+        let rafId = 0;
+        let lastTs = null;
+        let accMs = 0;
+        let lastLabel = '';
+        let px = W / 2;
+        let py = H / 2;
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw();
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                scene.step();
+            }
+        }
+        function setButton() {
+            btnEl.textContent = reduce ? '다음 장면' : (paused ? '재생' : '멈춤');
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / r.width, 0, W), clamp((e.clientY - r.top) * H / r.height, 0, H)];
+        }
+        function moved() {
+            if (scene.point) {
+                scene.point(px, py);
+            }
+            if (reduce) {
+                show();
+            }
+        }
+        function onButton() {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                rootEl.classList.remove('is-demo');
+            }
+            else {
+                rootEl.classList.add('is-demo');
+            }
+            setButton();
+        }
+        function onAction() {
+            if (scene.tap) {
+                scene.tap();
+                if (reduce) {
+                    show();
+                }
+                return;
+            }
+            onButton();
+        }
+        function tick(ts) {
+            if (lastTs === null) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        listen(btnEl, 'click', function () { onButton(); });
+        listen(canvas, 'pointerdown', function (e) {
+            const p = toLocal(e);
+            px = p[0];
+            py = p[1];
+            moved();
+            if (scene.tap) {
+                scene.tap();
+                if (reduce) {
+                    show();
+                }
+            }
+        });
+        listen(canvas, 'pointermove', function (e) {
+            const p = toLocal(e);
+            px = p[0];
+            py = p[1];
+            moved();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                onAction();
+                return;
+            }
+            let dx = 0;
+            let dy = 0;
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            px = clamp(px + dx, 0, W);
+            py = clamp(py + dy, 0, H);
+            moved();
+        });
+        advance(REDUCE_START_MS);
+        setButton();
+        show();
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        function destroy() {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        }
+        return destroy;
+    }
+    const VISOR_DEPTH = 24;
+    const VIEW_TILT_MAX = 52;
+    const SHADOW_BLUR = 9;
+    const LENS_OFFSET = 5;
+    const EYE_DISTANCE = 190;
+    const HEAD_XS = [104, 240, 376];
+    const HEAD_CY = 120;
+    const LENS_R = 17;
+    const LENS_STEP = 44;
+    const SAMPLE_GRID = 9;
+    const PATH_PERIOD_MS = 5200;
+    function makeScene(ctx, reduce) {
+        let f = 0;
+        let userSet = false;
+        let ex = 240;
+        let ey = 200;
+        let tx = 240;
+        let ty = 200;
+        const vis = [1, 1, 1];
+        function autoPath() {
+            const a = PI2 * (f * FIXED_DT) / PATH_PERIOD_MS;
+            return [240 + 214 * Math.sin(a), 176 + 96 * Math.sin(1.7 * a + 1)];
+        }
+        // 눈 위치에서 본 챙 입구 원의 이동량 — 눈이 오른쪽이면 입구가 왼쪽으로 밀려 렌즈 오른쪽이 가려진다
+        function shiftOf(hx, ly) {
+            const dx = (ex - hx) / EYE_DISTANCE;
+            const dy = (ey - ly) / EYE_DISTANCE;
+            const lim = VIEW_TILT_MAX / VISOR_DEPTH;
+            return [-VISOR_DEPTH * clamp(dx, -lim, lim), -VISOR_DEPTH * clamp(dy, -lim, lim)];
+        }
+        function rimRadius() { return LENS_R + 3; }
+        // 렌즈 안을 격자로 훑어 입구 안에 든 점의 비율
+        function visibleOf(hx, ly) {
+            const s = shiftOf(hx, ly);
+            let hit = 0;
+            let all = 0;
+            for (let i = 0; i < SAMPLE_GRID; i += 1) {
+                for (let j = 0; j < SAMPLE_GRID; j += 1) {
+                    const x = (i + 0.5) / SAMPLE_GRID * 2 - 1;
+                    const y = (j + 0.5) / SAMPLE_GRID * 2 - 1;
+                    if (x * x + y * y > 1) {
+                        continue;
+                    }
+                    all += 1;
+                    const ax = x * LENS_R - s[0];
+                    const ay = y * LENS_R - s[1];
+                    if (ax * ax + ay * ay <= rimRadius() * rimRadius()) {
+                        hit += 1;
+                    }
+                }
+            }
+            return hit / all;
+        }
+        function update() {
+            for (let h = 0; h < 3; h += 1) {
+                const target = visibleOf(HEAD_XS[h], HEAD_CY + (h - 1) * LENS_STEP);
+                vis[h] = reduce ? target : vis[h] + (target - vis[h]) * 0.3;
+            }
+        }
+        const scene = {
+            step: function () {
+                f += 1;
+                if (!userSet) {
+                    const p = autoPath();
+                    tx = p[0];
+                    ty = p[1];
+                }
+                ex = reduce ? tx : lerp(ex, tx, 0.16);
+                ey = reduce ? ty : lerp(ey, ty, 0.16);
+                update();
+            },
+            point: function (x, y) {
+                userSet = true;
+                tx = x;
+                ty = y;
+                if (reduce) {
+                    ex = x;
+                    ey = y;
+                    update();
+                }
+            },
+            label: function () {
+                const lo = Math.min(vis[0], vis[1], vis[2]);
+                if (lo > 0.85) {
+                    return '신호가 모두 잘 보임';
+                }
+                return lo < 0.3 ? '챙에 가려 거의 안 보임' : '챙이 렌즈 일부를 가림';
+            },
+            draw: function () {
+                ctx.fillStyle = rgba(SKY_RGB, 1);
+                ctx.fillRect(0, 0, W, H);
+                ctx.fillStyle = rgba(GRASS_RGB, 1);
+                ctx.fillRect(0, 232, W, 68);
+                // 가로대와 기둥
+                ctx.fillStyle = rgba(INK_RGB, 1);
+                ctx.fillRect(40, 46, 400, 7);
+                ctx.fillRect(236, 46, 8, 186);
+                for (let h = 0; h < 3; h += 1) {
+                    const hx = HEAD_XS[h];
+                    ctx.fillStyle = rgba(INK_RGB, 1);
+                    ctx.fillRect(hx - 3, 50, 6, 16);
+                    rrect(ctx, hx - 28, HEAD_CY - LENS_STEP - 26, 56, LENS_STEP * 2 + 52, 14);
+                    ctx.fillStyle = rgba(INK_RGB, 1);
+                    ctx.fill();
+                    for (let i = 0; i < 3; i += 1) {
+                        const ly = HEAD_CY + (i - 1) * LENS_STEP;
+                        const s = shiftOf(hx, ly);
+                        const lit = i === h ? 1 : 0;
+                        // 렌즈 바탕
+                        ctx.beginPath();
+                        ctx.arc(hx, ly, LENS_R, 0, PI2);
+                        ctx.fillStyle = rgba(LENS_RGBS[i], 0.2);
+                        ctx.fill();
+                        const ax = hx + s[0];
+                        const ay = ly + s[1];
+                        if (lit > 0) {
+                            glow(ctx, hx, ly, 70, LENS_RGBS[i], 0.55 * vis[h]);
+                            // 챙 입구 안쪽만 보이게 자르고 그 안에 렌즈의 빛을 그린다
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.arc(ax, ay, rimRadius(), 0, PI2);
+                            ctx.clip();
+                            ctx.beginPath();
+                            ctx.arc(hx, ly, LENS_R, 0, PI2);
+                            ctx.fillStyle = rgba(LENS_RGBS[i], 1);
+                            ctx.fill();
+                            glow(ctx, hx - 5, ly - 5, 14, [255, 255, 255], 0.7);
+                            ctx.restore();
+                        }
+                        // 입구 가장자리가 렌즈에 드리우는 번진 그림자
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.arc(hx, ly, LENS_R, 0, PI2);
+                        ctx.clip();
+                        ctx.beginPath();
+                        ctx.arc(ax, ay, rimRadius() + 3, 0, PI2);
+                        ctx.shadowColor = 'rgba(30,24,60,0.7)';
+                        ctx.shadowBlur = SHADOW_BLUR;
+                        ctx.shadowOffsetY = LENS_OFFSET;
+                        ctx.lineWidth = 6;
+                        ctx.strokeStyle = 'rgba(84,76,122,1)';
+                        ctx.stroke();
+                        ctx.restore();
+                        // 챙 안쪽 벽 — 입구 밖에 있는 렌즈 부분과 렌즈 둘레를 가린다
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(hx - 40, ly - 40, 80, 80);
+                        ctx.moveTo(ax + rimRadius(), ay);
+                        ctx.arc(ax, ay, rimRadius(), 0, PI2);
+                        ctx.clip('evenodd');
+                        ctx.beginPath();
+                        ctx.arc(hx, ly, LENS_R + 7, 0, PI2);
+                        ctx.fillStyle = 'rgba(84,76,122,1)';
+                        ctx.fill();
+                        ctx.restore();
+                    }
+                    ctx.fillStyle = rgba(INK_RGB, 1);
+                    ctx.font = '700 13px ' + FONT;
+                    ctx.textAlign = 'center';
+                    ctx.fillText(String(Math.round(vis[h] * 100)) + '%', hx, HEAD_CY + LENS_STEP + 44);
+                }
+                // 눈 위치 표시
+                ctx.beginPath();
+                ctx.arc(ex, ey, 9, 0, PI2);
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = rgba(INK_RGB, 0.9);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(ex, ey, 3, 0, PI2);
+                ctx.fillStyle = rgba(INK_RGB, 0.9);
+                ctx.fill();
+            }
+        };
+        const p0 = autoPath();
+        tx = p0[0];
+        ty = p0[1];
+        ex = tx;
+        ey = ty;
+        update();
+        return scene;
+    }
+    main(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'));
+})();
+</script>
+</body>
+</html>
