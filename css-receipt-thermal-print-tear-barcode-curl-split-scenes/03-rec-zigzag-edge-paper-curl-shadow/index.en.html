@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Paper Texture Scene With a Zigzag Edge and a Curled Corner Where a Different Shadow Falls on Each Column — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rc is-demo" id="rc">
+  <canvas class="rc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="A sheet with zigzag edges and a curled corner while the light angle keeps moving and each column gets a different shadow"></canvas>
+  <p class="rc__status" data-role="status" aria-live="polite">The light is moving</p>
+  <div class="rc__tools">
+    <button class="rc__btn" data-role="btn" type="button" aria-pressed="false">Hold light</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("rc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 종이를 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    function fitCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        if (reduceQuery.matches) {
+            draw();
+        }
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    const TOOTH_N = 18;
+    const CURL_PX = 74;
+    const LIGHT_DEG = 38;
+    const SHADE_MAX = 0.46;
+    const SWAY_DEG = 46;
+    const SWAY_MS = 2400;
+    const SHEET_W = 300;
+    const SHEET_T = 22;
+    const SHEET_B = 262;
+    const TXT_AUTO = 'The light is moving';
+    const TXT_HOLD = 'Light angle held';
+    const LINES = ['Moonlight Shop', 'Milk', 'Bread', 'Apples'];
+    const PRICES = ['', '1,200', '2,800', '3,500'];
+    const holdBtn = root.querySelector('[data-role="btn"]');
+    let clock = 0;
+    let manual = false;
+    let manualDeg = LIGHT_DEG;
+    let dragging = false;
+    const sheetX = (W - SHEET_W) / 2;
+    // 지금 빛이 오는 각도(도) — 자동이면 기준 각도를 중심으로 계속 흔든다
+    function lightDeg() {
+        if (manual) {
+            return manualDeg;
+        }
+        return LIGHT_DEG + SWAY_DEG * Math.sin((clock / SWAY_MS) * Math.PI * 2);
+    }
+    // 가로 열 하나의 음영 세기 — 종이를 부드럽게 말린 곡면으로 보고 법선과 빛 방향의 내적을 쓴다
+    function shadeAt(col, deg) {
+        const u = col / SHEET_W * 2 - 1;
+        const slope = u * 0.62;
+        const nx = -slope;
+        const nz = Math.sqrt(1 - Math.min(0.99, slope * slope));
+        const rad = deg * Math.PI / 180;
+        const lx = Math.sin(rad);
+        const lz = Math.cos(rad);
+        const dot = clamp(nx * lx + nz * lz, 0, 1);
+        return (1 - dot) * SHADE_MAX;
+    }
+    function edgeY(i, top) {
+        const amp = 7;
+        const y = top ? SHEET_T : SHEET_B;
+        const up = (i % 2 === 0) === top;
+        return y + (up ? -amp * 0.4 : amp * 0.8);
+    }
+    function step() {
+        clock += FIXED_DT;
+    }
+    function settle() {
+        clock = SWAY_MS * 0.16;
+    }
+    function outline(ctx2, dx, dy) {
+        ctx2.beginPath();
+        const n = TOOTH_N;
+        ctx2.moveTo(sheetX + dx, edgeY(0, true) + dy);
+        for (let i = 1; i <= n; i += 1) {
+            ctx2.lineTo(sheetX + dx + (SHEET_W * i) / n, edgeY(i, true) + dy);
+        }
+        // 오른쪽 아래 모서리는 말려 올라간 만큼 잘라 낸다
+        ctx2.lineTo(sheetX + dx + SHEET_W, SHEET_B - CURL_PX + dy);
+        ctx2.lineTo(sheetX + dx + SHEET_W - CURL_PX, SHEET_B + dy);
+        for (let i = n - 1; i >= 0; i -= 1) {
+            ctx2.lineTo(sheetX + dx + (SHEET_W * i) / n, edgeY(i, false) + dy);
+        }
+        ctx2.closePath();
+    }
+    function draw() {
+        const deg = lightDeg();
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+        // 바닥 그림자 — 빛 반대쪽으로 밀려 나간다
+        const rad = deg * Math.PI / 180;
+        const sx = -Math.sin(rad) * 14;
+        ctx.fillStyle = rgba([10, 8, 22], 0.45);
+        outline(ctx, sx + 4, 10);
+        ctx.fill();
+        // 종이 본체
+        ctx.fillStyle = rgba(PAPER, 1);
+        outline(ctx, 0, 0);
+        ctx.fill();
+        ctx.save();
+        outline(ctx, 0, 0);
+        ctx.clip();
+        // 열마다 다른 음영
+        const colW = 3;
+        for (let c = 0; c < SHEET_W; c += colW) {
+            const s = shadeAt(c + colW / 2, deg);
+            ctx.fillStyle = rgba(INK, s);
+            ctx.fillRect(sheetX + c, 0, colW, H);
+        }
+        // 가로 결과 글자
+        ctx.fillStyle = rgba(INK, 0.06);
+        for (let y = SHEET_T; y < SHEET_B; y += 8) {
+            ctx.fillRect(sheetX, y, SHEET_W, 1);
+        }
+        ctx.font = '600 13px "Noto Sans KR", ui-monospace, monospace';
+        for (let i = 0; i < LINES.length; i += 1) {
+            const y = 62 + i * 30;
+            ctx.fillStyle = rgba(INK, 0.9);
+            ctx.textAlign = i === 0 ? 'center' : 'left';
+            ctx.fillText(LINES[i], i === 0 ? sheetX + SHEET_W / 2 : sheetX + 26, y);
+            if (PRICES[i]) {
+                ctx.textAlign = 'right';
+                ctx.fillText(PRICES[i], sheetX + SHEET_W - 26, y);
+            }
+        }
+        // 말린 모서리가 종이 위에 던지는 그림자 — 빛이 기울면 길이와 방향이 바뀐다
+        const cx = sheetX + SHEET_W;
+        const cy = SHEET_B;
+        const throwX = Math.sin(rad) * 26;
+        ctx.fillStyle = rgba([40, 30, 60], 0.3);
+        ctx.beginPath();
+        ctx.moveTo(cx - CURL_PX, cy);
+        ctx.lineTo(cx, cy - CURL_PX);
+        ctx.lineTo(cx - CURL_PX * 0.55 - throwX, cy - CURL_PX * 0.55 - 12);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+        // 접힌 날개 — 종이 뒷면이 빛을 받아 밝게 보인다
+        const flap = ctx.createLinearGradient(cx - CURL_PX, cy, cx, cy - CURL_PX);
+        const lit = 0.5 + 0.5 * Math.cos(rad - 0.9);
+        flap.addColorStop(0, rgba(mix(PAPER, LILAC, 0.5), 1));
+        flap.addColorStop(1, rgba(mix(PAPER, [255, 255, 255], 0.5 * lit), 1));
+        ctx.fillStyle = flap;
+        ctx.beginPath();
+        ctx.moveTo(cx - CURL_PX, cy);
+        ctx.lineTo(cx, cy - CURL_PX);
+        ctx.lineTo(cx - CURL_PX * 0.86, cy - CURL_PX * 0.86 + 4);
+        ctx.lineTo(cx - CURL_PX - 6, cy - 6);
+        ctx.closePath();
+        ctx.fill();
+        // 빛 방향 표시 — 위쪽 반원에서 해가 돈다
+        const hx = W / 2 + Math.sin(rad) * 190;
+        const hy = 18 - Math.cos(rad) * 6;
+        ctx.fillStyle = rgba(PEACH, 0.95);
+        ctx.beginPath();
+        ctx.arc(clamp(hx, 14, W - 14), hy + 6, 7, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    function setHold(on) {
+        // 고정하는 순간의 각도를 먼저 읽는다 — manual 을 먼저 바꾸면 옛 manualDeg 로 튄다
+        if (on && !manual) {
+            manualDeg = lightDeg();
+        }
+        manual = on;
+        if (holdBtn) {
+            holdBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        }
+        status.textContent = on ? TXT_HOLD : TXT_AUTO;
+        if (reduceQuery.matches) {
+            draw();
+        }
+    }
+    if (holdBtn) {
+        holdBtn.addEventListener('click', function () { setHold(!manual); });
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        dragging = true;
+        cv.setPointerCapture(ev.pointerId);
+        setHold(true);
+        manualDeg = clamp((toScene(ev)[0] / W - 0.5) * 120, -60, 60);
+        if (reduceQuery.matches) {
+            draw();
+        }
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        if (!dragging) {
+            return;
+        }
+        manualDeg = clamp((toScene(ev)[0] / W - 0.5) * 120, -60, 60);
+        if (reduceQuery.matches) {
+            draw();
+        }
+    });
+    cv.addEventListener('pointerup', function () { dragging = false; });
+    cv.addEventListener('pointercancel', function () { dragging = false; });
+    cv.addEventListener('keydown', function (ev) {
+        if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+            ev.preventDefault();
+            if (!manual) {
+                setHold(true);
+            }
+            manualDeg = clamp(manualDeg + (ev.key === 'ArrowLeft' ? -6 : 6), -90, 90);
+            if (reduceQuery.matches) {
+                draw();
+            }
+        }
+    });
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (reduceQuery.matches) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

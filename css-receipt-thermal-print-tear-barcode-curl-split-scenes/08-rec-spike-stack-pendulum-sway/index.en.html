@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Storage Scene Where Nine Receipts Hang Side by Side on a Rail and Sway as Pendulums of Different Lengths, the Shortest Settling First — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rc is-demo" id="rc">
+  <canvas class="rc__canvas" data-role="canvas" width="480" height="300" aria-label="Nine receipts on a spike swaying as pendulums of different lengths, the shortest settling first"></canvas>
+  <p class="rc__status" data-role="status" aria-live="polite">Swaying</p>
+  <div class="rc__tools">
+    <button class="rc__btn" data-role="btn" type="button">Tap</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("rc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 종이를 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    function fitCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        if (reduceQuery.matches) {
+            draw();
+        }
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    const SHEET_N = 9;
+    const LEN_MIN = 70;
+    const LEN_STEP = 22;
+    const LEN_REF = 160;
+    const DAMP = 0.9;
+    const KICK = 2;
+    const KICK_MS = 1800;
+    const GRAV = 3600;
+    const SHEET_W = 56;
+    const PIVOT_Y = 24;
+    const GAP_X = 40;
+    const TXT_KICK = 'Tapped';
+    const TXT_SWAY = 'Swaying';
+    const TXT_STILL = 'Hanging still';
+    const kickBtn = root.querySelector('[data-role="btn"]');
+    const ang = [];
+    const vel = [];
+    const len = [];
+    const tints = [PAPER, mix(PAPER, PINK, 0.28), mix(PAPER, SKY, 0.28), mix(PAPER, MINT, 0.28), mix(PAPER, LILAC, 0.3)];
+    for (let i = 0; i < SHEET_N; i += 1) {
+        ang.push(0);
+        vel.push(0);
+        len.push(LEN_MIN + i * LEN_STEP);
+    }
+    let clock = 0;
+    let nextKick = 200;
+    let sign = 1;
+    let barShift = 0;
+    let barVel = 0;
+    // 판 하나의 각도 가속 — 길이가 길수록 느리고, 짧은 판일수록 공기 저항이 크다
+    function accel(i, a, v) {
+        return -(GRAV / len[i]) * Math.sin(a) - DAMP * (LEN_REF / len[i]) * v;
+    }
+    function kick(dir) {
+        for (let i = 0; i < SHEET_N; i += 1) {
+            vel[i] += dir * KICK * (LEN_REF / len[i]);
+        }
+        barVel += dir * 60;
+    }
+    function step() {
+        clock += FIXED_DT;
+        const dt = FIXED_DT / 1000;
+        if (clock >= nextKick) {
+            kick(sign);
+            sign = -sign;
+            nextKick = clock + KICK_MS;
+        }
+        for (let i = 0; i < SHEET_N; i += 1) {
+            vel[i] += accel(i, ang[i], vel[i]) * dt;
+            ang[i] += vel[i] * dt;
+        }
+        barVel += (-90 * barShift - 9 * barVel) * dt;
+        barShift += barVel * dt;
+    }
+    function settle() {
+        for (let i = 0; i < SHEET_N; i += 1) {
+            ang[i] = 0;
+            vel[i] = 0;
+        }
+        status.textContent = TXT_STILL;
+    }
+    function drawSheet(i) {
+        const px = W / 2 + (i - (SHEET_N - 1) / 2) * GAP_X + barShift;
+        const L = len[i];
+        ctx.save();
+        ctx.translate(px, PIVOT_Y);
+        ctx.rotate(ang[i]);
+        ctx.fillStyle = rgba([10, 8, 22], 0.4);
+        ctx.fillRect(-SHEET_W / 2 + 5, 8, SHEET_W, L);
+        const t = tints[i % tints.length];
+        const g = ctx.createLinearGradient(-SHEET_W / 2, 0, SHEET_W / 2, 0);
+        g.addColorStop(0, rgba(mix(t, INK, 0.12), 1));
+        g.addColorStop(0.3, rgba(t, 1));
+        g.addColorStop(1, rgba(mix(t, INK, 0.06), 1));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(-SHEET_W / 2, 0);
+        ctx.lineTo(SHEET_W / 2, 0);
+        ctx.lineTo(SHEET_W / 2, L);
+        for (let k = 7; k >= 0; k -= 1) {
+            ctx.lineTo(-SHEET_W / 2 + (SHEET_W * k) / 7, L + (k % 2 === 0 ? 0 : 5));
+        }
+        ctx.closePath();
+        ctx.fill();
+        // 글줄 막대 — 장마다 줄 수가 다르다
+        ctx.fillStyle = rgba(INK, 0.55);
+        const rows = Math.floor((L - 30) / 14);
+        for (let r = 0; r < rows; r += 1) {
+            const w = SHEET_W - 18 - ((r * 7 + i * 5) % 14);
+            ctx.fillRect(-SHEET_W / 2 + 9, 22 + r * 14, w, 3);
+        }
+        // 걸린 구멍
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.beginPath();
+        ctx.arc(0, 9, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+    function draw() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+        // 꽂이 막대
+        ctx.fillStyle = rgba(mix(BG, LILAC, 0.5), 1);
+        ctx.fillRect(34 + barShift, PIVOT_Y - 12, W - 68, 6);
+        // 긴 장을 뒤에 그린다
+        for (let i = SHEET_N - 1; i >= 0; i -= 1) {
+            drawSheet(i);
+        }
+        ctx.fillStyle = rgba(PEACH, 1);
+        for (let i = 0; i < SHEET_N; i += 1) {
+            ctx.beginPath();
+            ctx.arc(W / 2 + (i - (SHEET_N - 1) / 2) * GAP_X + barShift, PIVOT_Y - 9, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+    function userKick() {
+        status.textContent = TXT_KICK;
+        if (reduceQuery.matches) {
+            return;
+        }
+        kick(sign);
+        sign = -sign;
+        nextKick = clock + KICK_MS;
+    }
+    if (kickBtn) {
+        kickBtn.addEventListener('click', userKick);
+    }
+    cv.addEventListener('pointerdown', userKick);
+    status.textContent = TXT_SWAY;
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (reduceQuery.matches) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>品目を人ごとの枠へドラッグして置くと、枠ごとの合計が減衰しながら新しい値を追って動く割り勘リスト — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rc is-demo" id="rc">
+  <div class="rc__fit">
+    <div class="rc__board" data-role="board">
+      <div class="rc__slot" data-slot="0"><span class="rc__slot-name">A</span><b class="rc__slot-sum" data-sum="0">0</b></div>
+      <div class="rc__slot" data-slot="1"><span class="rc__slot-name">B</span><b class="rc__slot-sum" data-sum="1">0</b></div>
+      <div class="rc__slot" data-slot="2"><span class="rc__slot-name">C</span><b class="rc__slot-sum" data-sum="2">0</b></div>
+      <button class="rc__chip" data-item="0" data-price="1200" type="button"><span>牛乳</span><b>1,200</b></button>
+      <button class="rc__chip" data-item="1" data-price="2800" type="button"><span>食パン</span><b>2,800</b></button>
+      <button class="rc__chip" data-item="2" data-price="3500" type="button"><span>りんご</span><b>3,500</b></button>
+      <button class="rc__chip" data-item="3" data-price="4100" type="button"><span>卵</span><b>4,100</b></button>
+      <button class="rc__chip" data-item="4" data-price="1900" type="button"><span>みかん</span><b>1,900</b></button>
+      <i class="rc__ghost" data-role="ghost" data-on="0" aria-hidden="true"></i>
+    </div>
+  </div>
+  <p class="rc__status" data-role="status" aria-live="polite">品目を枠へドラッグして置く</p>
+  <div class="rc__tools">
+    <button class="rc__btn" data-role="btn" type="button">最初に戻す</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("rc");
+    if (!root) return;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    const BW = 480;
+    const BH = 300;
+    const FIXED_DT = 16;
+    const SPRING_K = 240;
+    const DAMP = 19;
+    const EASE_RATE = 9;
+    const TAX_RATE = 0.1;
+    const SLOT_N = 3;
+    const CHIP_W = 92;
+    const CHIP_H = 28;
+    const SLOT_X = 178;
+    const SLOT_W = 290;
+    const SLOT_H = 80;
+    const SLOT_GAP = 8;
+    const SLOT_Y0 = 8;
+    const HOME_X = 18;
+    const HOME_Y0 = 14;
+    const HOME_DY = 52;
+    const MOVE_MS = 460;
+    const TXT_MISS = '枠の外なので戻ってきた';
+    const TXT_SUM = '合計';
+    const TXT_RESET = '最初に戻した';
+    const TXT_READY = '品目を枠へドラッグして置く';
+    const SLOT_NAMES = ['A', 'B', 'C'];
+    const boardEl = root.querySelector('[data-role="board"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ghostEl = root.querySelector('[data-role="ghost"]');
+    const resetBtn = root.querySelector('[data-role="btn"]');
+    if (!boardEl || !statusEl || !ghostEl) {
+        return;
+    }
+    const board = boardEl;
+    const status = statusEl;
+    const ghost = ghostEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const chips = [];
+    const sums = [];
+    const slotEls = [];
+    const chipNodes = root.querySelectorAll('[data-item]');
+    for (let i = 0; i < chipNodes.length; i += 1) {
+        chips.push(chipNodes[i]);
+    }
+    const sumNodes = root.querySelectorAll('[data-sum]');
+    for (let i = 0; i < sumNodes.length; i += 1) {
+        sums.push(sumNodes[i]);
+    }
+    const slotNodes = root.querySelectorAll('[data-slot]');
+    for (let i = 0; i < slotNodes.length; i += 1) {
+        slotEls.push(slotNodes[i]);
+    }
+    const N = chips.length;
+    const price = [];
+    for (let i = 0; i < N; i += 1) {
+        price.push(Number(chips[i].getAttribute('data-price')));
+    }
+    const px = [];
+    const py = [];
+    const vx = [];
+    const vy = [];
+    const owner = [];
+    const shown = [];
+    for (let i = 0; i < N; i += 1) {
+        px.push(HOME_X);
+        py.push(HOME_Y0 + i * HOME_DY);
+        vx.push(0);
+        vy.push(0);
+        owner.push(-1);
+    }
+    for (let s = 0; s < SLOT_N; s += 1) {
+        shown.push(0);
+    }
+    let scale = 1;
+    let drag = -1;
+    let grabDx = 0;
+    let grabDy = 0;
+    let moved = false;
+    let clock = 0;
+    let userTouched = false;
+    let autoIdx = 0;
+    let autoAt = 200;
+    let fakeI = -1;
+    let fakeT = 0;
+    let fakeFrom = [0, 0];
+    let fakeTo = [0, 0];
+    let fakeSlot = -1;
+    let raf = 0;
+    let lastTs = -1;
+    let acc = 0;
+    // 자동 시연 대본 — 항목, 놓을 칸(-1 은 칸 밖), 시작 시각 간격
+    const SCRIPT = [[1, 1], [3, -1], [0, 0], [2, 1], [4, 2]];
+    function homeOf(i) { return [HOME_X, HOME_Y0 + i * HOME_DY]; }
+    function slotRect(s) { return [SLOT_X, SLOT_Y0 + s * (SLOT_H + SLOT_GAP), SLOT_W, SLOT_H]; }
+    function slotIndexOf(i) {
+        let k = 0;
+        for (let j = 0; j < i; j += 1) {
+            if (owner[j] === owner[i]) {
+                k += 1;
+            }
+        }
+        return k;
+    }
+    // 칸 안에서 몇 번째 자리인지 — 한 줄에 셋, 두 줄까지
+    function targetOf(i) {
+        if (owner[i] < 0) {
+            return homeOf(i);
+        }
+        const r = slotRect(owner[i]);
+        const k = Math.min(5, slotIndexOf(i));
+        return [r[0] + 6 + (k % 3) * (CHIP_W + 4), r[1] + 28 + Math.floor(k / 3) * (CHIP_H + 2)];
+    }
+    function subOf(s) {
+        let sum = 0;
+        for (let i = 0; i < N; i += 1) {
+            if (owner[i] === s) {
+                sum += price[i];
+            }
+        }
+        return sum;
+    }
+    function targetSum(s) { return Math.round(subOf(s) * (1 + TAX_RATE)); }
+    function fmt(n) {
+        const v = String(Math.round(n));
+        let out = '';
+        for (let i = 0; i < v.length; i += 1) {
+            if (i > 0 && (v.length - i) % 3 === 0) {
+                out += ',';
+            }
+            out += v.charAt(i);
+        }
+        return out;
+    }
+    function labelOf(i) {
+        const sp = chips[i].querySelector('span');
+        return sp && sp.textContent ? sp.textContent : '';
+    }
+    function assign(i, s) {
+        owner[i] = s;
+        if (s >= 0) {
+            status.textContent = labelOf(i) + ' → ' + SLOT_NAMES[s] + ', ' + TXT_SUM + ' ' + fmt(targetSum(s));
+        }
+        else {
+            status.textContent = labelOf(i) + ' → ' + TXT_RESET;
+        }
+        if (reduceQuery.matches) {
+            snap();
+        }
+    }
+    // 놓을 때의 판정 — 칩 중심이 어느 칸 안에 있는가
+    function judge(cx, cy) {
+        for (let s = 0; s < SLOT_N; s += 1) {
+            const r = slotRect(s);
+            if (cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3]) {
+                return s;
+            }
+        }
+        return -1;
+    }
+    function drop(i) {
+        const s = judge(px[i] + CHIP_W / 2, py[i] + CHIP_H / 2);
+        if (s < 0) {
+            status.textContent = labelOf(i) + ' — ' + TXT_MISS;
+            if (reduceQuery.matches) {
+                snap();
+            }
+            return;
+        }
+        assign(i, s);
+    }
+    function snap() {
+        for (let i = 0; i < N; i += 1) {
+            const t = targetOf(i);
+            px[i] = t[0];
+            py[i] = t[1];
+            vx[i] = 0;
+            vy[i] = 0;
+        }
+        for (let s = 0; s < SLOT_N; s += 1) {
+            shown[s] = targetSum(s);
+        }
+        render();
+    }
+    function render() {
+        for (let i = 0; i < N; i += 1) {
+            const lift = drag === i || fakeI === i;
+            chips[i].style.transform = 'translate(' + px[i].toFixed(1) + 'px,' + py[i].toFixed(1) + 'px)' + (lift ? ' scale(1.06)' : '');
+            chips[i].setAttribute('data-lift', lift ? '1' : '0');
+        }
+        for (let s = 0; s < SLOT_N; s += 1) {
+            sums[s].textContent = fmt(shown[s]);
+            slotEls[s].setAttribute('data-hot', ((drag >= 0 || fakeI >= 0) && judgeLive() === s) ? '1' : '0');
+        }
+    }
+    function judgeLive() {
+        const i = drag >= 0 ? drag : fakeI;
+        if (i < 0) {
+            return -1;
+        }
+        return judge(px[i] + CHIP_W / 2, py[i] + CHIP_H / 2);
+    }
+    function resetAll() {
+        for (let i = 0; i < N; i += 1) {
+            owner[i] = -1;
+        }
+        status.textContent = TXT_RESET;
+        if (reduceQuery.matches) {
+            snap();
+        }
+    }
+    function step() {
+        const dt = FIXED_DT / 1000;
+        clock += FIXED_DT;
+        // 자동 시연 — 가짜 포인터가 스스로 끌어다 놓는다
+        if (!userTouched && fakeI < 0 && drag < 0 && clock >= autoAt) {
+            if (autoIdx >= SCRIPT.length) {
+                resetAll();
+                autoIdx = 0;
+                autoAt = clock + 500;
+            }
+            else {
+                const it = SCRIPT[autoIdx];
+                fakeI = it[0];
+                fakeSlot = it[1];
+                fakeT = 0;
+                fakeFrom = [px[fakeI], py[fakeI]];
+                if (fakeSlot >= 0) {
+                    const r = slotRect(fakeSlot);
+                    fakeTo = [r[0] + 40 + (countIn(fakeSlot) % 3) * 40, r[1] + 36];
+                }
+                else {
+                    fakeTo = [112, 150];
+                }
+                autoIdx += 1;
+            }
+        }
+        if (fakeI >= 0) {
+            fakeT += FIXED_DT;
+            const k = smooth(fakeT / MOVE_MS);
+            px[fakeI] = lerp(fakeFrom[0], fakeTo[0], k);
+            py[fakeI] = lerp(fakeFrom[1], fakeTo[1], k);
+            vx[fakeI] = 0;
+            vy[fakeI] = 0;
+            ghost.style.transform = 'translate(' + (px[fakeI] + CHIP_W - 14).toFixed(1) + 'px,' + (py[fakeI] + CHIP_H - 6).toFixed(1) + 'px)';
+            ghost.setAttribute('data-on', '1');
+            if (fakeT >= MOVE_MS + 120) {
+                const done = fakeI;
+                ghost.setAttribute('data-on', '0');
+                fakeI = -1;
+                drop(done);
+                autoAt = clock + 140;
+            }
+        }
+        for (let i = 0; i < N; i += 1) {
+            if (i === drag || i === fakeI) {
+                continue;
+            }
+            const t = targetOf(i);
+            vx[i] += (SPRING_K * (t[0] - px[i]) - DAMP * vx[i]) * dt;
+            vy[i] += (SPRING_K * (t[1] - py[i]) - DAMP * vy[i]) * dt;
+            px[i] += vx[i] * dt;
+            py[i] += vy[i] * dt;
+        }
+        // 칸 합계는 값을 바로 바꾸지 않고 감쇠하며 따라간다
+        for (let s = 0; s < SLOT_N; s += 1) {
+            shown[s] += (targetSum(s) - shown[s]) * (1 - Math.exp(-EASE_RATE * dt));
+        }
+        render();
+    }
+    function countIn(s) {
+        let k = 0;
+        for (let j = 0; j < N; j += 1) {
+            if (owner[j] === s) {
+                k += 1;
+            }
+        }
+        return k;
+    }
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        raf = window.requestAnimationFrame(frame);
+    }
+    function fit() {
+        scale = board.parentElement ? board.parentElement.clientWidth / BW : 1;
+        board.style.transform = 'scale(' + scale.toFixed(4) + ')';
+    }
+    function pointOf(ev) {
+        const r = board.getBoundingClientRect();
+        return [(ev.clientX - r.left) / scale, (ev.clientY - r.top) / scale];
+    }
+    chips.forEach(function (chip, i) {
+        chip.addEventListener('pointerdown', function (ev) {
+            userTouched = true;
+            if (fakeI >= 0) {
+                ghost.setAttribute('data-on', '0');
+                fakeI = -1;
+            }
+            const p = pointOf(ev);
+            drag = i;
+            moved = false;
+            grabDx = p[0] - px[i];
+            grabDy = p[1] - py[i];
+            chip.setPointerCapture(ev.pointerId);
+        });
+        chip.addEventListener('pointermove', function (ev) {
+            if (drag !== i) {
+                return;
+            }
+            const p = pointOf(ev);
+            px[i] = clamp(p[0] - grabDx, 0, BW - CHIP_W);
+            py[i] = clamp(p[1] - grabDy, 0, BH - CHIP_H);
+            moved = true;
+            if (reduceQuery.matches) {
+                render();
+            }
+        });
+        function end() {
+            if (drag !== i) {
+                return;
+            }
+            drag = -1;
+            if (moved) {
+                drop(i);
+            }
+            if (reduceQuery.matches) {
+                snap();
+            }
+        }
+        chip.addEventListener('pointerup', end);
+        chip.addEventListener('pointercancel', end);
+        chip.addEventListener('click', function (ev) {
+            // 포인터 클릭은 위에서 처리했다 — 키보드(Enter·Space)로 누른 클릭만 칸을 돌려 가며 옮긴다
+            if (ev.detail !== 0) {
+                return;
+            }
+            userTouched = true;
+            assign(i, owner[i] >= SLOT_N - 1 ? -1 : owner[i] + 1);
+        });
+        chip.addEventListener('keydown', function (ev) {
+            const n = Number(ev.key);
+            if (n >= 1 && n <= SLOT_N) {
+                ev.preventDefault();
+                userTouched = true;
+                assign(i, n - 1);
+            }
+            else if (ev.key === '0' || ev.key === 'Backspace') {
+                ev.preventDefault();
+                userTouched = true;
+                assign(i, -1);
+            }
+        });
+    });
+    if (resetBtn) {
+        resetBtn.addEventListener('click', function () {
+            userTouched = true;
+            resetAll();
+        });
+    }
+    status.textContent = TXT_READY;
+    fit();
+    window.addEventListener('resize', fit);
+    if (reduceQuery.matches) {
+        owner[1] = 1;
+        owner[3] = 0;
+        owner[0] = 1;
+        snap();
+    }
+    else {
+        render();
+        raf = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(raf);
+        window.removeEventListener('resize', fit);
+    };
+})();
+</script>
+</body>
+</html>
