@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深さ優先で掘り進み、行き止まりで戻って枝を掘るグリッド迷路 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="深さ優先で壁を払いながら掘り進み、行き止まりでスタックをたどって枝を開く31×31の迷路。マスを押すとそこから掘り直します"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">掘り進んでいます</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="restart" type="button">掘り直す</button>
+    <button class="hs__btn" data-role="pause" type="button" aria-pressed="false">停止</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 바닥을 얹어 명도 차로 길이 읽힌다
+    const BG = [29, 26, 44];
+    const ROCK = [44, 39, 64];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 미로가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자 — 31×31 칸, 칸마다 벽 네 장을 비트 하나씩으로 든다
+    const GRID_N = 31;
+    const CELL_N = GRID_N * GRID_N;
+    const CS = 9;
+    const BOARD = GRID_N * CS;
+    let BX = W - 12 - BOARD;
+    const BY = (H - BOARD) / 2;
+    const ENTRY = 0;
+    const EXIT = CELL_N - 1;
+    // 방향 0 북 · 1 동 · 2 남 · 3 서 — 시계 방향 순서라 +1 이 오른쪽으로 돌기, +3 이 왼쪽으로 돌기
+    const DX = [0, 1, 0, -1];
+    const DY = [-1, 0, 1, 0];
+    const BIT = [1, 2, 4, 8];
+    const ALL_WALLS = 15;
+    function neighbor(i, d) {
+        const x = (i % GRID_N) + DX[d];
+        const y = Math.floor(i / GRID_N) + DY[d];
+        return x < 0 || y < 0 || x >= GRID_N || y >= GRID_N ? -1 : y * GRID_N + x;
+    }
+    function isOpen(walls, i, d) {
+        return (walls[i] & BIT[d]) === 0 && neighbor(i, d) >= 0;
+    }
+    // 벽 한 장 걷기 — 양쪽 칸의 비트를 함께 지운다 (한쪽만 지우면 길이 일방통행이 된다)
+    function knock(walls, i, d) {
+        const n = neighbor(i, d);
+        walls[i] &= ~BIT[d];
+        walls[n] &= ~BIT[(d + 2) % 4];
+        return n;
+    }
+    function openCount(walls, i) {
+        let c = 0;
+        for (let d = 0; d < 4; d += 1) {
+            if (isOpen(walls, i, d)) {
+                c += 1;
+            }
+        }
+        return c;
+    }
+    function cellX(i) { return BX + (i % GRID_N) * CS; }
+    function cellY(i) { return BY + Math.floor(i / GRID_N) * CS; }
+    function cellAt(sx, sy) {
+        const x = Math.floor((sx - BX) / CS);
+        const y = Math.floor((sy - BY) / CS);
+        return x < 0 || y < 0 || x >= GRID_N || y >= GRID_N ? -1 : y * GRID_N + x;
+    }
+    function fillCell(i, c, a) {
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillRect(cellX(i), cellY(i), CS, CS);
+    }
+    // 벽 비트를 선분으로 — 칸마다 동·남 벽만 긋고 맨 윗줄·맨 왼줄만 북·서 벽을 더 긋는다 (같은 벽을 두 번 긋지 않는다)
+    function strokeWalls(walls, color, lw) {
+        ctx.beginPath();
+        for (let i = 0; i < CELL_N; i += 1) {
+            const x = cellX(i);
+            const y = cellY(i);
+            const w = walls[i];
+            if ((w & 2) !== 0) {
+                ctx.moveTo(x + CS, y);
+                ctx.lineTo(x + CS, y + CS);
+            }
+            if ((w & 4) !== 0) {
+                ctx.moveTo(x, y + CS);
+                ctx.lineTo(x + CS, y + CS);
+            }
+            if (i < GRID_N && (w & 1) !== 0) {
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + CS, y);
+            }
+            if (i % GRID_N === 0 && (w & 8) !== 0) {
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + CS);
+            }
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lw;
+        ctx.lineCap = 'square';
+        ctx.stroke();
+    }
+    // 입구(왼쪽 위)·출구(오른쪽 아래) 표시 — 바깥 벽 밖에 작은 삼각형
+    function drawGates() {
+        ctx.fillStyle = rgba(MINT, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(BX - 9, BY + 1);
+        ctx.lineTo(BX - 2, BY + CS / 2);
+        ctx.lineTo(BX - 9, BY + CS - 1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = rgba(PINK, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(BX + BOARD + 2, BY + BOARD - CS + 1);
+        ctx.lineTo(BX + BOARD + 9, BY + BOARD - CS / 2);
+        ctx.lineTo(BX + BOARD + 2, BY + BOARD - 1);
+        ctx.closePath();
+        ctx.fill();
+    }
+    // 왼쪽 칸의 수치 — 이름표 한 줄 + 값 한 줄
+    function panelRow(row, label, value) {
+        const y = 104 + row * 34;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.62);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, 16, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 15px sans-serif';
+        ctx.fillText(value, 16, y + 18);
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    const CARVE_STEP_MS = 24;
+    // 스택 안에서 머리로부터 몇 칸 아래인가를 색으로 — 이 칸 수만큼 내려가면 색이 1/e 로 옅어진다.
+    // 스택에서 빠진 칸은 그때 연달아 戻った歩数 수를 같은 눈금으로 하늘색에 섞는다
+    const BACKTRACK_TINT = 72;
+    const SEED = 464;
+    // 시연은 앞 640걸음을 미리 걸어 둔 상태에서 이어 판다 — 2초 안에 스택 색이 움직이는 모습이 보이게
+    const DEMO_WARM = 640;
+    const HOLD_MS = 1400;
+    const TXT_DIG = '掘り進んでいます';
+    const TXT_BACK = '行き止まりで戻っています';
+    const TXT_DONE = '完成 — すべてのマスが一本の道でつながりました';
+    const TXT_PAUSE = '停止';
+    const restartBtn = root.querySelector('[data-role="restart"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const walls = new Uint8Array(CELL_N);
+    const visited = new Uint8Array(CELL_N);
+    const stack = new Int32Array(CELL_N);
+    const stackPos = new Int32Array(CELL_N);
+    // 이 칸이 스택에서 빠질 때 연달아 戻った歩数 수
+    const popRun = new Int32Array(CELL_N);
+    let top = 0;
+    let steps = 0;
+    let carved = 0;
+    let backs = 0;
+    let backRun = 0;
+    let lastMove = 0;
+    let rnd = makeRng(SEED);
+    let pass = 0;
+    let paused = false;
+    let stepAcc = 0;
+    let holdLeft = 0;
+    function reset(start, seed) {
+        walls.fill(ALL_WALLS);
+        visited.fill(0);
+        stackPos.fill(-1);
+        popRun.fill(0);
+        rnd = makeRng(seed);
+        steps = 0;
+        carved = 0;
+        backs = 0;
+        backRun = 0;
+        lastMove = 0;
+        stepAcc = 0;
+        holdLeft = 0;
+        stack[0] = start;
+        stackPos[start] = 0;
+        top = 1;
+        visited[start] = 1;
+    }
+    // 한 歩数 — 머리 칸에 안 판 이웃이 있으면 하나를 골라 그쪽 벽을 걷고 들어가고(0), 없으면 스택에서 하나 빼 되돌아간다(1). 끝나면 2
+    function carveStep() {
+        if (top === 0) {
+            return 2;
+        }
+        const cur = stack[top - 1];
+        const opts = [];
+        for (let d = 0; d < 4; d += 1) {
+            const n = neighbor(cur, d);
+            if (n >= 0 && visited[n] === 0) {
+                opts.push(d);
+            }
+        }
+        steps += 1;
+        if (opts.length > 0) {
+            const n = knock(walls, cur, opts[Math.floor(rnd() * opts.length)]);
+            visited[n] = 1;
+            stackPos[n] = top;
+            stack[top] = n;
+            top += 1;
+            carved += 1;
+            backRun = 0;
+            return 0;
+        }
+        top -= 1;
+        stackPos[cur] = -1;
+        backRun += 1;
+        popRun[cur] = backRun;
+        backs += 1;
+        return 1;
+    }
+    function report() {
+        if (top === 0) {
+            say(TXT_DONE);
+        }
+        else if (paused) {
+            say(TXT_PAUSE);
+        }
+        else {
+            say(lastMove === 1 ? TXT_BACK : TXT_DIG);
+        }
+    }
+    function warm(n) {
+        for (let k = 0; k < n && top > 0; k += 1) {
+            lastMove = carveStep();
+        }
+    }
+    function step() {
+        if (paused || top === 0) {
+            return;
+        }
+        stepAcc += FIXED_DT;
+        while (stepAcc >= CARVE_STEP_MS && top > 0) {
+            stepAcc -= CARVE_STEP_MS;
+            lastMove = carveStep();
+        }
+        report();
+    }
+    function settle() {
+        while (carveStep() !== 2) { /* 끝까지 */ }
+        report();
+    }
+    function demoTick(t) {
+        if (top > 0 || t < 0) {
+            return;
+        }
+        holdLeft += FIXED_DT;
+        if (holdLeft >= HOLD_MS) {
+            pass += 1;
+            reset(ENTRY, SEED + pass);
+            warm(DEMO_WARM);
+        }
+    }
+    const STACK_PALE = mix(PAPER, LILAC, 0.3);
+    const DONE_PALE = mix(PAPER, BG, 0.06);
+    function draw() {
+        clearStage();
+        ctx.fillStyle = rgba(ROCK, 1);
+        ctx.fillRect(BX, BY, BOARD, BOARD);
+        for (let i = 0; i < CELL_N; i += 1) {
+            if (visited[i] === 0) {
+                continue;
+            }
+            if (stackPos[i] >= 0) {
+                const k = Math.exp(-(top - 1 - stackPos[i]) / BACKTRACK_TINT);
+                fillCell(i, mix(STACK_PALE, PINK, k), 1);
+            }
+            else {
+                fillCell(i, mix(DONE_PALE, SKY, clamp(popRun[i] / BACKTRACK_TINT, 0, 1) * 0.8), 1);
+            }
+        }
+        strokeWalls(walls, rgba(INK, 1), 2);
+        if (top > 0) {
+            const h = stack[top - 1];
+            ctx.fillStyle = rgba(PAPER, 1);
+            ctx.strokeStyle = rgba(PINK, 1);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cellX(h) + CS / 2, cellY(h) + CS / 2, 3.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        }
+        drawGates();
+        panelRow(0, '掘ったマス', String(carved + 1) + ' / ' + String(CELL_N));
+        panelRow(1, 'スタックの深さ', String(top));
+        panelRow(2, '戻った歩数', String(backs));
+        panelRow(3, '歩数', String(steps));
+    }
+    function after() {
+        if (still) {
+            settle();
+        }
+        report();
+        draw();
+    }
+    function restart(start) {
+        pass += 1;
+        reset(start, SEED + pass);
+        after();
+    }
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+        report();
+        draw();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        const p = toScene(ev);
+        const c = cellAt(p[0], p[1]);
+        if (c >= 0) {
+            restart(c);
+        }
+    });
+    cv.addEventListener('keydown', function (ev) {
+        if (ev.key === ' ' || ev.key === 'Spacebar') {
+            ev.preventDefault();
+            wake();
+            setPaused(!paused);
+        }
+        else if (ev.key === 'ArrowRight') {
+            ev.preventDefault();
+            wake();
+            warm(20);
+            after();
+        }
+        else if (ev.key === 'Home' || ev.key === 'Enter') {
+            ev.preventDefault();
+            wake();
+            restart(ENTRY);
+        }
+    });
+    if (restartBtn) {
+        restartBtn.addEventListener('click', function () { wake(); restart(ENTRY); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); });
+    }
+    reset(ENTRY, SEED);
+    if (demo && !still) {
+        warm(DEMO_WARM);
+    }
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (still) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

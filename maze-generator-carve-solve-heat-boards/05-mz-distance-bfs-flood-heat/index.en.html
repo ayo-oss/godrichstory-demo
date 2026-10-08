@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Maze Where a Spreading Wave Computes the Distance to Every Cell — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="A maze where a wave spreading one ring at a time from the entrance writes each cell's distance as a heat map and marks the farthest room. Press a cell to spread from there"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">Spreading from the entrance one ring at a time</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="far" type="button">From farthest room</button>
+    <button class="hs__btn" data-role="new" type="button">New maze</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 바닥을 얹어 명도 차로 길이 읽힌다
+    const BG = [29, 26, 44];
+    const ROCK = [44, 39, 64];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 미로가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자 — 31×31 칸, 칸마다 벽 네 장을 비트 하나씩으로 든다
+    const GRID_N = 31;
+    const CELL_N = GRID_N * GRID_N;
+    const CS = 9;
+    const BOARD = GRID_N * CS;
+    let BX = W - 12 - BOARD;
+    const BY = (H - BOARD) / 2;
+    const ENTRY = 0;
+    const EXIT = CELL_N - 1;
+    // 방향 0 북 · 1 동 · 2 남 · 3 서 — 시계 방향 순서라 +1 이 오른쪽으로 돌기, +3 이 왼쪽으로 돌기
+    const DX = [0, 1, 0, -1];
+    const DY = [-1, 0, 1, 0];
+    const BIT = [1, 2, 4, 8];
+    const ALL_WALLS = 15;
+    function neighbor(i, d) {
+        const x = (i % GRID_N) + DX[d];
+        const y = Math.floor(i / GRID_N) + DY[d];
+        return x < 0 || y < 0 || x >= GRID_N || y >= GRID_N ? -1 : y * GRID_N + x;
+    }
+    function isOpen(walls, i, d) {
+        return (walls[i] & BIT[d]) === 0 && neighbor(i, d) >= 0;
+    }
+    // 벽 한 장 걷기 — 양쪽 칸의 비트를 함께 지운다 (한쪽만 지우면 길이 일방통행이 된다)
+    function knock(walls, i, d) {
+        const n = neighbor(i, d);
+        walls[i] &= ~BIT[d];
+        walls[n] &= ~BIT[(d + 2) % 4];
+        return n;
+    }
+    function openCount(walls, i) {
+        let c = 0;
+        for (let d = 0; d < 4; d += 1) {
+            if (isOpen(walls, i, d)) {
+                c += 1;
+            }
+        }
+        return c;
+    }
+    function cellX(i) { return BX + (i % GRID_N) * CS; }
+    function cellY(i) { return BY + Math.floor(i / GRID_N) * CS; }
+    function cellAt(sx, sy) {
+        const x = Math.floor((sx - BX) / CS);
+        const y = Math.floor((sy - BY) / CS);
+        return x < 0 || y < 0 || x >= GRID_N || y >= GRID_N ? -1 : y * GRID_N + x;
+    }
+    function fillCell(i, c, a) {
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillRect(cellX(i), cellY(i), CS, CS);
+    }
+    // 벽 비트를 선분으로 — 칸마다 동·남 벽만 긋고 맨 윗줄·맨 왼줄만 북·서 벽을 더 긋는다 (같은 벽을 두 번 긋지 않는다)
+    function strokeWalls(walls, color, lw) {
+        ctx.beginPath();
+        for (let i = 0; i < CELL_N; i += 1) {
+            const x = cellX(i);
+            const y = cellY(i);
+            const w = walls[i];
+            if ((w & 2) !== 0) {
+                ctx.moveTo(x + CS, y);
+                ctx.lineTo(x + CS, y + CS);
+            }
+            if ((w & 4) !== 0) {
+                ctx.moveTo(x, y + CS);
+                ctx.lineTo(x + CS, y + CS);
+            }
+            if (i < GRID_N && (w & 1) !== 0) {
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + CS, y);
+            }
+            if (i % GRID_N === 0 && (w & 8) !== 0) {
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + CS);
+            }
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lw;
+        ctx.lineCap = 'square';
+        ctx.stroke();
+    }
+    // 입구(왼쪽 위)·출구(오른쪽 아래) 표시 — 바깥 벽 밖에 작은 삼각형
+    function drawGates() {
+        ctx.fillStyle = rgba(MINT, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(BX - 9, BY + 1);
+        ctx.lineTo(BX - 2, BY + CS / 2);
+        ctx.lineTo(BX - 9, BY + CS - 1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = rgba(PINK, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(BX + BOARD + 2, BY + BOARD - CS + 1);
+        ctx.lineTo(BX + BOARD + 9, BY + BOARD - CS / 2);
+        ctx.lineTo(BX + BOARD + 2, BY + BOARD - 1);
+        ctx.closePath();
+        ctx.fill();
+    }
+    // 왼쪽 칸의 수치 — 이름표 한 줄 + 값 한 줄
+    function panelRow(row, label, value) {
+        const y = 104 + row * 34;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.62);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, 16, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 15px sans-serif';
+        ctx.fillText(value, 16, y + 18);
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function addFront(g, c) {
+        for (let d = 0; d < 4; d += 1) {
+            const n = neighbor(c, d);
+            if (n < 0 || g.inMaze[n] === 1 || g.inFront[n] === 1) {
+                continue;
+            }
+            g.inFront[n] = 1;
+            g.front.push(n);
+        }
+    }
+    function growStart(seed, start) {
+        const g = { walls: new Uint8Array(CELL_N).fill(ALL_WALLS), inMaze: new Uint8Array(CELL_N), inFront: new Uint8Array(CELL_N), front: [], order: new Int32Array(CELL_N).fill(-1), count: 0, last: start, rnd: makeRng(seed) };
+        g.inMaze[start] = 1;
+        g.order[start] = 0;
+        g.count = 1;
+        addFront(g, start);
+        return g;
+    }
+    // Frontier(판 영역에 닿은 안 Carved cells)에서 하나를 골라 이미 판 이웃 하나와 벽 한 장으로 잇는다
+    function growOne(g, mode) {
+        const len = g.front.length;
+        if (len === 0) {
+            return -1;
+        }
+        let c = 0;
+        if (mode === 'newest') {
+            c = g.front.pop();
+        }
+        else if (mode === 'oldest') {
+            c = g.front.shift();
+        }
+        else {
+            const k = Math.floor(g.rnd() * len);
+            c = g.front[k];
+            g.front[k] = g.front[len - 1];
+            g.front.pop();
+        }
+        g.inFront[c] = 0;
+        const links = [];
+        for (let d = 0; d < 4; d += 1) {
+            const n = neighbor(c, d);
+            if (n >= 0 && g.inMaze[n] === 1) {
+                links.push(d);
+            }
+        }
+        knock(g.walls, c, links[Math.floor(g.rnd() * links.length)]);
+        g.inMaze[c] = 1;
+        g.order[c] = g.count;
+        g.count += 1;
+        g.last = c;
+        addFront(g, c);
+        return c;
+    }
+    function growAll(seed, start, mode) {
+        const g = growStart(seed, start);
+        while (growOne(g, mode) >= 0) { /* 프론티어가 빌 때까지 */ }
+        return g.walls;
+    }
+    // 한 겹(같은 거리의 칸들)을 번지는 데 쓰는 시간
+    const FLOOD_STEP_MS = 20;
+    // 열지도 눈금의 바닥 — 파도가 이 거리를 넘기 전까지는 눈금을 이 값으로 고정해 초반 색이 출렁이지 않게 한다
+    const HEAT_MAX_D = 60;
+    // 지금 막 닿은 겹(파도 앞머리)을 덮는 밝기
+    const RING_ALPHA = 0.85;
+    const SEED = 464;
+    const HOLD_MS = 1400;
+    const GAP_MS = 500;
+    const HEAT_RAMP = [SKY, MINT, PEACH, PINK];
+    const TXT_FLOOD = 'Spreading from the entrance one ring at a time';
+    const TXT_FLOOD2 = 'Spreading again from the farthest room';
+    const TXT_DONE1 = 'Done — found the farthest room';
+    const TXT_DONE2 = 'Done — found the two rooms farthest apart';
+    const farBtn = root.querySelector('[data-role="far"]');
+    const newBtn = root.querySelector('[data-role="new"]');
+    let pass = 0;
+    let walls = growAll(SEED, Math.floor(CELL_N / 2), 'random');
+    let dist = new Int32Array(CELL_N).fill(-1);
+    let layer = [];
+    let front = 0;
+    let reached = 0;
+    let src = ENTRY;
+    let farCell = ENTRY;
+    let sweep = 1;
+    let longest = -1;
+    let longEnd = -1;
+    let stepAcc = 0;
+    let holdLeft = 0;
+    function startFlood(s, sw) {
+        src = s;
+        sweep = sw;
+        dist = new Int32Array(CELL_N).fill(-1);
+        dist[s] = 0;
+        layer = [s];
+        front = 0;
+        reached = 1;
+        farCell = s;
+        stepAcc = 0;
+        holdLeft = 0;
+    }
+    // 한 겹 번지기 — 지금 겹의 칸마다 열린 이웃 중 아직 거리가 없는 칸에 거리+1 을 적어 다음 겹을 만든다
+    function floodStep() {
+        if (layer.length === 0) {
+            return;
+        }
+        const next = [];
+        for (const c of layer) {
+            for (let d = 0; d < 4; d += 1) {
+                if (!isOpen(walls, c, d)) {
+                    continue;
+                }
+                const n = neighbor(c, d);
+                if (dist[n] >= 0) {
+                    continue;
+                }
+                dist[n] = front + 1;
+                next.push(n);
+            }
+        }
+        if (next.length === 0) {
+            layer = [];
+            if (sweep === 2) {
+                longest = front;
+                longEnd = farCell;
+            }
+            return;
+        }
+        front += 1;
+        layer = next;
+        reached += next.length;
+        farCell = next[next.length - 1];
+    }
+    function flooding() { return layer.length > 0; }
+    function report() {
+        if (flooding()) {
+            say(sweep === 2 ? TXT_FLOOD2 : TXT_FLOOD);
+        }
+        else {
+            say(sweep === 2 ? TXT_DONE2 : TXT_DONE1);
+        }
+    }
+    function flood(n) {
+        for (let k = 0; k < n && flooding(); k += 1) {
+            floodStep();
+        }
+    }
+    function step() {
+        if (!flooding()) {
+            return;
+        }
+        stepAcc += FIXED_DT;
+        while (stepAcc >= FLOOD_STEP_MS && flooding()) {
+            stepAcc -= FLOOD_STEP_MS;
+            floodStep();
+        }
+        report();
+    }
+    function settle() {
+        flood(CELL_N);
+        report();
+    }
+    // 시연 — 입구에서 번진 뒤 From farthest room 한 번 더 번진다 (가지 없는 길이 하나뿐인 미로에서 두 번째 끝이 가장 긴 길의 양 끝)
+    function demoTick(t) {
+        if (flooding() || t < 0) {
+            return;
+        }
+        holdLeft += FIXED_DT;
+        if (sweep === 1 && holdLeft >= GAP_MS) {
+            startFlood(farCell, 2);
+        }
+        else if (sweep === 2 && holdLeft >= HOLD_MS) {
+            newMaze();
+        }
+    }
+    function heat(t) {
+        const x = clamp(t, 0, 1) * (HEAT_RAMP.length - 1);
+        const i = Math.min(Math.floor(x), HEAT_RAMP.length - 2);
+        return mix(HEAT_RAMP[i], HEAT_RAMP[i + 1], x - i);
+    }
+    function ringAt(c, col, r) {
+        ctx.strokeStyle = rgba(col, 1);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cellX(c) + CS / 2, cellY(c) + CS / 2, r, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    const UNREACHED = mix(ROCK, PAPER, 0.12);
+    function draw() {
+        clearStage();
+        const scale = Math.max(front, HEAT_MAX_D);
+        for (let i = 0; i < CELL_N; i += 1) {
+            const d = dist[i];
+            if (d < 0) {
+                fillCell(i, UNREACHED, 1);
+                continue;
+            }
+            fillCell(i, mix(heat(d / scale), PAPER, 0.18), 1);
+            if (flooding() && d === front) {
+                fillCell(i, PAPER, RING_ALPHA);
+            }
+        }
+        strokeWalls(walls, rgba(INK, 1), 2);
+        ringAt(src, PAPER, 5);
+        ringAt(farCell, PAPER, 6.5);
+        drawGates();
+        panelRow(0, 'Distance ring', String(front));
+        panelRow(1, 'Cells reached', String(reached) + ' / ' + String(CELL_N));
+        panelRow(2, 'To farthest room', String(dist[farCell]));
+        panelRow(3, 'Longest path', longest >= 0 ? String(longest) : '—');
+    }
+    function after() {
+        if (still) {
+            settle();
+        }
+        report();
+        draw();
+    }
+    function newMaze() {
+        pass += 1;
+        walls = growAll(SEED + pass, Math.floor(CELL_N / 2), 'random');
+        longest = -1;
+        longEnd = -1;
+        startFlood(ENTRY, 1);
+        after();
+    }
+    function fromFar() {
+        if (flooding()) {
+            settle();
+        }
+        startFlood(farCell, 2);
+        after();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        const p = toScene(ev);
+        const c = cellAt(p[0], p[1]);
+        if (c < 0) {
+            return;
+        }
+        longest = -1;
+        startFlood(c, 1);
+        after();
+    });
+    cv.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            wake();
+            fromFar();
+        }
+        else if (ev.key === 'ArrowRight') {
+            ev.preventDefault();
+            wake();
+            flood(5);
+            after();
+        }
+        else if (ev.key === 'Home') {
+            ev.preventDefault();
+            wake();
+            newMaze();
+        }
+    });
+    if (farBtn) {
+        farBtn.addEventListener('click', function () { wake(); fromFar(); });
+    }
+    if (newBtn) {
+        newBtn.addEventListener('click', function () { wake(); newMaze(); });
+    }
+    startFlood(ENTRY, 1);
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (still) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>
