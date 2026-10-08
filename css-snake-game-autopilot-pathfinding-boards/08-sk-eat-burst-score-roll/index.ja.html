@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>餌を食べた瞬間に重力を受ける粒子が弾け、得点の数字が跳ね上がるヘビ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="餌を食べた瞬間に重力を受ける粒子が弾け、得点の数字が跳ね上がるヘビ"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">スコア</p>
+  <button class="sc__btn" id="scBtn" type="button">一時停止</button>
+  <p class="sc__caption">餌を食べた瞬間に重力を受ける粒子が弾け、得点の数字が跳ね上がるヘビ</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    // 파스텔 팔레트 — 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const TILE_A = [37, 33, 58];
+    const TILE_B = [42, 38, 66];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    // 둥근 사각형 경로 (roundRect 가 없는 브라우저에서도 같은 모양)
+    function rrPath(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+    function makeBoard(rows) {
+        const cell = H / rows;
+        const cols = Math.floor(W / cell + 1e-6);
+        return { cols: cols, rows: rows, cell: cell, ox: (W - cols * cell) / 2, oy: 0, n: cols * rows };
+    }
+    const DX = [0, 1, 0, -1];
+    const DY = [-1, 0, 1, 0];
+    // 칸 번호 y*cols+x. 판 밖이면 -1 (wrap 이면 반대편으로 이어진다)
+    function cellAt(b, x, y, wrap) {
+        let xx = x;
+        let yy = y;
+        if (wrap) {
+            xx = (x % b.cols + b.cols) % b.cols;
+            yy = (y % b.rows + b.rows) % b.rows;
+        }
+        else if (x < 0 || y < 0 || x >= b.cols || y >= b.rows) {
+            return -1;
+        }
+        return yy * b.cols + xx;
+    }
+    function neighborCell(b, i, d, wrap) {
+        return cellAt(b, (i % b.cols) + DX[d], Math.floor(i / b.cols) + DY[d], wrap);
+    }
+    // 목표 칸에서 너비 우선으로 퍼지는 거리장. blocked 칸과 닿지 못하는 칸은 -1
+    function distField(b, target, blocked, wrap) {
+        const dist = new Int16Array(b.n).fill(-1);
+        const queue = new Int16Array(b.n);
+        let qh = 0;
+        let qt = 0;
+        dist[target] = 0;
+        queue[qt] = target;
+        qt += 1;
+        while (qh < qt) {
+            const c = queue[qh];
+            qh += 1;
+            for (let d = 0; d < 4; d += 1) {
+                const nb = neighborCell(b, c, d, wrap);
+                if (nb >= 0 && dist[nb] < 0 && blocked[nb] === 0) {
+                    dist[nb] = dist[c] + 1;
+                    queue[qt] = nb;
+                    qt += 1;
+                }
+            }
+        }
+        return dist;
+    }
+    // 거리장에서 값이 가장 낮은 이웃 (없으면 -1)
+    function lowestNeighbor(b, dist, from, wrap) {
+        let best = -1;
+        let bv = 32000;
+        for (let d = 0; d < 4; d += 1) {
+            const nb = neighborCell(b, from, d, wrap);
+            if (nb >= 0 && dist[nb] >= 0 && dist[nb] < bv) {
+                bv = dist[nb];
+                best = nb;
+            }
+        }
+        return best;
+    }
+    function pathFrom(b, dist, head, wrap) {
+        const path = [];
+        let cur = head;
+        for (let k = 0; k < b.n; k += 1) {
+            const nx = lowestNeighbor(b, dist, cur, wrap);
+            if (nx < 0 || (dist[nx] >= dist[cur] && cur !== head)) {
+                return [];
+            }
+            path.push(nx);
+            if (dist[nx] === 0) {
+                return path;
+            }
+            cur = nx;
+        }
+        return [];
+    }
+    function placeFood(g) {
+        const used = new Uint8Array(g.b.n);
+        for (let i = 0; i < g.body.length; i += 1) {
+            used[g.body[i]] = 1;
+        }
+        const free = [];
+        for (let i = 0; i < g.b.n; i += 1) {
+            if (used[i] === 0) {
+                free.push(i);
+            }
+        }
+        g.food = free.length > 0 ? free[Math.floor(g.rnd() * free.length)] : -1;
+    }
+    function resetGame(g) {
+        const b = g.b;
+        const hx = Math.floor(b.cols / 2);
+        const hy = Math.floor(b.rows / 2);
+        g.body = [hy * b.cols + hx, hy * b.cols + hx - 1, hy * b.cols + hx - 2];
+        g.prev = g.body.slice();
+        g.dead = false;
+        g.resets += 1;
+        placeFood(g);
+    }
+    function newGame(b, wrap, seed) {
+        const g = { b: b, wrap: wrap, body: [], prev: [], food: -1, rnd: lcg(seed), eaten: 0, dead: false, resets: -1 };
+        resetGame(g);
+        return g;
+    }
+    // 머리를 next 칸으로 옮긴다. 먹으면 true, 몸에 부딪히면 dead
+    function moveSnake(g, next) {
+        g.prev = g.body.slice();
+        const ate = next === g.food;
+        const tail = g.body[g.body.length - 1];
+        for (let i = 0; i < g.body.length; i += 1) {
+            if (g.body[i] === next && !(i === g.body.length - 1 && !ate && next === tail)) {
+                g.dead = true;
+                return false;
+            }
+        }
+        g.body.unshift(next);
+        if (ate) {
+            g.eaten += 1;
+            placeFood(g);
+        }
+        else {
+            g.body.pop();
+        }
+        return ate;
+    }
+    // 경로를 끝까지 따라가 먹은 뒤의 가상 몸
+    function simulate(body, path) {
+        const v = body.slice();
+        for (let k = 0; k < path.length; k += 1) {
+            v.unshift(path[k]);
+            if (k < path.length - 1) {
+                v.pop();
+            }
+        }
+        return v;
+    }
+    // 가상 몸의 머리에서 번져 나가 꼬리에 닿는가. mark 를 주면 닿은 칸을 표시한다
+    function tailReachable(b, v, wrap, mark) {
+        const blocked = new Uint8Array(b.n);
+        for (let i = 1; i < v.length - 1; i += 1) {
+            blocked[v[i]] = 1;
+        }
+        const tail = v[v.length - 1];
+        const head = v[0];
+        const seen = new Uint8Array(b.n);
+        const stack = [head];
+        seen[head] = 1;
+        let hit = false;
+        while (stack.length > 0) {
+            const c = stack.pop();
+            for (let d = 0; d < 4; d += 1) {
+                const nb = neighborCell(b, c, d, wrap);
+                if (nb < 0 || seen[nb] === 1) {
+                    continue;
+                }
+                if (nb === tail) {
+                    hit = true;
+                    continue;
+                }
+                if (blocked[nb] === 1 || nb === head) {
+                    continue;
+                }
+                seen[nb] = 1;
+                stack.push(nb);
+            }
+        }
+        if (mark) {
+            mark.set(seen);
+        }
+        return hit;
+    }
+    // 한 수를 정한다: 먹이까지 최단 경로 → (안전 검사) → 막히면 꼬리를 쫓는다
+    function planMove(g, safeOn) {
+        const b = g.b;
+        const head = g.body[0];
+        const tail = g.body[g.body.length - 1];
+        const plan = { next: -1, path: [], rejected: [], trap: new Uint8Array(b.n), chase: false };
+        const blocked = new Uint8Array(b.n);
+        for (let i = 0; i < g.body.length - 1; i += 1) {
+            blocked[g.body[i]] = 1;
+        }
+        if (g.food >= 0) {
+            const dist = distField(b, g.food, blocked, g.wrap);
+            const path = pathFrom(b, dist, head, g.wrap);
+            plan.path = path;
+            if (path.length > 0) {
+                if (!safeOn) {
+                    plan.next = path[0];
+                    return plan;
+                }
+                const v = simulate(g.body, path);
+                if (tailReachable(b, v, g.wrap, plan.trap)) {
+                    plan.next = path[0];
+                    return plan;
+                }
+                plan.rejected = path;
+            }
+        }
+        plan.chase = true;
+        const dist2 = distField(b, tail, blocked, g.wrap);
+        const nx = lowestNeighbor(b, dist2, head, g.wrap);
+        if (nx >= 0) {
+            plan.next = nx;
+            return plan;
+        }
+        for (let d = 0; d < 4; d += 1) {
+            const nb = neighborCell(b, head, d, g.wrap);
+            if (nb >= 0 && blocked[nb] === 0 && nb !== head) {
+                plan.next = nb;
+                return plan;
+            }
+        }
+        return plan;
+    }
+    // 칸 중심의 화면 좌표
+    function cellX(b, i) { return b.ox + ((i % b.cols) + 0.5) * b.cell; }
+    function cellY(b, i) { return b.oy + (Math.floor(i / b.cols) + 0.5) * b.cell; }
+    function wrapDelta(a, c, n, wrap) {
+        let d = c - a;
+        if (wrap) {
+            if (d > n / 2) {
+                d -= n;
+            }
+            if (d < -n / 2) {
+                d += n;
+            }
+        }
+        return d;
+    }
+    // 節 i 의 보간 위치 (칸 좌표). 지난 틱의 자리에서 이번 틱의 자리로 p(0~1) 만큼
+    function segPos(g, i, p) {
+        const b = g.b;
+        const cur = g.body[i];
+        const pv = i < g.prev.length ? g.prev[i] : cur;
+        const cx = cur % b.cols;
+        const cy = Math.floor(cur / b.cols);
+        const px = pv % b.cols;
+        const py = Math.floor(pv / b.cols);
+        return [px + wrapDelta(px, cx, b.cols, g.wrap) * p, py + wrapDelta(py, cy, b.rows, g.wrap) * p];
+    }
+    function drawTiles(ctx, b) {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+        for (let y = 0; y < b.rows; y += 1) {
+            for (let x = 0; x < b.cols; x += 1) {
+                ctx.fillStyle = rgba((x + y) % 2 === 0 ? TILE_A : TILE_B, 1);
+                ctx.fillRect(b.ox + x * b.cell, b.oy + y * b.cell, b.cell + 0.5, b.cell + 0.5);
+            }
+        }
+    }
+    function drawFood(ctx, b, food, t) {
+        if (food < 0) {
+            return;
+        }
+        const x = cellX(b, food);
+        const y = cellY(b, food);
+        const pulse = 0.5 + 0.5 * Math.sin(t * 0.12);
+        glow(ctx, x, y, b.cell * (1.3 + 0.35 * pulse), PINK, 0.55);
+        ctx.fillStyle = rgba(PINK, 1);
+        ctx.beginPath();
+        ctx.arc(x, y, b.cell * 0.3, 0, PI2);
+        ctx.fill();
+        ctx.fillStyle = rgba(CREAM, 0.9);
+        ctx.beginPath();
+        ctx.arc(x - b.cell * 0.08, y - b.cell * 0.09, b.cell * 0.09, 0, PI2);
+        ctx.fill();
+    }
+    function bodyColor(i, len) {
+        return mix(MINT, SKY, len <= 1 ? 0 : i / (len - 1));
+    }
+    // 칸 중심 (x,y 칸 좌표, 소수 허용)에 節 하나
+    function drawSeg(ctx, b, gx, gy, c, shrink) {
+        const s = b.cell * (1 - shrink);
+        const cx = b.ox + (gx + 0.5) * b.cell;
+        const cy = b.oy + (gy + 0.5) * b.cell;
+        ctx.fillStyle = rgba(c, 1);
+        rrPath(ctx, cx - s / 2, cy - s / 2, s, s, s * 0.32);
+        ctx.fill();
+    }
+    function drawEyes(ctx, b, gx, gy, dirx, diry) {
+        const cx = b.ox + (gx + 0.5) * b.cell;
+        const cy = b.oy + (gy + 0.5) * b.cell;
+        const px = -diry;
+        const py = dirx;
+        const r = b.cell * 0.09;
+        ctx.fillStyle = rgba(BG, 1);
+        for (let s = -1; s <= 1; s += 2) {
+            ctx.beginPath();
+            ctx.arc(cx + dirx * b.cell * 0.16 + px * s * b.cell * 0.18, cy + diry * b.cell * 0.16 + py * s * b.cell * 0.18, r, 0, PI2);
+            ctx.fill();
+        }
+    }
+    function headDir(g) {
+        if (g.body.length < 2) {
+            return [1, 0];
+        }
+        const b = g.b;
+        const dx = wrapDelta(g.body[1] % b.cols, g.body[0] % b.cols, b.cols, g.wrap);
+        const dy = wrapDelta(Math.floor(g.body[1] / b.cols), Math.floor(g.body[0] / b.cols), b.rows, g.wrap);
+        return [clamp(dx, -1, 1), clamp(dy, -1, 1)];
+    }
+    // 보간 없이 칸 그대로 그리는 기본 뱀
+    function drawSnakeCells(ctx, g, dim) {
+        const len = g.body.length;
+        for (let i = len - 1; i >= 0; i -= 1) {
+            const c = g.body[i];
+            const col = mix(bodyColor(i, len), BG, dim);
+            drawSeg(ctx, g.b, c % g.b.cols, Math.floor(c / g.b.cols), col, 0.08);
+        }
+        const hd = headDir(g);
+        drawEyes(ctx, g.b, g.body[0] % g.b.cols, Math.floor(g.body[0] / g.b.cols), hd[0], hd[1]);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        // 움직임 줄이기에서는 루프가 없으니 입력 직후 한 틱쯤 앞으로 보내 바로 그린다
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 8);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            // 이 장면이 쓰는 키만 막는다. 쓰지 않는 키(Tab 등)는 그대로 둔다
+            if (scene.key(k)) {
+                e.preventDefault();
+                refresh();
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const TICK_MS = 70;
+    const GRID_N = 12;
+    const BURST_COUNT = 28;
+    const GRAVITY = 0.075;
+    const LIFE_DECAY = 0.017;
+    const DIGIT_STIFF = 0.2;
+    const DIGIT_DAMP = 0.13;
+    const SCORE_PER_FOOD = 10;
+    const WARM_TICKS = 71;
+    const TXT_SCORE = 'スコア';
+    const TXT_LEN = '長さ';
+    const TXT_DEAD = '閉じ込められた — やり直し';
+    const BURST_COLORS = [PINK, PEACH, CREAM, LILAC, SKY];
+    function makeScene(inp, reduce) {
+        const b = makeBoard(GRID_N);
+        const g = newGame(b, false, 455808);
+        const rnd = lcg(455809);
+        const sparks = [];
+        const rings = [];
+        let acc = 0;
+        let t = 0;
+        let score = 0;
+        let hold = 0;
+        const digitY = [0, 0, 0, 0];
+        const digitV = [0, 0, 0, 0];
+        function burst(x, y) {
+            for (let i = 0; i < BURST_COUNT; i += 1) {
+                const a = rnd() * PI2;
+                const sp = 0.9 + rnd() * 2.7;
+                sparks.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 1.2, life: 0.6 + rnd() * 0.4, c: BURST_COLORS[i % BURST_COLORS.length] });
+            }
+            rings.push({ x: x, y: y, r: 4, life: 1 });
+        }
+        function digits(v) {
+            let s = String(v);
+            while (s.length < 4) {
+                s = '0' + s;
+            }
+            return s.slice(-4);
+        }
+        function addScore() {
+            const before = digits(score);
+            score += SCORE_PER_FOOD;
+            const after = digits(score);
+            for (let i = 0; i < 4; i += 1) {
+                if (before.charAt(i) !== after.charAt(i)) {
+                    digitV[i] = -4.2;
+                }
+            }
+        }
+        function logic() {
+            if (hold > 0) {
+                hold -= 1;
+                if (hold === 0) {
+                    resetGame(g);
+                }
+                return;
+            }
+            const foodAt = g.food;
+            const p = planMove(g, true);
+            if (p.next < 0) {
+                g.dead = true;
+                hold = 8;
+                return;
+            }
+            const ate = moveSnake(g, p.next);
+            if (ate) {
+                burst(cellX(b, foodAt), cellY(b, foodAt));
+                addScore();
+            }
+        }
+        const scene = {
+            step() {
+                t += 1;
+                acc += FIXED_DT;
+                while (acc >= TICK_MS) {
+                    acc -= TICK_MS;
+                    logic();
+                }
+                for (let i = sparks.length - 1; i >= 0; i -= 1) {
+                    const s = sparks[i];
+                    s.vy += GRAVITY;
+                    s.x += s.vx;
+                    s.y += s.vy;
+                    s.life -= LIFE_DECAY;
+                    if (s.life <= 0) {
+                        sparks.splice(i, 1);
+                    }
+                }
+                for (let i = rings.length - 1; i >= 0; i -= 1) {
+                    rings[i].r += 3.2;
+                    rings[i].life -= 0.035;
+                    if (rings[i].life <= 0) {
+                        rings.splice(i, 1);
+                    }
+                }
+                for (let i = 0; i < 4; i += 1) {
+                    digitV[i] += -DIGIT_STIFF * digitY[i] - DIGIT_DAMP * digitV[i];
+                    digitY[i] += digitV[i];
+                }
+            },
+            draw(ctx) {
+                drawTiles(ctx, b);
+                for (let i = 0; i < rings.length; i += 1) {
+                    ctx.strokeStyle = rgba(PEACH, 0.6 * rings[i].life);
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(rings[i].x, rings[i].y, rings[i].r, 0, PI2);
+                    ctx.stroke();
+                }
+                drawFood(ctx, b, g.food, t);
+                const p = smooth(clamp(acc / TICK_MS, 0, 1));
+                const len = g.body.length;
+                for (let i = len - 1; i >= 0; i -= 1) {
+                    const sp = segPos(g, i, p);
+                    drawSeg(ctx, b, sp[0], sp[1], mix(bodyColor(i, len), BG, g.dead ? 0.55 : 0), 0.1);
+                }
+                const hs = segPos(g, 0, p);
+                const hd = headDir(g);
+                drawEyes(ctx, b, hs[0], hs[1], hd[0], hd[1]);
+                for (let i = 0; i < sparks.length; i += 1) {
+                    const s = sparks[i];
+                    glow(ctx, s.x, s.y, 3 + 7 * s.life, s.c, 0.85 * s.life);
+                }
+                // スコア — 자릿수마다 스프링으로 튀어 오른다
+                const sc = digits(score);
+                ctx.fillStyle = rgba(BG, 0.72);
+                rrPath(ctx, W - 118, 10, 108, 44, 12);
+                ctx.fill();
+                ctx.font = '700 28px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                for (let i = 0; i < 4; i += 1) {
+                    ctx.fillStyle = rgba(Math.abs(digitY[i]) > 0.6 ? PEACH : CREAM, 1);
+                    ctx.fillText(sc.charAt(i), W - 105 + 12 + i * 24, 33 + digitY[i]);
+                }
+            },
+            label() {
+                if (g.dead) {
+                    return TXT_DEAD;
+                }
+                return TXT_SCORE + ' ' + score + ' · ' + TXT_LEN + ' ' + g.body.length;
+            },
+            tap() {
+                burst(cellX(b, g.body[0]), cellY(b, g.body[0]));
+            },
+            key(k) {
+                return false;
+            }
+        };
+        for (let i = 0; i < WARM_TICKS; i += 1) {
+            logic();
+        }
+        sparks.length = 0;
+        rings.length = 0;
+        if (reduce) {
+            for (let i = 0; i < 4; i += 1) {
+                scene.step();
+            }
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>
