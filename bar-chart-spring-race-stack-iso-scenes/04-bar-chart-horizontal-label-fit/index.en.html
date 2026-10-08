@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horizontal Bars Whose Labels Decide to Sit Inside or Outside — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bc is-demo" id="bc">
+  <canvas class="bc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="A horizontal bar chart that measures the value text width and the bar color contrast to put each label inside or outside its bar. Pick a bar with ←/→ to hear its value and label spot"></canvas>
+  <p class="bc__status" data-role="status" aria-live="off">Pick a bar to hear where its label goes</p>
+  <div class="bc__tools">
+    <button class="bc__btn" data-role="data" type="button">New data</button>
+    <button class="bc__btn" data-role="shrink" type="button" aria-pressed="false">Shorten bars</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("bc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막대를 얹어 명도 차로 경계가 읽힌다
+    const BG = [24, 26, 38];
+    const PANEL = [36, 39, 56];
+    const PAPER = [250, 246, 236];
+    const INK = [30, 30, 44];
+    const PAL = [
+        [126, 190, 255],
+        [255, 164, 190],
+        [130, 224, 190],
+        [192, 168, 255],
+        [255, 206, 160],
+        [244, 226, 140],
+        [150, 220, 236],
+        [230, 184, 226],
+        [196, 220, 160],
+        [176, 196, 236],
+    ];
+    // 가상 데이터의 이름 — 실제 항목이 아니라 순서만 뜻한다
+    const LABELS = ['Item A', 'Item B', 'Item C', 'Item D', 'Item E', 'Item F', 'Item G', 'Item H', 'Item I', 'Item J'];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 움직임 줄이기 — 열린 페이지에서 설정을 바꿔도 아래 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 가상 데이터가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function seededValues(seed, n, lo, hi) {
+        const rnd = makeRng(seed);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            out.push(lo + Math.floor(rnd() * (hi - lo + 1)));
+        }
+        return out;
+    }
+    // 세 자리마다 쉼표 — 지역 설정에 기대지 않는다
+    function groupDigits(n) {
+        const s = String(Math.round(Math.abs(n)));
+        let out = '';
+        for (let i = 0; i < s.length; i += 1) {
+            if (i > 0 && (s.length - i) % 3 === 0) {
+                out += ',';
+            }
+            out += s[i];
+        }
+        return (n < 0 ? '-' : '') + out;
+    }
+    // 세로 막대 경로 — 기준선 base 에서 h 만큼(음수면 아래로) 뻗고, 끝 모서리만 둥글린다
+    function barPath(c, x, base, w, h, r) {
+        const rr = Math.min(r, Math.abs(h), w / 2);
+        const tip = base - h;
+        const s = h >= 0 ? 1 : -1;
+        c.beginPath();
+        c.moveTo(x, base);
+        c.lineTo(x, tip + s * rr);
+        c.quadraticCurveTo(x, tip, x + rr, tip);
+        c.lineTo(x + w - rr, tip);
+        c.quadraticCurveTo(x + w, tip, x + w, tip + s * rr);
+        c.lineTo(x + w, base);
+        c.closePath();
+    }
+    // 가로 막대 경로 — 왼쪽 x0 에서 len 만큼 뻗고 오른쪽 끝만 둥글린다
+    function hbarPath(c, x0, y, len, th, r) {
+        const rr = Math.min(r, Math.max(len, 0), th / 2);
+        const x1 = x0 + Math.max(len, 0);
+        c.beginPath();
+        c.moveTo(x0, y);
+        c.lineTo(x1 - rr, y);
+        c.quadraticCurveTo(x1, y, x1, y + rr);
+        c.lineTo(x1, y + th - rr);
+        c.quadraticCurveTo(x1, y + th, x1 - rr, y + th);
+        c.lineTo(x0, y + th);
+        c.closePath();
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function axisText(text, x, y, align, a) {
+        ctx.font = '500 10px sans-serif';
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(PAPER, a);
+        ctx.fillText(text, x, y);
+    }
+    // 고른 막대 — 화살표 키·포인터가 가리키는 sel 과 Enter·Space·클릭으로 고정한 pinned
+    let sel = -1;
+    let pinned = -1;
+    function focusIdx() { return sel >= 0 ? sel : pinned; }
+    function nextIdx(cur, d, n) {
+        return cur < 0 ? (d > 0 ? 0 : n - 1) : (cur + d + n) % n;
+    }
+    function togglePin(i) {
+        pinned = i < 0 || pinned === i ? -1 : i;
+    }
+    // 고른 막대 테두리 — 화살표·포인터로 가리키기만 하면 점선, Enter·Space·클릭으로 고정하면 실선
+    function ringStyle(i, a) {
+        ctx.strokeStyle = rgba(PAPER, 0.95 * a);
+        ctx.lineWidth = 2;
+        ctx.setLineDash(i === pinned ? [] : [4, 3]);
+    }
+    // 키보드 — ←/→ 막대 옮기기, Enter·Space 고르기, Esc 풀기. 셋 다 상태 줄이 이름과 값을 읽는다
+    function bindKeys(move, changed) {
+        cv.addEventListener('keydown', function (ev) {
+            if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                wake();
+                move(ev.key === 'ArrowRight' ? 1 : -1);
+                changed();
+            }
+            else if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                wake();
+                togglePin(focusIdx());
+                changed();
+            }
+            else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                wake();
+                sel = -1;
+                pinned = -1;
+                changed();
+            }
+        });
+    }
+    // 포인터 — 올리면 sel, 누르면 그 막대를 고정(같은 막대를 다시 누르면 풀기)
+    function bindPointer(hit, changed) {
+        cv.addEventListener('pointermove', function (ev) {
+            if (demo) {
+                return;
+            }
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            if (i !== sel) {
+                sel = i;
+                changed();
+            }
+        });
+        cv.addEventListener('pointerdown', function (ev) {
+            wake();
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            sel = i;
+            togglePin(i);
+            changed();
+        });
+    }
+    // 시연 일정 — 루프 안의 시각(ms) 표를 지날 때마다 한 번씩 부른다
+    let schedCycle = -1;
+    let schedIdx = 0;
+    function runSchedule(t, loop, marks, fire) {
+        const cyc = Math.floor(t / loop);
+        const p = t - cyc * loop;
+        if (cyc !== schedCycle) {
+            schedCycle = cyc;
+            schedIdx = 0;
+        }
+        while (schedIdx < marks.length && p >= marks[schedIdx]) {
+            fire(schedIdx, cyc);
+            schedIdx += 1;
+        }
+    }
+    // 글자 양옆 여백(px) — 막대 길이에서 이만큼을 빼고도 값 글자가 들어가야 안쪽에 둔다
+    const LABEL_PAD_PX = 8;
+    // 막대 색과 글자 색의 대비 하한 — (밝은 쪽 휘도 + 0.05) / (어두운 쪽 휘도 + 0.05). 두 후보 모두 못 넘으면 바깥에 둔다
+    const CONTRAST_MIN = 4.5;
+    const BAR_THICKNESS_PX = 22;
+    const ROW_N = 7;
+    const SEED = 4704;
+    const ROW_T = 60;
+    const ROW_H = 30;
+    const BAR_X0 = 70;
+    const BAR_X1 = 452;
+    const AXIS_MAX = 26000;
+    const LEN_LERP = 0.12;
+    const LABEL_LERP = 0.2;
+    const DEMO_LOOP = 2000;
+    const TXT_IDLE = 'Pick a bar to hear where its label goes';
+    const TXT_IN = 'inside';
+    const TXT_OUT = 'outside';
+    const dataBtn = root.querySelector('[data-role="data"]');
+    const shrinkBtn = root.querySelector('[data-role="shrink"]');
+    // 막대 색 — 밝은 파스텔·중간 톤·짙은 톤을 섞어 글자 색 고르기가 막대마다 달라지게
+    const ROW_COL = [[126, 190, 255], [76, 84, 150], [255, 164, 190], [128, 120, 150], [46, 104, 112], [244, 226, 140], [112, 96, 176]];
+    const LIGHT_TEXT = PAPER;
+    const DARK_TEXT = INK;
+    // 상대 휘도 — sRGB 채널을 선형으로 펴서 0.2126·0.7152·0.0722 로 섞는다
+    function channel(v) {
+        const c = v / 255;
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function luminance(c) { return 0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2]); }
+    function contrast(a, b) {
+        const la = luminance(a);
+        const lb = luminance(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+    // 자리 정하기 — 글자 폭 + 양옆 여백이 막대에 들어가고, 두 글자 색 중 나은 쪽이 CONTRAST_MIN 을 넘으면 inside
+    function placeLabel(text, len, bar) {
+        ctx.font = '700 12px sans-serif';
+        const width = ctx.measureText(text).width;
+        const light = contrast(bar, LIGHT_TEXT);
+        const dark = contrast(bar, DARK_TEXT);
+        const best = light >= dark ? LIGHT_TEXT : DARK_TEXT;
+        const ratio = Math.max(light, dark);
+        const fits = width + LABEL_PAD_PX * 2 <= len;
+        return { inside: fits && ratio >= CONTRAST_MIN, text: best, ratio: ratio, width: width };
+    }
+    const sets = [seededValues(SEED, ROW_N, 900, 25000), seededValues(SEED + 1, ROW_N, 900, 25000), seededValues(SEED + 2, ROW_N, 900, 25000)];
+    let setIdx = 0;
+    let shrink = false;
+    const len = [];
+    const labelX = [];
+    const inK = [];
+    for (let i = 0; i < ROW_N; i += 1) {
+        len.push(0);
+        labelX.push(BAR_X0);
+        inK.push(0);
+    }
+    function target(i) { return sets[setIdx][i] * (shrink ? 0.3 : 1); }
+    function lenOf(v) { return v / AXIS_MAX * (BAR_X1 - BAR_X0); }
+    // 글자 자리 목표 — 안쪽이면 막대 끝에서 여백만큼 안, 바깥이면 막대 끝에서 여백만큼 밖
+    function labelGoal(p, l) { return p.inside ? BAR_X0 + l - LABEL_PAD_PX - p.width : BAR_X0 + l + LABEL_PAD_PX; }
+    function step() {
+        for (let i = 0; i < ROW_N; i += 1) {
+            len[i] += (lenOf(target(i)) - len[i]) * LEN_LERP;
+            const p = placeLabel(groupDigits(sets[setIdx][i] * (shrink ? 0.3 : 1)), len[i], ROW_COL[i]);
+            labelX[i] += (labelGoal(p, len[i]) - labelX[i]) * LABEL_LERP;
+            inK[i] += ((p.inside ? 1 : 0) - inK[i]) * LABEL_LERP;
+        }
+    }
+    function settle() {
+        for (let i = 0; i < ROW_N; i += 1) {
+            len[i] = lenOf(target(i));
+            const p = placeLabel(groupDigits(target(i)), len[i], ROW_COL[i]);
+            labelX[i] = labelGoal(p, len[i]);
+            inK[i] = p.inside ? 1 : 0;
+        }
+    }
+    function report() {
+        const f = focusIdx();
+        if (f < 0) {
+            say(TXT_IDLE);
+            return;
+        }
+        const p = placeLabel(groupDigits(target(f)), lenOf(target(f)), ROW_COL[f]);
+        say(LABELS[f] + ' · ' + groupDigits(target(f)) + ' · ' + (p.inside ? TXT_IN : TXT_OUT) + ' ' + p.ratio.toFixed(1) + ':1');
+    }
+    function demoTick(t) {
+        runSchedule(t, DEMO_LOOP, [200, 900, 1600], function (k) {
+            setIdx = k;
+            shrink = false;
+            report();
+        });
+    }
+    function draw() {
+        clearStage();
+        const span = BAR_X1 - BAR_X0;
+        for (let g = 0; g <= 5; g += 1) {
+            const x = BAR_X0 + Math.round(span * g / 5);
+            ctx.fillStyle = rgba(PAPER, g === 0 ? 0.3 : 0.07);
+            ctx.fillRect(x, ROW_T - 6, 1, ROW_N * ROW_H + 2);
+            axisText(groupDigits(AXIS_MAX * g / 5), x, ROW_T + ROW_N * ROW_H + 8, 'center', 0.45);
+        }
+        const f = focusIdx();
+        for (let i = 0; i < ROW_N; i += 1) {
+            const y = ROW_T + i * ROW_H;
+            const dim = f >= 0 && f !== i;
+            ctx.fillStyle = rgba(ROW_COL[i], dim ? 0.5 : 1);
+            hbarPath(ctx, BAR_X0, y, len[i], BAR_THICKNESS_PX, 5);
+            ctx.fill();
+            if (i === f) {
+                ringStyle(i, 1);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            axisText(LABELS[i], BAR_X0 - 8, y + BAR_THICKNESS_PX / 2, 'right', i === f ? 0.95 : 0.6);
+            const text = groupDigits(sets[setIdx][i] * (shrink ? 0.3 : 1));
+            const p = placeLabel(text, len[i], ROW_COL[i]);
+            // 안쪽에 못 들어간 막대 — 글자가 들어갔을 자리를 점선 상자로 보여 준다(폭 + 양옆 여백)
+            if (!p.inside && len[i] > 6) {
+                ctx.strokeStyle = rgba(PAPER, 0.35);
+                ctx.lineWidth = 1;
+                ctx.setLineDash([2, 3]);
+                ctx.strokeRect(BAR_X0 + len[i] - p.width - LABEL_PAD_PX * 2, y + 3, p.width + LABEL_PAD_PX * 2, BAR_THICKNESS_PX - 6);
+                ctx.setLineDash([]);
+            }
+            // 글자 색 — outside(무대 위 밝은 글자)과 inside(대비로 고른 색) 사이를 inK 로 섞는다
+            ctx.font = '700 12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = rgba(mix(PAPER, p.text, inK[i]), dim ? 0.5 : 1);
+            ctx.fillText(text, labelX[i], y + BAR_THICKNESS_PX / 2 + 0.5);
+        }
+    }
+    function after() {
+        if (still) {
+            settle();
+        }
+        report();
+        draw();
+        if (shrinkBtn) {
+            shrinkBtn.setAttribute('aria-pressed', shrink ? 'true' : 'false');
+        }
+    }
+    function hitRow(_x, y) {
+        const i = Math.floor((y - ROW_T + (ROW_H - BAR_THICKNESS_PX) / 2) / ROW_H);
+        return i >= 0 && i < ROW_N ? i : -1;
+    }
+    bindKeys(function (d) { sel = nextIdx(focusIdx(), d, ROW_N); }, after);
+    bindPointer(hitRow, after);
+    if (dataBtn) {
+        dataBtn.addEventListener('click', function () { wake(); setIdx = (setIdx + 1) % sets.length; after(); });
+    }
+    if (shrinkBtn) {
+        shrinkBtn.addEventListener('click', function () { wake(); shrink = !shrink; after(); });
+    }
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startMotion() {
+        window.cancelAnimationFrame(rafId);
+        lastTs = -1;
+        acc = 0;
+        if (still) {
+            // 움직임 줄이기 — 루프를 돌리지 않고 지금 목표 상태로 바로 그린다
+            settle();
+            draw();
+        }
+        else {
+            rafId = window.requestAnimationFrame(frame);
+        }
+    }
+    // 열린 페이지에서 움직임 줄이기 설정이 바뀌어도 그 자리에서 루프를 멈추거나 다시 켠다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        startMotion();
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    startMotion();
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>

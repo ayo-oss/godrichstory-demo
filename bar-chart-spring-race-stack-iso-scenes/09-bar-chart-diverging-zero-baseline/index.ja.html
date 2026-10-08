@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>増加は上へ・減少は下へ分かれ、ゼロの基準線も一緒に動く増減の棒 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bc is-demo" id="bc">
+  <canvas class="bc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="増加は上へ、減少は下へ分かれ、ゼロの基準線がデータと一緒に上下する増減の棒グラフ。←/→ で棒を選ぶと名前と増減を読み上げます"></canvas>
+  <p class="bc__status" data-role="status" aria-live="off">棒を選ぶと増減を読み上げます</p>
+  <div class="bc__tools">
+    <button class="bc__btn" data-role="next" type="button">次のデータ</button>
+    <button class="bc__btn" data-role="flip" type="button" aria-pressed="false">すべて反転</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("bc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막대를 얹어 명도 차로 경계가 읽힌다
+    const BG = [24, 26, 38];
+    const PANEL = [36, 39, 56];
+    const PAPER = [250, 246, 236];
+    const INK = [30, 30, 44];
+    const PAL = [
+        [126, 190, 255],
+        [255, 164, 190],
+        [130, 224, 190],
+        [192, 168, 255],
+        [255, 206, 160],
+        [244, 226, 140],
+        [150, 220, 236],
+        [230, 184, 226],
+        [196, 220, 160],
+        [176, 196, 236],
+    ];
+    // 가상 데이터의 이름 — 실제 항목이 아니라 순서만 뜻한다
+    const LABELS = ['項目 A', '項目 B', '項目 C', '項目 D', '項目 E', '項目 F', '項目 G', '項目 H', '項目 I', '項目 J'];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 움직임 줄이기 — 열린 페이지에서 설정을 바꿔도 아래 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 가상 데이터가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function seededValues(seed, n, lo, hi) {
+        const rnd = makeRng(seed);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            out.push(lo + Math.floor(rnd() * (hi - lo + 1)));
+        }
+        return out;
+    }
+    // 세 자리마다 쉼표 — 지역 설정에 기대지 않는다
+    function groupDigits(n) {
+        const s = String(Math.round(Math.abs(n)));
+        let out = '';
+        for (let i = 0; i < s.length; i += 1) {
+            if (i > 0 && (s.length - i) % 3 === 0) {
+                out += ',';
+            }
+            out += s[i];
+        }
+        return (n < 0 ? '-' : '') + out;
+    }
+    // 세로 막대 경로 — 기준선 base 에서 h 만큼(음수면 아래로) 뻗고, 끝 모서리만 둥글린다
+    function barPath(c, x, base, w, h, r) {
+        const rr = Math.min(r, Math.abs(h), w / 2);
+        const tip = base - h;
+        const s = h >= 0 ? 1 : -1;
+        c.beginPath();
+        c.moveTo(x, base);
+        c.lineTo(x, tip + s * rr);
+        c.quadraticCurveTo(x, tip, x + rr, tip);
+        c.lineTo(x + w - rr, tip);
+        c.quadraticCurveTo(x + w, tip, x + w, tip + s * rr);
+        c.lineTo(x + w, base);
+        c.closePath();
+    }
+    // 가로 막대 경로 — 왼쪽 x0 에서 len 만큼 뻗고 오른쪽 끝만 둥글린다
+    function hbarPath(c, x0, y, len, th, r) {
+        const rr = Math.min(r, Math.max(len, 0), th / 2);
+        const x1 = x0 + Math.max(len, 0);
+        c.beginPath();
+        c.moveTo(x0, y);
+        c.lineTo(x1 - rr, y);
+        c.quadraticCurveTo(x1, y, x1, y + rr);
+        c.lineTo(x1, y + th - rr);
+        c.quadraticCurveTo(x1, y + th, x1 - rr, y + th);
+        c.lineTo(x0, y + th);
+        c.closePath();
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function axisText(text, x, y, align, a) {
+        ctx.font = '500 10px sans-serif';
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(PAPER, a);
+        ctx.fillText(text, x, y);
+    }
+    // 고른 막대 — 화살표 키·포인터가 가리키는 sel 과 Enter·Space·클릭으로 고정한 pinned
+    let sel = -1;
+    let pinned = -1;
+    function focusIdx() { return sel >= 0 ? sel : pinned; }
+    function nextIdx(cur, d, n) {
+        return cur < 0 ? (d > 0 ? 0 : n - 1) : (cur + d + n) % n;
+    }
+    function togglePin(i) {
+        pinned = i < 0 || pinned === i ? -1 : i;
+    }
+    // 고른 막대 테두리 — 화살표·포인터로 가리키기만 하면 점선, Enter·Space·클릭으로 고정하면 실선
+    function ringStyle(i, a) {
+        ctx.strokeStyle = rgba(PAPER, 0.95 * a);
+        ctx.lineWidth = 2;
+        ctx.setLineDash(i === pinned ? [] : [4, 3]);
+    }
+    // 키보드 — ←/→ 막대 옮기기, Enter·Space 고르기, Esc 풀기. 셋 다 상태 줄이 이름과 값을 읽는다
+    function bindKeys(move, changed) {
+        cv.addEventListener('keydown', function (ev) {
+            if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                wake();
+                move(ev.key === 'ArrowRight' ? 1 : -1);
+                changed();
+            }
+            else if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                wake();
+                togglePin(focusIdx());
+                changed();
+            }
+            else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                wake();
+                sel = -1;
+                pinned = -1;
+                changed();
+            }
+        });
+    }
+    // 포인터 — 올리면 sel, 누르면 그 막대를 고정(같은 막대를 다시 누르면 풀기)
+    function bindPointer(hit, changed) {
+        cv.addEventListener('pointermove', function (ev) {
+            if (demo) {
+                return;
+            }
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            if (i !== sel) {
+                sel = i;
+                changed();
+            }
+        });
+        cv.addEventListener('pointerdown', function (ev) {
+            wake();
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            sel = i;
+            togglePin(i);
+            changed();
+        });
+    }
+    // 시연 일정 — 루프 안의 시각(ms) 표를 지날 때마다 한 번씩 부른다
+    let schedCycle = -1;
+    let schedIdx = 0;
+    function runSchedule(t, loop, marks, fire) {
+        const cyc = Math.floor(t / loop);
+        const p = t - cyc * loop;
+        if (cyc !== schedCycle) {
+            schedCycle = cyc;
+            schedIdx = 0;
+        }
+        while (schedIdx < marks.length && p >= marks[schedIdx]) {
+            fire(schedIdx, cyc);
+            schedIdx += 1;
+        }
+    }
+    // 16ms 걸음마다 축 위·아래 끝(그래서 0 기준선 높이)이 새 목표와의 남은 거리 중 이 비율만큼 다가간다
+    const BASELINE_LERP = 0.1;
+    // 0 을 지나는 막대의 색 섞기 폭(값 단위 %p) — −이 값 ~ +이 값 사이에서 감소색이 증가색으로 넘어간다
+    const ZERO_CROSS_FADE = 8;
+    // 축 위아래 여백 — 값 범위의 이 백분율만큼 바깥으로 넓혀 막대 끝 글자가 판에 붙지 않게
+    const DIVERGE_PAD_PCT = 12;
+    const BAR_N = 8;
+    const SEED = 4709;
+    const PLOT_L = 52;
+    const PLOT_R = 462;
+    const PLOT_T = 58;
+    const PLOT_B = 272;
+    const BAR_GAP = 16;
+    const VALUE_LERP = 0.12;
+    const DEMO_LOOP = 2000;
+    const GAIN = [130, 224, 190];
+    const LOSS = [255, 160, 150];
+    const TXT_IDLE = '棒を選ぶと増減を読み上げます';
+    const nextBtn = root.querySelector('[data-role="next"]');
+    const flipBtn = root.querySelector('[data-role="flip"]');
+    // 가상 증감 묶음 — 대체로 오름·대체로 내림·섞임 세 벌. 범위 [lo, hi] 안에서 시드 난수
+    function makeSet(sd, lo, hi) {
+        const rnd = makeRng(sd);
+        const out = [];
+        for (let i = 0; i < BAR_N; i += 1) {
+            out.push(Math.round((lo + rnd() * (hi - lo)) * 10) / 10);
+        }
+        return out;
+    }
+    const sets = [makeSet(SEED, -8, 46), makeSet(SEED + 1, -44, 9), makeSet(SEED + 2, -30, 30)];
+    let setIdx = 0;
+    let flipped = false;
+    const vals = [];
+    for (let i = 0; i < BAR_N; i += 1) {
+        vals.push(0);
+    }
+    function goalOf(i) { return sets[setIdx][i] * (flipped ? -1 : 1); }
+    // 축 범위 — 0 을 반드시 품고(min(0,·)·max(0,·)) 값 범위의 DIVERGE_PAD_PCT 만큼 위아래로 넓힌다
+    function rangeFor() {
+        let lo = 0;
+        let hi = 0;
+        for (let i = 0; i < BAR_N; i += 1) {
+            lo = Math.min(lo, goalOf(i));
+            hi = Math.max(hi, goalOf(i));
+        }
+        const pad = (hi - lo) * DIVERGE_PAD_PCT / 100;
+        return { lo: lo - pad, hi: hi + pad };
+    }
+    const axis = rangeFor();
+    // 0 기준선 높이 — 축 위 끝에서 0 까지가 전체 범위에서 차지하는 비율
+    function zeroY() { return PLOT_T + (axis.hi / (axis.hi - axis.lo)) * (PLOT_B - PLOT_T); }
+    function yOf(v) { return PLOT_T + ((axis.hi - v) / (axis.hi - axis.lo)) * (PLOT_B - PLOT_T); }
+    // 증감 색 — 값이 0 근처 ±ZERO_CROSS_FADE 안이면 두 색을 부드럽게 섞는다
+    function signColor(v) { return mix(LOSS, GAIN, smooth((v / ZERO_CROSS_FADE + 1) / 2)); }
+    function signed(v) { return (v > 0 ? '+' : '') + v.toFixed(1) + '%'; }
+    function step() {
+        const r = rangeFor();
+        axis.lo += (r.lo - axis.lo) * BASELINE_LERP;
+        axis.hi += (r.hi - axis.hi) * BASELINE_LERP;
+        for (let i = 0; i < BAR_N; i += 1) {
+            vals[i] += (goalOf(i) - vals[i]) * VALUE_LERP;
+        }
+    }
+    function settle() {
+        const r = rangeFor();
+        axis.lo = r.lo;
+        axis.hi = r.hi;
+        for (let i = 0; i < BAR_N; i += 1) {
+            vals[i] = goalOf(i);
+        }
+    }
+    function report() {
+        const f = focusIdx();
+        if (f >= 0) {
+            say(LABELS[f] + ' · ' + signed(goalOf(f)));
+        }
+        else {
+            say(TXT_IDLE);
+        }
+    }
+    function demoTick(t) {
+        runSchedule(t, DEMO_LOOP, [200, 850, 1500], function (k) {
+            setIdx = k;
+            flipped = false;
+            report();
+        });
+    }
+    const slotW = (PLOT_R - PLOT_L) / BAR_N;
+    const barW = slotW - BAR_GAP;
+    function draw() {
+        clearStage();
+        const zy = zeroY();
+        // 기준선 위는 증가 쪽, 아래는 감소 쪽 — 바탕 색 띠가 기준선과 함께 오르내린다
+        ctx.fillStyle = rgba(GAIN, 0.07);
+        ctx.fillRect(PLOT_L, PLOT_T, PLOT_R - PLOT_L, zy - PLOT_T);
+        ctx.fillStyle = rgba(LOSS, 0.07);
+        ctx.fillRect(PLOT_L, zy, PLOT_R - PLOT_L, PLOT_B - zy);
+        const span = axis.hi - axis.lo;
+        const stepV = span > 60 ? 20 : 10;
+        for (let v = Math.ceil(axis.lo / stepV) * stepV; v <= axis.hi; v += stepV) {
+            if (v === 0) {
+                continue;
+            }
+            const y = yOf(v);
+            ctx.fillStyle = rgba(PAPER, 0.07);
+            ctx.fillRect(PLOT_L, Math.round(y), PLOT_R - PLOT_L, 1);
+            axisText(signed(v).replace('.0', ''), PLOT_L - 8, y, 'right', 0.45);
+        }
+        const f = focusIdx();
+        for (let i = 0; i < BAR_N; i += 1) {
+            const x = PLOT_L + i * slotW + BAR_GAP / 2;
+            const v = vals[i];
+            const h = zy - yOf(v);
+            const dim = f >= 0 && f !== i;
+            ctx.fillStyle = rgba(signColor(v), dim ? 0.5 : 1);
+            barPath(ctx, x, zy, barW, h, 5);
+            ctx.fill();
+            if (i === f) {
+                ringStyle(i, 1);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            // 값 글자 — 막대 끝 外側, 위로 뻗으면 위에 아래로 뻗으면 아래에
+            ctx.font = '700 11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = v >= 0 ? 'bottom' : 'top';
+            ctx.fillStyle = rgba(PAPER, dim ? 0.45 : 0.92);
+            ctx.fillText(signed(v), x + barW / 2, v >= 0 ? zy - h - 4 : zy - h + 4);
+            axisText(LABELS[i], x + barW / 2, v >= 0 ? zy + 10 : zy - 10, 'center', i === f ? 0.95 : 0.5);
+        }
+        // 0 기준선 — 맨 위에 밝게
+        ctx.fillStyle = rgba(PAPER, 0.85);
+        ctx.fillRect(PLOT_L, Math.round(zy) - 1, PLOT_R - PLOT_L, 2);
+        axisText('0', PLOT_L - 8, zy, 'right', 0.9);
+    }
+    function after() {
+        if (still) {
+            settle();
+        }
+        report();
+        draw();
+        if (flipBtn) {
+            flipBtn.setAttribute('aria-pressed', flipped ? 'true' : 'false');
+        }
+    }
+    function hitBar(x, y) {
+        if (y < PLOT_T - 20 || y > PLOT_B + 20) {
+            return -1;
+        }
+        const i = Math.floor((x - PLOT_L) / slotW);
+        return i >= 0 && i < BAR_N ? i : -1;
+    }
+    bindKeys(function (d) { sel = nextIdx(focusIdx(), d, BAR_N); }, after);
+    bindPointer(hitBar, after);
+    if (nextBtn) {
+        nextBtn.addEventListener('click', function () { wake(); setIdx = (setIdx + 1) % sets.length; after(); });
+    }
+    if (flipBtn) {
+        flipBtn.addEventListener('click', function () { wake(); flipped = !flipped; after(); });
+    }
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startMotion() {
+        window.cancelAnimationFrame(rafId);
+        lastTs = -1;
+        acc = 0;
+        if (still) {
+            // 움직임 줄이기 — 루프를 돌리지 않고 지금 목표 상태로 바로 그린다
+            settle();
+            draw();
+        }
+        else {
+            rafId = window.requestAnimationFrame(frame);
+        }
+    }
+    // 열린 페이지에서 움직임 줄이기 설정이 바뀌어도 그 자리에서 루프를 멈추거나 다시 켠다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        startMotion();
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    startMotion();
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>

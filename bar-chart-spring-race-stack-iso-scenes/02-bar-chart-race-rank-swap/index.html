@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>순위가 뒤집힐 때 막대가 줄을 바꿔 달리는 막대 경주 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="bc is-demo" id="bc">
+  <canvas class="bc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="키프레임 사이를 보간하며 매 걸음 다시 정렬해 순위가 바뀐 막대가 줄을 옮겨 달리는 막대 경주. ←/→ 로 순위 차례대로 막대를 고르고 Enter 로 고정한다"></canvas>
+  <p class="bc__status" data-role="status" aria-live="off">막대를 고르면 값과 순위를 읽어 줌</p>
+  <div class="bc__tools">
+    <button class="bc__btn" data-role="pause" type="button" aria-pressed="false">일시 정지</button>
+    <button class="bc__btn" data-role="restart" type="button">처음부터</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("bc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 막대를 얹어 명도 차로 경계가 읽힌다
+    const BG = [24, 26, 38];
+    const PANEL = [36, 39, 56];
+    const PAPER = [250, 246, 236];
+    const INK = [30, 30, 44];
+    const PAL = [
+        [126, 190, 255],
+        [255, 164, 190],
+        [130, 224, 190],
+        [192, 168, 255],
+        [255, 206, 160],
+        [244, 226, 140],
+        [150, 220, 236],
+        [230, 184, 226],
+        [196, 220, 160],
+        [176, 196, 236],
+    ];
+    // 가상 데이터의 이름 — 실제 항목이 아니라 순서만 뜻한다
+    const LABELS = ['항목 A', '항목 B', '항목 C', '항목 D', '항목 E', '항목 F', '항목 G', '항목 H', '항목 I', '항목 J'];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 움직임 줄이기 — 열린 페이지에서 설정을 바꿔도 아래 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 가상 데이터가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function seededValues(seed, n, lo, hi) {
+        const rnd = makeRng(seed);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            out.push(lo + Math.floor(rnd() * (hi - lo + 1)));
+        }
+        return out;
+    }
+    // 세 자리마다 쉼표 — 지역 설정에 기대지 않는다
+    function groupDigits(n) {
+        const s = String(Math.round(Math.abs(n)));
+        let out = '';
+        for (let i = 0; i < s.length; i += 1) {
+            if (i > 0 && (s.length - i) % 3 === 0) {
+                out += ',';
+            }
+            out += s[i];
+        }
+        return (n < 0 ? '-' : '') + out;
+    }
+    // 세로 막대 경로 — 기준선 base 에서 h 만큼(음수면 아래로) 뻗고, 끝 모서리만 둥글린다
+    function barPath(c, x, base, w, h, r) {
+        const rr = Math.min(r, Math.abs(h), w / 2);
+        const tip = base - h;
+        const s = h >= 0 ? 1 : -1;
+        c.beginPath();
+        c.moveTo(x, base);
+        c.lineTo(x, tip + s * rr);
+        c.quadraticCurveTo(x, tip, x + rr, tip);
+        c.lineTo(x + w - rr, tip);
+        c.quadraticCurveTo(x + w, tip, x + w, tip + s * rr);
+        c.lineTo(x + w, base);
+        c.closePath();
+    }
+    // 가로 막대 경로 — 왼쪽 x0 에서 len 만큼 뻗고 오른쪽 끝만 둥글린다
+    function hbarPath(c, x0, y, len, th, r) {
+        const rr = Math.min(r, Math.max(len, 0), th / 2);
+        const x1 = x0 + Math.max(len, 0);
+        c.beginPath();
+        c.moveTo(x0, y);
+        c.lineTo(x1 - rr, y);
+        c.quadraticCurveTo(x1, y, x1, y + rr);
+        c.lineTo(x1, y + th - rr);
+        c.quadraticCurveTo(x1, y + th, x1 - rr, y + th);
+        c.lineTo(x0, y + th);
+        c.closePath();
+    }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function axisText(text, x, y, align, a) {
+        ctx.font = '500 10px sans-serif';
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(PAPER, a);
+        ctx.fillText(text, x, y);
+    }
+    // 고른 막대 — 화살표 키·포인터가 가리키는 sel 과 Enter·Space·클릭으로 고정한 pinned
+    let sel = -1;
+    let pinned = -1;
+    function focusIdx() { return sel >= 0 ? sel : pinned; }
+    function nextIdx(cur, d, n) {
+        return cur < 0 ? (d > 0 ? 0 : n - 1) : (cur + d + n) % n;
+    }
+    function togglePin(i) {
+        pinned = i < 0 || pinned === i ? -1 : i;
+    }
+    // 고른 막대 테두리 — 화살표·포인터로 가리키기만 하면 점선, Enter·Space·클릭으로 고정하면 실선
+    function ringStyle(i, a) {
+        ctx.strokeStyle = rgba(PAPER, 0.95 * a);
+        ctx.lineWidth = 2;
+        ctx.setLineDash(i === pinned ? [] : [4, 3]);
+    }
+    // 키보드 — ←/→ 막대 옮기기, Enter·Space 고르기, Esc 풀기. 셋 다 상태 줄이 이름과 값을 읽는다
+    function bindKeys(move, changed) {
+        cv.addEventListener('keydown', function (ev) {
+            if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                wake();
+                move(ev.key === 'ArrowRight' ? 1 : -1);
+                changed();
+            }
+            else if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                wake();
+                togglePin(focusIdx());
+                changed();
+            }
+            else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                wake();
+                sel = -1;
+                pinned = -1;
+                changed();
+            }
+        });
+    }
+    // 포인터 — 올리면 sel, 누르면 그 막대를 고정(같은 막대를 다시 누르면 풀기)
+    function bindPointer(hit, changed) {
+        cv.addEventListener('pointermove', function (ev) {
+            if (demo) {
+                return;
+            }
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            if (i !== sel) {
+                sel = i;
+                changed();
+            }
+        });
+        cv.addEventListener('pointerdown', function (ev) {
+            wake();
+            const p = toScene(ev);
+            const i = hit(p[0], p[1]);
+            sel = i;
+            togglePin(i);
+            changed();
+        });
+    }
+    // 시연 일정 — 루프 안의 시각(ms) 표를 지날 때마다 한 번씩 부른다
+    let schedCycle = -1;
+    let schedIdx = 0;
+    function runSchedule(t, loop, marks, fire) {
+        const cyc = Math.floor(t / loop);
+        const p = t - cyc * loop;
+        if (cyc !== schedCycle) {
+            schedCycle = cyc;
+            schedIdx = 0;
+        }
+        while (schedIdx < marks.length && p >= marks[schedIdx]) {
+            fire(schedIdx, cyc);
+            schedIdx += 1;
+        }
+    }
+    // 키프레임 하나에서 다음 키프레임까지 걸리는 시간(ms) — 그 사이 값은 직선으로 보간한다
+    const RACE_FRAME_MS = 420;
+    // 16ms 걸음마다 막대의 세로 자리가 새 순위와의 남은 거리 중 이 비율만큼 다가간다 (지수 평활)
+    const RANK_LERP = 0.12;
+    // 화면에 남기는 줄 수 — 정렬한 뒤 위에서 이만큼만 그린다
+    const TOP_N = 6;
+    const ENTRY_N = 9;
+    const KEY_N = 8;
+    const SEED = 4702;
+    const LANE_T = 60;
+    const LANE_H = 33;
+    const BAR_TH = 23;
+    const BAR_X0 = 84;
+    const BAR_X1 = 420;
+    const SCALE_LERP = 0.08;
+    const TXT_IDLE = '막대를 고르면 값과 순위를 읽어 줌';
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const restartBtn = root.querySelector('[data-role="restart"]');
+    // 키프레임 값 — 항목마다 시작 값과 빨라졌다 느려지는 위상을 따로 두어 순위가 엎치락뒤치락한다
+    const rnd = makeRng(SEED);
+    const keys = [];
+    const phase = [];
+    for (let i = 0; i < ENTRY_N; i += 1) {
+        phase.push(rnd() * TAU);
+    }
+    for (let k = 0; k < KEY_N; k += 1) {
+        const row = [];
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            if (k === 0) {
+                row.push(Math.round(30 + rnd() * 50));
+            }
+            else {
+                row.push(keys[k - 1][i] + Math.round(8 + 46 * (0.5 + 0.5 * Math.sin(k * 1.1 + phase[i])) * (0.4 + 0.6 * rnd())));
+            }
+        }
+        keys.push(row);
+    }
+    const RACE_END = (KEY_N - 1) * RACE_FRAME_MS;
+    let raceMs = 0;
+    let paused = false;
+    const cur = [];
+    const rank = [];
+    const slotY = [];
+    const alpha = [];
+    const glow = [];
+    let axisMax = 1;
+    for (let i = 0; i < ENTRY_N; i += 1) {
+        cur.push(0);
+        rank.push(i);
+        slotY.push(i);
+        alpha.push(0);
+        glow.push(0);
+    }
+    // 지금 시각의 값 — 앞뒤 키프레임 사이를 선형 보간
+    function sample(ms) {
+        const p = clamp(ms / RACE_FRAME_MS, 0, KEY_N - 1);
+        const k = Math.min(Math.floor(p), KEY_N - 2);
+        const f = p - k;
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            cur[i] = lerp(keys[k][i], keys[k + 1][i], f);
+        }
+    }
+    // 매 걸음 정렬 — 값이 큰 순서로 순위를 다시 매기고, 순위가 오른 막대는 잠깐 빛난다
+    function reRank() {
+        const order = [];
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            order.push(i);
+        }
+        order.sort(function (a, b) { return cur[b] - cur[a]; });
+        for (let r = 0; r < ENTRY_N; r += 1) {
+            const i = order[r];
+            if (r < rank[i] && r < TOP_N) {
+                glow[i] = 1;
+            }
+            rank[i] = r;
+        }
+    }
+    function topValue() {
+        let m = 1;
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            m = Math.max(m, cur[i]);
+        }
+        return m;
+    }
+    function step() {
+        if (!paused) {
+            raceMs += FIXED_DT;
+            if (raceMs > RACE_END) {
+                raceMs = 0;
+            }
+        }
+        sample(raceMs);
+        reRank();
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            const target = Math.min(rank[i], TOP_N);
+            slotY[i] += (target - slotY[i]) * RANK_LERP;
+            alpha[i] += ((rank[i] < TOP_N ? 1 : 0) - alpha[i]) * RANK_LERP;
+            glow[i] *= 0.95;
+        }
+        axisMax += (topValue() * 1.06 - axisMax) * SCALE_LERP;
+        // 축 기준값이 늦게 따라와도 1등 막대가 판 오른쪽 끝을 넘지 않게 아래를 받친다
+        axisMax = Math.max(axisMax, topValue());
+    }
+    function settle() {
+        sample(raceMs);
+        reRank();
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            slotY[i] = Math.min(rank[i], TOP_N);
+            alpha[i] = rank[i] < TOP_N ? 1 : 0;
+            glow[i] = 0;
+        }
+        axisMax = topValue() * 1.06;
+    }
+    function report() {
+        const f = focusIdx();
+        if (f >= 0) {
+            say(LABELS[f] + ' · ' + groupDigits(cur[f]) + ' · #' + (rank[f] + 1));
+        }
+        else {
+            say(TXT_IDLE);
+        }
+    }
+    function demoTick(_t) {
+        // 시연은 경주를 그대로 흘려 보낸다 — 순위가 뒤집히는 줄 바꿈이 이 항목의 동작이다
+    }
+    function draw() {
+        clearStage();
+        const span = BAR_X1 - BAR_X0;
+        for (let g = 1; g <= 4; g += 1) {
+            ctx.fillStyle = rgba(PAPER, 0.07);
+            ctx.fillRect(BAR_X0 + Math.round(span * g / 4), LANE_T - 6, 1, TOP_N * LANE_H + 4);
+        }
+        ctx.fillStyle = rgba(PAPER, 0.3);
+        ctx.fillRect(BAR_X0, LANE_T - 6, 1, TOP_N * LANE_H + 4);
+        // 큰 숫자 — 지금 몇 번째 키프레임 구간을 지나는지
+        const p = raceMs / RACE_FRAME_MS;
+        ctx.font = '800 40px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(PAPER, 0.12);
+        ctx.fillText(String(Math.min(Math.floor(p) + 1, KEY_N - 1)).padStart(2, '0') + ' / ' + String(KEY_N - 1).padStart(2, '0'), W - 16, H - 14);
+        // 아래 줄부터 그려 위로 치고 올라오는 막대가 겹칠 때 위에 보이게
+        const order = [];
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            order.push(i);
+        }
+        order.sort(function (a, b) { return slotY[b] - slotY[a]; });
+        const f = focusIdx();
+        for (let n = 0; n < ENTRY_N; n += 1) {
+            const i = order[n];
+            if (alpha[i] < 0.02) {
+                continue;
+            }
+            const y = LANE_T + slotY[i] * LANE_H;
+            const len = cur[i] / axisMax * span;
+            const dim = f >= 0 && f !== i;
+            const a = alpha[i] * (dim ? 0.5 : 1);
+            ctx.fillStyle = rgba(mix(PAL[i], PAPER, 0.45 * glow[i]), a);
+            hbarPath(ctx, BAR_X0, y, len, BAR_TH, 6);
+            ctx.fill();
+            if (glow[i] > 0.05) {
+                ctx.strokeStyle = rgba(PAPER, 0.8 * glow[i] * alpha[i]);
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            if (i === f) {
+                ringStyle(i, alpha[i]);
+                hbarPath(ctx, BAR_X0, y, len, BAR_TH, 6);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'right';
+            ctx.font = '600 11px sans-serif';
+            ctx.fillStyle = rgba(PAPER, a * 0.85);
+            ctx.fillText(LABELS[i], BAR_X0 - 8, y + BAR_TH / 2);
+            ctx.textAlign = 'left';
+            ctx.font = '700 11px sans-serif';
+            ctx.fillStyle = rgba(PAPER, a * 0.95);
+            ctx.fillText(groupDigits(cur[i]), BAR_X0 + len + 6, y + BAR_TH / 2);
+        }
+    }
+    function after() {
+        if (still) {
+            settle();
+        }
+        report();
+        draw();
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        }
+    }
+    // 화면 위 줄 → 그 줄에 있는 항목
+    function hitLane(_x, y) {
+        const r = Math.floor((y - LANE_T + 4) / LANE_H);
+        if (r < 0 || r >= TOP_N) {
+            return -1;
+        }
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            if (rank[i] === r) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    // ←/→ 는 순위 차례로 옮긴다 — 화면에 보이는 TOP_N 줄 안에서만
+    function moveRank(d) {
+        const f = focusIdx();
+        const r = f < 0 ? (d > 0 ? 0 : TOP_N - 1) : (Math.min(rank[f], TOP_N - 1) + d + TOP_N) % TOP_N;
+        for (let i = 0; i < ENTRY_N; i += 1) {
+            if (rank[i] === r) {
+                sel = i;
+            }
+        }
+    }
+    bindKeys(moveRank, after);
+    bindPointer(hitLane, after);
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); paused = !paused; after(); });
+    }
+    if (restartBtn) {
+        restartBtn.addEventListener('click', function () { wake(); raceMs = 0; after(); });
+    }
+    if (still) {
+        raceMs = RACE_END;
+    }
+    sample(raceMs);
+    reRank();
+    report();
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startMotion() {
+        window.cancelAnimationFrame(rafId);
+        lastTs = -1;
+        acc = 0;
+        if (still) {
+            // 움직임 줄이기 — 루프를 돌리지 않고 지금 목표 상태로 바로 그린다
+            settle();
+            draw();
+        }
+        else {
+            rafId = window.requestAnimationFrame(frame);
+        }
+    }
+    // 열린 페이지에서 움직임 줄이기 설정이 바뀌어도 그 자리에서 루프를 멈추거나 다시 켠다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        startMotion();
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    startMotion();
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>
