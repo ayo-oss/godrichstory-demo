@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ブラックホールの近くで星の光が輪に曲がる重力レンズ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="ブラックホールの近くで星の光が輪に曲がる重力レンズ"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">レンズの質量 — 輪が星の光を集める</p>
+  <button class="sc__btn" id="scBtn" type="button">一時停止</button>
+  <p class="sc__caption">ブラックホールの近くで星の光が輪に曲がる重力レンズ</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    const BG = [14, 12, 32];
+    const STAR_RGBS = [[226, 238, 255], [255, 222, 196], [208, 196, 255], [196, 240, 228], [255, 206, 226]];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function paintBg(ctx, alpha) {
+        ctx.fillStyle = rgba(BG, alpha);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.idle = 0;
+            refresh();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const LENS_MASS = 2600;
+    const RING_RADIUS = Math.sqrt(LENS_MASS);
+    const FALLOFF = 1.1;
+    const SOFTEN = 5;
+    const FIELD_STARS = 260;
+    const GALAXY_STARS = 70;
+    const BOOST_TICKS = 80;
+    const BOOST_GAIN = 1.9;
+    const TXT_RING = 'レンズの質量 — 輪が星の光を集める';
+    const TXT_HEAVY = '質量が増えた — 輪が大きくなる';
+    function makeScene(inp, reduce) {
+        const rnd = lcg(450909);
+        const field = [];
+        for (let i = 0; i < FIELD_STARS; i += 1) {
+            field.push({ x: rnd() * W, y: rnd() * H, r: 0.7 + 1.3 * rnd() * rnd(), c: STAR_RGBS[Math.floor(rnd() * STAR_RGBS.length)] });
+        }
+        // 렌즈 바로 뒤의 작은 은하 — 상대 위치가 0 에 가까워 고리를 만든다
+        const galaxy = [];
+        for (let i = 0; i < GALAXY_STARS; i += 1) {
+            const a = rnd() * PI2;
+            const rr = 14 * Math.sqrt(rnd());
+            galaxy.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr, r: 0.9 + 0.8 * rnd(), c: STAR_RGBS[i % 2 === 0 ? 1 : 4] });
+        }
+        let cx = W / 2;
+        let cy = H / 2;
+        let t = 0;
+        let boost = 0;
+        function mass() {
+            return LENS_MASS * (1 + (BOOST_GAIN - 1) * smooth(boost / BOOST_TICKS));
+        }
+        // 점질량 렌즈: 원천이 렌즈 중심에서 b 만큼 떨어져 있으면 상 두 개가 b 방향의 +th 와 반대쪽 th2 에 맺힌다
+        function image(ctx, bx, by, r, c, m, alpha) {
+            const b = Math.hypot(bx, by);
+            const bs = Math.sqrt(b * b + SOFTEN * SOFTEN);
+            const root = Math.sqrt(bs * bs + 4 * m);
+            const thP = (bs + root) / 2;
+            const thM = (root - bs) / 2;
+            const u = bs / Math.sqrt(m);
+            const mag = (u * u + 2) / (2 * u * Math.sqrt(u * u + 4));
+            const muP = clamp(mag + 0.5, 1, 9);
+            const muM = clamp(mag - 0.5, 0, 9);
+            const ux = b > 0.001 ? bx / b : 1;
+            const uy = b > 0.001 ? by / b : 0;
+            const ang = Math.atan2(uy, ux) + Math.PI / 2;
+            const stretchP = clamp(thP / bs, 1, 6);
+            ctx.fillStyle = rgba(c, alpha * clamp(Math.pow(muP, FALLOFF) * 0.8, 0.3, 1));
+            ctx.beginPath();
+            ctx.ellipse(cx + ux * thP, cy + uy * thP, r * stretchP, r * 0.8, ang, 0, PI2);
+            ctx.fill();
+            if (muM > 0.04) {
+                const stretchM = clamp(thM / bs, 0.4, 6);
+                ctx.fillStyle = rgba(c, alpha * clamp(Math.pow(muM, FALLOFF) * 0.8, 0, 0.9));
+                ctx.beginPath();
+                ctx.ellipse(cx - ux * thM, cy - uy * thM, r * Math.max(stretchM, 0.8), r * 0.7, ang, 0, PI2);
+                ctx.fill();
+            }
+        }
+        const scene = {
+            step() {
+                t += 1;
+                if (boost > 0) {
+                    boost -= 1;
+                }
+                let tx = W / 2 + Math.sin(t * 0.012) * 110;
+                let ty = H / 2 + Math.sin(t * 0.017) * 50;
+                if (inp.idle < IDLE_TICKS) {
+                    tx = inp.x;
+                    ty = inp.y;
+                }
+                cx = lerp(cx, tx, 0.1);
+                cy = lerp(cy, ty, 0.1);
+                for (let i = 0; i < field.length; i += 1) {
+                    field[i].x -= 0.7;
+                    if (field[i].x < -8) {
+                        field[i].x += W + 16;
+                    }
+                }
+            },
+            draw(ctx) {
+                paintBg(ctx, 1);
+                const m = mass();
+                for (let i = 0; i < field.length; i += 1) {
+                    const s = field[i];
+                    image(ctx, s.x - cx, s.y - cy, s.r, s.c, m, 0.9);
+                }
+                const gx = Math.sin(t * 0.02) * 7;
+                const gy = Math.cos(t * 0.027) * 5;
+                for (let i = 0; i < galaxy.length; i += 1) {
+                    const s = galaxy[i];
+                    image(ctx, s.x + gx, s.y + gy, s.r, s.c, m, 0.8);
+                }
+                const ring = Math.sqrt(m);
+                ctx.strokeStyle = rgba([208, 196, 255], 0.14);
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(cx, cy, ring, 0, PI2);
+                ctx.stroke();
+                glow(ctx, cx, cy, ring * 1.1, [186, 150, 255], 0.12);
+                const hole = ctx.createRadialGradient(cx, cy, 0, cx, cy, RING_RADIUS * 0.3);
+                hole.addColorStop(0, rgba(BG, 1));
+                hole.addColorStop(0.7, rgba(BG, 1));
+                hole.addColorStop(1, rgba(BG, 0));
+                ctx.fillStyle = hole;
+                ctx.fillRect(cx - RING_RADIUS, cy - RING_RADIUS, RING_RADIUS * 2, RING_RADIUS * 2);
+            },
+            label() {
+                return boost > 0 ? TXT_HEAVY : TXT_RING;
+            },
+            tap() {
+                boost = BOOST_TICKS;
+            }
+        };
+        if (reduce) {
+            for (let i = 0; i < 40; i += 1) {
+                scene.step();
+            }
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>속도에 따라 푸르게 쏠리고 붉게 늘어지는 별빛 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="속도에 따라 푸르게 쏠리고 붉게 늘어지는 별빛"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">앞쪽은 청백, 가장자리는 주황</p>
+  <button class="sc__btn" id="scBtn" type="button">멈춤</button>
+  <p class="sc__caption">속도에 따라 푸르게 쏠리고 붉게 늘어지는 별빛</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '멈춤';
+    const BTN_PLAY = '재생';
+    const BTN_NEXT = '다음 장면';
+    const BG = [14, 12, 32];
+    const STAR_RGBS = [[226, 238, 255], [255, 222, 196], [208, 196, 255], [196, 240, 228], [255, 206, 226]];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function paintBg(ctx, alpha) {
+        ctx.fillStyle = rgba(BG, alpha);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.idle = 0;
+            refresh();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const COLOR_TEMP = 0.5;
+    const SHIFT_GAIN = 2.2;
+    const HEADING = 0.014;
+    const CONE_COS = 0.72;
+    const FOV = 150;
+    const SPEED_BASE = 9;
+    const STAR_COUNT = 240;
+    const Z_FAR = 900;
+    const Z_NEAR = 22;
+    const SPREAD = 640;
+    const WARM = [255, 184, 132];
+    const WHITE = [236, 240, 255];
+    const COOL = [168, 200, 255];
+    const TXT_SPLIT = '앞쪽은 청백, 가장자리는 주황';
+    const TXT_FAST = '가속 중 — 푸른 쏠림이 커진다';
+    // 0 은 주황, 0.5 는 흰빛, 1 은 청백
+    function temperature(k) {
+        return k < 0.5 ? mix(WARM, WHITE, k * 2) : mix(WHITE, COOL, (k - 0.5) * 2);
+    }
+    function makeScene(inp, reduce) {
+        const rnd = lcg(450404);
+        const stars = [];
+        let vx = W / 2;
+        let vy = H / 2;
+        let theta = 0;
+        let turn = 1;
+        let t = 0;
+        let ratio = 0.6;
+        let speed = SPEED_BASE;
+        let primed = false;
+        function place(s, far) {
+            s.x = (rnd() * 2 - 1) * SPREAD;
+            s.y = (rnd() * 2 - 1) * SPREAD * 0.65;
+            s.z = far ? Z_FAR : Z_NEAR + rnd() * (Z_FAR - Z_NEAR);
+        }
+        for (let i = 0; i < STAR_COUNT; i += 1) {
+            const s = { x: 0, y: 0, z: 0 };
+            place(s, false);
+            stars.push(s);
+        }
+        const scene = {
+            step() {
+                t += 1;
+                theta += HEADING * turn;
+                let tx = W / 2 + Math.cos(theta) * 120;
+                let ty = H / 2 + Math.sin(theta) * 50;
+                if (inp.idle < IDLE_TICKS) {
+                    tx = inp.x;
+                    ty = inp.y;
+                }
+                vx = lerp(vx, tx, 0.07);
+                vy = lerp(vy, ty, 0.07);
+                ratio = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 0.04));
+                speed = SPEED_BASE * (0.5 + ratio);
+                for (let i = 0; i < stars.length; i += 1) {
+                    const s = stars[i];
+                    s.z -= speed;
+                    const sx = vx + s.x * FOV / s.z;
+                    const sy = vy + s.y * FOV / s.z;
+                    if (s.z < Z_NEAR || sx < -80 || sx > W + 80 || sy < -80 || sy > H + 80) {
+                        place(s, true);
+                    }
+                }
+            },
+            draw(ctx) {
+                paintBg(ctx, primed ? 0.45 : 1);
+                primed = true;
+                glow(ctx, vx, vy, 110, temperature(clamp(COLOR_TEMP + 0.4 * (ratio - 0.5), 0, 1)), 0.22);
+                ctx.lineCap = 'round';
+                for (let i = 0; i < stars.length; i += 1) {
+                    const s = stars[i];
+                    const sx = vx + s.x * FOV / s.z;
+                    const sy = vy + s.y * FOV / s.z;
+                    const r = Math.hypot(sx - vx, sy - vy);
+                    // 시선과 별 방향 사이 각도의 코사인 — 소실점에서 멀수록 작다
+                    const cosA = FOV / Math.hypot(r, FOV);
+                    const k = clamp(COLOR_TEMP + SHIFT_GAIN * (cosA - CONE_COS) * (0.5 + ratio), 0, 1);
+                    const c = temperature(k);
+                    const near = 1 - s.z / Z_FAR;
+                    const zb = Math.min(s.z + speed * 1.2, Z_FAR * 1.3);
+                    const a = (0.3 + 0.7 * cosA * cosA) * (0.3 + 0.7 * near);
+                    ctx.strokeStyle = rgba(c, a);
+                    ctx.lineWidth = 0.8 + 2.4 * near * near;
+                    ctx.beginPath();
+                    ctx.moveTo(vx + s.x * FOV / zb, vy + s.y * FOV / zb);
+                    ctx.lineTo(sx, sy);
+                    ctx.stroke();
+                    if (near > 0.55) {
+                        glow(ctx, sx, sy, 3 + 9 * near, c, 0.32 * a);
+                    }
+                }
+            },
+            label() {
+                return ratio > 0.8 ? TXT_FAST : TXT_SPLIT;
+            },
+            tap() {
+                turn = -turn;
+            }
+        };
+        if (reduce) {
+            for (let i = 0; i < 12; i += 1) {
+                scene.step();
+            }
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>球面上の星を回転行列で回して見る空のドーム — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="球面上の星を回転行列で回して見る空のドーム"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">空のドームがゆっくり回る</p>
+  <button class="sc__btn" id="scBtn" type="button">一時停止</button>
+  <p class="sc__caption">球面上の星を回転行列で回して見る空のドーム</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    const BG = [14, 12, 32];
+    const STAR_RGBS = [[226, 238, 255], [255, 222, 196], [208, 196, 255], [196, 240, 228], [255, 206, 226]];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function glow(ctx, x, y, r, c, a) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, rgba(c, a));
+        g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function paintBg(ctx, alpha) {
+        ctx.fillStyle = rgba(BG, alpha);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.idle = 0;
+            refresh();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const YAW_RATE = 0.012;
+    const PITCH = 0.38;
+    const FOV = 150;
+    const STAR_COUNT = 900;
+    const BAND_STARS = 520;
+    const GRID_STEP = 72;
+    const NEAR_CUT = 0.08;
+    const TXT_AUTO = '空のドームがゆっくり回る';
+    const TXT_LOOK = 'ポインターの方へ首を向ける';
+    function makeScene(inp, reduce) {
+        const rnd = lcg(450606);
+        const stars = [];
+        // 구면 위 고른 분포 — 높이 z 를 -1 이상 1 이하에서 고르게, 방위각도 고르게
+        for (let i = 0; i < STAR_COUNT; i += 1) {
+            const zz = rnd() * 2 - 1;
+            const ph = rnd() * PI2;
+            const rr = Math.sqrt(1 - zz * zz);
+            stars.push({ x: rr * Math.cos(ph), y: zz, z: rr * Math.sin(ph), m: rnd(), c: STAR_RGBS[i % STAR_RGBS.length] });
+        }
+        // 은하수 띠 — 기울어진 큰 원 둘레에 좁게 모은 별
+        const tilt = 0.6;
+        for (let i = 0; i < BAND_STARS; i += 1) {
+            const ph = rnd() * PI2;
+            const lat = (rnd() + rnd() + rnd() - 1.5) * 0.2;
+            const bx = Math.cos(lat) * Math.cos(ph);
+            const by = Math.sin(lat);
+            const bz = Math.cos(lat) * Math.sin(ph);
+            stars.push({ x: bx, y: by * Math.cos(tilt) - bz * Math.sin(tilt), z: by * Math.sin(tilt) + bz * Math.cos(tilt), m: rnd() * 0.5, c: STAR_RGBS[2] });
+        }
+        let yaw = 0;
+        let pitch = PITCH;
+        let t = 0;
+        let look = 0;
+        let lookP = 0;
+        function project(x, y, z, cy, sy, cp, sp) {
+            const x1 = x * cy + z * sy;
+            const z1 = -x * sy + z * cy;
+            const y2 = y * cp - z1 * sp;
+            const z2 = y * sp + z1 * cp;
+            return [W / 2 + FOV * x1 / z2, H / 2 - FOV * y2 / z2, z2];
+        }
+        const scene = {
+            step() {
+                t += 1;
+                let ly = 0;
+                let lp = 0.22 * Math.sin(t * 0.008);
+                if (inp.idle < IDLE_TICKS) {
+                    ly = (inp.x - W / 2) / W * 1.6;
+                    lp = (H / 2 - inp.y) / H * 0.9;
+                }
+                look = lerp(look, ly, 0.06);
+                lookP = lerp(lookP, lp, 0.06);
+                yaw += YAW_RATE;
+                pitch = PITCH + lookP;
+            },
+            draw(ctx) {
+                paintBg(ctx, 1);
+                const cyw = Math.cos(yaw + look);
+                const syw = Math.sin(yaw + look);
+                const cp = Math.cos(pitch);
+                const sp = Math.sin(pitch);
+                // 위도선과 경선 — 점으로만 그려 돌아가는 방향이 보이게
+                ctx.fillStyle = rgba([208, 196, 255], 0.55);
+                for (let la = -60; la <= 60; la += 30) {
+                    const rl = Math.cos(la * Math.PI / 180);
+                    const yl = Math.sin(la * Math.PI / 180);
+                    for (let a = 0; a < 360; a += 5) {
+                        const p = project(rl * Math.cos(a * Math.PI / 180), yl, rl * Math.sin(a * Math.PI / 180), cyw, syw, cp, sp);
+                        if (p[2] > NEAR_CUT) {
+                            ctx.fillRect(p[0] - 0.9, p[1] - 0.9, 1.9, 1.9);
+                        }
+                    }
+                }
+                for (let me = 0; me < 360; me += GRID_STEP / 2) {
+                    for (let a = -80; a <= 80; a += 5) {
+                        const rl = Math.cos(a * Math.PI / 180);
+                        const p = project(rl * Math.cos(me * Math.PI / 180), Math.sin(a * Math.PI / 180), rl * Math.sin(me * Math.PI / 180), cyw, syw, cp, sp);
+                        if (p[2] > NEAR_CUT) {
+                            ctx.fillRect(p[0] - 0.9, p[1] - 0.9, 1.9, 1.9);
+                        }
+                    }
+                }
+                for (let i = 0; i < stars.length; i += 1) {
+                    const s = stars[i];
+                    const p = project(s.x, s.y, s.z, cyw, syw, cp, sp);
+                    if (p[2] <= NEAR_CUT || p[0] < -6 || p[0] > W + 6 || p[1] < -6 || p[1] > H + 6) {
+                        continue;
+                    }
+                    const r = 0.5 + 1.9 * s.m * s.m * s.m + (i < STAR_COUNT ? 0.3 : 0);
+                    const a = 0.35 + 0.65 * clamp(p[2] * 1.2, 0, 1);
+                    if (r > 1.5) {
+                        glow(ctx, p[0], p[1], r * 5, s.c, 0.35 * a);
+                    }
+                    ctx.fillStyle = rgba(s.c, a);
+                    ctx.beginPath();
+                    ctx.arc(p[0], p[1], r, 0, PI2);
+                    ctx.fill();
+                }
+            },
+            label() {
+                return inp.idle < IDLE_TICKS ? TXT_LOOK : TXT_AUTO;
+            },
+            tap() {
+                yaw += Math.PI / 3;
+            }
+        };
+        if (reduce) {
+            for (let i = 0; i < 60; i += 1) {
+                scene.step();
+            }
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>
