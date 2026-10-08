@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>남은 비율로 색이 번지고 끝 구간에서 심박이 뛰는 줄어드는 링 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="cd is-demo" id="cd" data-demo="1">
+    <div class="cd__view cd__view--ring">
+      <div class="cd__halo" data-r="halo"></div>
+      <svg class="cd__svg" viewBox="0 0 120 120" role="img" aria-label="줄어드는 링 타이머">
+        <circle class="cd__track" cx="60" cy="60" r="48"/>
+        <circle class="cd__arc" data-r="arc" cx="60" cy="60" r="48" transform="rotate(-90 60 60)"/>
+      </svg>
+      <p class="cd__read cd__read--center" role="timer"><b data-r="num">1.5</b><span>초</span></p>
+    </div>
+    <div class="cd__bar">
+      <button class="cd__btn" type="button" data-r="toggle">멈춤</button>
+      <button class="cd__btn" type="button" data-r="reset">다시</button>
+    </div>
+    <p class="cd__sr" aria-live="polite" data-r="status"></p>
+  </div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cd");
+    if (!root) return;
+    function cx(s) {
+        return s;
+    }
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let running = demo;
+    let elapsed = 0;
+    let lastTs = -1;
+    let lastDraw = -1e9;
+    let raf = 0;
+    const hooks = { stop: () => { } };
+    const offs = [];
+    const TOTAL_MS = 1500;
+    const HOLD_MS = 300;
+    const RING_R = 48;
+    const PULSE_AT = 0.4;
+    const PULSE_MS = 300;
+    const HUE_STOPS = ["--c0", "--c1", "--c2"];
+    let totalMs = TOTAL_MS;
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    // 지수 접근: 프레임률이 달라도 같은 속도가 되도록 dt 를 60fps 프레임 수로 환산해 쓴다
+    function approach(x, target, per, dt) {
+        return x + (target - x) * (1 - Math.pow(1 - per, dt * 60));
+    }
+    const toggle = q('[data-r="toggle"]');
+    const resetBtn = q('[data-r="reset"]');
+    const status = q('[data-r="status"]');
+    // 남은 시간. 경과는 rAF 타임스탬프 차이를 누적한 값이라 시계를 따로 읽지 않는다
+    function remainMs() {
+        return clamp(totalMs - elapsed, 0, totalMs);
+    }
+    function syncButtons() {
+        toggle.textContent = running ? "멈춤" : "시작";
+        toggle.setAttribute("aria-pressed", running ? "true" : "false");
+    }
+    // 스크린리더 안내는 멈출 때와 끝날 때만 갱신한다. 시연 루프 중에는 읽지 않는다
+    function say(msg) {
+        if (!demo)
+            status.textContent = msg;
+    }
+    function stopDemo() {
+        if (!demo)
+            return;
+        demo = false;
+        root.classList.remove("is-demo");
+        root.removeAttribute("data-demo");
+        hooks.stop();
+    }
+    function restart() {
+        elapsed = 0;
+        resetState();
+    }
+    function update(dt) {
+        tick(dt);
+        draw();
+    }
+    function frame(ts) {
+        raf = requestAnimationFrame(frame);
+        const raw = lastTs < 0 ? 0 : ts - lastTs;
+        lastTs = ts;
+        if (running) {
+            elapsed += raw;
+            if (demo) {
+                const cycle = totalMs + HOLD_MS;
+                if (elapsed >= cycle) {
+                    elapsed %= cycle;
+                    resetState();
+                }
+            }
+            else if (elapsed >= totalMs) {
+                elapsed = totalMs;
+                running = false;
+                say("시간이 다 됐습니다");
+                syncButtons();
+            }
+        }
+        if (reduce && ts - lastDraw < 250)
+            return;
+        lastDraw = ts;
+        update(Math.min(raw, 50) / 1000);
+    }
+    on(toggle, "click", () => {
+        stopDemo();
+        if (!running && elapsed >= totalMs)
+            restart();
+        running = !running;
+        say(running ? "" : "멈췄습니다");
+        syncButtons();
+        update(0);
+    });
+    on(resetBtn, "click", () => {
+        stopDemo();
+        running = false;
+        restart();
+        say("");
+        syncButtons();
+        update(0);
+    });
+    const arc = q('[data-r="arc"]');
+    const num = q('[data-r="num"]');
+    const halo = q('[data-r="halo"]');
+    const CIRC = 2 * Math.PI * RING_R;
+    const BASE_W = 9;
+    const PULSE_W = 6;
+    let stops = [[127, 220, 180], [255, 233, 159], [255, 158, 187]];
+    function parseColor(h) {
+        // CSS 변수 값은 #rrggbb 로도, rgb(r, g, b) 로도, rgb(100%, 50%, 0%) 로도 나올 수 있다
+        const m6 = /^#([0-9a-f]{6})$/i.exec(h);
+        if (m6) {
+            const n = parseInt(m6[1], 16);
+            return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+        }
+        const m = /([0-9.]+)(%?)[ ,]+([0-9.]+)(%?)[ ,]+([0-9.]+)(%?)/.exec(h);
+        if (!m)
+            return [255, 255, 255];
+        const ch = (v, pct) => Math.round(pct ? (Number(v) * 255) / 100 : Number(v));
+        return [ch(m[1], m[2]), ch(m[3], m[4]), ch(m[5], m[6])];
+    }
+    // 색 토큰은 CSS 변수가 갖고, 여기서는 변수 이름만 들고 있다가 읽는다
+    function readStops() {
+        const cs = getComputedStyle(root);
+        stops = HUE_STOPS.map((n) => parseColor(cs.getPropertyValue(n).trim()));
+    }
+    // 남은 비율 f 를 세 색 사이 보간으로 바꾼다. u = 1 - f 가 0 이면 첫 색, 1 이면 마지막 색
+    function blend(u) {
+        const s = clamp(u, 0, 1) * (stops.length - 1);
+        const i = Math.min(stops.length - 2, Math.floor(s));
+        const f = s - i;
+        const a = stops[i];
+        const b = stops[i + 1];
+        return a.map((v, k) => Math.round(v + (b[k] - v) * f));
+    }
+    // 심박 곡선: 한 주기에 두 번 솟는다(쿵 쿵). 값은 0 에서 1 사이
+    function heartbeat(ph) {
+        const p = ph - Math.floor(ph);
+        const lub = Math.exp(-Math.pow((p - 0.1) / 0.06, 2));
+        const dub = 0.6 * Math.exp(-Math.pow((p - 0.3) / 0.07, 2));
+        return Math.min(1, lub + dub);
+    }
+    function resize() {
+        readStops();
+        arc.style.strokeDasharray = CIRC.toFixed(2);
+    }
+    function resetState() { }
+    function tick(dt) { }
+    function draw() {
+        const rem = remainMs();
+        const f = rem / totalMs;
+        arc.style.strokeDashoffset = (CIRC * (1 - f)).toFixed(2);
+        const col = blend(1 - f);
+        arc.style.stroke = "rgb(" + col.join(",") + ")";
+        arc.style.opacity = f > 0 ? "1" : "0";
+        let w = BASE_W;
+        if (!reduce && f > 0 && f < PULSE_AT) {
+            const ramp = 1 - f / PULSE_AT;
+            w += PULSE_W * ramp * heartbeat(elapsed / PULSE_MS);
+        }
+        arc.style.strokeWidth = w.toFixed(2);
+        // 같은 색과 같은 박동이 배경 후광에도 번진다: 링 바깥까지 남은 시간이 읽힌다
+        const beat = (w - BASE_W) / PULSE_W;
+        halo.style.background = "radial-gradient(ellipse at 50% 50%, rgba(" + col.join(",") + "," + (0.34 + 0.2 * beat).toFixed(3) + ") 0%, rgba(" + col.join(",") + ",0) 72%)";
+        num.textContent = (rem / 1000).toFixed(1);
+    }
+    const ro = new ResizeObserver(() => {
+        resize();
+        draw();
+    });
+    ro.observe(root);
+    offs.push(() => ro.disconnect());
+    resize();
+    resetState();
+    syncButtons();
+    update(0);
+    raf = requestAnimationFrame(frame);
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>

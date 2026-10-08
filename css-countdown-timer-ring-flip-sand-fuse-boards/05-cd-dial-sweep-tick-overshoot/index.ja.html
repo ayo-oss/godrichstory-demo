@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>目盛りごとにひと跳ねして通った扇形が塗られる文字盤 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="cd is-demo" id="cd" data-demo="1">
+    <div class="cd__view cd__view--dial">
+      <div class="cd__face" data-r="face" role="img" aria-label="目盛りごとに跳ねるダイヤル">
+        <div class="cd__sector" data-r="sector"></div>
+        <div class="cd__needle" data-r="needle"></div>
+        <i class="cd__hub"></i>
+      </div>
+      <p class="cd__read cd__read--center" role="timer"><b data-r="num">10</b><span>秒</span></p>
+    </div>
+    <div class="cd__bar">
+      <button class="cd__btn" type="button" data-r="toggle">一時停止</button>
+      <button class="cd__btn" type="button" data-r="reset">リセット</button>
+    </div>
+    <p class="cd__sr" aria-live="polite" data-r="status"></p>
+  </div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cd");
+    if (!root) return;
+    function cx(s) {
+        return s;
+    }
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let running = demo;
+    let elapsed = 0;
+    let lastTs = -1;
+    let lastDraw = -1e9;
+    let raf = 0;
+    const hooks = { stop: () => { } };
+    const offs = [];
+    const TICK_COUNT = 10;
+    const DEMO_SECOND_MS = 150;
+    const SECOND_MS = 1000;
+    const HOLD_MS = 300;
+    const SPRING_K = 520;
+    const DAMPING = 22;
+    const SECTOR_ALPHA = 0.55;
+    let secondMs = demo ? DEMO_SECOND_MS : SECOND_MS;
+    let totalMs = TICK_COUNT * secondMs;
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    // 지수 접근: 프레임률이 달라도 같은 속도가 되도록 dt 를 60fps 프레임 수로 환산해 쓴다
+    function approach(x, target, per, dt) {
+        return x + (target - x) * (1 - Math.pow(1 - per, dt * 60));
+    }
+    const toggle = q('[data-r="toggle"]');
+    const resetBtn = q('[data-r="reset"]');
+    const status = q('[data-r="status"]');
+    // 남은 시간. 경과는 rAF 타임스탬프 차이를 누적한 값이라 시계를 따로 읽지 않는다
+    function remainMs() {
+        return clamp(totalMs - elapsed, 0, totalMs);
+    }
+    function syncButtons() {
+        toggle.textContent = running ? "一時停止" : "開始";
+        toggle.setAttribute("aria-pressed", running ? "true" : "false");
+    }
+    // 스크린리더 안내는 멈출 때와 끝날 때만 갱신한다. 시연 루프 중에는 읽지 않는다
+    function say(msg) {
+        if (!demo)
+            status.textContent = msg;
+    }
+    function stopDemo() {
+        if (!demo)
+            return;
+        demo = false;
+        root.classList.remove("is-demo");
+        root.removeAttribute("data-demo");
+        hooks.stop();
+    }
+    function restart() {
+        elapsed = 0;
+        resetState();
+    }
+    function update(dt) {
+        tick(dt);
+        draw();
+    }
+    function frame(ts) {
+        raf = requestAnimationFrame(frame);
+        const raw = lastTs < 0 ? 0 : ts - lastTs;
+        lastTs = ts;
+        if (running) {
+            elapsed += raw;
+            if (demo) {
+                const cycle = totalMs + HOLD_MS;
+                if (elapsed >= cycle) {
+                    elapsed %= cycle;
+                    resetState();
+                }
+            }
+            else if (elapsed >= totalMs) {
+                elapsed = totalMs;
+                running = false;
+                say("時間になりました");
+                syncButtons();
+            }
+        }
+        if (reduce && ts - lastDraw < 250)
+            return;
+        lastDraw = ts;
+        update(Math.min(raw, 50) / 1000);
+    }
+    on(toggle, "click", () => {
+        stopDemo();
+        if (!running && elapsed >= totalMs)
+            restart();
+        running = !running;
+        say(running ? "" : "一時停止しました");
+        syncButtons();
+        update(0);
+    });
+    on(resetBtn, "click", () => {
+        stopDemo();
+        running = false;
+        restart();
+        say("");
+        syncButtons();
+        update(0);
+    });
+    const sector = q('[data-r="sector"]');
+    const needle = q('[data-r="needle"]');
+    const face = q('[data-r="face"]');
+    const num = q('[data-r="num"]');
+    const STEP_DEG = 360 / TICK_COUNT;
+    const ticks = [];
+    for (let i = 0; i < TICK_COUNT; i++) {
+        const t = document.createElement("i");
+        t.className = cx("cd__tick");
+        t.style.transform = "rotate(" + i * STEP_DEG + "deg)";
+        face.appendChild(t);
+        ticks.push(t);
+    }
+    let angle = 0;
+    let vel = 0;
+    let passed = 0;
+    // 지난 눈금 수: secondMs 가 한 번 지날 때마다 한 칸
+    function passedTicks() {
+        return Math.min(TICK_COUNT, Math.floor(elapsed / secondMs + 1e-6));
+    }
+    function resize() { }
+    function resetState() {
+        angle = 0;
+        vel = 0;
+        passed = 0;
+    }
+    hooks.stop = () => {
+        elapsed *= SECOND_MS / secondMs;
+        secondMs = SECOND_MS;
+        totalMs = TICK_COUNT * secondMs;
+    };
+    function tick(dt) {
+        passed = passedTicks();
+        const target = passed * STEP_DEG;
+        if (reduce) {
+            angle = target;
+            vel = 0;
+            return;
+        }
+        let left = dt;
+        while (left > 0) {
+            const h = Math.min(left, 1 / 240);
+            vel += (-SPRING_K * (angle - target) - DAMPING * vel) * h;
+            angle += vel * h;
+            left -= h;
+        }
+    }
+    function draw() {
+        needle.style.transform = "rotate(" + angle.toFixed(2) + "deg)";
+        // 지나온 각도까지 부채꼴을 따로 깐다. 바늘이 튕기면 부채꼴 끝도 같이 튕긴다
+        sector.style.setProperty("--a", clamp(angle, 0, 360).toFixed(2));
+        sector.style.opacity = String(SECTOR_ALPHA);
+        ticks.forEach((t, i) => t.classList.toggle(cx("is-past"), i < passed));
+        num.textContent = String(Math.ceil(remainMs() / secondMs - 1e-6));
+    }
+    const ro = new ResizeObserver(() => {
+        resize();
+        draw();
+    });
+    ro.observe(root);
+    offs.push(() => ro.disconnect());
+    resize();
+    resetState();
+    syncButtons();
+    update(0);
+    raf = requestAnimationFrame(frame);
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>

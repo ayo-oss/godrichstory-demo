@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Launch Countdown Scene Where a Shockwave Spreads at Every Number and Ignition Fires at Zero — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="cd is-demo" id="cd" data-demo="1">
+    <div class="cd__view cd__view--scene">
+      <canvas class="cd__cv" data-r="cv" role="img" aria-label="A launch countdown where the stars speed up at 0"></canvas>
+      <p class="cd__read cd__read--corner" role="timer"><b data-r="num">1.4</b><span>s</span></p>
+    </div>
+    <div class="cd__bar">
+      <button class="cd__btn" type="button" data-r="toggle">Pause</button>
+      <button class="cd__btn" type="button" data-r="reset">Reset</button>
+    </div>
+    <p class="cd__sr" aria-live="polite" data-r="status"></p>
+  </div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cd");
+    if (!root) return;
+    function cx(s) {
+        return s;
+    }
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let running = demo;
+    let elapsed = 0;
+    let lastTs = -1;
+    let lastDraw = -1e9;
+    let raf = 0;
+    const hooks = { stop: () => { } };
+    const offs = [];
+    const COUNT_FROM = 3;
+    const DEMO_SECOND_MS = 450;
+    const SECOND_MS = 1000;
+    const HOLD_MS = 450;
+    const WAVE_R = 120;
+    const WAVE_MS = 420;
+    const SHAKE_AMP = 5;
+    const STAR_BOOST = 3;
+    const STAR_N = 90;
+    let secondMs = demo ? DEMO_SECOND_MS : SECOND_MS;
+    let totalMs = COUNT_FROM * secondMs;
+    const cv = q('[data-r="cv"]');
+    const ctx2d = cv.getContext("2d");
+    if (!ctx2d)
+        return () => { };
+    const g = ctx2d;
+    let cw = 1;
+    let ch = 1;
+    let dpr = 1;
+    // 캔버스 안쪽 해상도를 화면 크기와 devicePixelRatio 에 맞춘다. 리사이즈마다 Reset 호출된다
+    function fitCanvas() {
+        const r = cv.getBoundingClientRect();
+        dpr = Math.min(2, window.devicePixelRatio || 1);
+        cw = Math.max(1, Math.round(r.width));
+        ch = Math.max(1, Math.round(r.height));
+        cv.width = Math.round(cw * dpr);
+        cv.height = Math.round(ch * dpr);
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function cssVar(name) {
+        return getComputedStyle(root).getPropertyValue(name).trim();
+    }
+    function parseColor(h) {
+        // CSS 변수 값은 #rrggbb 로도, rgb(r, g, b) 로도, rgb(100%, 50%, 0%) 로도 나올 수 있다
+        const m6 = /^#([0-9a-f]{6})$/i.exec(h);
+        if (m6) {
+            const n = parseInt(m6[1], 16);
+            return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+        }
+        const m = /([0-9.]+)(%?)[ ,]+([0-9.]+)(%?)[ ,]+([0-9.]+)(%?)/.exec(h);
+        if (!m)
+            return [255, 255, 255];
+        const ch = (v, pct) => Math.round(pct ? (Number(v) * 255) / 100 : Number(v));
+        return [ch(m[1], m[2]), ch(m[3], m[4]), ch(m[5], m[6])];
+    }
+    function rgba(c, a) {
+        return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a.toFixed(3) + ")";
+    }
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    // 지수 접근: 프레임률이 달라도 같은 속도가 되도록 dt 를 60fps 프레임 수로 환산해 쓴다
+    function approach(x, target, per, dt) {
+        return x + (target - x) * (1 - Math.pow(1 - per, dt * 60));
+    }
+    const toggle = q('[data-r="toggle"]');
+    const resetBtn = q('[data-r="reset"]');
+    const status = q('[data-r="status"]');
+    // 남은 시간. 경과는 rAF 타임스탬프 차이를 누적한 값이라 시계를 따로 읽지 않는다
+    function remainMs() {
+        return clamp(totalMs - elapsed, 0, totalMs);
+    }
+    function syncButtons() {
+        toggle.textContent = running ? "Pause" : "Start";
+        toggle.setAttribute("aria-pressed", running ? "true" : "false");
+    }
+    // 스크린리더 안내는 멈출 때와 끝날 때만 갱신한다. 시연 루프 중에는 읽지 않는다
+    function say(msg) {
+        if (!demo)
+            status.textContent = msg;
+    }
+    function stopDemo() {
+        if (!demo)
+            return;
+        demo = false;
+        root.classList.remove("is-demo");
+        root.removeAttribute("data-demo");
+        hooks.stop();
+    }
+    function restart() {
+        elapsed = 0;
+        resetState();
+    }
+    function update(dt) {
+        tick(dt);
+        draw();
+    }
+    function frame(ts) {
+        raf = requestAnimationFrame(frame);
+        const raw = lastTs < 0 ? 0 : ts - lastTs;
+        lastTs = ts;
+        if (running) {
+            elapsed += raw;
+            if (demo) {
+                const cycle = totalMs + HOLD_MS;
+                if (elapsed >= cycle) {
+                    elapsed %= cycle;
+                    resetState();
+                }
+            }
+            else if (elapsed >= totalMs) {
+                elapsed = totalMs;
+                running = false;
+                say("Time is up");
+                syncButtons();
+            }
+        }
+        if (reduce && ts - lastDraw < 250)
+            return;
+        lastDraw = ts;
+        update(Math.min(raw, 50) / 1000);
+    }
+    on(toggle, "click", () => {
+        stopDemo();
+        if (!running && elapsed >= totalMs)
+            restart();
+        running = !running;
+        say(running ? "" : "Paused");
+        syncButtons();
+        update(0);
+    });
+    on(resetBtn, "click", () => {
+        stopDemo();
+        running = false;
+        restart();
+        say("");
+        syncButtons();
+        update(0);
+    });
+    const sx = new Float32Array(STAR_N);
+    const sy = new Float32Array(STAR_N);
+    const sz = new Float32Array(STAR_N);
+    let seed = 3;
+    function rand() {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+    }
+    for (let i = 0; i < STAR_N; i++) {
+        sx[i] = rand();
+        sy[i] = rand();
+        sz[i] = 0.3 + 0.7 * rand();
+    }
+    let speed = 40;
+    const num = q('[data-r="num"]');
+    // 1차원 값 노이즈: 정수 격자마다 사인으로 만든 값을 두고 사이를 부드럽게 잇는다
+    function lat(i) {
+        const s = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+        return s - Math.floor(s);
+    }
+    function vnoise(x) {
+        const i = Math.floor(x);
+        const f = x - i;
+        const u = f * f * (3 - 2 * f);
+        return lat(i) * (1 - u) + lat(i + 1) * u - 0.5;
+    }
+    let cStar = [255, 247, 230];
+    let cRing = [110, 200, 255];
+    let cFlame = [255, 158, 187];
+    let cWarm = [255, 233, 159];
+    function resize() {
+        fitCanvas();
+        cStar = parseColor(cssVar("--star"));
+        cRing = parseColor(cssVar("--ring"));
+        cFlame = parseColor(cssVar("--flame"));
+        cWarm = parseColor(cssVar("--warm"));
+    }
+    hooks.stop = () => {
+        elapsed *= SECOND_MS / secondMs;
+        secondMs = SECOND_MS;
+        totalMs = COUNT_FROM * secondMs;
+    };
+    function shownCount() {
+        return Math.ceil(remainMs() / secondMs - 1e-6);
+    }
+    function resetState() {
+        speed = 40;
+    }
+    function tick(dt) {
+        if (reduce)
+            return;
+        const ignited = shownCount() === 0;
+        const target = 40 * (ignited ? STAR_BOOST : 1);
+        speed = approach(speed, target, 0.12, dt);
+        for (let i = 0; i < STAR_N; i++) {
+            sy[i] += (speed * sz[i] * dt) / 100;
+            if (sy[i] > 1.05) {
+                sy[i] -= 1.1;
+                sx[i] = rand();
+            }
+        }
+    }
+    function draw() {
+        const n = shownCount();
+        const ignited = n === 0;
+        // 흔들림: 숫자가 바뀐 직후의 한 방 + 0 에 가까울수록 커지는 바닥 진동
+        let amp = 0;
+        if (!reduce) {
+            const since = elapsed - (COUNT_FROM - n) * secondMs;
+            const base = Math.pow(1 - n / COUNT_FROM, 2) * 0.45;
+            amp = SHAKE_AMP * (ignited ? 1 : base + 0.8 * Math.exp(-Math.max(0, since) / 70));
+        }
+        g.clearRect(0, 0, cw, ch);
+        g.save();
+        if (amp > 0)
+            g.translate(vnoise(elapsed * 0.07) * 2 * amp, vnoise(elapsed * 0.07 + 40) * 2 * amp);
+        // 별: 속도에 비례해 길어지는 줄
+        const trail = reduce ? 0 : speed / 70;
+        for (let i = 0; i < STAR_N; i++) {
+            const x = sx[i] * cw;
+            const y = sy[i] * ch;
+            g.strokeStyle = rgba(cStar, 0.35 + 0.55 * sz[i]);
+            g.lineWidth = 1 + sz[i];
+            g.beginPath();
+            g.moveTo(x, y);
+            g.lineTo(x, y - trail * sz[i] * 14);
+            g.stroke();
+            if (reduce) {
+                g.fillStyle = rgba(cStar, 0.6);
+                g.fillRect(x, y, 1.6, 1.6);
+            }
+        }
+        // 점화 불꽃(아래쪽)
+        if (ignited) {
+            const fx = cw / 2;
+            const fy = ch;
+            const pulse = reduce ? 1 : 1 + 0.12 * Math.sin(elapsed * 0.09);
+            const fg = g.createRadialGradient(fx, fy, 0, fx, fy, ch * 0.9 * pulse);
+            fg.addColorStop(0, rgba(cWarm, 0.9));
+            fg.addColorStop(0.45, rgba(cFlame, 0.45));
+            fg.addColorStop(1, rgba(cFlame, 0));
+            g.fillStyle = fg;
+            g.fillRect(0, 0, cw, ch);
+        }
+        // 충격파 링: 숫자가 바뀐 시각마다 한 개씩, 시간에서 바로 계산한다
+        if (!reduce) {
+            const k = Math.min(COUNT_FROM, Math.floor(elapsed / secondMs + 1e-6));
+            for (let j = Math.max(0, k - 1); j <= k; j++) {
+                const age = elapsed - j * secondMs;
+                if (age < 0 || age >= WAVE_MS)
+                    continue;
+                const u = age / WAVE_MS;
+                const big = j === COUNT_FROM ? 1.7 : 1;
+                g.strokeStyle = rgba(j === COUNT_FROM ? cFlame : cRing, Math.pow(1 - u, 1.5) * 0.9);
+                g.lineWidth = 3 + 5 * (1 - u);
+                g.beginPath();
+                g.arc(cw / 2, ch / 2, WAVE_R * big * (1 - Math.pow(1 - u, 3)) * Math.min(1, ch / 200), 0, Math.PI * 2);
+                g.stroke();
+            }
+        }
+        // 큰 숫자
+        g.fillStyle = rgba(ignited ? cFlame : cStar, 1);
+        g.font = "800 " + Math.round(ch * 0.5) + "px -apple-system, Segoe UI, sans-serif";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(String(n), cw / 2, ch / 2);
+        g.restore();
+        num.textContent = (remainMs() / 1000).toFixed(1);
+    }
+    const ro = new ResizeObserver(() => {
+        resize();
+        draw();
+    });
+    ro.observe(root);
+    offs.push(() => ro.disconnect());
+    resize();
+    resetState();
+    syncButtons();
+    update(0);
+    raf = requestAnimationFrame(frame);
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>
