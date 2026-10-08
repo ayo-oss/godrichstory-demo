@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カードが円筒のまわりに並び、横の移動量だけ回って、遠近の投影で大きさ・明るさが変わり、前後の順が並べ直される円筒ギャラリー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="十二枚のカードが円筒の周りを回り、遠近で大きさと明るさが変わるギャラリー"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">停止</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="prev" type="button">前へ</button>
+    <button class="hs__btn" data-role="next" type="button">次へ</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 카드를 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const TINTS = [SKY, PINK, MINT, LILAC, PEACH];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    // 휠 한 번의 이동량을 px 로 — 줄 단위(deltaMode 1)·쪽 단위(deltaMode 2) 장치도 같은 눈금으로 맞춘다.
+    // 가로·세로 중 큰 쪽을 쓴다: 트랙패드의 가로 쓸기와 마우스 휠의 세로 굴림이 같은 방향으로 들어온다
+    function wheelPx(ev) {
+        const unit = ev.deltaMode === 1 ? 16 : (ev.deltaMode === 2 ? W : 1);
+        const d = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+        return d * unit;
+    }
+    // 시연 시계가 loop 주기 안의 at 시각을 이번 스텝에 막 지났는가
+    function crossed(t, at, loop) {
+        const p = t % loop;
+        return p >= at && p - FIXED_DT < at;
+    }
+    function fitCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    function roundRectPath(c, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        c.beginPath();
+        c.moveTo(x + rr, y);
+        c.lineTo(x + w - rr, y);
+        c.quadraticCurveTo(x + w, y, x + w, y + rr);
+        c.lineTo(x + w, y + h - rr);
+        c.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        c.lineTo(x + rr, y + h);
+        c.quadraticCurveTo(x, y + h, x, y + h - rr);
+        c.lineTo(x, y + rr);
+        c.quadraticCurveTo(x, y, x + rr, y);
+        c.closePath();
+    }
+    // 카드 한 장 — 사진 대신 계산한 그림 칸(그라디언트 하늘·해·언덕) + 글줄 막대 두 개 + 번호
+    function drawCard(c, x, y, w, h, i, light) {
+        const t1 = TINTS[i % TINTS.length];
+        const t2 = TINTS[(i + 2) % TINTS.length];
+        const k = clamp(light, 0, 1);
+        roundRectPath(c, x, y, w, h, 10);
+        c.fillStyle = rgba(mix(BG, PAPER, k), 1);
+        c.fill();
+        const ih = h * 0.58;
+        const g = c.createLinearGradient(x, y, x + w, y + ih);
+        g.addColorStop(0, rgba(mix(BG, t1, k), 1));
+        g.addColorStop(1, rgba(mix(BG, t2, k * 0.92), 1));
+        c.save();
+        roundRectPath(c, x + 6, y + 6, w - 12, ih - 6, 7);
+        c.fillStyle = g;
+        c.fill();
+        c.clip();
+        c.fillStyle = rgba(mix(BG, PAPER, k * 0.9), 0.9);
+        c.beginPath();
+        c.arc(x + w * 0.7, y + ih * 0.36, Math.min(w, ih) * 0.13, 0, Math.PI * 2);
+        c.fill();
+        c.fillStyle = rgba(mix(BG, INK, k), 0.55);
+        c.beginPath();
+        c.moveTo(x, y + ih);
+        c.lineTo(x + w * 0.32, y + ih * 0.55);
+        c.lineTo(x + w * 0.55, y + ih * 0.8);
+        c.lineTo(x + w * 0.78, y + ih * 0.62);
+        c.lineTo(x + w, y + ih);
+        c.closePath();
+        c.fill();
+        c.restore();
+        c.fillStyle = rgba(mix(BG, INK, k), 0.75);
+        c.fillRect(x + 10, y + ih + 12, w * 0.62, 6);
+        c.fillStyle = rgba(mix(BG, INK, k), 0.4);
+        c.fillRect(x + 10, y + ih + 24, w * 0.44, 5);
+        c.fillStyle = rgba(mix(BG, INK, k), 0.9);
+        c.font = '700 13px sans-serif';
+        c.textAlign = 'right';
+        c.textBaseline = 'alphabetic';
+        c.fillText(String(i + 1).padStart(2, '0'), x + w - 9, y + h - 10);
+    }
+    const CARD_N = 12;
+    const RADIUS = 250;
+    const CAM_D = 520;
+    const HORIZON = 22;
+    const LIFT = 150;
+    const CARD_W = 118;
+    const CARD_H = 150;
+    const STEP_ANG = (Math.PI * 2) / CARD_N;
+    const HALF = CARD_W / (2 * RADIUS);
+    const MAX_ROT = (CARD_N - 1) * STEP_ANG;
+    const FRICTION = 0.93;
+    const ANG_GAIN = 0.00016;
+    const BACK_DIM = 0.35;
+    const STOP_AV = 0.0004;
+    const DEMO_LOOP = 4400;
+    const TXT_SPIN = '円筒が回っています';
+    const TXT_STOP = '停止';
+    const prevBtn = root.querySelector('[data-role="prev"]');
+    const nextBtn = root.querySelector('[data-role="next"]');
+    let rot = 0;
+    let av = 0;
+    let spinning = false;
+    // 원통 위 각도 φ 의 점 → 화면 x 와 원근 배율. 카메라는 축에서 CAM_D 떨어져 있고 맨 앞 카드가 배율 1
+    function project(phi) {
+        const X = RADIUS * Math.sin(phi);
+        const Z = CAM_D - RADIUS * Math.cos(phi);
+        const s = (CAM_D - RADIUS) / Z;
+        return [W / 2 + X * s, s];
+    }
+    // 높이 h(카드 가운데 0, 아래 +) 의 화면 y — 카메라가 LIFT 만큼 위에 있어 먼 카드일수록 지평선(HORIZON) 쪽으로 올라간다
+    function screenY(h, s) { return HORIZON + (h + LIFT) * s; }
+    // 카메라 쪽을 보고 있는가 — 바깥 법선과 카메라 방향의 내적 = CAM_D·cosφ − R
+    function facing(phi) { return CAM_D * Math.cos(phi) - RADIUS; }
+    function canMove(d) { return d > 0 ? rot < MAX_ROT - 0.001 : rot > 0.001; }
+    function spin(d) {
+        av += d * ANG_GAIN;
+        spinning = true;
+        say(TXT_SPIN);
+    }
+    // 목표 각도에 정확히 멈추는 처음 각속도 — 등비급수 거꾸로
+    function speedFor(distance) { return distance * (1 - FRICTION) / FRICTION; }
+    function step() {
+        rot += av;
+        av *= FRICTION;
+        if (rot < 0) {
+            rot = 0;
+            av = -av * 0.3;
+        }
+        if (rot > MAX_ROT) {
+            rot = MAX_ROT;
+            av = -av * 0.3;
+        }
+        if (spinning && Math.abs(av) < STOP_AV) {
+            av = 0;
+            spinning = false;
+            say(TXT_STOP);
+        }
+    }
+    function settle() {
+        rot = 0;
+        av = 0;
+        say(TXT_STOP);
+    }
+    function demoTick(t) {
+        for (let k = 0; k < 6; k += 1) {
+            if (crossed(t, 200 + k * 40, DEMO_LOOP)) {
+                spin(100);
+            }
+        }
+        for (let k = 0; k < 6; k += 1) {
+            if (crossed(t, 2300 + k * 40, DEMO_LOOP)) {
+                spin(-100);
+            }
+        }
+    }
+    function drawCardOn(i, phi) {
+        const a = project(phi - HALF);
+        const b = project(phi + HALF);
+        const front = facing(phi) > 0;
+        // 앞을 보는 카드는 밝게, 등을 보이는 뒤쪽 카드는 어둡게 — cosφ 를 0~1 로 옮겨 섞는다
+        const lit = lerp(BACK_DIM, 1, (Math.cos(phi) + 1) / 2);
+        const tint = TINTS[i % TINTS.length];
+        const ta = screenY(-CARD_H / 2, a[1]);
+        const ba = screenY(CARD_H / 2, a[1]);
+        const tb = screenY(-CARD_H / 2, b[1]);
+        const bb = screenY(CARD_H / 2, b[1]);
+        ctx.beginPath();
+        ctx.moveTo(a[0], ta);
+        ctx.lineTo(b[0], tb);
+        ctx.lineTo(b[0], bb);
+        ctx.lineTo(a[0], ba);
+        ctx.closePath();
+        if (!front) {
+            ctx.fillStyle = rgba(mix(BG, mix(INK, tint, 0.3), lit), 1);
+            ctx.fill();
+            return;
+        }
+        const g = ctx.createLinearGradient(a[0], 0, b[0], 0);
+        g.addColorStop(0, rgba(mix(BG, tint, lit * 0.9), 1));
+        g.addColorStop(1, rgba(mix(BG, mix(tint, PAPER, 0.35), lit), 1));
+        ctx.fillStyle = g;
+        ctx.fill();
+        // 글줄 막대와 번호 — 양쪽 모서리 높이를 선형으로 이어 원근을 따른다
+        const rows = [0.5, 0.64, 0.76];
+        for (let r = 0; r < rows.length; r += 1) {
+            const ya = lerp(ta, ba, rows[r]);
+            const yb = lerp(tb, bb, rows[r]);
+            const w = r === 0 ? 0.75 : 0.5;
+            ctx.strokeStyle = rgba(mix(BG, INK, lit), r === 0 ? 0.85 : 0.45);
+            ctx.lineWidth = (r === 0 ? 6 : 4) * (a[1] + b[1]) / 2;
+            ctx.beginPath();
+            ctx.moveTo(lerp(a[0], b[0], 0.12), lerp(ya, yb, 0.12));
+            ctx.lineTo(lerp(a[0], b[0], 0.12 + w * 0.8), lerp(ya, yb, 0.12 + w * 0.8));
+            ctx.stroke();
+        }
+        const mx = (a[0] + b[0]) / 2;
+        const s = (a[1] + b[1]) / 2;
+        ctx.fillStyle = rgba(mix(BG, INK, lit), 0.9);
+        ctx.font = '800 ' + Math.round(30 * s) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(String(i + 1).padStart(2, '0'), mx, lerp((ta + tb) / 2, (ba + bb) / 2, 0.36));
+    }
+    function draw() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+        // 바닥 고리 — 원통 밑면의 둘레를 같은 투영으로 찍어 잇는다
+        ctx.strokeStyle = rgba(mix(BG, LILAC, 0.35), 1);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let k = 0; k <= 48; k += 1) {
+            const p = project((k / 48) * Math.PI * 2);
+            const y = screenY(CARD_H / 2 + 10, p[1]);
+            if (k === 0) {
+                ctx.moveTo(p[0], y);
+            }
+            else {
+                ctx.lineTo(p[0], y);
+            }
+        }
+        ctx.stroke();
+        // 화가 알고리즘 — 카메라에서 먼(cosφ 가 작은) 카드부터 그린다
+        const order = [];
+        for (let i = 0; i < CARD_N; i += 1) {
+            order.push(i);
+        }
+        order.sort(function (p, q) {
+            return Math.cos(p * STEP_ANG - rot) - Math.cos(q * STEP_ANG - rot);
+        });
+        for (let k = 0; k < order.length; k += 1) {
+            const i = order[k];
+            drawCardOn(i, i * STEP_ANG - rot);
+        }
+    }
+    function onWheel(ev) {
+        const d = wheelPx(ev);
+        // 첫 카드·마지막 카드가 앞에 오면 더 돌지 않고 페이지 스크롤에 넘긴다
+        if (d === 0 || !canMove(d)) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        if (still) {
+            rot = clamp(rot + d / RADIUS, 0, MAX_ROT);
+            say(TXT_STOP);
+            draw();
+            return;
+        }
+        spin(d);
+    }
+    cv.addEventListener('wheel', onWheel, { passive: false });
+    let dragId = -1;
+    let dragX = 0;
+    let dragT = 0;
+    let dragAv = 0;
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        dragId = ev.pointerId;
+        cv.setPointerCapture(ev.pointerId);
+        dragX = toScene(ev)[0];
+        dragT = ev.timeStamp;
+        dragAv = 0;
+        av = 0;
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        if (ev.pointerId !== dragId) {
+            return;
+        }
+        const sx = toScene(ev)[0];
+        // 끈 거리(px)를 원통 둘레의 호로 보고 각도로 바꾼다
+        const da = -(sx - dragX) / RADIUS;
+        const steps = Math.max(1, (ev.timeStamp - dragT) / FIXED_DT);
+        rot = clamp(rot + da, 0, MAX_ROT);
+        dragAv = lerp(dragAv, da / steps, 0.5);
+        dragX = sx;
+        dragT = ev.timeStamp;
+        if (still) {
+            draw();
+        }
+    });
+    function endDrag(ev) {
+        if (ev.pointerId !== dragId) {
+            return;
+        }
+        dragId = -1;
+        if (still) {
+            return;
+        }
+        av = clamp(dragAv, -0.08, 0.08);
+        spinning = true;
+        say(TXT_SPIN);
+    }
+    cv.addEventListener('pointerup', endDrag);
+    cv.addEventListener('pointercancel', endDrag);
+    function goCard(k) {
+        const goal = clamp(k, 0, CARD_N - 1) * STEP_ANG;
+        if (Math.abs(goal - rot) < 0.001) {
+            return false;
+        }
+        if (still) {
+            rot = goal;
+            say(TXT_STOP);
+            draw();
+            return true;
+        }
+        av = speedFor(goal - rot);
+        spinning = true;
+        say(TXT_SPIN);
+        return true;
+    }
+    cv.addEventListener('keydown', function (ev) {
+        const cur = Math.round(rot / STEP_ANG);
+        let moved = false;
+        if (ev.key === 'ArrowRight') {
+            moved = goCard(cur + 1);
+        }
+        else if (ev.key === 'ArrowLeft') {
+            moved = goCard(cur - 1);
+        }
+        else if (ev.key === 'Home') {
+            moved = goCard(0);
+        }
+        else if (ev.key === 'End') {
+            moved = goCard(CARD_N - 1);
+        }
+        if (!moved) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+    });
+    if (prevBtn) {
+        prevBtn.addEventListener('click', function () { wake(); goCard(Math.round(rot / STEP_ANG) - 1); });
+    }
+    if (nextBtn) {
+        nextBtn.addEventListener('click', function () { wake(); goCard(Math.round(rot / STEP_ANG) + 1); });
+    }
+    say(TXT_STOP);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (still) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>トラックの両端に近づいたカードが魚眼レンズのように曲がって小さくなり、中央では平らに伸びる端のレンズ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="アイコンの列が画面の端へ行くほど魚眼レンズのように小さく曲がって見える場面"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">レンズ オン</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="btn" type="button" aria-pressed="false">レンズを切る</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 카드를 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const PAPER = [255, 248, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const TINTS = [SKY, PINK, MINT, LILAC, PEACH];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    // 휠 한 번의 이동량을 px 로 — 줄 단위(deltaMode 1)·쪽 단위(deltaMode 2) 장치도 같은 눈금으로 맞춘다.
+    // 가로·세로 중 큰 쪽을 쓴다: 트랙패드의 가로 쓸기와 마우스 휠의 세로 굴림이 같은 방향으로 들어온다
+    function wheelPx(ev) {
+        const unit = ev.deltaMode === 1 ? 16 : (ev.deltaMode === 2 ? W : 1);
+        const d = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+        return d * unit;
+    }
+    // 시연 시계가 loop 주기 안의 at 시각을 이번 스텝에 막 지났는가
+    function crossed(t, at, loop) {
+        const p = t % loop;
+        return p >= at && p - FIXED_DT < at;
+    }
+    function fitCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    function roundRectPath(c, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        c.beginPath();
+        c.moveTo(x + rr, y);
+        c.lineTo(x + w - rr, y);
+        c.quadraticCurveTo(x + w, y, x + w, y + rr);
+        c.lineTo(x + w, y + h - rr);
+        c.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        c.lineTo(x + rr, y + h);
+        c.quadraticCurveTo(x, y + h, x, y + h - rr);
+        c.lineTo(x, y + rr);
+        c.quadraticCurveTo(x, y, x + rr, y);
+        c.closePath();
+    }
+    // 카드 한 장 — 사진 대신 계산한 그림 칸(그라디언트 하늘·해·언덕) + 글줄 막대 두 개 + 번호
+    function drawCard(c, x, y, w, h, i, light) {
+        const t1 = TINTS[i % TINTS.length];
+        const t2 = TINTS[(i + 2) % TINTS.length];
+        const k = clamp(light, 0, 1);
+        roundRectPath(c, x, y, w, h, 10);
+        c.fillStyle = rgba(mix(BG, PAPER, k), 1);
+        c.fill();
+        const ih = h * 0.58;
+        const g = c.createLinearGradient(x, y, x + w, y + ih);
+        g.addColorStop(0, rgba(mix(BG, t1, k), 1));
+        g.addColorStop(1, rgba(mix(BG, t2, k * 0.92), 1));
+        c.save();
+        roundRectPath(c, x + 6, y + 6, w - 12, ih - 6, 7);
+        c.fillStyle = g;
+        c.fill();
+        c.clip();
+        c.fillStyle = rgba(mix(BG, PAPER, k * 0.9), 0.9);
+        c.beginPath();
+        c.arc(x + w * 0.7, y + ih * 0.36, Math.min(w, ih) * 0.13, 0, Math.PI * 2);
+        c.fill();
+        c.fillStyle = rgba(mix(BG, INK, k), 0.55);
+        c.beginPath();
+        c.moveTo(x, y + ih);
+        c.lineTo(x + w * 0.32, y + ih * 0.55);
+        c.lineTo(x + w * 0.55, y + ih * 0.8);
+        c.lineTo(x + w * 0.78, y + ih * 0.62);
+        c.lineTo(x + w, y + ih);
+        c.closePath();
+        c.fill();
+        c.restore();
+        c.fillStyle = rgba(mix(BG, INK, k), 0.75);
+        c.fillRect(x + 10, y + ih + 12, w * 0.62, 6);
+        c.fillStyle = rgba(mix(BG, INK, k), 0.4);
+        c.fillRect(x + 10, y + ih + 24, w * 0.44, 5);
+        c.fillStyle = rgba(mix(BG, INK, k), 0.9);
+        c.font = '700 13px sans-serif';
+        c.textAlign = 'right';
+        c.textBaseline = 'alphabetic';
+        c.fillText(String(i + 1).padStart(2, '0'), x + w - 9, y + h - 10);
+    }
+    const TILE_N = 16;
+    const TILE_W = 92;
+    const TILE_H = 116;
+    const TILE_GAP = 14;
+    const PITCH = TILE_W + TILE_GAP;
+    const PAD = 24;
+    const SRC_W = PAD * 2 + TILE_N * PITCH - TILE_GAP;
+    const CY = 136;
+    const LENS_K = 0.35;
+    const LENS_P = 2;
+    const BEND = 26;
+    const K_LERP = 0.12;
+    const S_LERP = 0.1;
+    const DEMO_LOOP = 4400;
+    const TXT_FLOW = 'レンズの下を流れています';
+    const TXT_ON = 'レンズ オン';
+    const TXT_OFF = 'レンズ オフ';
+    const lensBtn = root.querySelector('[data-role="btn"]');
+    // 화면 가로 위치 u(−1~1) → 원본 표본 위치 s. s = u·(1 + K·|u|^P) — 가장자리일수록 원본을 더 많이 눌러 담는다
+    function lensSample(u, k) { return u * (1 + k * Math.pow(Math.abs(u), LENS_P)); }
+    // 그 자리의 확대율 du/ds — 가운데 1, 가장자리 1/(1 + K·(P+1))
+    function lensScale(u, k) { return 1 / (1 + k * (LENS_P + 1) * Math.pow(Math.abs(u), LENS_P)); }
+    // 렌즈 세기 k 일 때 화면 반쪽(240px)이 담는 원본 폭의 반
+    function halfSpan(k) { return (W / 2) * (1 + k); }
+    function maxScroll(k) { return SRC_W - 2 * halfSpan(k); }
+    // 원본 — 평평한 아이콘 줄을 한 번만 그려 픽셀을 읽어 둔다(getImageData 는 시작 때 1회)
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = SRC_W;
+    srcCanvas.height = H;
+    const sctxRaw = srcCanvas.getContext('2d');
+    const bufCanvas = document.createElement('canvas');
+    bufCanvas.width = W;
+    bufCanvas.height = H;
+    const bctxRaw = bufCanvas.getContext('2d');
+    if (!sctxRaw || !bctxRaw) {
+        return;
+    }
+    const sctx = sctxRaw;
+    const bctx = bctxRaw;
+    sctx.fillStyle = rgba(BG, 1);
+    sctx.fillRect(0, 0, SRC_W, H);
+    // 바탕 격자 — 렌즈가 휘는 모양이 선으로 드러난다
+    sctx.fillStyle = rgba(mix(BG, LILAC, 0.16), 1);
+    for (let gx = 0; gx < SRC_W; gx += 24) {
+        sctx.fillRect(gx, 0, 1, H);
+    }
+    for (let gy = 16; gy < H; gy += 24) {
+        sctx.fillRect(0, gy, SRC_W, 1);
+    }
+    for (let i = 0; i < TILE_N; i += 1) {
+        drawCard(sctx, PAD + i * PITCH, CY - TILE_H / 2, TILE_W, TILE_H, i, 1);
+    }
+    const src = sctx.getImageData(0, 0, SRC_W, H).data;
+    const out = bctx.createImageData(W, H);
+    const dst = out.data;
+    const bgR = BG[0];
+    const bgG = BG[1];
+    const bgB = BG[2];
+    let kNow = LENS_K;
+    let kTarget = LENS_K;
+    let target = 0;
+    let scroll = 0;
+    let dirty = true;
+    let flowing = false;
+    // 한 장 다시 그리기 — 화면 픽셀마다 렌즈 곡선으로 원본 위치를 거꾸로 찾아 그 색을 가져온다
+    function remap() {
+        const center = scroll + halfSpan(kNow);
+        for (let x = 0; x < W; x += 1) {
+            const u = (x + 0.5 - W / 2) / (W / 2);
+            const sx = Math.round(center + lensSample(u, kNow) * (W / 2));
+            const sc = lensScale(u, kNow);
+            const sag = BEND * u * u * (kNow / LENS_K);
+            for (let y = 0; y < H; y += 1) {
+                const sy = Math.round(CY + (y - CY - sag) / sc);
+                const o = (y * W + x) * 4;
+                if (sx < 0 || sx >= SRC_W || sy < 0 || sy >= H) {
+                    dst[o] = bgR;
+                    dst[o + 1] = bgG;
+                    dst[o + 2] = bgB;
+                    dst[o + 3] = 255;
+                    continue;
+                }
+                const i = (sy * SRC_W + sx) * 4;
+                dst[o] = src[i];
+                dst[o + 1] = src[i + 1];
+                dst[o + 2] = src[i + 2];
+                dst[o + 3] = 255;
+            }
+        }
+        bctx.putImageData(out, 0, 0);
+        dirty = false;
+    }
+    function step() {
+        const ps = scroll;
+        const pk = kNow;
+        kNow += (kTarget - kNow) * K_LERP;
+        if (Math.abs(kTarget - kNow) < 0.001) {
+            kNow = kTarget;
+        }
+        target = clamp(target, 0, maxScroll(kNow));
+        scroll += (target - scroll) * S_LERP;
+        if (Math.abs(target - scroll) < 0.05) {
+            scroll = target;
+        }
+        if (scroll !== ps || kNow !== pk) {
+            dirty = true;
+        }
+        const now = Math.abs(scroll - ps) > 0.05;
+        if (now && !flowing) {
+            say(TXT_FLOW);
+        }
+        flowing = now;
+    }
+    function settle() {
+        kNow = kTarget;
+        scroll = clamp(target, 0, maxScroll(kNow));
+        dirty = true;
+    }
+    function demoTick(t) {
+        if (crossed(t, 200, DEMO_LOOP)) {
+            target = 520;
+        }
+        if (crossed(t, 1350, DEMO_LOOP)) {
+            target = 120;
+        }
+    }
+    function draw() {
+        if (dirty) {
+            remap();
+        }
+        ctx.drawImage(bufCanvas, 0, 0, W, H);
+        // 가장자리 그늘 — 렌즈 바깥이 둥글게 꺼지는 느낌
+        const g = ctx.createLinearGradient(0, 0, W, 0);
+        g.addColorStop(0, rgba(BG, 0.55 * kNow / LENS_K));
+        g.addColorStop(0.12, rgba(BG, 0));
+        g.addColorStop(0.88, rgba(BG, 0));
+        g.addColorStop(1, rgba(BG, 0.55 * kNow / LENS_K));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function canMove(d) { return d > 0 ? target < maxScroll(kNow) - 0.5 : target > 0.5; }
+    function moveTo(p) {
+        target = clamp(p, 0, maxScroll(kNow));
+        if (still) {
+            settle();
+            draw();
+        }
+    }
+    function onWheel(ev) {
+        const d = wheelPx(ev);
+        if (d === 0 || !canMove(d)) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        moveTo(target + d);
+    }
+    cv.addEventListener('wheel', onWheel, { passive: false });
+    let dragId = -1;
+    let dragX = 0;
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        dragId = ev.pointerId;
+        cv.setPointerCapture(ev.pointerId);
+        dragX = toScene(ev)[0];
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        if (ev.pointerId !== dragId) {
+            return;
+        }
+        const sx = toScene(ev)[0];
+        moveTo(target - (sx - dragX));
+        dragX = sx;
+    });
+    function endDrag(ev) { if (ev.pointerId === dragId) {
+        dragId = -1;
+    } }
+    cv.addEventListener('pointerup', endDrag);
+    cv.addEventListener('pointercancel', endDrag);
+    cv.addEventListener('keydown', function (ev) {
+        let goal = NaN;
+        if (ev.key === 'ArrowRight') {
+            goal = target + PITCH;
+        }
+        else if (ev.key === 'ArrowLeft') {
+            goal = target - PITCH;
+        }
+        else if (ev.key === 'Home') {
+            goal = 0;
+        }
+        else if (ev.key === 'End') {
+            goal = maxScroll(kNow);
+        }
+        if (Number.isNaN(goal) || !canMove(goal - target)) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        moveTo(goal);
+    });
+    if (lensBtn) {
+        lensBtn.addEventListener('click', function () {
+            wake();
+            const off = kTarget > 0;
+            kTarget = off ? 0 : LENS_K;
+            lensBtn.setAttribute('aria-pressed', off ? 'true' : 'false');
+            say(off ? TXT_OFF : TXT_ON);
+            if (still) {
+                settle();
+                draw();
+            }
+        });
+    }
+    say(TXT_ON);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (still) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>
