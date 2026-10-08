@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>直角に枝分かれして広がるひび — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pc is-demo" id="pc">
+  <canvas class="pc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="ひびがまっすぐ進んで別のひびに当たると止まり、既存のひびからほぼ直角に新しいひびが分かれ、横に砂の筋が積もる絵。Enterで新しいシードを描き、Rで同じシードを最初から育て直し、Spaceで一時停止します。"></canvas>
+  <p class="pc__status" data-role="status" aria-live="off">ひびが直角に分かれています</p>
+  <div class="pc__tools">
+    <button class="pc__btn" data-role="redraw" type="button">描き直す</button>
+    <button class="pc__btn" data-role="replay" type="button">同じシード</button>
+    <button class="pc__btn" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
+    // 파스텔 팔레트 — 어두운 무대(INK) 위에 밝은 線·면을 얹어 명도 차로 형태가 읽힌다
+    const INK = [29, 26, 44];
+    const PAPER = [255, 248, 234];
+    const PAL = [
+        [124, 196, 255],
+        [255, 160, 190],
+        [126, 226, 192],
+        [190, 164, 255],
+        [255, 208, 168],
+        [246, 228, 140],
+        [150, 222, 236],
+        [232, 182, 228],
+        [196, 220, 160],
+    ];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 씨앗이면 같은 수열, 곧 같은 그림이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seedValue) {
+        let s = seedValue >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 다음 シード — 다시 그리기를 누를 때마다 정수 하나만 바뀐다(10007~99995 사이 다섯 자리)
+    function nextSeed(s) { return ((s * 7919 + 104729) % 89989) + 10007; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    // 그림판 — 자란 결과를 쌓아 두는 화면 밖 캔버스. 프레임마다 이걸 옮겨 그리고 그 위에 지금 자라는 부분만 얹는다
+    const artEl = document.createElement('canvas');
+    const actxRaw = artEl.getContext('2d');
+    if (!canvasEl || !ctxRaw || !statusEl || !actxRaw) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const actx = actxRaw;
+    const redrawBtn = root.querySelector('[data-role="redraw"]');
+    const replayBtn = root.querySelector('[data-role="replay"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    // 지금 그림의 씨앗과, 그 씨앗을 심은 뒤 흐른 성장 시간(ms, 一時停止 동안은 멈춘다)
+    let seed = 0;
+    let age = 0;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    let dprNow = 0;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (dpr === dprNow) {
+            return;
+        }
+        // 캔버스 크기를 바꾸면 내용이 지워진다 — 그려 둔 그림판을 잠깐 옮겨 두었다가 새 배율로 다시 담는다
+        const keep = document.createElement('canvas');
+        keep.width = artEl.width;
+        keep.height = artEl.height;
+        const kctx = keep.getContext('2d');
+        if (kctx && dprNow) {
+            kctx.drawImage(artEl, 0, 0);
+        }
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        artEl.width = cv.width;
+        artEl.height = cv.height;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        actx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (kctx && dprNow) {
+            actx.drawImage(keep, 0, 0, W, H);
+        }
+        dprNow = dpr;
+    }
+    function clearArt(c) {
+        actx.fillStyle = rgba(c, 1);
+        actx.fillRect(0, 0, W, H);
+    }
+    function blitArt() { ctx.drawImage(artEl, 0, 0, W, H); }
+    // 오른쪽 아래 수치 상자 — 씨앗과 항목별 개수를 이름표 + 값 한 줄씩
+    function drawStats(pairs) {
+        ctx.font = '600 11px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'alphabetic';
+        const lines = [];
+        let wide = 0;
+        for (let i = 0; i < pairs.length; i += 1) {
+            const t = pairs[i][0] + ' ' + pairs[i][1];
+            lines.push(t);
+            wide = Math.max(wide, ctx.measureText(t).width);
+        }
+        const lh = 15;
+        const bw = wide + 16;
+        const bh = lines.length * lh + 8;
+        ctx.fillStyle = rgba(INK, 0.66);
+        ctx.fillRect(W - 10 - bw, H - 10 - bh, bw, bh);
+        ctx.fillStyle = rgba(PAPER, 0.95);
+        for (let i = 0; i < lines.length; i += 1) {
+            ctx.fillText(lines[i], W - 18, H - 10 - bh + 4 + lh * (i + 1) - 3);
+        }
+    }
+    // ひび 개수 상한 — 처음 금과 갈라져 나온 금을 모두 센다
+    const CRACK_MAX = 320;
+    // 새 금이 직각(±90°)에서 벗어나는 흔들림 폭(도)
+    const BRANCH_ANGLE_JITTER = 4;
+    // ひび 한 걸음마다 법선 방향으로 흩뿌리는 모래알 수
+    const SAND_GRAINS = 10;
+    // 처음 각도를 심어 두는 자리 수와 처음 ひび 수
+    const SEED_SITES = 12;
+    const START_CRACKS = 6;
+    // 동시에 伸びているひび 수 상한, 한 걸음 長さ(px), 한 틱에 금마다 걷는 걸음 수 — 프레임당 계산량 상한
+    const ACTIVE_MAX = 36;
+    const CRACK_STEP = 0.5;
+    const STEPS_PER_FRAME = 14;
+    // 같은 금으로 치는 각도 차(도) — 이보다 다른 각도가 적힌 칸에 닿으면 멈춘다
+    const ANGLE_TOLERANCE = 5;
+    // 출발 직후 이 걸음 수 동안은 충돌을 보지 않는다 — 갈라져 나온 자리(부모 ひび 칸)에서 바로 멈추지 않게
+    const START_GRACE = 4;
+    // 모래를 뿌릴 빈칸을 법선으로 훑는 최대 거리(px)
+    const SAND_REACH = 48;
+    const EMPTY = 10001;
+    const SEED0 = 47105;
+    const TXT_RUN = 'ひびが直角に分かれています';
+    // 각도 격자 — 화소마다 그 자리를 지나간 금의 각도(도). 아직 금이 없으면 EMPTY
+    const cgrid = new Float32Array(W * H);
+    // 각도가 적힌 화소 번호 목록 — 새 금의 출발점을 기존 ひび 위에서 바로 고른다
+    let marks = [];
+    let cracks = [];
+    let started = 0;
+    let crng = makeRng(SEED0);
+    function sandStyles(col) {
+        const out = [];
+        for (let i = 0; i < SAND_GRAINS; i += 1) {
+            out.push(rgba(col, 0.34 * (1 - i / SAND_GRAINS)));
+        }
+        return out;
+    }
+    // 기존 ひび 위 한 점에서 거의 직각으로 새 금을 낸다
+    function makeCrack() {
+        if (started >= CRACK_MAX || cracks.length >= ACTIVE_MAX) {
+            return;
+        }
+        if (!marks.length) {
+            return;
+        }
+        const found = marks[Math.floor(crng() * marks.length)];
+        const sgn = crng() < 0.5 ? -1 : 1;
+        const t = cgrid[found] + sgn * (90 + (crng() * 2 - 1) * BRANCH_ANGLE_JITTER);
+        const x = (found % W) + 0.61 * Math.cos(t * DEG);
+        const y = Math.floor(found / W) + 0.61 * Math.sin(t * DEG);
+        cracks.push({ x: x, y: y, t: t, steps: 0, g: crng(), sand: sandStyles(PAL[Math.floor(crng() * PAL.length)]), alive: true });
+        started += 1;
+    }
+    function plant(s) {
+        crng = makeRng(s);
+        cgrid.fill(EMPTY);
+        clearArt(PAPER);
+        cracks = [];
+        marks = [];
+        started = 0;
+        for (let k = 0; k < SEED_SITES; k += 1) {
+            const i = Math.floor(crng() * W) + Math.floor(crng() * H) * W;
+            cgrid[i] = Math.floor(crng() * 360);
+            marks.push(i);
+        }
+        for (let k = 0; k < START_CRACKS; k += 1) {
+            makeCrack();
+        }
+    }
+    // 법선 방향 모래 — 금에서 옆으로 빈칸을 따라가 다른 ひび(또는 테두리)까지의 거리를 재고, 그 안쪽에 옅은 알갱이를 겹쳐 찍는다
+    function paintSand(c) {
+        const nxv = Math.cos((c.t + 90) * DEG);
+        const nyv = Math.sin((c.t + 90) * DEG);
+        let d = 1;
+        for (; d < SAND_REACH; d += 1) {
+            const px = Math.floor(c.x + nxv * d);
+            const py = Math.floor(c.y + nyv * d);
+            if (px < 0 || px >= W || py < 0 || py >= H || cgrid[py * W + px] < EMPTY) {
+                break;
+            }
+        }
+        c.g = clamp(c.g + (crng() - 0.5) * 0.1, 0.05, 1);
+        for (let i = 0; i < SAND_GRAINS; i += 1) {
+            const k = (d * c.g * i) / SAND_GRAINS;
+            actx.fillStyle = c.sand[i];
+            actx.fillRect(c.x + nxv * k, c.y + nyv * k, 1, 1);
+        }
+    }
+    function moveCrack(c) {
+        c.x += CRACK_STEP * Math.cos(c.t * DEG);
+        c.y += CRACK_STEP * Math.sin(c.t * DEG);
+        c.steps += 1;
+        const cx = Math.floor(c.x + (crng() - 0.5) * 0.66);
+        const cy = Math.floor(c.y + (crng() - 0.5) * 0.66);
+        if (cx < 0 || cx >= W || cy < 0 || cy >= H) {
+            c.alive = false;
+            return;
+        }
+        const i = cy * W + cx;
+        const g = cgrid[i];
+        if (g >= EMPTY || Math.abs(g - c.t) < ANGLE_TOLERANCE) {
+            if (g >= EMPTY) {
+                marks.push(i);
+            }
+            cgrid[i] = c.t;
+            paintSand(c);
+            actx.fillStyle = rgba(INK, 0.85);
+            actx.fillRect(c.x, c.y, 1, 1);
+        }
+        else if (c.steps > START_GRACE) {
+            // 각도가 다른 금에 닿았다 — 여기서 멈춘다
+            c.alive = false;
+        }
+    }
+    function grow() {
+        for (let k = 0; k < cracks.length; k += 1) {
+            const c = cracks[k];
+            for (let s = 0; s < STEPS_PER_FRAME && c.alive; s += 1) {
+                moveCrack(c);
+            }
+        }
+        let ended = 0;
+        cracks = cracks.filter(function (c) { if (!c.alive) {
+            ended += 1;
+        } return c.alive; });
+        // 멈춘 ひび 하나마다 새 ひび 둘 — 상한(CRACK_MAX)까지 금이 늘어난다
+        for (let e = 0; e < ended; e += 1) {
+            makeCrack();
+            makeCrack();
+        }
+        return cracks.length === 0;
+    }
+    function paintFrame() {
+        blitArt();
+        // 지금 伸びているひび 끝
+        ctx.fillStyle = rgba(INK, 0.9);
+        for (let k = 0; k < cracks.length; k += 1) {
+            ctx.beginPath();
+            ctx.arc(cracks[k].x, cracks[k].y, 1.8, 0, TAU);
+            ctx.fill();
+        }
+    }
+    function statPairs() {
+        return [['ひび', started + ' / ' + CRACK_MAX], ['伸びているひび', String(cracks.length)]];
+    }
+    function runText() { return TXT_RUN; }
+    function doneText() { return TXT_DONE; }
+    const TXT_DONE = '育ち終わり — Enterで新しいシード';
+    const TXT_PAUSE = '一時停止 — Spaceで再開';
+    // 시연 — 첫 200ms 는 빈 판으로 두고(첫 변화 200ms 뒤) 자라게 한 뒤, 다 자라면 900ms 머물고 다음 씨앗으로
+    const DEMO_LEAD = 200;
+    const DEMO_HOLD_MS = 900;
+    // 동작 줄이기에서 한 번에 끝까지 키울 때 틱 수 상한 — 계산이 끝나지 않는 씨앗이 있어도 화면이 멈추지 않게
+    const GROW_GUARD = 6000;
+    let paused = false;
+    let done = false;
+    let holdMs = 0;
+    let clock = 0;
+    function reseed(s) {
+        seed = s;
+        age = 0;
+        done = false;
+        holdMs = 0;
+        plant(s);
+    }
+    function tickGrow() {
+        if (done) {
+            return;
+        }
+        age += FIXED_DT;
+        if (grow()) {
+            done = true;
+        }
+    }
+    // 끝까지 한 번에 — 동작 줄이기에서는 자라는 과정 없이 다 자란 그림을 바로 보인다
+    function finishNow() {
+        let g = 0;
+        while (!done && g < GROW_GUARD) {
+            tickGrow();
+            g += 1;
+        }
+    }
+    function report() {
+        if (paused) {
+            say(TXT_PAUSE);
+        }
+        else if (done) {
+            say(doneText());
+        }
+        else {
+            say(runText());
+        }
+    }
+    function render() {
+        paintFrame();
+        const pairs = [['シード', String(seed)]];
+        drawStats(pairs.concat(statPairs()));
+        report();
+    }
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+    }
+    // 입력 한 번 뒤 — 동작 줄이기면 그 씨앗의 다 자란 모습으로 바로 그린다
+    function after() {
+        if (still) {
+            finishNow();
+        }
+        render();
+    }
+    function newSeed() { setPaused(false); reseed(nextSeed(seed)); }
+    function replaySeed() { setPaused(false); reseed(seed); }
+    cv.addEventListener('pointerdown', function () { wake(); after(); });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k === 'Enter') {
+            newSeed();
+        }
+        else if (k === 'r' || k === 'R') {
+            replaySeed();
+        }
+        else if (k === ' ') {
+            setPaused(!paused);
+        }
+        else {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        after();
+    });
+    if (redrawBtn) {
+        redrawBtn.addEventListener('click', function () { wake(); newSeed(); after(); });
+    }
+    if (replayBtn) {
+        replayBtn.addEventListener('click', function () { wake(); replaySeed(); after(); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); after(); });
+    }
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    reseed(SEED0);
+    function tick() {
+        clock += FIXED_DT;
+        if (demo) {
+            if (clock < DEMO_LEAD) {
+                return;
+            }
+            if (done) {
+                holdMs += FIXED_DT;
+                if (holdMs >= DEMO_HOLD_MS) {
+                    reseed(nextSeed(seed));
+                }
+                return;
+            }
+        }
+        if (!paused) {
+            tickGrow();
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 한 프레임에 성장 계산이 몰리지 않게
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            tick();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 다 자란 그림으로, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            after();
+        }
+        else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    if (still) {
+        after();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>
