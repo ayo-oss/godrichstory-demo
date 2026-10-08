@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文字が点に散って再び集まるタイポグラフィのディザ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="文字が点に散って再び集まるタイポグラフィのディザ"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">文字がくっきり — まもなく点に散る</p>
+  <button class="sc__btn" id="scBtn" type="button">一時停止</button>
+  <p class="sc__caption">文字が点に散って再び集まるタイポグラフィのディザ</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    // 점을 찍는 작은 격자 — 화면에는 3배로 확대해 올린다
+    const GW = 160;
+    const GH = 100;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function frac(x) { return x - Math.floor(x); }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 좌표 두 개와 시드로 0 이상 1 미만의 값을 만드는 정수 해시 (난수 함수 없이도 같은 좌표는 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 격자 네 점의 해시를 smooth 로 이어 붙인 값 노이즈
+    function vnoise(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = smooth(x - xi);
+        const fy = smooth(y - yi);
+        const a = lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), fx);
+        const b = lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), fx);
+        return lerp(a, b, fy);
+    }
+    // 베이어 임계 행렬 — n 은 2 의 거듭제곱. 값은 0 초과 1 미만으로 맞춘다
+    function makeBayer(n) {
+        let size = 2;
+        let m = [0, 2, 3, 1];
+        const quad = [0, 2, 3, 1];
+        while (size < n) {
+            const s2 = size * 2;
+            const next = [];
+            for (let y = 0; y < s2; y += 1) {
+                for (let x = 0; x < s2; x += 1) {
+                    const q = (y >= size ? 2 : 0) + (x >= size ? 1 : 0);
+                    next.push(4 * m[(y % size) * size + (x % size)] + quad[q]);
+                }
+            }
+            m = next;
+            size = s2;
+        }
+        const out = new Float32Array(n * n);
+        for (let i = 0; i < out.length; i += 1) {
+            out[i] = (m[i] + 0.5) / (n * n);
+        }
+        return out;
+    }
+    // 색 하나를 캔버스 픽셀 한 개(리틀 엔디언 RGBA)로 묶는다
+    function pack(c) {
+        return ((255 << 24) | (Math.round(c[2]) << 16) | (Math.round(c[1]) << 8) | Math.round(c[0])) >>> 0;
+    }
+    function mixPack(a, b, k) {
+        return pack([lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]);
+    }
+    function makeBuf() {
+        const off = document.createElement('canvas');
+        off.width = GW;
+        off.height = GH;
+        const octx = off.getContext('2d');
+        if (!octx) {
+            throw new Error('2d context unavailable');
+        }
+        const img = octx.createImageData(GW, GH);
+        return { off: off, octx: octx, img: img, px: new Uint32Array(img.data.buffer) };
+    }
+    // 작은 격자를 큰 캔버스에 보간 없이 확대해 올린다
+    function flush(ctx, b) {
+        b.octx.putImageData(b.img, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(b.off, 0, 0, W, H);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.idle = 0;
+            refresh();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const DISSOLVE_SPEED = 0.014;
+    const FONT_PX = 38;
+    const MASK_BLUR = 1;
+    const BAYER_SIZE = 8;
+    const SKEW = 0.7;
+    const THR_DRIFT = 0.021;
+    const WORD = 'DITHER';
+    const INK = [35, 30, 52];
+    const TEXT_LIGHT = [255, 236, 214];
+    const GHOST = [118, 98, 160];
+    const BG_DOT = [66, 55, 98];
+    const TXT_SOLID = '文字がくっきり — まもなく点に散る';
+    const TXT_SCATTER = '閾値が左から文字を消していく';
+    const TXT_EMPTY = '文字がすべて点になって散った';
+    const TXT_GATHER = '点が再び集まって文字になる';
+    const TXT_SCRUB = 'ポインターの横位置が消えた度合いになる';
+    function makeScene(inp, reduce) {
+        const buf = makeBuf();
+        const matrix = makeBayer(BAYER_SIZE);
+        const ink = pack(INK);
+        const textLight = pack(TEXT_LIGHT);
+        const ghost = pack(GHOST);
+        const bgDot = pack(BG_DOT);
+        // 글자를 보이지 않는 캔버스에 그려 밝기 마스크로 읽는다
+        const mask = new Float32Array(GW * GH);
+        const off = document.createElement('canvas');
+        off.width = GW;
+        off.height = GH;
+        const octx = off.getContext('2d');
+        if (octx) {
+            octx.fillStyle = '#000000';
+            octx.fillRect(0, 0, GW, GH);
+            octx.fillStyle = '#ffffff';
+            octx.font = 'bold ' + FONT_PX + 'px sans-serif';
+            octx.textAlign = 'center';
+            octx.textBaseline = 'middle';
+            octx.fillText(WORD, GW / 2, GH / 2);
+            const data = octx.getImageData(0, 0, GW, GH).data;
+            const raw = new Float32Array(GW * GH);
+            for (let i = 0; i < raw.length; i += 1) {
+                raw[i] = data[i * 4] / 255;
+            }
+            // 상자 흐림 — 가장자리를 0 과 1 사이 값으로 풀어 점이 바깥까지 번지게 한다
+            for (let y = 0; y < GH; y += 1) {
+                for (let x = 0; x < GW; x += 1) {
+                    let sum = 0;
+                    let n = 0;
+                    for (let dy = -MASK_BLUR; dy <= MASK_BLUR; dy += 1) {
+                        for (let dx = -MASK_BLUR; dx <= MASK_BLUR; dx += 1) {
+                            const xx = x + dx;
+                            const yy = y + dy;
+                            if (xx >= 0 && xx < GW && yy >= 0 && yy < GH) {
+                                sum += raw[yy * GW + xx];
+                                n += 1;
+                            }
+                        }
+                    }
+                    mask[y * GW + x] = sum / n;
+                }
+            }
+        }
+        let t = 0;
+        let prog = 0;
+        function triangle(tick) {
+            const w = (tick * DISSOLVE_SPEED) % 2;
+            return w < 1 ? w : 2 - w;
+        }
+        const scene = {
+            step() {
+                t += 1;
+                const target = inp.idle < IDLE_TICKS ? clamp(inp.x / W, 0, 1) : triangle(t);
+                prog = lerp(prog, target, 0.2);
+            },
+            draw(ctx) {
+                // 양 끝에서 잠깐 멈추도록 진행도를 다듬는다
+                const p = clamp((prog - 0.12) / 0.76, 0, 1);
+                for (let y = 0; y < GH; y += 1) {
+                    for (let x = 0; x < GW; x += 1) {
+                        const i = y * GW + x;
+                        const xn = x / GW;
+                        const vis = clamp(1 - (p * (1 + SKEW) - xn * SKEW), 0, 1);
+                        const thr = frac(matrix[(y % BAYER_SIZE) * BAYER_SIZE + (x % BAYER_SIZE)] + t * THR_DRIFT);
+                        const m = mask[i];
+                        if (m * vis > thr) {
+                            buf.px[i] = textLight;
+                        }
+                        else if (m > 0.5 && ((x + y) & 1) === 0) {
+                            buf.px[i] = ghost;
+                        }
+                        else {
+                            const v = 0.14 + 0.12 * (0.5 + 0.5 * Math.sin(x * 0.09 + y * 0.06 - t * 0.05));
+                            buf.px[i] = v > matrix[(y % BAYER_SIZE) * BAYER_SIZE + (x % BAYER_SIZE)] ? bgDot : ink;
+                        }
+                    }
+                }
+                flush(ctx, buf);
+            },
+            label() {
+                if (inp.idle < IDLE_TICKS) {
+                    return TXT_SCRUB;
+                }
+                const w = (t * DISSOLVE_SPEED) % 2;
+                if (prog < 0.12) {
+                    return TXT_SOLID;
+                }
+                if (prog > 0.88) {
+                    return TXT_EMPTY;
+                }
+                return w < 1 ? TXT_SCATTER : TXT_GATHER;
+            },
+            tap() {
+                t = 0;
+                prog = 0;
+                inp.idle = IDLE_TICKS;
+            }
+        };
+        if (reduce) {
+            t = Math.floor(0.45 / DISSOLVE_SPEED);
+            prog = 0.45;
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>

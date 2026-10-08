@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Palette-Dithered Sunset That Quantizes a Sky Gradient to Four Colors — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="A Palette-Dithered Sunset That Quantizes a Sky Gradient to Four Colors"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">Four colors alone stamp the sunset</p>
+  <button class="sc__btn" id="scBtn" type="button">Pause</button>
+  <p class="sc__caption">A Palette-Dithered Sunset That Quantizes a Sky Gradient to Four Colors</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = 'Pause';
+    const BTN_PLAY = 'Play';
+    const BTN_NEXT = 'Next scene';
+    // 점을 찍는 작은 격자 — 화면에는 3배로 확대해 올린다
+    const GW = 160;
+    const GH = 100;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function frac(x) { return x - Math.floor(x); }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 좌표 두 개와 시드로 0 이상 1 미만의 값을 만드는 정수 해시 (난수 함수 없이도 같은 좌표는 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 격자 네 점의 해시를 smooth 로 이어 붙인 값 노이즈
+    function vnoise(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = smooth(x - xi);
+        const fy = smooth(y - yi);
+        const a = lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), fx);
+        const b = lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), fx);
+        return lerp(a, b, fy);
+    }
+    // 베이어 임계 행렬 — n 은 2 의 거듭제곱. 값은 0 초과 1 미만으로 맞춘다
+    function makeBayer(n) {
+        let size = 2;
+        let m = [0, 2, 3, 1];
+        const quad = [0, 2, 3, 1];
+        while (size < n) {
+            const s2 = size * 2;
+            const next = [];
+            for (let y = 0; y < s2; y += 1) {
+                for (let x = 0; x < s2; x += 1) {
+                    const q = (y >= size ? 2 : 0) + (x >= size ? 1 : 0);
+                    next.push(4 * m[(y % size) * size + (x % size)] + quad[q]);
+                }
+            }
+            m = next;
+            size = s2;
+        }
+        const out = new Float32Array(n * n);
+        for (let i = 0; i < out.length; i += 1) {
+            out[i] = (m[i] + 0.5) / (n * n);
+        }
+        return out;
+    }
+    // 색 하나를 캔버스 픽셀 한 개(리틀 엔디언 RGBA)로 묶는다
+    function pack(c) {
+        return ((255 << 24) | (Math.round(c[2]) << 16) | (Math.round(c[1]) << 8) | Math.round(c[0])) >>> 0;
+    }
+    function mixPack(a, b, k) {
+        return pack([lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]);
+    }
+    function makeBuf() {
+        const off = document.createElement('canvas');
+        off.width = GW;
+        off.height = GH;
+        const octx = off.getContext('2d');
+        if (!octx) {
+            throw new Error('2d context unavailable');
+        }
+        const img = octx.createImageData(GW, GH);
+        return { off: off, octx: octx, img: img, px: new Uint32Array(img.data.buffer) };
+    }
+    // 작은 격자를 큰 캔버스에 보간 없이 확대해 올린다
+    function flush(ctx, b) {
+        b.octx.putImageData(b.img, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(b.off, 0, 0, W, H);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                inp.idle += 1;
+                scene.step();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            advance(1400);
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.idle = 0;
+            refresh();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const DITHER_AMP = 0.4;
+    const PALETTE_SIZE = 4;
+    const HORIZON_Y = 62;
+    const SUN_SPEED = 0.05;
+    const SUN_R = 9;
+    const PALETTE_07 = [[52, 40, 84], [142, 92, 160], [240, 132, 124], [255, 222, 170]];
+    const SKY_TOP = [32, 26, 70];
+    const SKY_LOW = [250, 170, 140];
+    const TXT_SUNSET = 'Four colors alone stamp the sunset';
+    const TXT_BAND = 'With amplitude 0 bands appear at the borders';
+    const TXT_SUN = 'The pointer sets the sun position';
+    function makeScene(inp, reduce) {
+        const buf = makeBuf();
+        const matrix = makeBayer(8);
+        const pal = PALETTE_07.slice(0, PALETTE_SIZE);
+        const palPack = pal.map(pack);
+        let t = 0;
+        let banded = false;
+        let sunX = GW * 0.5;
+        // 보정한 색에서 가장 가까운 팔레트 색의 번호
+        function nearest(r, g, b) {
+            let best = 0;
+            let bestD = 1e9;
+            for (let k = 0; k < pal.length; k += 1) {
+                const dr = r - pal[k][0];
+                const dg = g - pal[k][1];
+                const db = b - pal[k][2];
+                const d = dr * dr + dg * dg + db * db;
+                if (d < bestD) {
+                    bestD = d;
+                    best = k;
+                }
+            }
+            return best;
+        }
+        const scene = {
+            step() {
+                t += 1;
+                const target = inp.idle < IDLE_TICKS ? inp.x * GW / W : GW * (0.5 + 0.16 * Math.sin(t * 0.017));
+                sunX = lerp(sunX, target, 0.1);
+            },
+            draw(ctx) {
+                // 해는 수평선 위에서 오래 머물다 잠깐 아래로 잠긴다
+                const h = 0.25 + 0.75 * Math.sin(t * SUN_SPEED);
+                const sunY = HORIZON_Y - 8 - 34 * h;
+                const day = 0.62 + 0.38 * smooth((h + 0.5) / 1.1);
+                const amp = (banded ? 0 : DITHER_AMP) * 255;
+                for (let y = 0; y < GH; y += 1) {
+                    for (let x = 0; x < GW; x += 1) {
+                        let r = 0;
+                        let g = 0;
+                        let b = 0;
+                        if (y < HORIZON_Y) {
+                            const s = Math.pow(y / HORIZON_Y, 1.3);
+                            r = lerp(SKY_TOP[0], SKY_LOW[0], s);
+                            g = lerp(SKY_TOP[1], SKY_LOW[1], s);
+                            b = lerp(SKY_TOP[2], SKY_LOW[2], s);
+                            const d = Math.hypot(x - sunX, y - sunY);
+                            const glow = 0.8 * Math.exp(-(d * d) / (2 * 22 * 22)) * (0.4 + 0.6 * day);
+                            r += 255 * glow * 0.8;
+                            g += 200 * glow * 0.7;
+                            b += 150 * glow * 0.5;
+                            if (d < SUN_R && sunY < HORIZON_Y) {
+                                r = 255;
+                                g = 236;
+                                b = 190;
+                            }
+                            r *= day;
+                            g *= day;
+                            b *= day;
+                        }
+                        else {
+                            const depth = y - HORIZON_Y;
+                            const base = 1 - 0.45 * Math.min(1, depth / 38);
+                            r = SKY_LOW[0] * 0.55 * base;
+                            g = SKY_LOW[1] * 0.42 * base;
+                            b = SKY_LOW[2] * 0.6 * base + 26;
+                            // 물결에 일렁이는 해의 반사 기둥
+                            const wob = 0.5 + 0.5 * Math.sin(y * 1.2 - t * 0.2 + Math.sin(x * 0.15) * 2);
+                            const width = 6 + depth * 0.25;
+                            const refl = Math.exp(-((x - sunX) * (x - sunX)) / (2 * width * width)) * 0.7 * wob * (sunY < HORIZON_Y + 12 ? 1 : 0.4);
+                            r += 255 * refl * day;
+                            g += 205 * refl * day;
+                            b += 160 * refl * day;
+                        }
+                        const off = (matrix[(y & 7) * 8 + (x & 7)] - 0.5) * amp;
+                        buf.px[y * GW + x] = palPack[nearest(r + off, g + off, b + off)];
+                    }
+                }
+                flush(ctx, buf);
+            },
+            label() {
+                if (banded) {
+                    return TXT_BAND;
+                }
+                return inp.idle < IDLE_TICKS ? TXT_SUN : TXT_SUNSET;
+            },
+            tap() {
+                banded = !banded;
+            }
+        };
+        if (reduce) {
+            for (let i = 0; i < 24; i += 1) {
+                scene.step();
+            }
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>
