@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An Input Whose Underline Chases the Caret with Inertia — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+  <div class="fl is-demo" id="fl" data-demo="1">
+    <div class="fl__field">
+      <div class="fl__box" data-r="box">
+        <input class="fl__input" id="f1" data-r="input" type="text" autocomplete="email" inputmode="email">
+        <label class="fl__label" for="f1" data-r="label">Email address</label>
+        <span class="fl__mirror" data-r="mirror" aria-hidden="true"></span>
+        <i class="fl__line" aria-hidden="true"></i>
+        <i class="fl__trail" data-r="trail" aria-hidden="true"></i>
+        <i class="fl__dot" data-r="dot" aria-hidden="true"></i>
+      </div>
+    </div>
+    <div class="fl__field">
+      <div class="fl__box" data-r="box">
+        <input class="fl__input" id="f2" data-r="input" type="text" autocomplete="name">
+        <label class="fl__label" for="f2" data-r="label">Name</label>
+        <span class="fl__mirror" data-r="mirror" aria-hidden="true"></span>
+        <i class="fl__line" aria-hidden="true"></i>
+        <i class="fl__trail" data-r="trail" aria-hidden="true"></i>
+        <i class="fl__dot" data-r="dot" aria-hidden="true"></i>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("fl");
+    const CLS = {};
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let last = -1;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function qa(sel) {
+        const list = Array.prototype.slice.call(root.querySelectorAll(sel));
+        return list;
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(function () {
+            el.removeEventListener(type, fn);
+        });
+    }
+    // 좌표 해시: 같은 입력이면 같은 값 0~1. 난수 함수를 쓰지 않고 사인의 소수부만 쓴다.
+    function hash(x) {
+        const s = Math.sin(x * 127.1 + 311.7) * 43758.5453;
+        return s - Math.floor(s);
+    }
+    // 지수 접근: 프레임당 비율 per 만큼 목표에 다가간다. f 는 60fps 기준 프레임 수(dt * 60)라 프레임률이 달라도 같은 속도다.
+    function approach(x, target, per, f) {
+        return x + (target - x) * (1 - Math.pow(1 - per, f));
+    }
+    // 스프링 한 칸: 가속도 = -k (x - 목표) - c v. 반암시적 오일러를 1/120초 이하 부분 스텝으로 쪼갠다.
+    function springStep(s, target, k, c, dt) {
+        let left = dt;
+        while (left > 0) {
+            const h = Math.min(left, 1 / 120);
+            s.v += (-k * (s.x - target) - c * s.v) * h;
+            s.x += s.v * h;
+            left -= h;
+        }
+    }
+    // 값이 있으면 라벨은 올라가 있어야 한다. 브라우저 자동완성이 값을 채우면 input 이벤트가 없을 수 있어 :autofill 도 함께 본다.
+    function isFilled(el) {
+        if (el.value !== "") return true;
+        try {
+            return el.matches(":-webkit-autofill");
+        } catch (err) {
+            return false;
+        }
+    }
+    let leaveHook = null;
+    function stopDemo() {
+        if (!demo) return;
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+        resetFields();
+    }
+    function frame(ts) {
+        const dt = last < 0 ? 0.016 : Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        if (demo) script(ts);
+        step(dt, ts);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    const ro = new ResizeObserver(function () {
+        relayout();
+    });
+    ro.observe(root);
+    if (document.fonts) {
+        document.fonts.ready.then(function () {
+            relayout();
+        });
+    }
+
+    // 시연 계획: 칸마다 포커스 구간(a~b), 타이핑 시작(s)·글자당 ms(rate)·글. 2초 주기로 되풀이하고 주기 첫머리엔 모두 비운다.
+    function runPlan(ts) {
+        const t = ts % 2000;
+        let changed = false;
+        for (let i = 0; i < PLAN.length; i += 1) {
+            const p = PLAN[i];
+            const f = fields[i];
+            const isOn = t >= p.a && t < p.b;
+            const n = t < p.s ? 0 : Math.min(p.text.length, Math.floor((t - p.s) / p.rate) + 1);
+            const v = p.text.slice(0, n);
+            if (f.input.value !== v) {
+                f.input.value = v;
+                changed = true;
+            }
+            if (f.focus !== isOn) {
+                f.focus = isOn;
+                changed = true;
+                if (!isOn && leaveHook) leaveHook(i);
+            }
+        }
+        if (changed) retarget();
+    }
+    function resetFields() {
+        for (let i = 0; i < fields.length; i += 1) {
+            fields[i].input.value = "";
+            fields[i].focus = false;
+        }
+        retarget();
+    }
+    function wire() {
+        fields.forEach(function (f, i) {
+            on(f.input, "focus", function () {
+                stopDemo();
+                f.focus = true;
+                retarget();
+            });
+            on(f.input, "blur", function () {
+                f.focus = false;
+                if (leaveHook) leaveHook(i);
+                retarget();
+            });
+            on(f.input, "input", function () {
+                retarget();
+            });
+        });
+    }
+
+    // 기법: 캐럿 앞 글자의 폭을 거울 span 으로 재서 밑줄 빛 점이 그 x 로 지수 접근한다. 타이핑이 빠르면 점이 뒤처진다.
+    const LERP = 0.18;
+    const UNDERLINE_H = 4;
+    const CARET_OFFSET = 1;
+    const TRAIL_FADE = 0.45;
+    const INPUT_PAD = 12;
+    const RISE_PX = 15;
+    const LABEL_SCALE = 0.74;
+    const DOT_W = 44;
+    const fields = qa("[data-r=box]").map(function (box) {
+        const trail = box.querySelector("[data-r=trail]");
+        const dot = box.querySelector("[data-r=dot]");
+        trail.style.height = UNDERLINE_H + "px";
+        dot.style.height = UNDERLINE_H + "px";
+        dot.style.width = DOT_W + "px";
+        return {
+            box: box,
+            input: box.querySelector("input"),
+            label: box.querySelector("label"),
+            mirror: box.querySelector("[data-r=mirror]"),
+            trail: trail, dot: dot,
+            focus: false, up: false, p: 0, x: INPUT_PAD, tx: INPUT_PAD, w: 400
+        };
+    });
+    const PLAN = [
+        { a: 200, b: 1150, s: 250, rate: 60, text: "mina@mail.dev" },
+        { a: 1150, b: 1980, s: 1250, rate: 90, text: "Mina Seo" }
+    ];
+    // 주의: type="email" 칸은 selectionStart 가 null 이고 setSelectionRange 가 예외를 던진다. 그래서 이메일 칸도 type="text" + inputmode="email" 로 둔다.
+    // 캐럿 x = 안쪽 여백 + 캐럿 앞 글자 폭 + 보정. 글자 폭은 input 과 같은 글꼴의 거울 span 으로 잰다.
+    function caretX(f) {
+        const at = f.input.selectionStart;
+        const n = at === null ? f.input.value.length : at;
+        f.mirror.textContent = f.input.value.slice(0, n);
+        return INPUT_PAD + f.mirror.getBoundingClientRect().width + CARET_OFFSET;
+    }
+    function retarget() {
+        fields.forEach(function (f) {
+            f.up = f.focus || isFilled(f.input);
+            if (f.up) f.box.setAttribute("data-up", "");
+            else f.box.removeAttribute("data-up");
+            f.tx = caretX(f);
+            if (reduce) {
+                f.p = f.up ? 1 : 0;
+                f.x = f.tx;
+            }
+        });
+        if (reduce) render();
+    }
+    function relayout() {
+        fields.forEach(function (f) {
+            f.w = f.box.clientWidth;
+        });
+        retarget();
+    }
+    let jumped = false;
+    function script(ts) {
+        runPlan(ts);
+        const t = ts % 2000;
+        const f = fields[0];
+        const want = t >= 1040 && t < 1150;
+        if (want !== jumped) {
+            jumped = want;
+            const to = want ? 3 : f.input.value.length;
+            f.input.setSelectionRange(to, to);
+            retarget();
+        }
+    }
+    function step(dt, ts) {
+        const fr = dt * 60;
+        fields.forEach(function (f) {
+            f.p = approach(f.p, f.up ? 1 : 0, 0.22, fr);
+            f.x = approach(f.x, f.tx, LERP, fr);
+        });
+    }
+    function render() {
+        fields.forEach(function (f) {
+            const s = 1 - (1 - LABEL_SCALE) * f.p;
+            f.label.style.transform = "translate3d(0," + (-RISE_PX * f.p).toFixed(2) + "px,0) scale(" + s.toFixed(3) + ")";
+            f.box.style.setProperty("--p", f.p.toFixed(3));
+            const lag = Math.abs(f.tx - f.x);
+            const glow = clamp(TRAIL_FADE + lag / 80, 0, 1) * f.p;
+            f.trail.style.transform = "scaleX(" + clamp(f.x / f.w, 0, 1).toFixed(4) + ")";
+            f.trail.style.opacity = glow.toFixed(3);
+            f.dot.style.transform = "translate3d(" + (f.x - DOT_W / 2).toFixed(2) + "px,0,0)";
+            f.dot.style.opacity = f.p.toFixed(3);
+        });
+    }
+    wire();
+
+    relayout();
+    if (reduce) {
+        render();
+    } else {
+        raf = requestAnimationFrame(frame);
+    }
+
+})();
+</script>
+</body>
+</html>
