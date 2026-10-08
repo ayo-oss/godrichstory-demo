@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>クリックした高さでちょうど頂点に達して炸裂する放物線の打ち上げ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sc is-demo" id="scRoot">
+  <canvas class="sc__canvas" id="scCanvas" width="480" height="300" tabindex="0" aria-label="クリックした高さでちょうど頂点に達して炸裂する放物線の打ち上げ"></canvas>
+  <p class="sc__status" id="scStatus" aria-live="polite">標的で頂点に達する — 初速を逆算している</p>
+  <button class="sc__btn" id="scBtn" type="button">一時停止</button>
+  <p class="sc__caption">クリックした高さでちょうど頂点に達して炸裂する放物線の打ち上げ</p>
+</div>
+</main>
+<script>
+(function () {
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const KEY_STEP = 14;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    // 파스텔 알갱이 팔레트와 밤하늘 두 끝 색
+    const PINK = [255, 170, 196];
+    const MINT = [150, 226, 196];
+    const LILAC = [196, 176, 255];
+    const SKY_BLUE = [150, 214, 255];
+    const BUTTER = [255, 230, 150];
+    const CREAM = [255, 247, 230];
+    const PALETTE = [PINK, MINT, LILAC, SKY_BLUE, BUTTER];
+    const SKY_TOP = [18, 16, 32];
+    const SKY_BOT = [46, 40, 76];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 하나와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash1(i, seed) {
+        let h = (Math.imul(i | 0, 374761393) + Math.imul(seed | 0, 668265263)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    function hash2(x, y, seed) {
+        return hash1((Math.imul(x | 0, 73856093) ^ Math.imul(y | 0, 19349663)) | 0, seed);
+    }
+    // 1차원 값 노이즈 — 정수점 해시를 smooth 로 이어 붙인다
+    function noise1(x, seed) {
+        const xi = Math.floor(x);
+        return lerp(hash1(xi, seed), hash1(xi + 1, seed), smooth(x - xi));
+    }
+    // 2차원 값 노이즈
+    function vnoise(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = smooth(x - xi);
+        const fy = smooth(y - yi);
+        const a = lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), fx);
+        const b = lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), fx);
+        return lerp(a, b, fy);
+    }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 밤하늘 바탕 — 위가 어둡고 아래가 보랏빛
+    function drawSky(ctx, height) {
+        const g = ctx.createLinearGradient(0, 0, 0, height);
+        g.addColorStop(0, rgba(SKY_TOP, 1));
+        g.addColorStop(1, rgba(SKY_BOT, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, height);
+    }
+    function start(root, canvas, statusEl, btnEl, make) {
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: W / 2, y: H / 2, idle: 99999, vx: 0, vy: 0, dpr: 1 };
+        let lastPx = -1;
+        let lastPy = -1;
+        // 화면 배율이 바뀌어도 캔버스 픽셀 수를 다시 맞춘다
+        function fit() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            inp.dpr = dpr;
+            canvas.width = Math.round(W * dpr);
+            canvas.height = Math.round(H * dpr);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        fit();
+        const scene = make(inp, reduce);
+        let paused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            ctx.setTransform(inp.dpr, 0, 0, inp.dpr, 0, 0);
+            scene.draw(ctx);
+            const t = scene.label();
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function tickOnce() {
+            inp.idle += 1;
+            inp.vx *= 0.9;
+            inp.vy *= 0.9;
+            scene.step();
+        }
+        function advance(ms) {
+            const n = Math.round(ms / FIXED_DT);
+            for (let i = 0; i < n; i += 1) {
+                tickOnce();
+            }
+        }
+        function refresh() {
+            if (reduce) {
+                advance(FIXED_DT * 6);
+                show();
+            }
+        }
+        function toLocal(e) {
+            const r = canvas.getBoundingClientRect();
+            const nx = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            const ny = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            if (lastPx >= 0) {
+                inp.vx = lerp(inp.vx, nx - lastPx, 0.5);
+                inp.vy = lerp(inp.vy, ny - lastPy, 0.5);
+            }
+            lastPx = nx;
+            lastPy = ny;
+            inp.x = nx;
+            inp.y = ny;
+            inp.idle = 0;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    tickOnce();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+        }
+        show();
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                advance(REDUCE_STEP_MS);
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'pointermove', function (e) {
+            toLocal(e);
+            refresh();
+        });
+        listen(canvas, 'pointerdown', function (e) {
+            lastPx = -1;
+            toLocal(e);
+            scene.tap();
+            refresh();
+        });
+        listen(canvas, 'keydown', function (e) {
+            const k = e.key;
+            let dx = 0;
+            let dy = 0;
+            if (k === 'Enter' || k === ' ') {
+                e.preventDefault();
+                scene.tap();
+                refresh();
+                return;
+            }
+            if (k === 'ArrowLeft') {
+                dx = -KEY_STEP;
+            }
+            else if (k === 'ArrowRight') {
+                dx = KEY_STEP;
+            }
+            else if (k === 'ArrowUp') {
+                dy = -KEY_STEP;
+            }
+            else if (k === 'ArrowDown') {
+                dy = KEY_STEP;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            inp.x = clamp(inp.x + dx, 0, W);
+            inp.y = clamp(inp.y + dy, 0, H);
+            inp.vx = dx * 0.5;
+            inp.vy = dy * 0.5;
+            inp.idle = 0;
+            refresh();
+        });
+        listen(window, 'resize', function () {
+            fit();
+            show();
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const LAUNCH_G = 0.12;
+    const APEX_FRAC = 0.04;
+    const TRAIL_LEN = 12;
+    const CLICK_PAD = 28;
+    const GROUND_Y = H - 22;
+    const SHOT_GAP = 40;
+    const SPARK_N = 72;
+    const SPARK_DRAG = 0.965;
+    const SPARK_GRAVITY = 0.04;
+    const PREWARM_STEPS = 62;
+    const TXT_AUTO = '標的で頂点に達する — 初速を逆算している';
+    const TXT_TAP = '押した高さが頂点になる';
+    // 높이 h 까지 올라가 속도가 0 이 되려면 초속도는 sqrt(2 g h)
+    function launchSpeed(h) {
+        return Math.sqrt(2 * LAUNCH_G * h);
+    }
+    function aimPoint(x, y) {
+        return [clamp(x, CLICK_PAD, W - CLICK_PAD), clamp(y, CLICK_PAD, GROUND_Y - 60)];
+    }
+    function makeRocket(tx0, ty0, hue) {
+        const p = aimPoint(tx0, ty0);
+        const h = GROUND_Y - p[1];
+        const v0 = launchSpeed(h);
+        const x0 = lerp(W / 2, p[0], 0.35);
+        const flight = v0 / LAUNCH_G;
+        return { x: x0, y: GROUND_Y, vx: (p[0] - x0) / flight, vy: -v0, v0: v0, tx: p[0], ty: p[1], trail: [], hue: hue };
+    }
+    // 한 프레임 올리고 정점에 닿았는지 알려 준다 (상승 속도가 정점 문턱 아래로 줄면 참)
+    function stepRocket(r) {
+        r.x += r.vx;
+        r.y += r.vy + LAUNCH_G * 0.5;
+        r.vy += LAUNCH_G;
+        r.trail.push(r.x, r.y);
+        if (r.trail.length > TRAIL_LEN * 2) {
+            r.trail.splice(0, 2);
+        }
+        return r.vy >= -APEX_FRAC * r.v0;
+    }
+    // 측정용 — 목표 높이 ty 로 쏘았을 때 실제로 터지는 높이
+    function burstHeight(ty) {
+        const r = makeRocket(W / 2, ty, PINK);
+        for (let i = 0; i < 400; i += 1) {
+            if (stepRocket(r)) {
+                return r.y;
+            }
+        }
+        return -1;
+    }
+    function makeScene(inp, reduce) {
+        const rng = lcg(2024);
+        let rockets = [];
+        let sparks = [];
+        let gap = 2;
+        let colorIdx = 0;
+        let t = 0;
+        let lastTarget = 0;
+        function fire(x, y) {
+            rockets.push(makeRocket(x, y, PALETTE[colorIdx % PALETTE.length]));
+            colorIdx += 1;
+            if (rockets.length > 6) {
+                rockets.shift();
+            }
+        }
+        function explode(r) {
+            for (let i = 0; i < SPARK_N; i += 1) {
+                const a = (i / SPARK_N) * PI2 + rng() * 0.12;
+                const sp = 2.4 + rng() * 1.5;
+                sparks.push({ x: r.x, y: r.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life: 58 + rng() * 22, hue: i % 3 === 0 ? CREAM : r.hue });
+            }
+        }
+        const scene = {
+            step() {
+                t += 1;
+                gap -= 1;
+                if (gap <= 0) {
+                    fire(80 + rng() * 320, 50 + rng() * 80);
+                    gap = SHOT_GAP;
+                }
+                const rest = [];
+                for (let i = 0; i < rockets.length; i += 1) {
+                    if (stepRocket(rockets[i])) {
+                        explode(rockets[i]);
+                        lastTarget = t;
+                    }
+                    else {
+                        rest.push(rockets[i]);
+                    }
+                }
+                rockets = rest;
+                const alive = [];
+                for (let i = 0; i < sparks.length; i += 1) {
+                    const s = sparks[i];
+                    s.age += 1;
+                    s.vx *= SPARK_DRAG;
+                    s.vy = s.vy * SPARK_DRAG + SPARK_GRAVITY;
+                    s.x += s.vx;
+                    s.y += s.vy;
+                    if (s.age < s.life) {
+                        alive.push(s);
+                    }
+                }
+                sparks = alive;
+            },
+            draw(ctx) {
+                drawSky(ctx, H);
+                ctx.fillStyle = rgba([24, 20, 38], 1);
+                ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+                ctx.globalCompositeOperation = 'lighter';
+                for (let i = 0; i < rockets.length; i += 1) {
+                    const r = rockets[i];
+                    // 표적 — 발사체가 이 점에서 정점을 찍는다
+                    const pulse = 0.5 + 0.5 * Math.sin(t * 0.25 + i);
+                    ctx.strokeStyle = rgba(r.hue, 0.35 + 0.3 * pulse);
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.arc(r.tx, r.ty, 6 + pulse * 2, 0, PI2);
+                    ctx.stroke();
+                    for (let k = 2; k < r.trail.length; k += 2) {
+                        ctx.strokeStyle = rgba(CREAM, (k / r.trail.length) * 0.8);
+                        ctx.lineWidth = 1 + (k / r.trail.length) * 1.4;
+                        ctx.beginPath();
+                        ctx.moveTo(r.trail[k - 2], r.trail[k - 1]);
+                        ctx.lineTo(r.trail[k], r.trail[k + 1]);
+                        ctx.stroke();
+                    }
+                    ctx.fillStyle = rgba(CREAM, 1);
+                    ctx.beginPath();
+                    ctx.arc(r.x, r.y, 2.2, 0, PI2);
+                    ctx.fill();
+                }
+                const flashAge = t - lastTarget;
+                if (flashAge < 8 && lastTarget > 0) {
+                    ctx.fillStyle = rgba(LILAC, (1 - flashAge / 8) * (reduce ? 0.03 : 0.09));
+                    ctx.fillRect(0, 0, W, GROUND_Y);
+                }
+                for (let i = 0; i < sparks.length; i += 1) {
+                    const s = sparks[i];
+                    const a = Math.pow(1 - s.age / s.life, 0.8);
+                    ctx.strokeStyle = rgba(s.hue, a * 0.5);
+                    ctx.lineWidth = 1.1;
+                    ctx.beginPath();
+                    ctx.moveTo(s.x - s.vx * 1.6, s.y - s.vy * 1.6);
+                    ctx.lineTo(s.x, s.y);
+                    ctx.stroke();
+                    ctx.fillStyle = rgba(s.hue, a);
+                    ctx.beginPath();
+                    ctx.arc(s.x, s.y, 1.2 + 1.5 * a, 0, PI2);
+                    ctx.fill();
+                }
+                ctx.globalCompositeOperation = 'source-over';
+            },
+            label() {
+                return inp.idle < IDLE_TICKS ? TXT_TAP : TXT_AUTO;
+            },
+            tap() {
+                fire(inp.x, inp.y);
+            }
+        };
+        for (let i = 0; i < PREWARM_STEPS; i += 1) {
+            scene.step();
+        }
+        return scene;
+    }
+    start(document.getElementById('scRoot'), document.getElementById('scCanvas'), document.getElementById('scStatus'), document.getElementById('scBtn'), makeScene);
+})();
+</script>
+</body>
+</html>
