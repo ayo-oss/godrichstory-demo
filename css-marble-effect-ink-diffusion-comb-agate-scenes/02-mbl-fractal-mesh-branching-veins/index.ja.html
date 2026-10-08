@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>押されたインクの面が細いすき間に割れて枝分かれする断片の目 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="hs is-demo" id="hs">
+  <canvas class="hs__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="押されたインクの面が細いすき間に割れて枝分かれする断片の目"></canvas>
+  <p class="hs__status" data-role="status" aria-live="off">押された縁がすき間に割れていきます</p>
+  <div class="hs__tools">
+    <button class="hs__btn" data-role="btn" type="button">押す</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("hs");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    // 마블링 팔레트 — 종이 물면(PAPER) 위에 파스텔 잉크 결이 흐른다
+    const PAPER = [252, 246, 234];
+    const INK = [58, 48, 76];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const TINTS = [SKY, PINK, MINT, LILAC, PEACH];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    // 시연 시계가 loop 주기 안의 at 시각을 이번 스텝에 막 지났는가
+    function crossed(t, at, loop) {
+        const p = t % loop;
+        return p >= at && p - FIXED_DT < at;
+    }
+    function fitCanvas() {
+        // 캔버스 내부 해상도는 480x300 고정, 배율은 devicePixelRatio 에 상한 2 를 둔다
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function onResize() {
+        fitCanvas();
+        draw();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    // ── 필드 버퍼(077 방식) — 항목이 정한 낮은 해상도 버퍼에 픽셀 값을 굽고 drawImage 로 부드럽게 확대한다
+    const small = document.createElement('canvas');
+    let sctx = null;
+    let buf = null;
+    let px = null;
+    // 종이 결은 시간이 지나도 안 변한다 — 필드를 만들 때 한 번만 구워 두고 픽셀마다 꺼내 쓴다
+    let grainF = new Float32Array(0);
+    function initField(nw, nh) {
+        small.width = nw;
+        small.height = nh;
+        const c = small.getContext('2d');
+        if (!c) {
+            return;
+        }
+        sctx = c;
+        buf = c.createImageData(nw, nh);
+        px = buf.data;
+        grainF = new Float32Array(nw * nh);
+        for (let y = 0; y < nh; y += 1) {
+            for (let x = 0; x < nw; x += 1) {
+                grainF[y * nw + x] = paperGrain(x * W / nw, y * H / nh);
+            }
+        }
+    }
+    function blitField(nw, nh) {
+        if (!sctx || !buf) {
+            return;
+        }
+        sctx.putImageData(buf, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(small, 0, 0, nw, nh, 0, 0, W, H);
+    }
+    // ── 결정적 값노이즈 — 난수 소스를 못 쓰므로 정수 해시로 같은 시드에 같은 값
+    const SEED = 463;
+    function hash1(n, seed) {
+        let h = Math.imul(n ^ seed, 374761393);
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+    function hash2(x, y, seed) {
+        return hash1((Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) | 0, seed);
+    }
+    function fade(t) { return t * t * (3 - 2 * t); }
+    function vnoise2(x, y, seed) {
+        const xi = Math.floor(x), yi = Math.floor(y);
+        const u = fade(x - xi), v = fade(y - yi);
+        const a = hash2(xi, yi, seed), b = hash2(xi + 1, yi, seed);
+        const c = hash2(xi, yi + 1, seed), d = hash2(xi + 1, yi + 1, seed);
+        return lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    function fbm2(x, y, oct, seed) {
+        let sum = 0, amp = 0.5, norm = 0, f = 1;
+        for (let i = 0; i < oct; i += 1) {
+            sum += vnoise2(x * f, y * f, seed + i * 131) * amp;
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    // 종이 결 — 옅은 얼룩으로 종이가 느껴지게 하는 바닥 값(0~1)
+    function paperGrain(x, y) {
+        return fbm2(x * 0.021, y * 0.021, 3, 71);
+    }
+    // 02 부분 결 — 격자 셀 간 밀도차 잉크 교환으로 가장자리 열화·분기 반복
+    const CELL_N = 60; // 격자 세로 셀 수(가로는 무대 비율로 96)
+    const DENSITY_DIFF_K = 0.16; // 이웃 셀과의 압력(밀도)차 가운데 한 번에 넘기는 비율
+    const SPLIT_DEPTH = 3; // 틈이 다시 두 갈래로 나뉘는 깊이(이득장 노이즈 옥타브 수)
+    const EDGE_KEEP = 0.12; // 찢어진 경계를 날카롭게 붙잡는 반응항 세기 — 0 이면 잉크가 흐려지며 퍼지기만 한다
+    const PUSH_K = 0.5; // 미는 방향으로 더 흘려 보내는 비율
+    const TRADES = 3; // 16ms 스텝 하나에 교환을 몇 번 돌리나
+    const GX = Math.round(CELL_N * W / H);
+    const GY = CELL_N;
+    const DEMO_LOOP = 3600;
+    const TXT_EDGE = '押された縁がすき間に割れていきます';
+    const TXT_FORK = 'すき間が二又に分かれていきます';
+    const TXT_SETTLE = '目が収まりました';
+    const TXT_GUIDE = '矢印でインクを押します';
+    let dens = new Float32Array(GX * GY);
+    // 셀마다 잉크를 붙잡는 힘(이득)이 다르다 — 옥타브를 SPLIT_DEPTH 겹 쌓아 큰 골짜기 안에 작은 골짜기가 생기게 한다
+    const gain = new Float32Array(GX * GY);
+    for (let y = 0; y < GY; y += 1) {
+        for (let x = 0; x < GX; x += 1) {
+            gain[y * GX + x] = fbm2(x * 0.1, y * 0.1, SPLIT_DEPTH, 211);
+        }
+    }
+    let pushX = 0;
+    let pushY = 0;
+    let pushLeft = 0; // 남은 押す 스텝(사람이 민 경우)
+    let pushCount = 0;
+    let trades = 0;
+    function seedDens() {
+        // 잉크 면 — 종이 거의 전체를 0.85 농도 잉크 한 장으로 덮고, 가장자리만 부드럽게 비운다
+        for (let y = 0; y < GY; y += 1) {
+            for (let x = 0; x < GX; x += 1) {
+                const ex = Math.min(x, GX - 1 - x) / 6, ey = Math.min(y, GY - 1 - y) / 6;
+                dens[y * GX + x] = 0.85 * smooth(Math.min(ex, ey));
+            }
+        }
+        trades = 0;
+    }
+    // 셀의 압력 = 밀도 × (1.15 − 이득) — 이득이 낮은 골짜기 셀은 같은 밀도에서도 압력이 높아 잉크를 밀어낸다
+    function pressure(i) { return dens[i] * (1.15 - gain[i]); }
+    // 이웃 한 쌍의 교환 — 압력차 × K 만큼 높은 쪽에서 낮은 쪽으로, 미는 방향이면 PUSH_K 만큼 더
+    function trade(out, i, j, along) {
+        let flow = (pressure(i) - pressure(j)) * DENSITY_DIFF_K;
+        if (along > 0) {
+            flow += dens[i] * DENSITY_DIFF_K * PUSH_K;
+        }
+        else if (along < 0) {
+            flow -= dens[j] * DENSITY_DIFF_K * PUSH_K;
+        }
+        flow = clamp(flow, -dens[j] * 0.24, dens[i] * 0.24);
+        out[i] -= flow;
+        out[j] += flow;
+    }
+    // 교환 한 번 — 오른쪽·아래 이웃 쌍만 돌아 한 쌍을 두 번 세지 않는다. 골짜기가 비며 틈이 되고,
+    // 반응항 d(1−d)(d−½) 이 0 과 1 사이 값을 양 끝으로 되밀어 틈의 가장자리가 흐려지지 않는다
+    function tradeDens(dx, dy) {
+        const out = new Float32Array(dens);
+        for (let y = 0; y < GY; y += 1) {
+            for (let x = 0; x < GX; x += 1) {
+                const i = y * GX + x;
+                if (x + 1 < GX) {
+                    trade(out, i, i + 1, dx);
+                }
+                if (y + 1 < GY) {
+                    trade(out, i, i + GX, dy);
+                }
+            }
+        }
+        for (let i = 0; i < out.length; i += 1) {
+            const d = out[i];
+            out[i] = clamp(d + EDGE_KEEP * d * (1 - d) * (d - 0.5) * 4, 0, 1);
+        }
+        dens = out;
+        trades += 1;
+    }
+    // 틈 비율 — 잉크가 0.1 아래로 빠진 셀의 몫(사실 측정·상태 줄용)
+    function gapShare() {
+        let n = 0;
+        for (let i = 0; i < dens.length; i += 1) {
+            if (dens[i] < 0.1) {
+                n += 1;
+            }
+        }
+        return n / dens.length;
+    }
+    function draw() {
+        if (!px || !sctx) {
+            return;
+        }
+        let i4 = 0;
+        for (let y = 0; y < GY; y += 1) {
+            for (let x = 0; x < GX; x += 1) {
+                const i = y * GX + x;
+                const g = grainF[i];
+                const base = mix(PAPER, INK, g * 0.07 + 0.015);
+                const v = dens[i];
+                let col = base;
+                if (v > 0.06) {
+                    // 잉크 섬마다 이득 높이로 색을 갈라 결을 만들고, 진한 곳은 잉크빛을 더한다
+                    const tint = TINTS[Math.floor(gain[i] * 11) % TINTS.length];
+                    col = mix(base, tint, smooth(v * 1.4) * 0.8);
+                    if (v > 0.8) {
+                        col = mix(col, INK, (v - 0.8) * 0.9);
+                    }
+                }
+                px[i4] = col[0];
+                px[i4 + 1] = col[1];
+                px[i4 + 2] = col[2];
+                px[i4 + 3] = 255;
+                i4 += 4;
+            }
+        }
+        blitField(GX, GY);
+    }
+    function settle() {
+        seedDens();
+        for (let n = 0; n < 240; n += 1) {
+            tradeDens(0, 0);
+        }
+        say(TXT_SETTLE);
+    }
+    function step() {
+        const active = demo || pushLeft > 0 || trades < 600;
+        if (!active) {
+            return;
+        }
+        for (let n = 0; n < TRADES; n += 1) {
+            tradeDens(pushX, pushY);
+        }
+        if (pushLeft > 0) {
+            pushLeft -= 1;
+            if (pushLeft === 0) {
+                pushX = 0;
+                pushY = 0;
+                say(TXT_SETTLE);
+            }
+        }
+    }
+    function pushInk(dx, dy) {
+        pushX = dx;
+        pushY = dy;
+        pushCount += 1;
+        if (still) {
+            for (let n = 0; n < 24; n += 1) {
+                tradeDens(dx, dy);
+            }
+            say(TXT_EDGE);
+            draw();
+            return;
+        }
+        pushLeft = 60;
+        say(pushCount % 2 === 0 ? TXT_FORK : TXT_EDGE);
+    }
+    // 시연 — 잉크 한 장이 깔린 채 시작해 저절로 갈라지고, 900ms 부터는 오른쪽 → 아래 → 왼쪽으로 민다.
+    // 다시 깔기는 캡처 창 밖(3500ms)에서만 한다
+    const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+    function demoTick(t) {
+        if (crossed(t, 200, DEMO_LOOP)) {
+            pushX = 0;
+            pushY = 0;
+            say(TXT_EDGE);
+        }
+        for (let k = 0; k < 5; k += 1) {
+            if (crossed(t, 900 + k * 500, DEMO_LOOP)) {
+                pushX = DIRS[k % 4][0];
+                pushY = DIRS[k % 4][1];
+                say(TXT_FORK);
+            }
+        }
+        if (crossed(t, 3500, DEMO_LOOP)) {
+            seedDens();
+            pushX = 0;
+            pushY = 0;
+        }
+    }
+    seedDens();
+    initField(GX, GY);
+    const btn = root.querySelector('[data-role="btn"]');
+    if (btn) {
+        btn.addEventListener('click', function () {
+            wake();
+            const d = DIRS[pushCount % 4];
+            pushInk(d[0], d[1]);
+        });
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        const p = toScene(ev);
+        const dx = p[0] - W / 2, dy = p[1] - H / 2;
+        // 누른 쪽에서 반대쪽으로 민다 — 가로·세로 중 더 먼 축으로
+        if (Math.abs(dx) / W > Math.abs(dy) / H) {
+            pushInk(dx < 0 ? 1 : -1, 0);
+        }
+        else {
+            pushInk(0, dy < 0 ? 1 : -1);
+        }
+    });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown') {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        say(TXT_GUIDE);
+        pushInk(k === 'ArrowRight' ? 1 : (k === 'ArrowLeft' ? -1 : 0), k === 'ArrowDown' ? 1 : (k === 'ArrowUp' ? -1 : 0));
+    });
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    let clock = 0;
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    if (still) {
+        settle();
+        draw();
+    }
+    else {
+        rafId = window.requestAnimationFrame(frame);
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+    };
+})();
+</script>
+</body>
+</html>
