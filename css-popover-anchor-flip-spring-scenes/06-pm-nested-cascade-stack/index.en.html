@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nested Popovers Whose Shadow and Size Step Up with Each Depth — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pm is-demo" id="pm" data-demo="1">
+  <p class="pm__live" data-r="live" aria-live="off" aria-atomic="true"></p>
+  <button class="pm__open pm__open--a" data-r="op" type="button" aria-expanded="false">Settings</button>
+  <div class="pm__pop" data-r="lv"><b class="pm__ttl">Settings</b><button class="pm__open" data-r="op" type="button" aria-expanded="false">Alerts</button></div>
+  <div class="pm__pop" data-r="lv"><b class="pm__ttl">Alerts</b><button class="pm__open" data-r="op" type="button" aria-expanded="false">Sound</button></div>
+  <div class="pm__pop" data-r="lv"><b class="pm__ttl">Sound</b><span class="pm__txt">Volume, vibrate</span></div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pm");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    let acc = 0;
+    let clock = 0;
+    const offs = [];
+    const live = root.querySelector("[data-r=live]");
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        if (!demo)
+            return;
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+        live.setAttribute("aria-live", "polite");
+    }
+    if (reduce)
+        live.setAttribute("aria-live", "polite");
+    let shown = "";
+    function say(s) {
+        if (s === shown)
+            return;
+        shown = s;
+        live.textContent = s;
+    }
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return () => {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function local(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 팝오버 안에서 또 열리는 팝오버의 깊이 d 를 세어, 그림자 높이는 d 에 비례해 키우고 크기·밝기는 d 가 늘 때마다 한 단계씩 줄인다.
+    const DEPTH_STEP = 0.1;
+    const SHADOW_LIFT = 7;
+    const SCALE_STEP = 0.07;
+    const STAGGER = 260;
+    const POP_W = 128;
+    const POP_H = 70;
+    const X0 = 84;
+    const Y0 = 34;
+    const STEP_Y = 28;
+    const CYCLE_MS = 3000;
+    const ops = Array.from(root.querySelectorAll("[data-r=op]"));
+    const lv = Array.from(root.querySelectorAll("[data-r=lv]"));
+    const openAmt = [0, 0, 0];
+    let depth = reduce ? 3 : 0;
+    let lastDepth = -1;
+    function script(ms) {
+        const t = ms % CYCLE_MS;
+        const base = 300;
+        depth = t < base ? 0 : t < base + STAGGER ? 1 : t < base + 2 * STAGGER ? 2 : t < 1900 ? 3 : t < 1900 + STAGGER ? 2 : t < 1900 + 2 * STAGGER ? 1 : 0;
+    }
+    function tick(ms) {
+        if (demo)
+            script(ms);
+        for (let i = 0; i < 3; i += 1)
+            openAmt[i] += ((depth > i ? 1 : 0) - openAmt[i]) * 0.22;
+    }
+    function snap() {
+        for (let i = 0; i < 3; i += 1)
+            openAmt[i] = depth > i ? 1 : 0;
+    }
+    function render() {
+        const w = root.clientWidth;
+        const stepX = clamp((w - X0 - POP_W - 8) / 2, 28, 84);
+        for (let i = 0; i < 3; i += 1) {
+            const d = i + 1;
+            const o = openAmt[i];
+            const sc = (1 - (d - 1) * SCALE_STEP) * (0.92 + 0.08 * o);
+            const lift = d * SHADOW_LIFT * o;
+            const x = X0 + i * stepX - (1 - o) * 14;
+            const y = Y0 + i * STEP_Y - (1 - o) * 8;
+            lv[i].style.transform = "translate3d(" + x.toFixed(1) + "px," + y.toFixed(1) + "px,0) scale(" + sc.toFixed(3) + ")";
+            lv[i].style.opacity = o.toFixed(2);
+            lv[i].style.visibility = o > 0.02 ? "visible" : "hidden";
+            lv[i].style.filter = "brightness(" + (1 - (d - 1) * DEPTH_STEP).toFixed(2) + ")";
+            lv[i].style.boxShadow = "0 " + lift.toFixed(1) + "px " + (lift * 2).toFixed(1) + "px rgba(23, 20, 26, .34)";
+        }
+        if (depth !== lastDepth) {
+            lastDepth = depth;
+            for (let i = 0; i < 3; i += 1)
+                ops[i].setAttribute("aria-expanded", depth > i ? "true" : "false");
+        }
+        const dd = Math.max(1, depth);
+        say("depth " + depth + "  lift " + (dd * SHADOW_LIFT) + "  scale " + (1 - (dd - 1) * SCALE_STEP).toFixed(2));
+    }
+    ops.forEach((el, i) => {
+        on(el, "click", () => {
+            stopDemo();
+            depth = depth > i ? i : i + 1;
+            sync();
+        });
+    });
+    on(root, "keydown", (e) => {
+        if (e.key !== "Escape" || depth === 0)
+            return;
+        e.preventDefault();
+        stopDemo();
+        depth -= 1;
+        ops[depth].focus({ preventScroll: true });
+        sync();
+    });
+    const FRAME_MS = 1000 / 60;
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        acc += Math.min(100, ts - last);
+        last = ts;
+        let n = 0;
+        while (acc >= FRAME_MS && n < 6) {
+            clock += FRAME_MS;
+            tick(clock);
+            acc -= FRAME_MS;
+            n += 1;
+        }
+        if (n === 6)
+            acc = 0;
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    const ro = new ResizeObserver(() => sync());
+    ro.observe(root);
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+        ro.disconnect();
+    };
+})();
+</script>
+</body>
+</html>

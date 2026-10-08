@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Popover That Follows by Inertia and Resists Like Rubber at the Edge — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pm is-demo" id="pm" data-demo="1">
+  <p class="pm__live" data-r="live" aria-live="off" aria-atomic="true"></p>
+  <i class="pm__bound" data-r="bound"></i>
+  <i class="pm__tether" data-r="tether"></i>
+  <div class="pm__pop" data-r="pop"><b class="pm__ttl">Note</b><span class="pm__txt">Drag to move</span></div>
+  <button class="pm__anchor" data-r="anchor" type="button" aria-label="Pin, move with arrow keys"></button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pm");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    let acc = 0;
+    let clock = 0;
+    const offs = [];
+    const live = root.querySelector("[data-r=live]");
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        if (!demo)
+            return;
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+        live.setAttribute("aria-live", "polite");
+    }
+    if (reduce)
+        live.setAttribute("aria-live", "polite");
+    let shown = "";
+    function say(s) {
+        if (s === shown)
+            return;
+        shown = s;
+        live.textContent = s;
+    }
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return () => {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    function local(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 팝오버 목표 위치가 허용 범위를 넘으면 넘은 거리에 저항(RUBBER)을 곱하고 LAG 에서 포화시킨 뒤, FOLLOW_LERP 관성으로 쫓아간다.
+    const FOLLOW_LERP = 0.14;
+    const RUBBER = 0.55;
+    const EDGE_PAD = 20;
+    const LAG = 28;
+    const POP_W = 116;
+    const POP_H = 56;
+    const ANCHOR_R = 14;
+    const LIFT = 10;
+    const SWEEP_MS = 2600;
+    const anchor = q("[data-r=anchor]");
+    const pop = q("[data-r=pop]");
+    const tether = q("[data-r=tether]");
+    const bound = q("[data-r=bound]");
+    let nx = reduce ? 0.94 : 0.5;
+    let ny = reduce ? 0.2 : 0.55;
+    let px = 0;
+    let py = 0;
+    let placed = false;
+    let dragging = false;
+    let overX = 0;
+    let overY = 0;
+    function rubber(over) {
+        const o = Math.abs(over);
+        const r = LAG * (1 - 1 / (1 + (o * RUBBER) / LAG));
+        return over < 0 ? -r : r;
+    }
+    function resist(v, lo, hi) {
+        if (v < lo)
+            return lo + rubber(v - lo);
+        if (v > hi)
+            return hi + rubber(v - hi);
+        return v;
+    }
+    function goal() {
+        const w = root.clientWidth;
+        const h = root.clientHeight;
+        const tx = nx * w - POP_W / 2;
+        const ty = ny * h - ANCHOR_R - LIFT - POP_H;
+        const lx = EDGE_PAD;
+        const hx = w - EDGE_PAD - POP_W;
+        const ly = EDGE_PAD;
+        const hy = h - EDGE_PAD - POP_H;
+        overX = tx < lx ? tx - lx : tx > hx ? tx - hx : 0;
+        overY = ty < ly ? ty - ly : ty > hy ? ty - hy : 0;
+        return [resist(tx, lx, hx), resist(ty, ly, hy)];
+    }
+    function tick(ms) {
+        if (demo) {
+            const t = Math.max(0, ms - 200);
+            nx = clamp(0.5 + 0.58 * Math.sin((t / SWEEP_MS) * Math.PI * 2), 0.06, 0.94);
+            ny = clamp(0.5 + 0.5 * Math.sin((t / 1700) * Math.PI * 2 + 1), 0.08, 0.94);
+        }
+        const g = goal();
+        if (!placed)
+            snap();
+        px += (g[0] - px) * FOLLOW_LERP;
+        py += (g[1] - py) * FOLLOW_LERP;
+    }
+    function snap() {
+        const g = goal();
+        px = g[0];
+        py = g[1];
+        placed = true;
+    }
+    function render() {
+        const w = root.clientWidth;
+        const h = root.clientHeight;
+        const ax = nx * w;
+        const ay = ny * h;
+        anchor.style.transform = "translate3d(" + (ax - ANCHOR_R).toFixed(1) + "px," + (ay - ANCHOR_R).toFixed(1) + "px,0)";
+        pop.style.transform = "translate3d(" + px.toFixed(1) + "px," + py.toFixed(1) + "px,0)";
+        const cx = px + POP_W / 2;
+        const cy = py + POP_H / 2;
+        const len = Math.hypot(cx - ax, cy - ay);
+        tether.style.transform = "translate3d(" + ax.toFixed(1) + "px," + (ay - 1).toFixed(1) + "px,0) rotate(" + Math.atan2(cy - ay, cx - ax).toFixed(4) + "rad) scale(" + len.toFixed(1) + ",1)";
+        bound.style.transform = "translate3d(" + EDGE_PAD + "px," + EDGE_PAD + "px,0)";
+        bound.style.width = Math.max(0, w - 2 * EDGE_PAD) + "px";
+        bound.style.height = Math.max(0, h - 2 * EDGE_PAD) + "px";
+        say("over " + Math.round(Math.hypot(overX, overY)) + "  stretch " + Math.round(Math.hypot(rubber(overX), rubber(overY))));
+    }
+    function moveTo(e) {
+        const p = local(e);
+        nx = clamp(p.x / root.clientWidth, 0.04, 0.96);
+        ny = clamp(p.y / root.clientHeight, 0.06, 0.96);
+        sync();
+    }
+    on(root, "pointerdown", (e) => {
+        stopDemo();
+        dragging = true;
+        root.setPointerCapture(e.pointerId);
+        moveTo(e);
+    });
+    on(root, "pointermove", (e) => {
+        if (dragging)
+            moveTo(e);
+    });
+    on(root, "pointerup", () => {
+        dragging = false;
+    });
+    on(root, "pointercancel", () => {
+        dragging = false;
+    });
+    on(anchor, "keydown", (e) => {
+        const dx = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        const dy = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+        if (dx === 0 && dy === 0)
+            return;
+        e.preventDefault();
+        stopDemo();
+        nx = clamp(nx + dx * 0.06, 0.04, 0.96);
+        ny = clamp(ny + dy * 0.08, 0.06, 0.96);
+        sync();
+    });
+    snap();
+    const FRAME_MS = 1000 / 60;
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        acc += Math.min(100, ts - last);
+        last = ts;
+        let n = 0;
+        while (acc >= FRAME_MS && n < 6) {
+            clock += FRAME_MS;
+            tick(clock);
+            acc -= FRAME_MS;
+            n += 1;
+        }
+        if (n === 6)
+            acc = 0;
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    const ro = new ResizeObserver(() => sync());
+    ro.observe(root);
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+        ro.disconnect();
+    };
+})();
+</script>
+</body>
+</html>
