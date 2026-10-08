@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マスを押すとXとOが筆順どおりに描かれ、マスがバネで沈んで戻る置き方 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="tt is-demo" id="tt">
+  <canvas class="tt__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="マスを押すとXとOが筆順どおりに描かれ、マスがバネで沈んで戻る置き方"></canvas>
+  <p class="tt__status" data-role="status" aria-live="polite">Xの番</p>
+  <button class="tt__btn" data-role="btn" type="button">一時停止</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("tt");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const PI2 = Math.PI * 2;
+    const FIXED_DT = 16;
+    const REDUCE_STEP_MS = 900;
+    const IDLE_TICKS = 150;
+    const BTN_PAUSE = '一時停止';
+    const BTN_PLAY = '再生';
+    const BTN_NEXT = '次の場面';
+    const TXT_CELL = 'マス';
+    // 파스텔 팔레트 — 어두운 판 위에 밝은 색을 얹어 명도 차로 읽힌다
+    const BG = [29, 26, 44];
+    const TILE = [40, 36, 62];
+    const MINT = [126, 226, 192];
+    const SKY = [124, 196, 255];
+    const LILAC = [190, 164, 255];
+    const PINK = [255, 160, 190];
+    const PEACH = [255, 208, 168];
+    const CREAM = [255, 244, 224];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) {
+        return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+    }
+    // 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+    function lcg(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 정수 두 개로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+    function hash2(x, y, seed) {
+        let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 1442695041)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 값 노이즈 — 격자점 해시 네 개를 부드럽게 섞는다
+    function noise2(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = smooth(x - xi);
+        const fy = smooth(y - yi);
+        const a = hash2(xi, yi, seed);
+        const b = hash2(xi + 1, yi, seed);
+        const c = hash2(xi, yi + 1, seed);
+        const d = hash2(xi + 1, yi + 1, seed);
+        return lerp(lerp(a, b, fx), lerp(c, d, fx), fy);
+    }
+    function rrect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    // 말 하나를 (cx, cy) 에 그린다. p(0~1) 만큼 대시 오프셋으로 획을 긋는다 — who 1 은 X(두 획), 2 는 O(원)
+    function drawMark(ctx, who, cx, cy, r, p, w, col) {
+        ctx.save();
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = col;
+        if (who === 1) {
+            const d = r * 2 * Math.SQRT2;
+            for (let k = 0; k < 2; k += 1) {
+                const pk = clamp(p * 2 - k, 0, 1);
+                if (pk <= 0.001) {
+                    continue;
+                }
+                ctx.setLineDash([d, d]);
+                ctx.lineDashOffset = d * (1 - pk);
+                ctx.beginPath();
+                if (k === 0) {
+                    ctx.moveTo(cx - r, cy - r);
+                    ctx.lineTo(cx + r, cy + r);
+                }
+                else {
+                    ctx.moveTo(cx + r, cy - r);
+                    ctx.lineTo(cx - r, cy + r);
+                }
+                ctx.stroke();
+            }
+        }
+        else {
+            const L = PI2 * r;
+            if (p > 0.001) {
+                ctx.setLineDash([L, L]);
+                ctx.lineDashOffset = L * (1 - clamp(p, 0, 1));
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + PI2);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    }
+    function mount(root, make) {
+        const canvas = root.querySelector('[data-role="canvas"]');
+        const statusEl = root.querySelector('[data-role="status"]');
+        const btnEl = root.querySelector('[data-role="btn"]');
+        if (!canvas || !statusEl || !btnEl) {
+            return function () { return; };
+        }
+        const ctx0 = canvas.getContext('2d');
+        if (!ctx0) {
+            return function () { return; };
+        }
+        const ctx = ctx0;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const inp = { x: -1, y: -1, cur: -1, key: false, idle: 99999 };
+        const scene = make(inp, reduce);
+        let paused = false;
+        let focused = false;
+        let rafId = 0;
+        let lastTs = -1;
+        let accMs = 0;
+        let lastLabel = '';
+        const cleaners = [];
+        function listen(target, type, fn) {
+            target.addEventListener(type, fn);
+            cleaners.push(function () { target.removeEventListener(type, fn); });
+        }
+        function show() {
+            scene.draw(ctx);
+            if (inp.key && focused && inp.cur >= 0) {
+                const r = scene.rect(inp.cur);
+                ctx.save();
+                ctx.lineWidth = 2.5;
+                ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+                rrect(ctx, r[0] + 2, r[1] + 2, r[2] - 4, r[3] - 4, 8);
+                ctx.stroke();
+                ctx.restore();
+            }
+            let t = scene.label();
+            if (inp.key && inp.cur >= 0) {
+                const n = scene.n();
+                t += ' · ' + TXT_CELL + ' ' + (Math.floor(inp.cur / n) + 1) + '-' + ((inp.cur % n) + 1);
+            }
+            if (t !== lastLabel) {
+                lastLabel = t;
+                statusEl.textContent = t;
+            }
+        }
+        function localPoint(e) {
+            const r = canvas.getBoundingClientRect();
+            inp.x = clamp((e.clientX - r.left) * W / r.width, 0, W);
+            inp.y = clamp((e.clientY - r.top) * H / r.height, 0, H);
+            inp.idle = 0;
+            inp.key = false;
+        }
+        function tick(ts) {
+            if (lastTs < 0) {
+                lastTs = ts;
+            }
+            const frameDt = Math.min(ts - lastTs, 160);
+            lastTs = ts;
+            if (!paused) {
+                accMs += frameDt;
+                while (accMs >= FIXED_DT) {
+                    inp.idle += 1;
+                    scene.step();
+                    accMs -= FIXED_DT;
+                }
+                show();
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+        btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+        if (reduce) {
+            root.classList.remove('is-demo');
+            scene.auto();
+            scene.auto();
+            scene.auto();
+            show();
+        }
+        listen(btnEl, 'click', function () {
+            if (reduce) {
+                scene.auto();
+                show();
+                return;
+            }
+            paused = !paused;
+            if (paused) {
+                root.classList.remove('is-demo');
+            }
+            else {
+                root.classList.add('is-demo');
+            }
+            btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        });
+        listen(canvas, 'focus', function () { focused = true; });
+        listen(canvas, 'blur', function () { focused = false; if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointermove', function (e) {
+            localPoint(e);
+            scene.hover(scene.hit(inp.x, inp.y));
+            if (reduce) {
+                show();
+            }
+        });
+        listen(canvas, 'pointerleave', function () { scene.hover(-1); if (reduce) {
+            show();
+        } });
+        listen(canvas, 'pointerdown', function (e) {
+            localPoint(e);
+            const i = scene.hit(inp.x, inp.y);
+            if (i >= 0) {
+                scene.tap(i);
+            }
+            if (reduce) {
+                show();
+            }
+        });
+        listen(canvas, 'keydown', function (e) {
+            const ev = e;
+            const k = ev.key;
+            const n = scene.n();
+            const mid = Math.floor((n * n) / 2);
+            if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown') {
+                ev.preventDefault();
+                if (inp.cur < 0) {
+                    inp.cur = mid;
+                }
+                else {
+                    let r = Math.floor(inp.cur / n);
+                    let c = inp.cur % n;
+                    if (k === 'ArrowLeft') {
+                        c = Math.max(0, c - 1);
+                    }
+                    if (k === 'ArrowRight') {
+                        c = Math.min(n - 1, c + 1);
+                    }
+                    if (k === 'ArrowUp') {
+                        r = Math.max(0, r - 1);
+                    }
+                    if (k === 'ArrowDown') {
+                        r = Math.min(n - 1, r + 1);
+                    }
+                    inp.cur = r * n + c;
+                }
+                inp.key = true;
+                inp.idle = 0;
+                scene.hover(inp.cur);
+                if (reduce) {
+                    show();
+                }
+                return;
+            }
+            if (k === 'Enter' || k === ' ') {
+                ev.preventDefault();
+                if (inp.cur < 0) {
+                    inp.cur = mid;
+                }
+                inp.key = true;
+                inp.idle = 0;
+                scene.tap(inp.cur);
+                if (reduce) {
+                    show();
+                }
+            }
+        });
+        if (!reduce) {
+            rafId = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(rafId);
+            for (let i = 0; i < cleaners.length; i += 1) {
+                cleaners[i]();
+            }
+        };
+    }
+    const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]];
+    const SCORE_WIN = 10;
+    const TXT_X_TURN = 'Xの番';
+    const TXT_O_TURN = 'Oの番';
+    const TXT_X_WIN = 'Xの勝ち';
+    const TXT_O_WIN = 'Oの勝ち';
+    const TXT_DRAW = '引き分け';
+    function newGame() { return { b: [0, 0, 0, 0, 0, 0, 0, 0, 0], turn: 1, over: false, line: -1 }; }
+    // 완성된 줄의 번호(LINES 안의 위치). 없으면 -1
+    function lineOf(b) {
+        for (let k = 0; k < LINES.length; k += 1) {
+            const l = LINES[k];
+            if (b[l[0]] !== 0 && b[l[0]] === b[l[1]] && b[l[1]] === b[l[2]]) {
+                return k;
+            }
+        }
+        return -1;
+    }
+    function emptyCells(b) {
+        const out = [];
+        for (let i = 0; i < 9; i += 1) {
+            if (b[i] === 0) {
+                out.push(i);
+            }
+        }
+        return out;
+    }
+    function place(g, i) {
+        if (g.over || g.b[i] !== 0) {
+            return false;
+        }
+        g.b[i] = g.turn;
+        g.line = lineOf(g.b);
+        if (g.line >= 0 || emptyCells(g.b).length === 0) {
+            g.over = true;
+        }
+        else {
+            g.turn = 3 - g.turn;
+        }
+        return true;
+    }
+    function gameLabel(g) {
+        if (g.over) {
+            return g.line >= 0 ? (g.b[LINES[g.line][0]] === 1 ? TXT_X_WIN : TXT_O_WIN) : TXT_DRAW;
+        }
+        return g.turn === 1 ? TXT_X_TURN : TXT_O_TURN;
+    }
+    // 전수 탐색 — X 시점 점수. depth 가 0 이 되면 더 보지 않고 0 으로 친다. cnt.n 은 방문한 국면 수
+    function solve(b, turn, ply, depth, cnt) {
+        cnt.n += 1;
+        const w = lineOf(b);
+        if (w >= 0) {
+            const s = SCORE_WIN - ply;
+            if (b[LINES[w][0]] === 1) {
+                cnt.x += 1;
+                return s;
+            }
+            cnt.o += 1;
+            return -s;
+        }
+        if (depth <= 0) {
+            return 0;
+        }
+        let best = turn === 1 ? -1000 : 1000;
+        let any = false;
+        for (let i = 0; i < 9; i += 1) {
+            if (b[i] !== 0) {
+                continue;
+            }
+            b[i] = turn;
+            const v = solve(b, 3 - turn, ply + 1, depth - 1, cnt);
+            b[i] = 0;
+            any = true;
+            if (turn === 1 ? v > best : v < best) {
+                best = v;
+            }
+        }
+        return any ? best : 0;
+    }
+    // 둘 곳마다 점수. 이미 찬 칸은 NaN. 둔 사람(turn) 시점이 아니라 X 시점 값이다
+    function cellScores(b, turn, depth, cnt, per) {
+        const out = [];
+        for (let i = 0; i < 9; i += 1) {
+            if (b[i] !== 0) {
+                out.push(NaN);
+                if (per) {
+                    per.push({ n: 0, x: 0, o: 0 });
+                }
+                continue;
+            }
+            b[i] = turn;
+            const c = { n: 0, x: 0, o: 0 };
+            out.push(solve(b, 3 - turn, 1, depth - 1, c));
+            b[i] = 0;
+            cnt.n += c.n;
+            cnt.x += c.x;
+            cnt.o += c.o;
+            if (per) {
+                per.push(c);
+            }
+        }
+        return out;
+    }
+    function bestCell(b, turn, depth) {
+        const cnt = { n: 0, x: 0, o: 0 };
+        const sc = cellScores(b, turn, depth, cnt);
+        let best = -1;
+        for (let i = 0; i < 9; i += 1) {
+            if (isNaN(sc[i])) {
+                continue;
+            }
+            if (best < 0 || (turn === 1 ? sc[i] > sc[best] : sc[i] < sc[best])) {
+                best = i;
+            }
+        }
+        return best;
+    }
+    function gridRect(i, ox, oy, cs) {
+        return [ox + (i % 3) * cs, oy + Math.floor(i / 3) * cs, cs, cs];
+    }
+    function gridHit(x, y, ox, oy, cs) {
+        const c = Math.floor((x - ox) / cs);
+        const r = Math.floor((y - oy) / cs);
+        return c >= 0 && c < 3 && r >= 0 && r < 3 ? r * 3 + c : -1;
+    }
+    const MATCH_DEPTH = 9;
+    const REPLY_MS = 420;
+    // 한 판 진행기 — 사람은 X, 컴퓨터는 O. 사람이 가만히 있으면(idle) 둘 다 컴퓨터가 두어 루프를 만든다.
+    // pick 이 있으면 자동 대국의 수를 그 함수가 정한다. 판이 끝나면 holdMs 뒤에 새 판
+    function makeMatch(inp, reduce, turnMs, holdMs, seed, depth, onPlace, onReset, pick) {
+        const rng = lcg(seed);
+        let t = 0;
+        let reply = -1;
+        let hold = 0;
+        const m = {
+            g: newGame(),
+            since: 0,
+            move(i) {
+                const who = m.g.turn;
+                if (place(m.g, i)) {
+                    m.since = 0;
+                    onPlace(i, who);
+                }
+            },
+            tap(i) {
+                if (m.g.over) {
+                    reset();
+                    return;
+                }
+                if (m.g.turn !== 1 || m.g.b[i] !== 0) {
+                    return;
+                }
+                m.move(i);
+                if (!m.g.over) {
+                    if (reduce) {
+                        m.move(bestCell(m.g.b, 2, depth));
+                    }
+                    else {
+                        reply = REPLY_MS;
+                    }
+                }
+            },
+            step() {
+                m.since += FIXED_DT;
+                if (m.g.over) {
+                    hold += FIXED_DT;
+                    if (hold >= holdMs) {
+                        reset();
+                    }
+                    return;
+                }
+                if (reply >= 0) {
+                    reply -= FIXED_DT;
+                    if (reply < 0) {
+                        m.move(bestCell(m.g.b, 2, depth));
+                    }
+                    return;
+                }
+                if (inp.idle > IDLE_TICKS) {
+                    t += FIXED_DT;
+                    if (t >= turnMs) {
+                        t = 0;
+                        autoMove();
+                    }
+                }
+            },
+            auto() {
+                if (m.g.over) {
+                    reset();
+                }
+                else {
+                    autoMove();
+                }
+            },
+        };
+        function reset() {
+            m.g = newGame();
+            t = 0;
+            reply = -1;
+            hold = 0;
+            onReset();
+        }
+        function autoMove() {
+            if (pick) {
+                const p = pick();
+                if (p >= 0) {
+                    m.move(p);
+                }
+                return;
+            }
+            const e = emptyCells(m.g.b);
+            if (m.g.turn === 1 && (e.length > 6 || rng() < 0.3)) {
+                m.move(e[Math.floor(rng() * e.length)]);
+                return;
+            }
+            m.move(bestCell(m.g.b, m.g.turn, depth));
+        }
+        return m;
+    }
+    const MARK_MS = 360;
+    const OVERSHOOT = 1.1;
+    const STROKE_W = 7;
+    const SPRING_K = 260;
+    const TURN_MS = 560;
+    const HOLD_MS = 1500;
+    const CELL = 88;
+    const OX = 108;
+    const OY = 18;
+    const RING_MS = 520;
+    const make = function (inp, reduce) {
+        // 감쇠 스프링 — 처음 값 0 에서 1 로 갈 때 최대 OVERSHOOT 까지 넘치도록 감쇠비를 거꾸로 푼다
+        const ov = Math.max(OVERSHOOT - 1, 0.001);
+        const ln = Math.log(ov);
+        const zeta = -ln / Math.sqrt(Math.PI * Math.PI + ln * ln);
+        const damp = 2 * zeta * Math.sqrt(SPRING_K);
+        const pos = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+        const vel = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+        const age = [-1, -1, -1, -1, -1, -1, -1, -1, -1];
+        const who = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let hov = -1;
+        let clock = 0;
+        const m = makeMatch(inp, reduce, TURN_MS, HOLD_MS, 11, MATCH_DEPTH, function (i, w) {
+            who[i] = w;
+            if (reduce) {
+                age[i] = 99999;
+                pos[i] = 1;
+                vel[i] = 0;
+                return;
+            }
+            age[i] = 0;
+            pos[i] = 0;
+            vel[i] = 0;
+        }, function () {
+            for (let i = 0; i < 9; i += 1) {
+                age[i] = -1;
+                pos[i] = 0;
+                vel[i] = 0;
+                who[i] = 0;
+            }
+        }, null);
+        return {
+            step() {
+                clock += FIXED_DT;
+                m.step();
+                const dt = FIXED_DT / 1000;
+                for (let i = 0; i < 9; i += 1) {
+                    if (age[i] < 0) {
+                        continue;
+                    }
+                    age[i] += FIXED_DT;
+                    // 16ms 한 걸음을 네 번으로 쪼개 적분 — 한 번에 가면 식이 목표로 한 넘침보다 작게 나온다
+                    for (let q = 0; q < 4; q += 1) {
+                        const a = -SPRING_K * (pos[i] - 1) - damp * vel[i];
+                        vel[i] += (a * dt) / 4;
+                        pos[i] += (vel[i] * dt) / 4;
+                    }
+                }
+            },
+            draw(ctx) {
+                ctx.fillStyle = rgba(BG, 1);
+                ctx.fillRect(0, 0, W, H);
+                const wl = m.g.line >= 0 ? LINES[m.g.line] : [];
+                for (let i = 0; i < 9; i += 1) {
+                    const r = gridRect(i, OX, OY, CELL);
+                    const cx = r[0] + CELL / 2;
+                    const cy = r[1] + CELL / 2;
+                    const x = age[i] >= 0 ? pos[i] : 1;
+                    const pad = (CELL - 8) * (age[i] >= 0 ? 0.86 + 0.14 * x : 1);
+                    let col = TILE;
+                    if (age[i] >= 0) {
+                        col = mix(TILE, who[i] === 1 ? SKY : PINK, 0.2);
+                    }
+                    if (wl.indexOf(i) >= 0) {
+                        col = mix(col, MINT, 0.35 + 0.15 * Math.sin(clock / 160));
+                    }
+                    if (hov === i && age[i] < 0 && !m.g.over) {
+                        col = mix(TILE, CREAM, 0.12);
+                    }
+                    ctx.fillStyle = rgba(col, 1);
+                    rrect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, 12);
+                    ctx.fill();
+                    if (age[i] < 0) {
+                        continue;
+                    }
+                    const q = age[i] / RING_MS;
+                    if (q < 1) {
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = rgba(who[i] === 1 ? SKY : PINK, (1 - q) * 0.55);
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, 20 + 38 * smooth(q), 0, PI2);
+                        ctx.stroke();
+                    }
+                    const p = clamp(age[i] / MARK_MS, 0, 1);
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.scale(Math.max(x, 0), Math.max(x, 0));
+                    drawMark(ctx, who[i], 0, 0, 22, p, STROKE_W, rgba(who[i] === 1 ? SKY : PINK, 1));
+                    ctx.restore();
+                }
+            },
+            label() { return gameLabel(m.g); },
+            hit(x, y) { return gridHit(x, y, OX, OY, CELL); },
+            hover(i) { hov = i; },
+            tap(i) { m.tap(i); },
+            auto() { m.auto(); },
+            rect(i) { return gridRect(i, OX, OY, CELL); },
+            n() { return 3; },
+        };
+    };
+    return mount(root, make);
+})();
+</script>
+</body>
+</html>
