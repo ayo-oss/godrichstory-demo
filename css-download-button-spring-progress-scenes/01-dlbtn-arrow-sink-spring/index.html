@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>눌리면 가라앉는 화살표 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="sk is-demo" id="skRoot">
+  <button class="sk__btn" id="skBtn" type="button">
+    <svg class="sk__icon" id="skIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M6.5 10.5 12 16l5.5-5.5M5 20h14"/></svg>
+    <span>내려받기</span>
+  </button>
+  <p class="sk__meta"><span class="sk__tag">Y</span> <b id="skY">0.0</b> <span class="sk__tag">TILT</span> <b id="skTilt">0.0</b></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 눌림 깊이와 기울기를 스프링 방정식 x'' = -K (x - 목표) - D x' 로 매 프레임 적분한다.
+  // 감쇠가 약해서 화살표는 제자리를 지나쳤다가 한 번 더 출렁이고 멈춘다 (CSS transition 으로는 못 만드는 곡선).
+  var SINK_PX = 10;
+  var SPRING_K = 120;
+  var SPRING_DAMP = 9;
+  var TILT_MAX = 14;
+  var START_MS = 200;
+  var HOLD_MS = 560;
+  var CYCLE_MS = 2000;
+
+  var root = document.getElementById('skRoot');
+  var btn = document.getElementById('skBtn');
+  var icon = document.getElementById('skIcon');
+  var yEl = document.getElementById('skY');
+  var tiltEl = document.getElementById('skTilt');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var y = 0;
+  var vy = 0;
+  var tilt = 0;
+  var vt = 0;
+  var pressed = false;
+  var side = 0;
+  var t0 = null;
+  var lastTs = null;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function stopDemo() { root.classList.remove('is-demo'); }
+
+  function goal(now) {
+    if (root.classList.contains('is-demo') && now >= START_MS) {
+      var ph = (now - START_MS) % CYCLE_MS;
+      return { depth: ph < HOLD_MS ? SINK_PX : 0, lean: ph < HOLD_MS ? -0.8 : (ph < 1100 ? 0.8 : 0) };
+    }
+    return { depth: pressed ? SINK_PX : 0, lean: side };
+  }
+
+  function integrate(dt, g) {
+    var n = Math.ceil(dt / 0.008);
+    var h = dt / n;
+    for (var i = 0; i < n; i += 1) {
+      vy += (-SPRING_K * (y - g.depth) - SPRING_DAMP * vy) * h;
+      y += vy * h;
+      vt += (-SPRING_K * (tilt - g.lean * TILT_MAX) - SPRING_DAMP * vt) * h;
+      tilt += vt * h;
+    }
+  }
+
+  function render() {
+    var p = clamp(y / SINK_PX, -0.3, 1);
+    icon.style.transform = 'translateY(' + y.toFixed(2) + 'px) rotate(' + tilt.toFixed(2) + 'deg)';
+    btn.style.transform = 'translateY(' + (y * 0.3).toFixed(2) + 'px)';
+    btn.style.setProperty('--p', p.toFixed(3));
+    yEl.textContent = y.toFixed(1);
+    tiltEl.textContent = tilt.toFixed(1);
+  }
+
+  function snap() {
+    var g = goal(0);
+    y = g.depth; vy = 0; tilt = g.lean * TILT_MAX; vt = 0;
+    render();
+  }
+
+  function press() { stopDemo(); pressed = true; if (reduce) snap(); }
+  function release() { pressed = false; if (reduce) snap(); }
+
+  btn.addEventListener('pointerdown', function (e) {
+    var r = btn.getBoundingClientRect();
+    side = clamp((e.clientX - r.left - r.width / 2) / (r.width / 2), -1, 1);
+    press();
+  });
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointerleave', release);
+  btn.addEventListener('pointercancel', release);
+  btn.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) { side = 0; press(); }
+  });
+  btn.addEventListener('keyup', function (e) { if (e.key === 'Enter' || e.key === ' ') release(); });
+  btn.addEventListener('blur', release);
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    integrate(dt, goal(now));
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    render();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A File That Flies Into the Tray — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="fl is-demo" id="flRoot">
+  <button class="fl__btn" id="flBtn" type="button">
+    <svg class="fl__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M6.5 10.5 12 16l5.5-5.5M5 20h14"/></svg>
+    <span>Download</span>
+  </button>
+  <svg class="fl__file" id="flFile" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></svg>
+  <div class="fl__tray" id="flTray" role="status"><span>Received</span><b id="flCount">0</b></div>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 파일 아이콘은 2차 베지어 곡선 B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2 위를 날아간다.
+  // 제어점 P1 을 옆으로 ARC_HEIGHT 만큼 밀어 활처럼 휘게 하고, 도착하면 트레이를 TRAY_BOUNCE 만큼 눌러 스프링으로 되돌린다.
+  var FLY_MS = 700;
+  var ARC_HEIGHT = 56;
+  var TRAY_BOUNCE = 14;
+  var TRAY_K = 180;
+  var TRAY_DAMP = 10;
+  var START_MS = 200;
+  var CYCLE_MS = 2000;
+
+  var root = document.getElementById('flRoot');
+  var btn = document.getElementById('flBtn');
+  var file = document.getElementById('flFile');
+  var tray = document.getElementById('flTray');
+  var countEl = document.getElementById('flCount');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var clock = 0;
+  var flightStart = null;
+  var count = 0;
+  var ty = 0;
+  var tv = 0;
+  var lastCycle = -1;
+  var t0 = null;
+  var lastTs = null;
+
+  function stopDemo() { root.classList.remove('is-demo'); }
+  function ease(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  function geometry() {
+    var w = root.clientWidth;
+    var b = btn.offsetTop + btn.offsetHeight / 2;
+    var tr = tray.offsetTop + tray.offsetHeight / 2;
+    return { x: w / 2, y0: b, y2: tr };
+  }
+
+  function land() {
+    count += 1;
+    ty = TRAY_BOUNCE;
+    tv = 0;
+    flightStart = null;
+  }
+
+  function renderFile(now) {
+    if (flightStart === null) { file.style.opacity = '0'; return; }
+    var t = Math.min(1, (now - flightStart) / FLY_MS);
+    var e = ease(t);
+    var g = geometry();
+    var cx = g.x + 2 * ARC_HEIGHT;
+    var cy = (g.y0 + g.y2) / 2;
+    var x = (1 - e) * (1 - e) * g.x + 2 * (1 - e) * e * cx + e * e * g.x;
+    var y = (1 - e) * (1 - e) * g.y0 + 2 * (1 - e) * e * cy + e * e * g.y2;
+    var rot = 28 * Math.sin(Math.PI * e);
+    var sc = 1 - 0.45 * e;
+    file.style.opacity = t > 0.9 ? String((1 - t) * 10) : '1';
+    file.style.transform = 'translate(' + (x - 14).toFixed(1) + 'px,' + (y - 14).toFixed(1) + 'px) rotate(' + rot.toFixed(1) + 'deg) scale(' + sc.toFixed(3) + ')';
+  }
+
+  function renderTray() {
+    tray.style.transform = 'translateY(' + ty.toFixed(2) + 'px)';
+    tray.style.setProperty('--h', Math.max(0, Math.min(1, ty / TRAY_BOUNCE)).toFixed(3));
+    countEl.textContent = String(count);
+  }
+
+  function activate() {
+    stopDemo();
+    if (reduce) { count += 1; renderTray(); return; }
+    if (flightStart === null) flightStart = clock;
+  }
+  btn.addEventListener('click', activate);
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    clock = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (root.classList.contains('is-demo') && clock >= START_MS) {
+      var cyc = Math.floor((clock - START_MS) / CYCLE_MS);
+      if (cyc > lastCycle) { lastCycle = cyc; count = 0; flightStart = START_MS + cyc * CYCLE_MS; }
+    }
+    if (flightStart !== null && clock - flightStart >= FLY_MS) land();
+    var n = Math.ceil(dt / 0.008);
+    var h = dt / n;
+    for (var i = 0; i < n; i += 1) {
+      tv += (-TRAY_K * ty - TRAY_DAMP * tv) * h;
+      ty += tv * h;
+    }
+    renderFile(clock);
+    renderTray();
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    renderTray();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

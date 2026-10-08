@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>실패하고 감쇠하며 다시 시도하는 버튼 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rt is-demo" id="rtRoot">
+  <div class="rt__wrap" id="rtBar" role="progressbar" aria-labelledby="rtLabel" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0%">
+    <svg class="rt__svg" viewBox="0 0 232 96" aria-hidden="true">
+      <rect class="rt__ring" id="rtRing" x="3" y="3" width="226" height="90" rx="16" pathLength="100"/>
+    </svg>
+    <button class="rt__btn" id="rtBtn" type="button">
+      <svg class="rt__icon" viewBox="0 0 24 24" aria-hidden="true"><path id="rtGlyph" d="M12 4v11M6.5 10.5 12 16l5.5-5.5"/></svg>
+      <span id="rtLabel">내려받기</span>
+    </button>
+  </div>
+  <p class="rt__meta"><span class="rt__tag">X</span> <b id="rtX">0.0</b> <span class="rt__tag">P</span> <b id="rtP">0</b></p>
+  <p class="rt__sr" id="rtStatus" role="status"></p>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 실패 순간부터 흔들림 x = SHAKE_AMP x e^(-SHAKE_DECAY x t) x sin(2 pi f t) 로 진폭이 지수로 줄고,
+  // 링은 실패한 길이에서 처음으로 REWIND_MS 동안 되감긴다. 두 번째 시도는 끝까지 간다.
+  var SHAKE_AMP = 14;
+  var SHAKE_DECAY = 5;
+  var REWIND_MS = 500;
+  var SHAKE_HZ = 4.5;
+  var FAIL_AT = 0.62;
+  var RUN_MS = 700;
+  var REWIND_DELAY = 150;
+  var START_MS = 200;
+  var CYCLE_MS = 2000;
+
+  var root = document.getElementById('rtRoot');
+  var bar = document.getElementById('rtBar');
+  var btn = document.getElementById('rtBtn');
+  var ring = document.getElementById('rtRing');
+  var labelEl = document.getElementById('rtLabel');
+  var glyph = document.getElementById('rtGlyph');
+  var xEl = document.getElementById('rtX');
+  var pEl = document.getElementById('rtP');
+  var statusEl = document.getElementById('rtStatus');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var ARROW = 'M12 4v11M6.5 10.5 12 16l5.5-5.5';
+  var BANG = 'M12 5v9M12 19v.5';
+  var clock = 0;
+  var runStart = null;
+  var outcome = 'fail';
+  var attempts = 0;
+  var settled = null;
+  var lastNote = '';
+  var t0 = null;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function stopDemo() { root.classList.remove('is-demo'); }
+  function outQuad(t) { return 1 - (1 - t) * (1 - t); }
+  function inOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+  function busy(now) { return runStart !== null && now - runStart < RUN_MS + REWIND_DELAY + REWIND_MS; }
+
+  function frame(now) {
+    var s;
+    var res = outcome;
+    if (root.classList.contains('is-demo')) {
+      s = now < START_MS ? null : START_MS + Math.floor((now - START_MS) / CYCLE_MS) * CYCLE_MS;
+      res = 'fail';
+    } else {
+      s = runStart;
+    }
+    if (settled) return settled;
+    if (s === null) return { p: 0, x: 0, e: 0, label: '내려받기', glyph: ARROW, note: '' };
+    var t = now - s;
+    if (t < RUN_MS) {
+      var u = outQuad(t / RUN_MS);
+      return { p: res === 'fail' ? FAIL_AT * u : u, x: 0, e: 0, label: '받는 중', glyph: ARROW, note: '' };
+    }
+    if (res === 'ok') return { p: 1, x: 0, e: 0, label: '완료', glyph: ARROW, note: '받기 완료' };
+    var tau = (t - RUN_MS) / 1000;
+    var rw = clamp((t - RUN_MS - REWIND_DELAY) / REWIND_MS, 0, 1);
+    return {
+      p: FAIL_AT * (1 - inOut(rw)),
+      x: SHAKE_AMP * Math.exp(-SHAKE_DECAY * tau) * Math.sin(2 * Math.PI * SHAKE_HZ * tau),
+      e: 1,
+      label: rw >= 1 ? '다시 시도' : '실패',
+      glyph: BANG,
+      note: '받기가 끊겼어요'
+    };
+  }
+
+  function paint(f) {
+    var pct = Math.round(f.p * 100);
+    ring.style.strokeDashoffset = String((100 - f.p * 100).toFixed(2));
+    ring.style.opacity = f.p < 0.004 ? '0' : '1';
+    bar.style.setProperty('--e', String(f.e));
+    bar.style.transform = 'translateX(' + f.x.toFixed(2) + 'px)';
+    labelEl.textContent = f.label;
+    glyph.setAttribute('d', f.glyph);
+    xEl.textContent = f.x.toFixed(1);
+    pEl.textContent = String(pct);
+    bar.setAttribute('aria-valuenow', String(pct));
+    bar.setAttribute('aria-valuetext', pct + '%');
+    if (f.note !== lastNote) { lastNote = f.note; statusEl.textContent = f.note; }
+  }
+
+  btn.addEventListener('click', function () {
+    stopDemo();
+    if (busy(clock)) return;
+    outcome = attempts % 2 === 0 ? 'fail' : 'ok';
+    attempts += 1;
+    if (reduce) {
+      settled = outcome === 'ok'
+        ? { p: 1, x: 0, e: 0, label: '완료', glyph: ARROW, note: '받기 완료' }
+        : { p: 0, x: 0, e: 1, label: '다시 시도', glyph: BANG, note: '받기가 끊겼어요' };
+      paint(settled);
+      settled = null;
+      runStart = null;
+      return;
+    }
+    runStart = clock;
+  });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    clock = ts - t0;
+    paint(frame(clock));
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    paint(frame(0));
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>

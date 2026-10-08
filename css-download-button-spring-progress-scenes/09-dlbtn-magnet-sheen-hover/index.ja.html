@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カーソルへ寄って光るボタン — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="mg is-demo" id="mgRoot">
+  <button class="mg__btn" id="mgBtn" type="button">
+    <span class="mg__sheen" id="mgSheen" aria-hidden="true"></span>
+    <svg class="mg__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M6.5 10.5 12 16l5.5-5.5M5 20h14"/></svg>
+    <span class="mg__text">ダウンロード</span>
+  </button>
+</div>
+</main>
+<script>
+(function () {
+  // 기법: 커서와 버튼 중심의 거리 x PULL_RATE 만큼 버튼이 끌려가고 (LEAN_MAX 에서 멈춤), 광택 띠는 커서의 가로 위치를 따라 지수 보간으로 쫓아간다.
+  // 포인터가 없는 데모에서는 같은 계산에 궤도 위 가짜 커서를 넣는다.
+  var PULL_RATE = 0.12;
+  var SHEEN_W = 64;
+  var LEAN_MAX = 10;
+  var LEAN_LERP = 10;
+  var SHEEN_LERP = 14;
+  var START_MS = 200;
+  var CYCLE_MS = 2000;
+  var ORBIT_X = 150;
+  var ORBIT_Y = 48;
+
+  var root = document.getElementById('mgRoot');
+  var btn = document.getElementById('mgBtn');
+  var sheen = document.getElementById('mgSheen');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var lx = 0;
+  var ly = 0;
+  var sx = -SHEEN_W * 2;
+  var alpha = 0;
+  var cursor = null;
+  var kbFocus = false;
+  var t0 = null;
+  var lastTs = null;
+
+  sheen.style.width = SHEEN_W + 'px';
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function stopDemo() { root.classList.remove('is-demo'); }
+
+  function goal(now) {
+    var w = btn.offsetWidth;
+    var h = btn.offsetHeight;
+    var d = null;
+    if (root.classList.contains('is-demo') && now >= START_MS) {
+      var a = 2 * Math.PI * ((now - START_MS) % CYCLE_MS) / CYCLE_MS;
+      d = { x: ORBIT_X * Math.cos(a), y: ORBIT_Y * Math.sin(a) };
+    } else if (cursor) {
+      d = cursor;
+    }
+    if (kbFocus && !d) return { lx: 0, ly: 0, sx: w / 2, a: 1, gx: 50, gy: 50 };
+    if (!d) return { lx: 0, ly: 0, sx: -SHEEN_W * 2, a: 0, gx: 50, gy: 50 };
+    return {
+      lx: clamp(d.x * PULL_RATE, -LEAN_MAX, LEAN_MAX),
+      ly: clamp(d.y * PULL_RATE, -LEAN_MAX, LEAN_MAX),
+      sx: clamp(d.x + w / 2, -SHEEN_W, w + SHEEN_W),
+      a: 1,
+      gx: clamp((d.x + w / 2) / w * 100, -20, 120),
+      gy: clamp((d.y + h / 2) / h * 100, -40, 140)
+    };
+  }
+
+  function render(g) {
+    btn.style.transform = 'translate(' + lx.toFixed(2) + 'px,' + ly.toFixed(2) + 'px)';
+    sheen.style.transform = 'translateX(' + (sx - SHEEN_W / 2).toFixed(1) + 'px) skewX(-20deg)';
+    sheen.style.opacity = alpha.toFixed(3);
+    btn.style.setProperty('--gx', g.gx.toFixed(1) + '%');
+    btn.style.setProperty('--gy', g.gy.toFixed(1) + '%');
+    btn.style.setProperty('--ga', (alpha * 0.55).toFixed(3));
+  }
+
+  function snap() {
+    var g = goal(0);
+    lx = g.lx; ly = g.ly; sx = g.sx; alpha = g.a;
+    render(g);
+  }
+
+  root.addEventListener('pointermove', function (e) {
+    var r = btn.getBoundingClientRect();
+    stopDemo();
+    cursor = { x: e.clientX - (r.left - lx) - r.width / 2, y: e.clientY - (r.top - ly) - r.height / 2 };
+    if (reduce) snap();
+  });
+  root.addEventListener('pointerleave', function () { cursor = null; if (reduce) snap(); });
+  btn.addEventListener('focus', function () { kbFocus = btn.matches(':focus-visible'); if (kbFocus) stopDemo(); if (reduce) snap(); });
+  btn.addEventListener('blur', function () { kbFocus = false; if (reduce) snap(); });
+
+  function tick(ts) {
+    if (t0 === null) t0 = ts;
+    var now = ts - t0;
+    var dt = lastTs === null ? 0.016 : Math.min(0.05, (ts - lastTs) / 1000);
+    lastTs = ts;
+    var g = goal(now);
+    var kl = 1 - Math.exp(-dt * LEAN_LERP);
+    var ks = 1 - Math.exp(-dt * SHEEN_LERP);
+    lx += (g.lx - lx) * kl;
+    ly += (g.ly - ly) * kl;
+    sx += (g.sx - sx) * ks;
+    alpha += (g.a - alpha) * ks;
+    render(g);
+    requestAnimationFrame(tick);
+  }
+
+  if (reduce) {
+    stopDemo();
+    snap();
+  } else {
+    requestAnimationFrame(tick);
+  }
+})();
+</script>
+</body>
+</html>
