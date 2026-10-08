@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>휠로 확대해도 포인터 아래 순간이 제자리에 머물고 묶음이 다시 계산되는 파형 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wf is-demo" id="wfRoot">
+  <canvas class="wf__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="휠로 확대해도 포인터 아래 순간이 제자리에 머물고 묶음이 다시 계산되는 파형"></canvas>
+  <p class="wf__status" data-role="status" aria-live="polite">확대 배율</p>
+  <button class="wf__btn" data-role="btn" type="button">멈춤</button>
+  <p class="wf__caption">휠로 확대해도 포인터 아래 순간이 제자리에 머물고 묶음이 다시 계산되는 파형</p>
+</div>
+</main>
+<script>
+(function () {
+const W = 480;
+const H = 300;
+const PI2 = Math.PI * 2;
+const FIXED_DT = 16;
+const IDLE_STEPS = 220;
+const REDUCE_STEP_MS = 900;
+const REDUCE_WARM_STEPS = 40;
+const BTN_PAUSE = '멈춤';
+const BTN_PLAY = '재생';
+const BTN_NEXT = '다음 순간';
+// 파스텔 팔레트와 어두운 바탕 두 끝 색
+const PINK = [255, 170, 196];
+const MINT = [150, 226, 196];
+const LILAC = [196, 176, 255];
+const SKY_BLUE = [150, 214, 255];
+const BUTTER = [255, 230, 150];
+const CREAM = [255, 247, 230];
+const INK = [23, 20, 26];
+const BG_TOP = [24, 21, 40];
+const BG_BOT = [48, 42, 78];
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a, b, k) { return a + (b - a) * k; }
+function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+function rgba(c, a) { return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + a.toFixed(3) + ')'; }
+// 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+function lcg(seed) {
+    let s = seed >>> 0;
+    return function () {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return s / 4294967296;
+    };
+}
+// 정수 하나와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+function hash1(i, seed) {
+    let h = (Math.imul(i | 0, 374761393) + Math.imul(seed | 0, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+}
+// 사인 두 개를 음절마다 갈아 끼우고 엔벨로프를 씌운 합성 신호 (소리는 재생하지 않고 수치만 만든다)
+function synth(n, seed) {
+    const rnd = lcg(seed);
+    const out = new Float32Array(n);
+    let i = 0;
+    let p1 = 0;
+    let p2 = 0;
+    let peak = 0.0001;
+    while (i < n) {
+        const len = 1800 + Math.floor(rnd() * 4200);
+        const amp = 0.18 + rnd() * 0.82;
+        const rest = rnd() < 0.18;
+        const f1 = 0.02 + rnd() * 0.09;
+        const f2 = f1 * (1.5 + rnd());
+        const stop = Math.min(n, i + len);
+        for (let k = i; k < stop; k += 1) {
+            const x = (k - i) / len;
+            const env = Math.min(1, x / 0.06) * Math.pow(1 - x, 0.8);
+            p1 += PI2 * f1;
+            p2 += PI2 * f2;
+            const tone = Math.sin(p1) * 0.7 + Math.sin(p2) * 0.3;
+            const gain = rest ? 0.03 : amp * env;
+            const v = gain * tone + (rnd() - 0.5) * 0.08 * (rest ? 0.4 : amp);
+            out[k] = v;
+            const a = Math.abs(v);
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        i = stop;
+    }
+    const norm = 0.92 / peak;
+    for (let k = 0; k < n; k += 1) {
+        out[k] *= norm;
+    }
+    return out;
+}
+// 표본 구간 [a, b) 의 최솟값과 최댓값 — 결과는 rangeLo, rangeHi 에 둔다
+let rangeLo = 0;
+let rangeHi = 0;
+function scanRange(sig, a, b) {
+    const from = Math.max(0, Math.floor(a));
+    const to = Math.min(sig.length, Math.max(from + 1, Math.ceil(b)));
+    let lo = 1e9;
+    let hi = -1e9;
+    for (let i = from; i < to; i += 1) {
+        const v = sig[i];
+        if (v < lo) {
+            lo = v;
+        }
+        if (v > hi) {
+            hi = v;
+        }
+    }
+    if (lo > hi) {
+        lo = 0;
+        hi = 0;
+    }
+    rangeLo = lo;
+    rangeHi = hi;
+}
+function paintBg(ctx, top, bot) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, rgba(top, 1));
+    g.addColorStop(1, rgba(bot, 1));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+}
+// 가짜 포인터 — 시연 동안 손이 움직이는 것처럼 보이게 그린다
+function drawCursor(ctx, x, y, down) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, 15);
+    ctx.lineTo(4, 11.5);
+    ctx.lineTo(7.5, 18);
+    ctx.lineTo(10, 16.8);
+    ctx.lineTo(6.6, 10.4);
+    ctx.lineTo(11.5, 10.2);
+    ctx.closePath();
+    ctx.fillStyle = rgba(CREAM, 1);
+    ctx.strokeStyle = rgba(INK, 1);
+    ctx.lineWidth = 1.4;
+    ctx.fill();
+    ctx.stroke();
+    if (down) {
+        ctx.beginPath();
+        ctx.arc(0, 0, 9, 0, PI2);
+        ctx.strokeStyle = rgba(PINK, 0.9);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+function boot(root, make) {
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const btnEl = root.querySelector('[data-role="btn"]');
+    if (!(canvasEl instanceof HTMLCanvasElement) || !statusEl || !(btnEl instanceof HTMLButtonElement)) {
+        return function () { };
+    }
+    const ctxOrNull = canvasEl.getContext('2d');
+    if (!ctxOrNull) {
+        return function () { };
+    }
+    const canvas = canvasEl;
+    const ctx = ctxOrNull;
+    const status = statusEl;
+    const btn = btnEl;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const cleaners = [];
+    let paused = false;
+    let idle = IDLE_STEPS + 1;
+    let clock = 0;
+    let lastSayAt = -1e9;
+    let lastText = status.textContent || '';
+    let scene = null;
+    let rafId = 0;
+    let acc = 0;
+    let lastTs = -1;
+    function isAuto() { return !reduce && !paused && idle > IDLE_STEPS; }
+    function sync() {
+        const on = isAuto();
+        if (root.classList.contains('is-demo') !== on) {
+            root.classList.toggle('is-demo', on);
+        }
+    }
+    function fit() {
+        const r = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const cw = Math.max(1, Math.round(r.width * dpr));
+        const ch = Math.max(1, Math.round(r.height * dpr));
+        canvas.width = cw;
+        canvas.height = ch;
+        ctx.setTransform(cw / W, 0, 0, ch / H, 0, 0);
+    }
+    const host = {
+        ctx,
+        canvas,
+        root,
+        reduce,
+        touch() {
+            idle = 0;
+            sync();
+        },
+        auto: isAuto,
+        refresh() {
+            if (scene) {
+                scene.draw();
+            }
+        },
+        say(text) {
+            if (text === lastText) {
+                return;
+            }
+            if (!reduce && clock - lastSayAt < 250) {
+                return;
+            }
+            lastText = text;
+            lastSayAt = clock;
+            // 시연이 혼자 돌 때는 읽어 주지 않고, 사람이 만졌을 때만 알린다
+            status.setAttribute('aria-live', isAuto() ? 'off' : 'polite');
+            status.textContent = text;
+        },
+        local(e) {
+            const r = canvas.getBoundingClientRect();
+            return [clamp((e.clientX - r.left) * W / Math.max(1, r.width), 0, W), clamp((e.clientY - r.top) * H / Math.max(1, r.height), 0, H)];
+        },
+        listen(target, type, fn, opts) {
+            target.addEventListener(type, fn, opts);
+            cleaners.push(function () { target.removeEventListener(type, fn, opts); });
+        }
+    };
+    function advance(ms) {
+        if (!scene) {
+            return;
+        }
+        const n = Math.max(1, Math.round(ms / FIXED_DT));
+        for (let i = 0; i < n; i += 1) {
+            idle += 1;
+            clock += FIXED_DT;
+            scene.step();
+        }
+    }
+    function frame(ts) {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min(ts - lastTs, 160);
+        lastTs = ts;
+        if (!paused && scene) {
+            acc += dt;
+            while (acc >= FIXED_DT) {
+                idle += 1;
+                clock += FIXED_DT;
+                scene.step();
+                acc -= FIXED_DT;
+            }
+            sync();
+            scene.draw();
+        }
+        rafId = requestAnimationFrame(frame);
+    }
+    scene = make(host);
+    btn.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+    fit();
+    if (reduce) {
+        root.classList.remove('is-demo');
+        advance(REDUCE_WARM_STEPS * FIXED_DT);
+    }
+    scene.draw();
+    host.listen(btn, 'click', function () {
+        if (reduce) {
+            advance(REDUCE_STEP_MS);
+            host.refresh();
+            return;
+        }
+        paused = !paused;
+        btn.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+        sync();
+    });
+    host.listen(window, 'resize', function () {
+        fit();
+        host.refresh();
+    });
+    if (!reduce) {
+        rafId = requestAnimationFrame(frame);
+    }
+    return function () {
+        cancelAnimationFrame(rafId);
+        for (let i = 0; i < cleaners.length; i += 1) {
+            cleaners[i]();
+        }
+    };
+}
+const SAMPLE_N = 43200;
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 96;
+const ZOOM_STEP = 1.5;
+const VIEW_START = 0;
+const COL_PX = 2;
+const MID_Y = 142;
+const HALF_Y = 78;
+const SCRIPT_LEN = 420;
+const KEY_PAN_PX = 24;
+const TXT_ZOOM = '확대 배율';
+// 포인터 아래 표본 위치(anchorT)가 같은 화면 x(anchorPx)에 머물도록 시작점을 거꾸로 구한다
+function viewStartFor(anchorT, anchorPx, span) {
+    return clamp(anchorT - anchorPx / W * span, 0, SAMPLE_N - span);
+}
+function niceStep(raw) {
+    const p = Math.pow(10, Math.floor(Math.log10(Math.max(1, raw))));
+    const m = raw / p;
+    return (m < 1.5 ? 1 : (m < 3.5 ? 2 : (m < 7.5 ? 5 : 10))) * p;
+}
+function makeZoomScene(h) {
+    const sig = synth(SAMPLE_N, 4593);
+    const nOv = Math.floor(W / 4);
+    const ovLo = [];
+    const ovHi = [];
+    for (let c = 0; c < nOv; c += 1) {
+        scanRange(sig, c * SAMPLE_N / nOv, (c + 1) * SAMPLE_N / nOv);
+        ovLo.push(rangeLo);
+        ovHi.push(rangeHi);
+    }
+    let zt = ZOOM_MIN;
+    let z = ZOOM_MIN;
+    let span = SAMPLE_N / ZOOM_MIN;
+    let anchorPx = W / 2;
+    let anchorT = VIEW_START + anchorPx / W * span;
+    let start = VIEW_START;
+    let hoverPx = W / 2;
+    let k = 0;
+    let fakeX = 330;
+    let fakeDown = false;
+    let drag = false;
+    let lastX = 0;
+    function recompute() {
+        span = SAMPLE_N / z;
+        start = viewStartFor(anchorT, anchorPx, span);
+    }
+    // 휠 한 칸 — 포인터가 가리키는 표본을 앵커로 잡고 목표 배율만 바꾼다
+    function notch(dir, px) {
+        const next = clamp(zt * (dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP), ZOOM_MIN, ZOOM_MAX);
+        if (next === zt) {
+            return false;
+        }
+        anchorT = start + px / W * span;
+        anchorPx = px;
+        zt = next;
+        if (h.reduce) {
+            z = zt;
+            recompute();
+        }
+        return true;
+    }
+    function pan(dxPx) {
+        anchorT = clamp(anchorT - dxPx / W * span, 0, SAMPLE_N);
+        recompute();
+    }
+    h.listen(h.canvas, 'wheel', function (e) {
+        const we = e;
+        const px = h.local(we)[0];
+        hoverPx = px;
+        if (notch(we.deltaY < 0 ? 1 : -1, px)) {
+            // 배율이 실제로 바뀔 때만 페이지 스크롤을 막는다
+            e.preventDefault();
+            h.touch();
+            h.refresh();
+        }
+    }, { passive: false });
+    h.listen(h.canvas, 'pointerdown', function (e) {
+        const pe = e;
+        drag = true;
+        lastX = h.local(pe)[0];
+        h.canvas.setPointerCapture(pe.pointerId);
+        h.touch();
+    });
+    h.listen(h.canvas, 'pointermove', function (e) {
+        const x = h.local(e)[0];
+        hoverPx = x;
+        if (drag) {
+            pan(x - lastX);
+            lastX = x;
+            h.touch();
+            h.refresh();
+        }
+    });
+    const drop = function () { drag = false; };
+    h.listen(h.canvas, 'pointerup', drop);
+    h.listen(h.canvas, 'pointercancel', drop);
+    h.listen(h.canvas, 'keydown', function (e) {
+        const key = e.key;
+        let handled = true;
+        if (key === '+' || key === '=') {
+            notch(1, hoverPx);
+        }
+        else if (key === '-' || key === '_') {
+            notch(-1, hoverPx);
+        }
+        else if (key === 'ArrowLeft') {
+            pan(KEY_PAN_PX);
+        }
+        else if (key === 'ArrowRight') {
+            pan(-KEY_PAN_PX);
+        }
+        else if (key === 'Home') {
+            zt = ZOOM_MIN;
+            anchorT = SAMPLE_N / 2;
+            anchorPx = W / 2;
+            if (h.reduce) {
+                z = zt;
+                recompute();
+            }
+        }
+        else {
+            handled = false;
+        }
+        if (handled) {
+            e.preventDefault();
+            h.touch();
+            h.refresh();
+        }
+    });
+    function script() {
+        const j = k % SCRIPT_LEN;
+        if (j === 0) {
+            zt = ZOOM_MIN;
+            anchorT = SAMPLE_N * 0.5;
+            anchorPx = W / 2;
+        }
+        fakeDown = false;
+        if (j < 12) {
+            fakeX = 330;
+        }
+        else if (j < 56) {
+            fakeX = 330;
+            if ((j - 12) % 4 === 0) {
+                notch(1, fakeX);
+            }
+        }
+        else if (j >= 64 && j < 130) {
+            fakeDown = true;
+            fakeX = 330 - (j - 64) * 1.2;
+            pan(-1.2);
+        }
+        else if (j >= 190 && j < 232) {
+            fakeX = lerp(250, 120, (j - 190) / 42);
+        }
+        else if (j >= 240 && j < 312) {
+            fakeX = 120;
+            if ((j - 240) % 6 === 0) {
+                notch(-1, fakeX);
+            }
+        }
+        hoverPx = fakeX;
+    }
+    return {
+        step() {
+            k += 1;
+            if (h.auto()) {
+                script();
+            }
+            if (!h.reduce) {
+                const r = zt / z;
+                z = Math.abs(Math.log(r)) < 0.002 ? zt : z * Math.pow(r, 0.2);
+                recompute();
+            }
+        },
+        draw() {
+            const ctx = h.ctx;
+            paintBg(ctx, BG_TOP, BG_BOT);
+            // 위쪽 개요 띠 — 전체 신호와 지금 보는 구간
+            for (let c = 0; c < nOv; c += 1) {
+                ctx.fillStyle = rgba(LILAC, 0.5);
+                ctx.fillRect(c * 4, 40 - ovHi[c] * 5, 3, (ovHi[c] - ovLo[c]) * 5 + 1);
+            }
+            ctx.strokeStyle = rgba(BUTTER, 1);
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(start / SAMPLE_N * W, 31, Math.max(3, span / SAMPLE_N * W), 18);
+            // 눈금
+            const tickStep = niceStep(span / 7);
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            for (let t = Math.ceil(start / tickStep) * tickStep; t < start + span; t += tickStep) {
+                const x = (t - start) / span * W;
+                ctx.fillStyle = rgba(CREAM, 0.16);
+                ctx.fillRect(x, 56, 1, 178);
+                ctx.fillStyle = rgba(CREAM, 0.7);
+                ctx.fillText(String(Math.round(t)), x, 64);
+            }
+            ctx.fillStyle = rgba(CREAM, 0.16);
+            ctx.fillRect(0, MID_Y, W, 1);
+            const spp = span / W;
+            if (spp >= 1.6) {
+                // 묶음 단계 — 기둥마다 최대·최소
+                const n = Math.floor(W / COL_PX);
+                const per = span / n;
+                for (let c = 0; c < n; c += 1) {
+                    scanRange(sig, start + c * per, start + (c + 1) * per);
+                    const loud = clamp(Math.max(rangeHi, -rangeLo), 0, 1);
+                    ctx.fillStyle = rgba(mix(LILAC, PINK, loud), 0.9);
+                    ctx.fillRect(c * COL_PX, MID_Y - rangeHi * HALF_Y, COL_PX - 0.5, Math.max(1, (rangeHi - rangeLo) * HALF_Y));
+                }
+            }
+            else {
+                // 표본 단계 — 표본마다 점과 선
+                ctx.beginPath();
+                const first = Math.floor(start);
+                const last = Math.min(SAMPLE_N - 1, Math.ceil(start + span));
+                for (let i = first; i <= last; i += 1) {
+                    const x = (i - start) / span * W;
+                    const y = MID_Y - sig[i] * HALF_Y;
+                    if (i === first) {
+                        ctx.moveTo(x, y);
+                    }
+                    else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.strokeStyle = rgba(MINT, 0.95);
+                ctx.lineWidth = 1.4;
+                ctx.stroke();
+                ctx.fillStyle = rgba(PINK, 1);
+                for (let i = first; i <= last; i += 1) {
+                    ctx.beginPath();
+                    ctx.arc((i - start) / span * W, MID_Y - sig[i] * HALF_Y, 1.8, 0, PI2);
+                    ctx.fill();
+                }
+            }
+            // 앵커 — 확대해도 이 선 아래 표본은 같은 자리에 있다
+            ctx.fillStyle = rgba(BUTTER, 0.8);
+            ctx.fillRect(anchorPx - 0.5, 56, 1.5, 178);
+            if (h.auto() && !h.reduce) {
+                drawCursor(ctx, fakeX, MID_Y + 6, fakeDown);
+            }
+            h.say(TXT_ZOOM + ': ' + z.toFixed(1) + ' x / ' + Math.round(span));
+        }
+    };
+}
+
+    boot(document.getElementById('wfRoot'), makeZoomScene);
+})();
+</script>
+</body>
+</html>
