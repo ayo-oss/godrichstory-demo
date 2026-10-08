@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>다가가면 점이 퍼지고 잡으면 가라앉는 손잡이 모양 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rh is-demo" id="rh" data-demo="1">
+  <div class="rh__panel" data-r="panel">
+    <p class="rh__meta"><span class="rh__tag">W</span> <b data-r="w">0</b> <span class="rh__tag">TILT</span> <b data-r="tilt">0.0</b></p>
+    <button class="rh__pad" data-r="pad" type="button" aria-label="크기 조절 손잡이">
+      <i class="rh__dot" data-r="dot"></i><i class="rh__dot" data-r="dot"></i><i class="rh__dot" data-r="dot"></i>
+      <i class="rh__dot" data-r="dot"></i><i class="rh__dot" data-r="dot"></i><i class="rh__dot" data-r="dot"></i>
+    </button>
+  </div>
+  <i class="rh__cursor" data-r="cursor"></i>
+</div>
+</main>
+<script>
+
+(function () {
+    const root = document.getElementById("rh");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+    }
+    function pos(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function spring(x, v, to, k, c, dt) {
+        const n = Math.max(1, Math.ceil(dt / 0.008));
+        const h = dt / n;
+        for (let i = 0; i < n; i += 1) {
+            v += (-k * (x - to) - c * v) * h;
+            x += v * h;
+        }
+        return [x, v];
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 점 여섯 개가 포인터까지 거리(HOVER_SPREAD 안)에 비례해 커지며 바깥으로 밀려난다.
+    // 잡으면 손잡이가 PRESS_DEPTH 만큼 가라앉고, 가로 속도에 TILT_BY_VEL 을 곱한 각도만큼 기운다.
+    const GRIP_DOTS = 6;
+    const HOVER_SPREAD = 56;
+    const PRESS_DEPTH = 3;
+    const TILT_BY_VEL = 0.012;
+    const PAD = 52;
+    const INSET = 8;
+    const MIN_W = 120;
+    const MIN_H = 96;
+    const panel = q("[data-r=panel]");
+    const pad = q("[data-r=pad]");
+    const cursor = q("[data-r=cursor]");
+    const wEl = q("[data-r=w]");
+    const tiltEl = q("[data-r=tilt]");
+    const dots = Array.prototype.slice.call(root.querySelectorAll("[data-r=dot]"));
+    const cols = [0, 1, 2, 0, 1, 0];
+    const rowsOf = [0, 0, 0, 1, 1, 2];
+    let w = 0;
+    let h = 0;
+    let tw = 0;
+    let th = 0;
+    let px = -999;
+    let py = -999;
+    let lastPx = -999;
+    let gx = 0;
+    let gy = 0;
+    let vx = 0;
+    let tilt = 0;
+    let press = 0;
+    let pressed = false;
+    let dragging = false;
+    let ready = false;
+    function init() {
+        if (ready)
+            return;
+        ready = true;
+        tw = w = root.clientWidth * 0.72;
+        th = h = root.clientHeight * 0.7;
+    }
+    function userTakes() {
+        stopDemo();
+        dragging = false;
+        pressed = false;
+        init();
+    }
+    function leg(l, a, b, from, to) {
+        const t = seg(l, a, b);
+        return [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t];
+    }
+    function script(now) {
+        const W = root.clientWidth;
+        const H = root.clientHeight;
+        const ph = now % 2000;
+        const c0 = [W * 0.72 - INSET - PAD / 2, H * 0.7 - INSET - PAD / 2];
+        const c1 = [W * 0.97 - INSET - PAD / 2, H * 0.95 - INSET - PAD / 2];
+        const p0 = [c0[0] + 70, c0[1] - 40];
+        let q = p0;
+        pressed = false;
+        if (ph >= 200 && ph < 600)
+            q = leg(ph, 200, 600, p0, c0);
+        else if (ph >= 600 && ph < 760)
+            q = c0;
+        else if (ph >= 760 && ph < 1000) {
+            q = leg(ph, 760, 1000, c0, c1);
+            pressed = true;
+        }
+        else if (ph >= 1000 && ph < 1160) {
+            q = c1;
+            pressed = true;
+        }
+        else if (ph >= 1160 && ph < 1240)
+            q = c1;
+        else if (ph >= 1240 && ph < 1480) {
+            q = leg(ph, 1240, 1480, c1, c0);
+            pressed = true;
+        }
+        else if (ph >= 1480 && ph < 1560)
+            q = c0;
+        else if (ph >= 1560 && ph < 1960)
+            q = leg(ph, 1560, 1960, c0, p0);
+        else if (ph >= 1960)
+            q = p0;
+        px = q[0];
+        py = q[1];
+        gx = INSET + PAD / 2;
+        gy = INSET + PAD / 2;
+        dragging = pressed;
+    }
+    function snap() {
+        init();
+        w = tw;
+        h = th;
+    }
+    function step(dt, now) {
+        init();
+        if (demo)
+            script(now);
+        if (dragging) {
+            tw = clamp(px + gx, MIN_W, root.clientWidth);
+            th = clamp(py + gy, MIN_H, root.clientHeight);
+        }
+        tw = Math.min(tw, root.clientWidth);
+        th = Math.min(th, root.clientHeight);
+        const k = 1 - Math.exp(-28 * dt);
+        w = Math.min(w + (tw - w) * k, root.clientWidth);
+        h = Math.min(h + (th - h) * k, root.clientHeight);
+        press += ((pressed || dragging ? 1 : 0) - press) * (1 - Math.exp(-20 * dt));
+        const v = dragging && lastPx > -900 ? (px - lastPx) / Math.max(dt, 0.001) : 0;
+        vx += (v - vx) * 0.25;
+        lastPx = px;
+        tilt += (clamp(vx * TILT_BY_VEL, -18, 18) - tilt) * (1 - Math.exp(-14 * dt));
+    }
+    function render() {
+        panel.style.width = w.toFixed(1) + "px";
+        panel.style.height = h.toFixed(1) + "px";
+        const ox = w - INSET - PAD;
+        const oy = h - INSET - PAD;
+        pad.style.setProperty("--p", press.toFixed(3));
+        pad.style.transform = "translate(" + (press * PRESS_DEPTH).toFixed(2) + "px," + (press * PRESS_DEPTH).toFixed(2) + "px) rotate(" + tilt.toFixed(2) + "deg)";
+        for (let i = 0; i < GRIP_DOTS; i += 1) {
+            const bx = 40 - cols[i] * 14;
+            const by = 40 - rowsOf[i] * 14;
+            const dx = ox + bx - px;
+            const dy = oy + by - py;
+            const d = Math.max(1, Math.hypot(dx, dy));
+            const f = Math.max(0, 1 - d / HOVER_SPREAD);
+            const s = (1 + 1.2 * f * f) * (1 - 0.2 * press);
+            const mx = (dx / d) * 6 * f;
+            const my = (dy / d) * 6 * f;
+            dots[i].style.transform = "translate(" + (bx + mx - 4).toFixed(2) + "px," + (by + my - 4).toFixed(2) + "px) scale(" + s.toFixed(3) + ")";
+        }
+        wEl.textContent = String(Math.round(w));
+        tiltEl.textContent = tilt.toFixed(1);
+        cursor.style.transform = "translate(" + px.toFixed(1) + "px," + py.toFixed(1) + "px)";
+    }
+    on(root, "pointermove", (e) => {
+        if (demo)
+            return;
+        const p = pos(e);
+        px = p.x;
+        py = p.y;
+        if (dragging) {
+            tw = clamp(px + gx, MIN_W, root.clientWidth);
+            th = clamp(py + gy, MIN_H, root.clientHeight);
+        }
+        sync();
+    });
+    on(root, "pointerleave", () => {
+        if (demo || dragging)
+            return;
+        px = -999;
+        py = -999;
+        sync();
+    });
+    on(pad, "pointerdown", (e) => {
+        userTakes();
+        pad.setPointerCapture(e.pointerId);
+        const p = pos(e);
+        px = p.x;
+        py = p.y;
+        lastPx = px;
+        gx = w - p.x;
+        gy = h - p.y;
+        pressed = true;
+        dragging = true;
+        press = 1;
+        sync();
+    });
+    on(pad, "pointerup", () => { dragging = false; pressed = false; sync(); });
+    on(pad, "pointercancel", () => { dragging = false; pressed = false; sync(); });
+    on(pad, "keydown", (e) => {
+        const k = e.key;
+        if (k !== "ArrowLeft" && k !== "ArrowRight" && k !== "ArrowUp" && k !== "ArrowDown")
+            return;
+        e.preventDefault();
+        userTakes();
+        tw = clamp(tw + (k === "ArrowRight" ? 16 : k === "ArrowLeft" ? -16 : 0), MIN_W, root.clientWidth);
+        th = clamp(th + (k === "ArrowDown" ? 16 : k === "ArrowUp" ? -16 : 0), MIN_H, root.clientHeight);
+        press = 1;
+        sync();
+    });
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        const dt = Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        step(dt, ts - t0);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>

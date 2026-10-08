@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>行の高さの倍数に吸い付くテキストエリアのつまみ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rh is-demo" id="rh" data-demo="1">
+  <div class="rh__box" data-r="box">
+    <div class="rh__lines">
+      <i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i><i class="rh__ln"></i>
+    </div>
+    <button class="rh__grip" data-r="grip" type="button" aria-label="サイズ変更つまみ"></button>
+  </div>
+  <i class="rh__raw" data-r="raw"></i>
+  <p class="rh__rows"><b data-r="rows">0</b><span class="rh__tag">ROWS</span></p>
+  <i class="rh__cursor" data-r="cursor"></i>
+</div>
+</main>
+<script>
+
+(function () {
+    const root = document.getElementById("rh");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+    }
+    function pos(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function spring(x, v, to, k, c, dt) {
+        const n = Math.max(1, Math.ceil(dt / 0.008));
+        const h = dt / n;
+        for (let i = 0; i < n; i += 1) {
+            v += (-k * (x - to) - c * v) * h;
+            x += v * h;
+        }
+        return [x, v];
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 끄는 높이(raw)를 줄 높이로 나눠 가장 가까운 줄 수로 반올림하고, 상자는 그 높이까지 지수 감쇠로 끌려간다.
+    // 점선은 손이 실제로 있는 높이, 상자는 줄에 맞춘 높이 - 둘의 차이가 계산이다.
+    const LINE_H = 28;
+    const PAD = 8;
+    const ROUND_ROWS = 1;
+    const EASE_TO = 14;
+    const box = q("[data-r=box]");
+    const grip = q("[data-r=grip]");
+    const raw = q("[data-r=raw]");
+    const rowsEl = q("[data-r=rows]");
+    const cursor = q("[data-r=cursor]");
+    let h = 0;
+    let rawH = 0;
+    let rows = 3;
+    let px = 0;
+    let py = 0;
+    let gy = 0;
+    let dragging = false;
+    let ready = false;
+    root.style.setProperty("--lh", LINE_H + "px");
+    function maxRows() {
+        return Math.max(2, Math.floor((root.clientHeight - 2 * PAD - 12) / LINE_H));
+    }
+    function rowsFor(height) {
+        const r = Math.round((height - 2 * PAD) / LINE_H / ROUND_ROWS) * ROUND_ROWS;
+        return clamp(r, 1, maxRows());
+    }
+    function init() {
+        if (ready)
+            return;
+        ready = true;
+        rows = Math.max(2, Math.round(maxRows() * 0.3));
+        h = rawH = rows * LINE_H + 2 * PAD;
+    }
+    function userTakes() {
+        stopDemo();
+        dragging = false;
+        init();
+    }
+    function script(now) {
+        const ph = now % 2000;
+        const lo = rows0() * LINE_H + 2 * PAD - 0.4 * LINE_H;
+        const hi = maxRows() * LINE_H + 2 * PAD;
+        const mid = Math.round(maxRows() * 0.5) * LINE_H + 2 * PAD + 0.45 * LINE_H;
+        let y = lo;
+        if (ph >= 200 && ph < 900)
+            y = lo + (hi - lo) * seg(ph, 200, 900);
+        else if (ph >= 900 && ph < 1100)
+            y = hi;
+        else if (ph >= 1100 && ph < 1800)
+            y = hi + (mid - hi) * seg(ph, 1100, 1800);
+        else if (ph >= 1800)
+            y = mid + (lo - mid) * seg(ph, 1800, 2000);
+        py = y - 4;
+        gy = 4;
+        dragging = ph >= 200;
+    }
+    function rows0() {
+        return Math.max(2, Math.round(maxRows() * 0.3));
+    }
+    function snap() {
+        init();
+        h = rows * LINE_H + 2 * PAD;
+    }
+    function step(dt, now) {
+        init();
+        if (demo)
+            script(now);
+        if (dragging) {
+            rawH = clamp(py + gy, LINE_H + 2 * PAD, root.clientHeight - 12);
+            rows = rowsFor(rawH);
+        }
+        h += (rows * LINE_H + 2 * PAD - h) * (1 - Math.exp(-EASE_TO * dt));
+    }
+    function render() {
+        box.style.height = h.toFixed(1) + "px";
+        raw.style.transform = "translateY(" + rawH.toFixed(1) + "px)";
+        rowsEl.textContent = String(rows);
+        cursor.style.transform = "translate(" + (root.clientWidth * 0.5 - 32).toFixed(1) + "px," + py.toFixed(1) + "px)";
+    }
+    on(grip, "pointerdown", (e) => {
+        userTakes();
+        grip.setPointerCapture(e.pointerId);
+        const p = pos(e);
+        py = p.y;
+        gy = h - p.y;
+        dragging = true;
+    });
+    on(grip, "pointermove", (e) => {
+        if (!dragging)
+            return;
+        py = pos(e).y;
+        rawH = clamp(py + gy, LINE_H + 2 * PAD, root.clientHeight - 12);
+        rows = rowsFor(rawH);
+        sync();
+    });
+    on(grip, "pointerup", () => { dragging = false; });
+    on(grip, "pointercancel", () => { dragging = false; });
+    on(grip, "keydown", (e) => {
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown")
+            return;
+        e.preventDefault();
+        userTakes();
+        rows = clamp(rows + (e.key === "ArrowDown" ? 1 : -1), 1, maxRows());
+        rawH = rows * LINE_H + 2 * PAD;
+        sync();
+    });
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        const dt = Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        step(dt, ts - t0);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>

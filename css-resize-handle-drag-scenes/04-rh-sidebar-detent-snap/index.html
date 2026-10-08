@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>세 단계 폭에 철컥 걸리는 사이드바 가장자리 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rh is-demo" id="rh" data-demo="1">
+  <div class="rh__side" data-r="side">
+    <p class="rh__item"><i class="rh__ico"></i><span class="rh__lab" data-r="lab">Home</span></p>
+    <p class="rh__item"><i class="rh__ico"></i><span class="rh__lab" data-r="lab">Inbox</span></p>
+    <p class="rh__item"><i class="rh__ico"></i><span class="rh__lab" data-r="lab">Tasks</span></p>
+    <p class="rh__item"><i class="rh__ico"></i><span class="rh__lab" data-r="lab">Setup</span></p>
+    <button class="rh__grip" data-r="grip" type="button" aria-label="크기 조절 손잡이"></button>
+  </div>
+  <i class="rh__tick" data-r="tick"></i><i class="rh__tick" data-r="tick"></i><i class="rh__tick" data-r="tick"></i>
+  <div class="rh__main"><i></i><i></i><i></i></div>
+  <p class="rh__meta"><span class="rh__tag">DETENT</span> <b data-r="det">1</b> <span class="rh__tag">W</span> <b data-r="w">0</b></p>
+  <i class="rh__cursor" data-r="cursor"></i>
+</div>
+</main>
+<script>
+
+(function () {
+    const root = document.getElementById("rh");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+    }
+    function pos(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function spring(x, v, to, k, c, dt) {
+        const n = Math.max(1, Math.ceil(dt / 0.008));
+        const h = dt / n;
+        for (let i = 0; i < n; i += 1) {
+            v += (-k * (x - to) - c * v) * h;
+            x += v * h;
+        }
+        return [x, v];
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 끄는 중에는 눈금 가까이에서 PULL_RADIUS 안으로 들어오는 만큼 끌려가고(거리 비례),
+    // 놓을 때는 손 속도에 FLING 시간을 곱해 미리 내다본 위치에서 가장 가까운 눈금(NEAREST)으로 간다.
+    const DETENTS = [56, 144, 232];
+    const PULL_RADIUS = 36;
+    const FLING_VEL = 0.2;
+    const side = q("[data-r=side]");
+    const grip = q("[data-r=grip]");
+    const cursor = q("[data-r=cursor]");
+    const wEl = q("[data-r=w]");
+    const detEl = q("[data-r=det]");
+    const labs = Array.prototype.slice.call(root.querySelectorAll("[data-r=lab]"));
+    const ticks = Array.prototype.slice.call(root.querySelectorAll("[data-r=tick]"));
+    let sw = DETENTS[0];
+    let vs = 0;
+    let target = DETENTS[0];
+    let raw = DETENTS[0];
+    let lastRaw = DETENTS[0];
+    let vel = 0;
+    let px = 0;
+    let py = 0;
+    let gx = 0;
+    let dragging = false;
+    function limit() { return Math.min(DETENTS[2], root.clientWidth - 48); }
+    function nearest(x) {
+        let best = 0;
+        for (let i = 1; i < DETENTS.length; i += 1) {
+            if (Math.abs(DETENTS[i] - x) < Math.abs(DETENTS[best] - x))
+                best = i;
+        }
+        return best;
+    }
+    function pulled(x) {
+        const d = DETENTS[nearest(x)];
+        const dist = Math.abs(x - d);
+        if (dist >= PULL_RADIUS)
+            return x;
+        const t = 1 - dist / PULL_RADIUS;
+        return x + (d - x) * t * t * 0.9;
+    }
+    function release() {
+        if (!dragging)
+            return;
+        dragging = false;
+        target = Math.min(DETENTS[nearest(raw + vel * FLING_VEL)], limit());
+    }
+    function userTakes() {
+        stopDemo();
+        dragging = false;
+    }
+    function script(now) {
+        const ph = now % 2000;
+        const was = dragging;
+        dragging = false;
+        if (ph >= 200 && ph < 560) {
+            raw = 60 + 110 * seg2(ph, 200, 560);
+            dragging = true;
+        }
+        else if (ph >= 1100 && ph < 1500) {
+            raw = DETENTS[2] - 132 * seg2(ph, 1100, 1500);
+            dragging = true;
+        }
+        if (!was && dragging) {
+            lastRaw = raw;
+            vel = 0;
+        }
+        if (was && !dragging) {
+            dragging = true;
+            release();
+        }
+        px = (dragging ? raw : sw) - 4;
+        py = root.clientHeight * 0.5;
+        gx = 4;
+    }
+    function seg2(t, a, b) { return clamp((t - a) / (b - a), 0, 1); }
+    function snap() {
+        sw = target;
+        vs = 0;
+    }
+    function step(dt, now) {
+        if (demo)
+            script(now);
+        if (dragging) {
+            if (!demo)
+                raw = clamp(px + gx, 40, limit());
+            vel += ((raw - lastRaw) / Math.max(dt, 0.001) - vel) * 0.3;
+            lastRaw = raw;
+            target = clamp(pulled(raw), 40, limit());
+        }
+        const a = spring(sw, vs, target, 900, 2 * 0.72 * 30, dt);
+        sw = a[0];
+        vs = a[1];
+    }
+    function render() {
+        side.style.width = sw.toFixed(1) + "px";
+        const open = clamp((sw - 100) / 60, 0, 1);
+        for (let i = 0; i < labs.length; i += 1)
+            labs[i].style.opacity = open.toFixed(2);
+        for (let i = 0; i < ticks.length; i += 1) {
+            ticks[i].style.transform = "translateX(" + DETENTS[i] + "px)";
+            ticks[i].setAttribute("data-on", i === nearest(sw) ? "1" : "0");
+        }
+        wEl.textContent = String(Math.round(sw));
+        detEl.textContent = String(nearest(sw) + 1);
+        cursor.style.transform = "translate(" + px.toFixed(1) + "px," + py.toFixed(1) + "px)";
+    }
+    on(grip, "pointerdown", (e) => {
+        userTakes();
+        grip.setPointerCapture(e.pointerId);
+        const p = pos(e);
+        px = p.x;
+        py = p.y;
+        gx = sw - p.x;
+        raw = lastRaw = sw;
+        vel = 0;
+        dragging = true;
+    });
+    on(grip, "pointermove", (e) => {
+        if (!dragging)
+            return;
+        px = pos(e).x;
+        raw = clamp(px + gx, 40, limit());
+        if (reduce) {
+            target = clamp(pulled(raw), 40, limit());
+            sync();
+        }
+    });
+    on(grip, "pointerup", release);
+    on(grip, "pointercancel", release);
+    on(grip, "keydown", (e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight")
+            return;
+        e.preventDefault();
+        userTakes();
+        const i = clamp(nearest(target) + (e.key === "ArrowRight" ? 1 : -1), 0, DETENTS.length - 1);
+        target = Math.min(DETENTS[i], limit());
+        sync();
+    });
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        const dt = Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        step(dt, ts - t0);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>

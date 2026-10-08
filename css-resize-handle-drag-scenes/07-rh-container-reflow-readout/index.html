@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>폭이 바뀌는 대로 배치가 갈아입는 카드 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="rh is-demo" id="rh" data-demo="1">
+  <div class="rh__box" data-r="box">
+    <div class="rh__cards">
+      <div class="rh__card"><i></i><span><b></b><b></b></span></div>
+      <div class="rh__card"><i></i><span><b></b><b></b></span></div>
+      <div class="rh__card"><i></i><span><b></b><b></b></span></div>
+    </div>
+    <button class="rh__grip" data-r="grip" type="button" aria-label="크기 조절 손잡이"></button>
+  </div>
+  <p class="rh__meta"><span class="rh__tag">W</span> <b data-r="w">0</b> <span class="rh__tag">RANGE</span> <b data-r="range">STACK</b></p>
+  <i class="rh__cursor" data-r="cursor"></i>
+</div>
+</main>
+<script>
+
+(function () {
+    const root = document.getElementById("rh");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let demo = !reduce;
+    let raf = 0;
+    let t0 = -1;
+    let last = -1;
+    const offs = [];
+    function q(sel) {
+        return root.querySelector(sel);
+    }
+    function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+    function seg(t, a, b) {
+        const c = clamp((t - a) / (b - a), 0, 1);
+        return c * c * (3 - 2 * c);
+    }
+    function on(el, type, fn) {
+        el.addEventListener(type, fn);
+        offs.push(() => el.removeEventListener(type, fn));
+    }
+    function stopDemo() {
+        demo = false;
+        root.removeAttribute("data-demo");
+        root.classList.remove("is-demo");
+    }
+    function pos(e) {
+        const r = root.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    function spring(x, v, to, k, c, dt) {
+        const n = Math.max(1, Math.ceil(dt / 0.008));
+        const h = dt / n;
+        for (let i = 0; i < n; i += 1) {
+            v += (-k * (x - to) - c * v) * h;
+            x += v * h;
+        }
+        return [x, v];
+    }
+    function sync() {
+        if (reduce) {
+            snap();
+            render();
+        }
+    }
+    // 기법: 상자 너비 하나(cw)를 JS 가 끌고, 안쪽 배치는 CSS @container 가 너비 구간으로 바꾼다.
+    // 구간 이름은 JS 가 같은 경계값(BREAK_A, BREAK_B)으로 읽어 화면 밑에 적는다.
+    const BREAK_A = 150;
+    const BREAK_B = 250;
+    const RANGE_LABEL = ["STACK", "ROW", "GRID"];
+    const MIN_W = 96;
+    const FOLLOW = 16;
+    const box = q("[data-r=box]");
+    const grip = q("[data-r=grip]");
+    const wEl = q("[data-r=w]");
+    const rangeEl = q("[data-r=range]");
+    const cursor = q("[data-r=cursor]");
+    let cw = 0;
+    let tw = 0;
+    let px = 0;
+    let py = 0;
+    let gx = 0;
+    let dragging = false;
+    let ready = false;
+    function maxW() { return root.clientWidth - 8; }
+    function init() {
+        if (ready)
+            return;
+        ready = true;
+        tw = cw = root.clientWidth * 0.34;
+    }
+    function rangeOf(width) { return width < BREAK_A ? 0 : width < BREAK_B ? 1 : 2; }
+    function userTakes() {
+        stopDemo();
+        dragging = false;
+        init();
+    }
+    function script(now) {
+        const W = root.clientWidth;
+        const ph = now % 2000;
+        const a = W * 0.34;
+        const b = maxW();
+        let x = a;
+        if (ph >= 200 && ph < 760)
+            x = a + (b - a) * seg(ph, 200, 760);
+        else if (ph >= 760 && ph < 1100)
+            x = b;
+        else if (ph >= 1100 && ph < 1800)
+            x = b + (a - b) * seg(ph, 1100, 1800);
+        dragging = true;
+        px = x - 4;
+        py = root.clientHeight * 0.45;
+        gx = 4;
+    }
+    function snap() {
+        init();
+        cw = tw;
+    }
+    function step(dt, now) {
+        init();
+        if (demo)
+            script(now);
+        if (dragging)
+            tw = clamp(px + gx, MIN_W, maxW());
+        cw += (tw - cw) * (1 - Math.exp(-FOLLOW * dt));
+    }
+    function render() {
+        box.style.width = cw.toFixed(1) + "px";
+        wEl.textContent = String(Math.round(cw));
+        rangeEl.textContent = RANGE_LABEL[rangeOf(cw)];
+        cursor.style.transform = "translate(" + px.toFixed(1) + "px," + py.toFixed(1) + "px)";
+    }
+    on(grip, "pointerdown", (e) => {
+        userTakes();
+        grip.setPointerCapture(e.pointerId);
+        const p = pos(e);
+        px = p.x;
+        py = p.y;
+        gx = cw - p.x;
+        dragging = true;
+    });
+    on(grip, "pointermove", (e) => {
+        if (!dragging)
+            return;
+        px = pos(e).x;
+        tw = clamp(px + gx, MIN_W, maxW());
+        sync();
+    });
+    on(grip, "pointerup", () => { dragging = false; });
+    on(grip, "pointercancel", () => { dragging = false; });
+    on(grip, "keydown", (e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight")
+            return;
+        e.preventDefault();
+        userTakes();
+        tw = clamp(tw + (e.key === "ArrowRight" ? 16 : -16), MIN_W, maxW());
+        sync();
+    });
+    function frame(ts) {
+        if (t0 < 0) {
+            t0 = ts;
+            last = ts;
+        }
+        const dt = Math.min(0.05, (ts - last) / 1000);
+        last = ts;
+        step(dt, ts - t0);
+        render();
+        raf = requestAnimationFrame(frame);
+    }
+    if (reduce) {
+        stopDemo();
+        snap();
+        render();
+    }
+    else {
+        raf = requestAnimationFrame(frame);
+    }
+    return () => {
+        cancelAnimationFrame(raf);
+        offs.forEach((f) => f());
+    };
+})();
+</script>
+</body>
+</html>
