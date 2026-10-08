@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로고 외곽선을 같은 빠르기로 따라 그으며 펜 끝이 빛나는 로더 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pc is-demo" id="pc">
+  <canvas class="pc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="진행률만큼 육각형 마크의 외곽선을 같은 빠르기로 그어 가며 펜 끝이 빛나는 로딩 화면. 가로로 끌거나 방향키로 진행률을 직접 옮기고, Enter 로 다시 시작, Space 로 일시정지, Esc 로 가상 진행에 돌아간다"></canvas>
+  <p class="pc__status" data-role="status" aria-live="off">외곽선을 긋는 중</p>
+  <div class="pc__tools">
+    <button class="pc__btn" data-role="restart" type="button">다시 시작</button>
+    <button class="pc__btn" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+  </div>
+  <div class="pc__bar" data-role="bar" role="progressbar" aria-label="로고 불러오기 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="pc__fill" data-role="fill"></span></div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
+    // 마크 중심 — 왼쪽 위는 버튼, 왼쪽은 수치, 왼쪽 아래는 상태 줄이라 마크는 오른쪽으로 비켜 둔다
+    const CX = 318;
+    const CY = 148;
+    // 마크 크기 — 육각형 중심에서 꼭짓점까지(px)
+    const LOGO_R = 104;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 조각을 얹어 명도 차로 경계가 읽힌다
+    const BG = [29, 26, 44];
+    const PANEL = [46, 41, 68];
+    const PAPER = [255, 248, 234];
+    const PAL = [
+        [124, 196, 255],
+        [255, 160, 190],
+        [126, 226, 192],
+        [190, 164, 255],
+        [255, 208, 168],
+        [246, 228, 140],
+        [150, 222, 236],
+        [232, 182, 228],
+        [196, 220, 160],
+    ];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function shadeRGB(c, k) { return [c[0] * k, c[1] * k, c[2] * k]; }
+    // 시드 고정 난수 — 같은 시드면 같은 배치가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 자체 기하 마크 — 꼭짓점이 위를 향한 둥근 육각형 안에 네 갈래 별 모양 구멍. 실존 브랜드와 무관한 도형
+    function hexVerts(r) {
+        const out = [];
+        for (let k = 0; k < 6; k += 1) {
+            const a = (-90 + 60 * k) * DEG;
+            out.push([CX + Math.cos(a) * r, CY + Math.sin(a) * r]);
+        }
+        return out;
+    }
+    // 별 — 바깥 꼭짓점 4개(위·오른쪽·아래·왼쪽)와 그 사이 안쪽 꼭짓점 4개를 번갈아
+    function starVerts(ro, ri) {
+        const out = [];
+        for (let k = 0; k < 8; k += 1) {
+            const a = (-90 + 45 * k) * DEG;
+            const r = k % 2 === 0 ? ro : ri;
+            out.push([CX + Math.cos(a) * r, CY + Math.sin(a) * r]);
+        }
+        return out;
+    }
+    // 모서리 둥글리기 — 꼭짓점 양옆을 변 길이의 cut 비율만큼 잘라 내고, 꼭짓점을 조절점으로 한 2차 베지어를 steps 칸으로 찍는다
+    function roundCorners(v, cut, steps) {
+        const out = [];
+        const n = v.length;
+        for (let i = 0; i < n; i += 1) {
+            const p = v[i];
+            const a = v[(i + n - 1) % n];
+            const b = v[(i + 1) % n];
+            const s = [lerp(p[0], a[0], cut), lerp(p[1], a[1], cut)];
+            const e = [lerp(p[0], b[0], cut), lerp(p[1], b[1], cut)];
+            for (let k = 0; k <= steps; k += 1) {
+                const t = k / steps;
+                const u = 1 - t;
+                out.push([u * u * s[0] + 2 * u * t * p[0] + t * t * e[0], u * u * s[1] + 2 * u * t * p[1] + t * t * e[1]]);
+            }
+        }
+        return out;
+    }
+    const LOGO_OUTER = roundCorners(hexVerts(LOGO_R), 0.2, 6);
+    const LOGO_HOLE = roundCorners(starVerts(44, 14), 0.16, 3);
+    // 외곽선 두 개 — 짝홀 규칙(evenodd)으로 칠하면 바깥 육각형만 칠해지고 별 자리는 뚫린다
+    const LOGO = [LOGO_OUTER, LOGO_HOLE];
+    // 점이 마크 안인가 — 오른쪽으로 쏜 반직선이 외곽선을 홀수 번 지나면 안(짝홀 규칙, 캔버스 evenodd 와 같은 판정)
+    function insideLogo(x, y) {
+        let inside = false;
+        for (let c = 0; c < LOGO.length; c += 1) {
+            const poly = LOGO[c];
+            for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+                const a = poly[i];
+                const b = poly[j];
+                if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) {
+                    inside = !inside;
+                }
+            }
+        }
+        return inside;
+    }
+    // 닫힌 외곽선의 둘레(px)
+    function ringLength(c) {
+        let s = 0;
+        for (let i = 0; i < c.length; i += 1) {
+            const a = c[i];
+            const b = c[(i + 1) % c.length];
+            s += Math.hypot(b[0] - a[0], b[1] - a[1]);
+        }
+        return s;
+    }
+    // 가상 진행 — 실제 네트워크 없이 시드 469 로 만든 도착 표(도착 시각 ms, 그때까지 받은 비율). STALL_CHUNK 번째 조각은 받는 양 없이 시간만 흐른다
+    const LOAD_MS = 1300;
+    const LOAD_CHUNKS = 7;
+    const STALL_CHUNK = 3;
+    function makeLoad(seed) {
+        const rng = makeRng(seed);
+        const gaps = [];
+        const sizes = [];
+        for (let k = 0; k < LOAD_CHUNKS; k += 1) {
+            gaps.push(0.6 + rng());
+            sizes.push(0.35 + rng());
+        }
+        sizes[STALL_CHUNK] = 0;
+        gaps[STALL_CHUNK] += 0.9;
+        let gs = 0;
+        let ss = 0;
+        for (let k = 0; k < LOAD_CHUNKS; k += 1) {
+            gs += gaps[k];
+            ss += sizes[k];
+        }
+        const out = [{ t: 0, v: 0 }];
+        let t = 0;
+        let v = 0;
+        for (let k = 0; k < LOAD_CHUNKS; k += 1) {
+            t += (gaps[k] / gs) * LOAD_MS;
+            v += sizes[k] / ss;
+            out.push({ t: t, v: v });
+        }
+        out[out.length - 1] = { t: LOAD_MS, v: 1 };
+        return out;
+    }
+    const LOAD = makeLoad(469);
+    // 도착 사이를 직선으로 잇는 진행 — 01~08 이 받는 값
+    function loadAt(ms) {
+        if (ms <= 0) {
+            return 0;
+        }
+        for (let k = 1; k < LOAD.length; k += 1) {
+            const a = LOAD[k - 1];
+            const b = LOAD[k];
+            if (ms < b.t) {
+                return lerp(a.v, b.v, (ms - a.t) / (b.t - a.t));
+            }
+        }
+        return 1;
+    }
+    // 도착할 때만 한 번에 뛰는 진행 — 실제 progress 이벤트처럼 계단으로 들어온다 (09 가 받는 값)
+    function reportedAt(ms) {
+        let v = 0;
+        for (let k = 0; k < LOAD.length; k += 1) {
+            if (LOAD[k].t <= ms) {
+                v = LOAD[k].v;
+            }
+        }
+        return v;
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const barEl = root.querySelector('[data-role="bar"]');
+    const fillEl = root.querySelector('[data-role="fill"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl || !barEl || !fillEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const bar = barEl;
+    const fill = fillEl;
+    const restartBtn = root.querySelector('[data-role="restart"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 늘 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    function contourPath(c) {
+        ctx.moveTo(c[0][0], c[0][1]);
+        for (let i = 1; i < c.length; i += 1) {
+            ctx.lineTo(c[i][0], c[i][1]);
+        }
+        ctx.closePath();
+    }
+    function logoPath() {
+        ctx.beginPath();
+        for (let c = 0; c < LOGO.length; c += 1) {
+            contourPath(LOGO[c]);
+        }
+    }
+    // 마크 모양으로 자르기 — 이 뒤에 그리는 것은 육각형 안·별 구멍 밖에만 남는다
+    function clipLogo() {
+        logoPath();
+        ctx.clip('evenodd');
+    }
+    // 마크 자리 안내선 — 다 그려지면 어떤 모양이 될지 미리 보여 주는 옅은 외곽선
+    function logoGuide(a) {
+        logoPath();
+        ctx.strokeStyle = rgba(PAPER, a);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+    // 왼쪽 수치 한 줄 — 이름표 + 값
+    const LEG_X = 16;
+    function statRow(y, label, value) {
+        ctx.textBaseline = 'alphabetic';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = rgba(PAPER, 0.6);
+        ctx.font = '500 11px sans-serif';
+        ctx.fillText(label, LEG_X, y);
+        ctx.fillStyle = rgba(PAPER, 0.96);
+        ctx.font = '700 14px sans-serif';
+        ctx.fillText(value, LEG_X, y + 17);
+    }
+    function pct(v) { return Math.round(clamp(v, 0, 1) * 100) + '%'; }
+    function clearStage() {
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 진행 상태 — loadMs 는 가상 진행의 시계, manual 은 끌기·방향키로 직접 정한 진행률(−1 이면 가상 진행을 따른다)
+    let loadMs = 0;
+    let paused = false;
+    let manual = -1;
+    let progress = 0;
+    let clock = 0;
+    function targetProgress() { return manual >= 0 ? manual : loadAt(loadMs); }
+    function updateProgress() { progress = targetProgress(); }
+    function advanceLoad(dt) {
+        if (paused || manual >= 0) {
+            return;
+        }
+        loadMs = Math.min(loadMs + dt, LOAD_MS);
+    }
+    // 아래 띠(role="progressbar") — 화면에 그린 값과 같은 값을 띠 길이와 aria-valuenow 로 알린다. 정수 % 가 바뀔 때만 속성을 고친다
+    let barPct = -1;
+    function syncBar(v) {
+        const c = clamp(v, 0, 1);
+        fill.style.transform = 'scaleX(' + c.toFixed(4) + ')';
+        const p = Math.round(c * 100);
+        if (p !== barPct) {
+            barPct = p;
+            bar.setAttribute('aria-valuenow', String(p));
+        }
+    }
+    const TXT_DONE = '불러오기 끝 — Enter 로 다시';
+    const TXT_PAUSE = '일시정지 — Space 로 이어서';
+    const TXT_MANUAL = '직접 옮기는 중 — Esc 로 돌아가기';
+    function report() {
+        if (manual >= 0) {
+            say(TXT_MANUAL);
+        }
+        else if (paused) {
+            say(TXT_PAUSE);
+        }
+        else if (shown() >= 0.999) {
+            say(TXT_DONE);
+        }
+        else {
+            say(TXT_RUN);
+        }
+    }
+    function render() {
+        draw();
+        syncBar(shown());
+        report();
+    }
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+    }
+    function restart() {
+        loadMs = 0;
+        manual = -1;
+        setPaused(false);
+        progress = 0;
+        onRestart();
+    }
+    // 시연 — 2초마다 처음부터. 첫 200ms 는 빈 마크로 두고(첫 변화 200ms 뒤) 1,300ms 동안 불러온 뒤 끝 상태로 머문다
+    const DEMO_LOOP = 2000;
+    const DEMO_LEAD = 200;
+    let demoCycle = -1;
+    function demoTick(t) {
+        const cyc = Math.floor(t / DEMO_LOOP);
+        if (cyc !== demoCycle) {
+            demoCycle = cyc;
+            restart();
+        }
+        loadMs = clamp(t - cyc * DEMO_LOOP - DEMO_LEAD, 0, LOAD_MS);
+    }
+    // 입력 한 번 뒤 — 진행률을 다시 읽고, 동작 줄이기면 움직임 없이 그 진행률의 끝 모습으로 바로 그린다
+    function after() {
+        updateProgress();
+        if (still) {
+            settle();
+        }
+        render();
+        if (still) {
+            kickStill();
+        }
+    }
+    // 끌기 — 무대 가로 위치를 진행률로 (왼쪽 40px = 0%, 오른쪽 40px = 100%)
+    const SCRUB_X0 = 40;
+    const SCRUB_X1 = 440;
+    const KEY_STEP = 0.05;
+    let dragging = false;
+    function scrubAt(ev) {
+        const p = toScene(ev);
+        manual = clamp((p[0] - SCRUB_X0) / (SCRUB_X1 - SCRUB_X0), 0, 1);
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        dragging = true;
+        if (cv.setPointerCapture) {
+            cv.setPointerCapture(ev.pointerId);
+        }
+        scrubAt(ev);
+        after();
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        if (!dragging) {
+            return;
+        }
+        scrubAt(ev);
+        after();
+    });
+    function endDrag() { dragging = false; }
+    cv.addEventListener('pointerup', endDrag);
+    cv.addEventListener('pointercancel', endDrag);
+    function nudge(d) {
+        manual = clamp((manual >= 0 ? manual : progress) + d, 0, 1);
+    }
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k === 'Enter') {
+            restart();
+        }
+        else if (k === ' ') {
+            setPaused(!paused);
+        }
+        else if (k === 'ArrowRight' || k === 'ArrowUp') {
+            nudge(KEY_STEP);
+        }
+        else if (k === 'ArrowLeft' || k === 'ArrowDown') {
+            nudge(-KEY_STEP);
+        }
+        else if (k === 'Home') {
+            manual = 0;
+        }
+        else if (k === 'End') {
+            manual = 1;
+        }
+        else if (k === 'Escape') {
+            manual = -1;
+        }
+        else {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        after();
+    });
+    if (restartBtn) {
+        restartBtn.addEventListener('click', function () { wake(); restart(); after(); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); after(); });
+    }
+    // 외곽선을 자르는 점 개수 — 외곽선마다 꼭짓점 번호를 같은 간격으로 나눠 찍는다
+    const TRACE_SAMPLES = 360;
+    // 펜 끝 빛 번짐 반지름(px)
+    const PEN_GLOW_PX = 18;
+    // 진행률을 그은 길이로 바꾸는 곡선의 지수 — 1 이면 그대로, 클수록 앞에서 빨리 긋고 끝에서 천천히 닫는다
+    const TRACE_EASE_POW = 1.6;
+    const LINE_W = 3.2;
+    const TXT_RUN = '외곽선을 긋는 중';
+    function samplePath() {
+        let verts = 0;
+        for (let c = 0; c < LOGO.length; c += 1) {
+            verts += LOGO[c].length;
+        }
+        const out = [];
+        for (let c = 0; c < LOGO.length; c += 1) {
+            const poly = LOGO[c];
+            const n = Math.max(8, Math.round((TRACE_SAMPLES * poly.length) / verts));
+            for (let i = 0; i <= n; i += 1) {
+                const u = (i / n) * poly.length;
+                const k = Math.floor(u) % poly.length;
+                const f = u - Math.floor(u);
+                const a = poly[k];
+                const b = poly[(k + 1) % poly.length];
+                out.push({ x: lerp(a[0], b[0], f), y: lerp(a[1], b[1], f), lift: i === 0, ring: c });
+            }
+        }
+        return out;
+    }
+    const TRACE = samplePath();
+    // 누적 호 길이 표 — cum[i] 는 첫 점에서 i 번째 점까지 실제로 그은 길이. 외곽선이 바뀌는 자리(lift)는 펜을 들고 건너가 0 을 더한다
+    function arcTable(p) {
+        const cum = [0];
+        for (let i = 1; i < p.length; i += 1) {
+            cum.push(cum[i - 1] + (p[i].lift ? 0 : Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y)));
+        }
+        return cum;
+    }
+    const CUM = arcTable(TRACE);
+    const TOTAL = CUM[CUM.length - 1];
+    // 이분 탐색 — cum[i] <= d 인 가장 큰 i. 표가 오름차순이라 점 360개도 9번 안쪽 비교로 찾는다
+    function findSeg(d) {
+        let lo = 0;
+        let hi = CUM.length - 1;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (CUM[mid] <= d) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+    function traceEase(p) { return 1 - Math.pow(1 - clamp(p, 0, 1), TRACE_EASE_POW); }
+    // 펜 끝 — 그 칸 안에서 남은 거리 비율만큼 두 점 사이를 잇는다. 그래서 펜은 점 간격과 상관없이 길이에 비례해 움직인다
+    function penAt(d) {
+        const i = findSeg(d);
+        if (i >= TRACE.length - 1) {
+            return { i: i, x: TRACE[i].x, y: TRACE[i].y };
+        }
+        const seg = CUM[i + 1] - CUM[i];
+        const f = seg > 0 ? clamp((d - CUM[i]) / seg, 0, 1) : 0;
+        return { i: i, x: lerp(TRACE[i].x, TRACE[i + 1].x, f), y: lerp(TRACE[i].y, TRACE[i + 1].y, f) };
+    }
+    const RING_COL = [PAL[6], PAL[1]];
+    function shown() { return progress; }
+    function step() { }
+    function settle() { }
+    function onRestart() { }
+    function draw() {
+        clearStage();
+        const d = traceEase(progress) * TOTAL;
+        // 다 그은 뒤 마지막 30% 구간에서 속이 차오른다 — 외곽선이 닫혀야 채움이 의미가 있다
+        const fillA = smooth((progress - 0.7) / 0.3);
+        if (fillA > 0) {
+            logoPath();
+            const g = ctx.createLinearGradient(0, CY - LOGO_R, 0, CY + LOGO_R);
+            g.addColorStop(0, rgba(PAL[6], 0.9 * fillA));
+            g.addColorStop(1, rgba(PAL[3], 0.9 * fillA));
+            ctx.fillStyle = g;
+            ctx.fill('evenodd');
+        }
+        logoGuide(0.16);
+        const pen = penAt(d);
+        ctx.lineWidth = LINE_W;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        let ring = TRACE[0].ring;
+        for (let i = 0; i <= pen.i; i += 1) {
+            const p = TRACE[i];
+            if (p.lift) {
+                if (i > 0) {
+                    ctx.strokeStyle = rgba(RING_COL[ring], 1);
+                    ctx.stroke();
+                    ctx.beginPath();
+                }
+                ring = p.ring;
+                ctx.moveTo(p.x, p.y);
+            }
+            else {
+                ctx.lineTo(p.x, p.y);
+            }
+        }
+        ctx.lineTo(pen.x, pen.y);
+        ctx.strokeStyle = rgba(RING_COL[ring], 1);
+        ctx.stroke();
+        if (progress > 0 && progress < 1) {
+            const g = ctx.createRadialGradient(pen.x, pen.y, 0, pen.x, pen.y, PEN_GLOW_PX);
+            g.addColorStop(0, rgba(PAPER, 0.95));
+            g.addColorStop(0.35, rgba(RING_COL[ring], 0.6));
+            g.addColorStop(1, rgba(RING_COL[ring], 0));
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(pen.x, pen.y, PEN_GLOW_PX, 0, TAU);
+            ctx.fill();
+        }
+        statRow(112, '진행률', pct(progress));
+        statRow(160, '그은 길이', Math.round(d) + ' / ' + Math.round(TOTAL) + ' px');
+    }
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            if (demo) {
+                demoTick(clock);
+            }
+            else {
+                advanceLoad(FIXED_DT);
+            }
+            updateProgress();
+            step();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 — rAF 루프 없이 STILL_TICK_MS 마다 가상 진행만 한 칸 옮기고, 그 진행률의 끝 모습(물결·스프링·뒤집기 없이)을 그린다
+    const STILL_TICK_MS = 400;
+    let stillTimer = 0;
+    function stillTick() {
+        stillTimer = 0;
+        if (!still) {
+            return;
+        }
+        advanceLoad(STILL_TICK_MS);
+        after();
+    }
+    function kickStill() {
+        if (!still || stillTimer || paused || manual >= 0 || loadMs >= LOAD_MS) {
+            return;
+        }
+        stillTimer = window.setTimeout(stillTick, STILL_TICK_MS);
+    }
+    function stopStill() {
+        if (stillTimer) {
+            window.clearTimeout(stillTimer);
+            stillTimer = 0;
+        }
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 그 진행률의 끝 모습으로, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            after();
+        }
+        else {
+            stopStill();
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    if (still) {
+        after();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        stopStill();
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>
