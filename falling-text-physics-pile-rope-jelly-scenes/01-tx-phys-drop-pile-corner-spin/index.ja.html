@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>角から着くと回りながら積もる文字 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pc is-demo" id="pc">
+  <p class="pc__sr" data-role="word">つみかさね</p>
+  <canvas class="pc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="文字の箱が落ち、角から着くと回りながら床に積もる場面。押すとその場の文字をはじき、左右の矢印キーで揺らし、上矢印キーで浮かせ、Enterでもう一度落とし、Spaceで一時停止します。"></canvas>
+  <p class="pc__status" data-role="status" aria-live="off">文字が落ちて積もっています</p>
+  <div class="pc__tools">
+    <button class="pc__btn" data-role="restart" type="button">もう一度落とす</button>
+    <button class="pc__btn" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
+    // 바닥 높이 — 왼쪽 아래 상태 줄 위에서 글자가 멈추도록 바닥을 띄워 둔다
+    const FLOOR = 250;
+    // 다시 떨어뜨린 뒤 첫 200ms 는 그대로 둔다 — 첫 변화가 200ms 뒤에 오게
+    const LEAD_MS = 200;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 글자를 얹어 명도 차로 글자 경계가 읽힌다
+    const BG = [27, 24, 38];
+    const BG_LOW = [38, 33, 54];
+    const FLOOR_COL = [56, 50, 78];
+    const INK = [33, 29, 46];
+    const PAPER = [255, 248, 234];
+    const PAL = [
+        [124, 196, 255],
+        [255, 160, 190],
+        [126, 226, 192],
+        [190, 164, 255],
+        [255, 208, 168],
+        [246, 228, 140],
+        [150, 222, 236],
+        [232, 182, 228],
+        [196, 220, 160],
+    ];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function shadeRGB(c, k) { return [c[0] * k, c[1] * k, c[2] * k]; }
+    // 시드 고정 난수 — 같은 시드면 같은 배치가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const wordEl = root.querySelector('[data-role="word"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl || !wordEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    // 원문 한 줄 — 화면 낭독기는 이 문장만 한 번 읽는다. 캔버스에 그린 낱글자는 접근성 트리에 들어가지 않는다
+    const WORD = (wordEl.textContent || '').trim();
+    const restartBtn = root.querySelector('[data-role="restart"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 아래 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 그때그때 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    // 글자 사이 간격 — 글자 크기에 대한 비율
+    const GLYPH_GAP = 0.1;
+    function fontAt(px) { return '800 ' + px.toFixed(1) + 'px ' + FONT_FAMILY; }
+    function layoutWord(text, sizeMax, maxW, cx, cy) {
+        const chars = Array.from(text);
+        ctx.font = fontAt(sizeMax);
+        const ws = [];
+        let total = 0;
+        for (let i = 0; i < chars.length; i += 1) {
+            const m = chars[i].trim() === '' ? sizeMax * 0.3 : ctx.measureText(chars[i]).width;
+            ws.push(m);
+            total += m;
+        }
+        total += GLYPH_GAP * sizeMax * Math.max(0, chars.length - 1);
+        // 줄이 maxW 보다 길면 글자 크기를 같은 비율로 줄인다 — 언어마다 글자 수가 달라도 무대 안에 든다
+        const k = total > maxW ? maxW / total : 1;
+        const size = sizeMax * k;
+        const out = [];
+        let x = cx - (total * k) / 2;
+        let n = 0;
+        for (let i = 0; i < chars.length; i += 1) {
+            const w = ws[i] * k;
+            if (chars[i].trim() !== '') {
+                out.push({ ch: chars[i], w: Math.max(w, size * 0.34), h: size * 0.9, hx: x + w / 2, hy: cy, size: size, col: PAL[n % PAL.length], i: n });
+                n += 1;
+            }
+            x += w + GLYPH_GAP * size;
+        }
+        return out;
+    }
+    // 글자 하나 그리기 — 같은 글자를 어둡게 한 번 아래로 비켜 찍어 두께를 만든 뒤 제 색으로 덮는다
+    function drawGlyph(g, x, y, a, sx, sy, fill) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(a);
+        ctx.scale(sx, sy);
+        ctx.font = fontAt(g.size);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(shadeRGB(fill, 0.5), 1);
+        ctx.fillText(g.ch, 1.4, g.size * 0.04 + 2.8);
+        ctx.fillStyle = rgba(fill, 1);
+        ctx.fillText(g.ch, 0, g.size * 0.04);
+        ctx.restore();
+    }
+    // 모서리가 둥근 사각형 경로 — 가운데 (0,0) 기준 폭 w·높이 h
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        ctx.lineTo(x + rr, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+        ctx.lineTo(x, y + rr);
+        ctx.quadraticCurveTo(x, y, x + rr, y);
+        ctx.closePath();
+    }
+    // 바닥 그림자 — 글자 아래끝이 바닥에서 멀수록 옅고 넓게. 높이 값 하나로 크기와 진하기를 함께 정한다
+    function floorShadow(x, bottom, w) {
+        const lift = clamp((FLOOR - bottom) / 160, 0, 1);
+        ctx.fillStyle = rgba([0, 0, 0], 0.34 * (1 - lift) + 0.05);
+        ctx.beginPath();
+        ctx.ellipse(x, FLOOR + 3, w * (0.5 + 0.4 * lift), 3.5 + 2.5 * lift, 0, 0, TAU);
+        ctx.fill();
+    }
+    function clearStage() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG, 1));
+        g.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function drawFloor() {
+        ctx.fillStyle = rgba(FLOOR_COL, 1);
+        ctx.fillRect(0, FLOOR, W, H - FLOOR);
+        ctx.fillStyle = rgba(PAPER, 0.22);
+        ctx.fillRect(0, FLOOR, W, 1.5);
+    }
+    const TXT_PAUSE = '一時停止中 — Spaceで再開';
+    // 시계 — clock 은 시연 시계, age 는 다시 떨어뜨린 뒤 흐른 시간(ms). 둘 다 16ms 고정 스텝으로만 늘어난다
+    let paused = false;
+    let clock = 0;
+    let age = 0;
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+    }
+    function restart() {
+        age = 0;
+        onRestart();
+    }
+    function tick() {
+        age += FIXED_DT;
+        step();
+    }
+    function report() { say(paused ? TXT_PAUSE : stateText()); }
+    function render() {
+        draw();
+        report();
+    }
+    // 시연 — DEMO_LOOP_MS 마다 처음부터 다시 떨어뜨린다
+    let demoCycle = -1;
+    function demoTick(t) {
+        const cyc = Math.floor(t / DEMO_LOOP_MS);
+        if (cyc !== demoCycle) {
+            demoCycle = cyc;
+            restart();
+        }
+        demoDrive(t - cyc * DEMO_LOOP_MS);
+    }
+    // 동작 줄이기 — 움직임을 그리지 않고 SETTLE_TICKS 스텝을 한 번에 계산해 내려앉은 결과만 그린다
+    const SETTLE_TICKS = 360;
+    function settle() {
+        for (let k = 0; k < SETTLE_TICKS; k += 1) {
+            tick();
+        }
+    }
+    // 입력 한 번 뒤 — 동작 줄이기면 그 입력이 낳은 결과까지 바로 계산해 그린다
+    function after() {
+        if (still) {
+            settle();
+        }
+        render();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        if (cv.setPointerCapture) {
+            cv.setPointerCapture(ev.pointerId);
+        }
+        const p = toScene(ev);
+        onPointer('down', p[0], p[1]);
+        after();
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        const p = toScene(ev);
+        if (onPointer('move', p[0], p[1])) {
+            wake();
+            after();
+        }
+    });
+    cv.addEventListener('pointerup', function (ev) {
+        const p = toScene(ev);
+        onPointer('up', p[0], p[1]);
+    });
+    cv.addEventListener('pointercancel', function () { onPointer('up', -1, -1); });
+    cv.addEventListener('pointerleave', function () {
+        if (onPointer('leave', -1, -1)) {
+            after();
+        }
+    });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k === 'Enter') {
+            restart();
+        }
+        else if (k === ' ') {
+            setPaused(!paused);
+        }
+        else if (!onKey(k)) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        after();
+    });
+    if (restartBtn) {
+        restartBtn.addEventListener('click', function () { wake(); restart(); after(); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); after(); });
+    }
+    // 한 틱을 두 번으로 나눠 옮긴다 — 빠르게 떨어진 글자가 다른 글자를 뚫고 지나가지 않게
+    const SUBSTEPS = 2;
+    // 접점 충격량을 되풀이해 맞추는 횟수
+    const SOLVER_ITERATIONS = 6;
+    // 이보다 느리게 닿으면 되튀지 않는다 — 쌓인 글자가 제자리에서 떨지 않게(px/틱)
+    const BOUNCE_MIN = 1.2;
+    // 이만큼(px)까지 파고든 것은 그냥 둔다 — 밀어내기가 접점을 매번 끊었다 붙였다 하지 않게
+    const SLOP = 0.4;
+    const WALL_L = 8;
+    const WALL_R = W - 8;
+    function makeBody(g, x, y, a) {
+        // 질량은 상자 넓이에 비례, 회전 관성은 상자 공식 m(w²+h²)/12
+        const m = (g.w * g.h) / 900;
+        const inertia = (m * (g.w * g.w + g.h * g.h)) / 12;
+        return { g: g, x: x, y: y, vx: 0, vy: 0, a: a, w: 0, hw: g.w / 2, hh: g.h / 2, im: 1 / m, ii: 1 / inertia, free: true };
+    }
+    function corners(b) {
+        const c = Math.cos(b.a);
+        const s = Math.sin(b.a);
+        const out = [];
+        const sx = [-1, 1, 1, -1];
+        const sy = [-1, -1, 1, 1];
+        for (let k = 0; k < 4; k += 1) {
+            const lx = sx[k] * b.hw;
+            const ly = sy[k] * b.hh;
+            out.push([b.x + lx * c - ly * s, b.y + lx * s + ly * c]);
+        }
+        return out;
+    }
+    function addContact(out, a, b, px, py, nx, ny, pen) {
+        out.push({ a: a, b: b, px: px, py: py, nx: nx, ny: ny, pen: pen, target: 0, jn: 0, jt: 0 });
+    }
+    // 꼭짓점 하나가 다른 상자 안에 들어갔는가 — 들어갔으면 덜 파고든 축을 법선으로 삼는다(그쪽으로 빼는 게 가장 짧다)
+    function cornerInBox(out, a, p, b) {
+        const dx = p[0] - b.x;
+        const dy = p[1] - b.y;
+        const c = Math.cos(b.a);
+        const s = Math.sin(b.a);
+        const lx = dx * c + dy * s;
+        const ly = -dx * s + dy * c;
+        const ox = b.hw - Math.abs(lx);
+        const oy = b.hh - Math.abs(ly);
+        if (ox <= 0 || oy <= 0) {
+            return;
+        }
+        let nlx = 0;
+        let nly = 0;
+        let pen = 0;
+        if (ox < oy) {
+            nlx = lx < 0 ? -1 : 1;
+            pen = ox;
+        }
+        else {
+            nly = ly < 0 ? -1 : 1;
+            pen = oy;
+        }
+        addContact(out, a, b, p[0], p[1], nlx * c - nly * s, nlx * s + nly * c, pen);
+    }
+    function findContacts(bodies) {
+        const out = [];
+        for (let i = 0; i < bodies.length; i += 1) {
+            const a = bodies[i];
+            if (!a.free) {
+                continue;
+            }
+            const cs = corners(a);
+            for (let k = 0; k < 4; k += 1) {
+                const p = cs[k];
+                if (p[1] > FLOOR) {
+                    addContact(out, a, null, p[0], p[1], 0, -1, p[1] - FLOOR);
+                }
+                if (p[0] < WALL_L) {
+                    addContact(out, a, null, p[0], p[1], 1, 0, WALL_L - p[0]);
+                }
+                if (p[0] > WALL_R) {
+                    addContact(out, a, null, p[0], p[1], -1, 0, p[0] - WALL_R);
+                }
+            }
+            for (let j = i + 1; j < bodies.length; j += 1) {
+                const b = bodies[j];
+                if (!b.free) {
+                    continue;
+                }
+                const reach = Math.hypot(a.hw, a.hh) + Math.hypot(b.hw, b.hh);
+                if (Math.abs(a.x - b.x) > reach || Math.abs(a.y - b.y) > reach) {
+                    continue;
+                }
+                for (let k = 0; k < 4; k += 1) {
+                    cornerInBox(out, a, cs[k], b);
+                }
+                const cb = corners(b);
+                for (let k = 0; k < 4; k += 1) {
+                    cornerInBox(out, b, cb[k], a);
+                }
+            }
+        }
+        return out;
+    }
+    // 접점 속도 — 무게중심 속도 + 각속도 x 무게중심에서 접점까지의 거리
+    function pointVel(b, px, py) {
+        return [b.vx - b.w * (py - b.y), b.vy + b.w * (px - b.x)];
+    }
+    function relVel(c) {
+        const va = pointVel(c.a, c.px, c.py);
+        if (!c.b) {
+            return va;
+        }
+        const vb = pointVel(c.b, c.px, c.py);
+        return [va[0] - vb[0], va[1] - vb[1]];
+    }
+    // 접점이 무게중심에서 벗어난 거리(r x n)가 클수록 같은 충격량이 회전으로 더 많이 간다
+    function effMass(c, dx, dy) {
+        const ra = (c.px - c.a.x) * dy - (c.py - c.a.y) * dx;
+        let k = c.a.im + ra * ra * c.a.ii;
+        if (c.b) {
+            const rb = (c.px - c.b.x) * dy - (c.py - c.b.y) * dx;
+            k += c.b.im + rb * rb * c.b.ii;
+        }
+        return k;
+    }
+    function applyImpulse(b, px, py, jx, jy) {
+        b.vx += jx * b.im;
+        b.vy += jy * b.im;
+        b.w += ((px - b.x) * jy - (py - b.y) * jx) * b.ii;
+    }
+    function pushPair(c, jx, jy) {
+        applyImpulse(c.a, c.px, c.py, jx, jy);
+        if (c.b) {
+            applyImpulse(c.b, c.px, c.py, -jx, -jy);
+        }
+    }
+    function solveContact(c, fric) {
+        const rel = relVel(c);
+        const vn = rel[0] * c.nx + rel[1] * c.ny;
+        const jn0 = c.jn;
+        c.jn = Math.max(jn0 + (c.target - vn) / effMass(c, c.nx, c.ny), 0);
+        const dj = c.jn - jn0;
+        pushPair(c, c.nx * dj, c.ny * dj);
+        // 마찰 — 미끄러지는 방향 충격량은 누르는 충격량 x fric 을 넘지 못한다
+        const tx = -c.ny;
+        const ty = c.nx;
+        const rel2 = relVel(c);
+        const vt = rel2[0] * tx + rel2[1] * ty;
+        const lim = fric * c.jn;
+        const jt0 = c.jt;
+        c.jt = clamp(jt0 - vt / effMass(c, tx, ty), -lim, lim);
+        const djt = c.jt - jt0;
+        pushPair(c, tx * djt, ty * djt);
+    }
+    function rigidStep(bodies, grav, rest, fric) {
+        for (let s = 0; s < SUBSTEPS; s += 1) {
+            for (let i = 0; i < bodies.length; i += 1) {
+                const b = bodies[i];
+                if (!b.free) {
+                    continue;
+                }
+                b.vy += grav / SUBSTEPS;
+                b.x += b.vx / SUBSTEPS;
+                b.y += b.vy / SUBSTEPS;
+                b.a += b.w / SUBSTEPS;
+            }
+            const cs = findContacts(bodies);
+            for (let k = 0; k < cs.length; k += 1) {
+                const c = cs[k];
+                const rel = relVel(c);
+                const vn = rel[0] * c.nx + rel[1] * c.ny;
+                // 되튐 목표 — 닿기 직전 법선 속도의 rest 배만큼 반대로. 느린 접촉은 0
+                c.target = vn < -BOUNCE_MIN ? -rest * vn : 0;
+            }
+            for (let it = 0; it < SOLVER_ITERATIONS; it += 1) {
+                for (let k = 0; k < cs.length; k += 1) {
+                    solveContact(cs[k], fric);
+                }
+            }
+            // 파고든 깊이는 질량 역수 비율로 나눠 밖으로 뺀다
+            for (let k = 0; k < cs.length; k += 1) {
+                const c = cs[k];
+                const sum = c.a.im + (c.b ? c.b.im : 0);
+                const corr = (Math.max(c.pen - SLOP, 0) * 0.45) / sum;
+                c.a.x += c.nx * corr * c.a.im;
+                c.a.y += c.ny * corr * c.a.im;
+                if (c.b) {
+                    c.b.x -= c.nx * corr * c.b.im;
+                    c.b.y -= c.ny * corr * c.b.im;
+                }
+            }
+        }
+        for (let i = 0; i < bodies.length; i += 1) {
+            const b = bodies[i];
+            if (!b.free) {
+                continue;
+            }
+            b.vx *= 0.998;
+            b.w *= 0.985;
+        }
+    }
+    function drawBody(b) { drawGlyph(b.g, b.x, b.y, b.a, 1, 1, b.g.col); }
+    function bodyBottom(b) {
+        return b.y + Math.abs(Math.sin(b.a)) * b.hw + Math.abs(Math.cos(b.a)) * b.hh;
+    }
+    // 중력 — 틱(16ms)마다 속도에 더하는 값(px/틱²)
+    const GRAVITY = 0.45;
+    // 되튐 — 닿기 직전 법선 방향 속도의 이 비율만큼 반대로 튀어 오른다
+    const RESTITUTION = 0.32;
+    // 마찰 — 미끄러지는 방향 충격량은 누르는 충격량 x 이 값을 넘지 못한다
+    const FRICTION = 0.55;
+    // 누른 자리에서 이 거리(px) 안의 글자를 튕긴다
+    const POKE_R = 90;
+    const DEMO_LOOP_MS = 3400;
+    const TXT_RUN = '文字が落ちて積もっています';
+    const TXT_REST = '積もりました — Enterでもう一度';
+    const GLYPHS = layoutWord(WORD, 74, 400, 240, 120);
+    let bodies = [];
+    function onRestart() {
+        const rng = makeRng(4721);
+        bodies = GLYPHS.map(function (g, i) {
+            // 가운데로 모아 떨어뜨린다 — 겹쳐 떨어져야 모서리로 닿고 서로 위에 쌓인다
+            const x = 240 + (g.hx - 240) * 0.28 + (rng() - 0.5) * 18;
+            const y = -g.h - i * 62 - rng() * 24;
+            const b = makeBody(g, x, y, (rng() - 0.5) * 0.8);
+            b.vx = (rng() - 0.5) * 1.4;
+            return b;
+        });
+    }
+    function step() {
+        if (age < LEAD_MS) {
+            return;
+        }
+        rigidStep(bodies, GRAVITY, RESTITUTION, FRICTION);
+    }
+    function resting() {
+        for (let i = 0; i < bodies.length; i += 1) {
+            const b = bodies[i];
+            if (b.y < 0 || Math.hypot(b.vx, b.vy) > 0.08 || Math.abs(b.w) > 0.004) {
+                return false;
+            }
+        }
+        return true;
+    }
+    function stateText() { return resting() ? TXT_REST : TXT_RUN; }
+    function draw() {
+        clearStage();
+        drawFloor();
+        for (let i = 0; i < bodies.length; i += 1) {
+            floorShadow(bodies[i].x, bodyBottom(bodies[i]), bodies[i].hw);
+        }
+        for (let i = 0; i < bodies.length; i += 1) {
+            drawBody(bodies[i]);
+        }
+    }
+    function demoDrive(t) { }
+    // 누른 자리에서 가까운 글자일수록 세게, 바깥·위로 튕기고 누른 쪽 반대로 돌린다
+    function poke(x, y) {
+        for (let i = 0; i < bodies.length; i += 1) {
+            const b = bodies[i];
+            const dx = b.x - x;
+            const dy = b.y - y;
+            const d = Math.max(Math.hypot(dx, dy), 1);
+            if (d > POKE_R) {
+                continue;
+            }
+            const k = 1 - d / POKE_R;
+            b.vx += (dx / d) * 6 * k;
+            b.vy -= 9 * k;
+            b.w += (dx < 0 ? -1 : 1) * 0.14 * k;
+        }
+    }
+    function onPointer(type, x, y) {
+        if (type === 'down') {
+            poke(x, y);
+        }
+        return false;
+    }
+    function onKey(k) {
+        if (k === 'ArrowLeft' || k === 'ArrowRight') {
+            const s = k === 'ArrowLeft' ? -1 : 1;
+            for (let i = 0; i < bodies.length; i += 1) {
+                bodies[i].vx += 4 * s;
+                bodies[i].vy -= 3;
+            }
+            return true;
+        }
+        if (k === 'ArrowUp') {
+            for (let i = 0; i < bodies.length; i += 1) {
+                bodies[i].vy -= 8;
+                bodies[i].w += (i % 2 ? 0.1 : -0.1);
+            }
+            return true;
+        }
+        return false;
+    }
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            if (!paused) {
+                clock += FIXED_DT;
+                if (demo) {
+                    demoTick(clock);
+                }
+                tick();
+            }
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 내려앉은 결과로, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            after();
+        }
+        else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    restart();
+    if (still) {
+        after();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>

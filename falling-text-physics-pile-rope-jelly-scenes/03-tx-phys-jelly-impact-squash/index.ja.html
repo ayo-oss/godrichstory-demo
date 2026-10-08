@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ぶつかった速さの分だけゼリーのようにつぶれてふくらむ文字 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pc is-demo" id="pc">
+  <p class="pc__sr" data-role="word">ぷにぷに</p>
+  <canvas class="pc__canvas" data-role="canvas" width="480" height="300" tabindex="0" aria-label="文字を包むゼリーの体が床に着いた速さの分だけつぶれ、ふくらみ直す場面。押すと近くの文字をはじき、下矢印キーで叩きつけ、上矢印キーで浮かせ、Enterでもう一度落とし、Spaceで一時停止します。"></canvas>
+  <p class="pc__status" data-role="status" aria-live="off">文字がつぶれてふくらんでいます</p>
+  <div class="pc__tools">
+    <button class="pc__btn" data-role="restart" type="button">もう一度落とす</button>
+    <button class="pc__btn" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
+    // 바닥 높이 — 왼쪽 아래 상태 줄 위에서 글자가 멈추도록 바닥을 띄워 둔다
+    const FLOOR = 250;
+    // 다시 떨어뜨린 뒤 첫 200ms 는 그대로 둔다 — 첫 변화가 200ms 뒤에 오게
+    const LEAD_MS = 200;
+    // 파스텔 팔레트 — 어두운 무대 위에 밝은 글자를 얹어 명도 차로 글자 경계가 읽힌다
+    const BG = [27, 24, 38];
+    const BG_LOW = [38, 33, 54];
+    const FLOOR_COL = [56, 50, 78];
+    const INK = [33, 29, 46];
+    const PAPER = [255, 248, 234];
+    const PAL = [
+        [124, 196, 255],
+        [255, 160, 190],
+        [126, 226, 192],
+        [190, 164, 255],
+        [255, 208, 168],
+        [246, 228, 140],
+        [150, 222, 236],
+        [232, 182, 228],
+        [196, 220, 160],
+    ];
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function shadeRGB(c, k) { return [c[0] * k, c[1] * k, c[2] * k]; }
+    // 시드 고정 난수 — 같은 시드면 같은 배치가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const wordEl = root.querySelector('[data-role="word"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl || !wordEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    // 원문 한 줄 — 화면 낭독기는 이 문장만 한 번 읽는다. 캔버스에 그린 낱글자는 접근성 트리에 들어가지 않는다
+    const WORD = (wordEl.textContent || '').trim();
+    const restartBtn = root.querySelector('[data-role="restart"]');
+    const pauseBtn = root.querySelector('[data-role="pause"]');
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 아래 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 화면 좌표(CSS px) → 장면 좌표(480x300). 리사이즈 뒤에도 그때그때 현재 크기로 다시 잰다
+    function toScene(ev) {
+        const r = cv.getBoundingClientRect();
+        return [((ev.clientX - r.left) / r.width) * W, ((ev.clientY - r.top) / r.height) * H];
+    }
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    // 글자 사이 간격 — 글자 크기에 대한 비율
+    const GLYPH_GAP = 0.1;
+    function fontAt(px) { return '800 ' + px.toFixed(1) + 'px ' + FONT_FAMILY; }
+    function layoutWord(text, sizeMax, maxW, cx, cy) {
+        const chars = Array.from(text);
+        ctx.font = fontAt(sizeMax);
+        const ws = [];
+        let total = 0;
+        for (let i = 0; i < chars.length; i += 1) {
+            const m = chars[i].trim() === '' ? sizeMax * 0.3 : ctx.measureText(chars[i]).width;
+            ws.push(m);
+            total += m;
+        }
+        total += GLYPH_GAP * sizeMax * Math.max(0, chars.length - 1);
+        // 줄이 maxW 보다 길면 글자 크기를 같은 비율로 줄인다 — 언어마다 글자 수가 달라도 무대 안에 든다
+        const k = total > maxW ? maxW / total : 1;
+        const size = sizeMax * k;
+        const out = [];
+        let x = cx - (total * k) / 2;
+        let n = 0;
+        for (let i = 0; i < chars.length; i += 1) {
+            const w = ws[i] * k;
+            if (chars[i].trim() !== '') {
+                out.push({ ch: chars[i], w: Math.max(w, size * 0.34), h: size * 0.9, hx: x + w / 2, hy: cy, size: size, col: PAL[n % PAL.length], i: n });
+                n += 1;
+            }
+            x += w + GLYPH_GAP * size;
+        }
+        return out;
+    }
+    // 글자 하나 그리기 — 같은 글자를 어둡게 한 번 아래로 비켜 찍어 두께를 만든 뒤 제 색으로 덮는다
+    function drawGlyph(g, x, y, a, sx, sy, fill) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(a);
+        ctx.scale(sx, sy);
+        ctx.font = fontAt(g.size);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(shadeRGB(fill, 0.5), 1);
+        ctx.fillText(g.ch, 1.4, g.size * 0.04 + 2.8);
+        ctx.fillStyle = rgba(fill, 1);
+        ctx.fillText(g.ch, 0, g.size * 0.04);
+        ctx.restore();
+    }
+    // 모서리가 둥근 사각형 경로 — 가운데 (0,0) 기준 폭 w·높이 h
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        ctx.lineTo(x + rr, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+        ctx.lineTo(x, y + rr);
+        ctx.quadraticCurveTo(x, y, x + rr, y);
+        ctx.closePath();
+    }
+    // 바닥 그림자 — 글자 아래끝이 바닥에서 멀수록 옅고 넓게. 높이 값 하나로 크기와 진하기를 함께 정한다
+    function floorShadow(x, bottom, w) {
+        const lift = clamp((FLOOR - bottom) / 160, 0, 1);
+        ctx.fillStyle = rgba([0, 0, 0], 0.34 * (1 - lift) + 0.05);
+        ctx.beginPath();
+        ctx.ellipse(x, FLOOR + 3, w * (0.5 + 0.4 * lift), 3.5 + 2.5 * lift, 0, 0, TAU);
+        ctx.fill();
+    }
+    function clearStage() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG, 1));
+        g.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function drawFloor() {
+        ctx.fillStyle = rgba(FLOOR_COL, 1);
+        ctx.fillRect(0, FLOOR, W, H - FLOOR);
+        ctx.fillStyle = rgba(PAPER, 0.22);
+        ctx.fillRect(0, FLOOR, W, 1.5);
+    }
+    const TXT_PAUSE = '一時停止中 — Spaceで再開';
+    // 시계 — clock 은 시연 시계, age 는 다시 떨어뜨린 뒤 흐른 시간(ms). 둘 다 16ms 고정 스텝으로만 늘어난다
+    let paused = false;
+    let clock = 0;
+    let age = 0;
+    function setPaused(v) {
+        paused = v;
+        if (pauseBtn) {
+            pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false');
+        }
+    }
+    function restart() {
+        age = 0;
+        onRestart();
+    }
+    function tick() {
+        age += FIXED_DT;
+        step();
+    }
+    function report() { say(paused ? TXT_PAUSE : stateText()); }
+    function render() {
+        draw();
+        report();
+    }
+    // 시연 — DEMO_LOOP_MS 마다 처음부터 다시 떨어뜨린다
+    let demoCycle = -1;
+    function demoTick(t) {
+        const cyc = Math.floor(t / DEMO_LOOP_MS);
+        if (cyc !== demoCycle) {
+            demoCycle = cyc;
+            restart();
+        }
+        demoDrive(t - cyc * DEMO_LOOP_MS);
+    }
+    // 동작 줄이기 — 움직임을 그리지 않고 SETTLE_TICKS 스텝을 한 번에 계산해 내려앉은 결과만 그린다
+    const SETTLE_TICKS = 360;
+    function settle() {
+        for (let k = 0; k < SETTLE_TICKS; k += 1) {
+            tick();
+        }
+    }
+    // 입력 한 번 뒤 — 동작 줄이기면 그 입력이 낳은 결과까지 바로 계산해 그린다
+    function after() {
+        if (still) {
+            settle();
+        }
+        render();
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+        wake();
+        if (cv.setPointerCapture) {
+            cv.setPointerCapture(ev.pointerId);
+        }
+        const p = toScene(ev);
+        onPointer('down', p[0], p[1]);
+        after();
+    });
+    cv.addEventListener('pointermove', function (ev) {
+        const p = toScene(ev);
+        if (onPointer('move', p[0], p[1])) {
+            wake();
+            after();
+        }
+    });
+    cv.addEventListener('pointerup', function (ev) {
+        const p = toScene(ev);
+        onPointer('up', p[0], p[1]);
+    });
+    cv.addEventListener('pointercancel', function () { onPointer('up', -1, -1); });
+    cv.addEventListener('pointerleave', function () {
+        if (onPointer('leave', -1, -1)) {
+            after();
+        }
+    });
+    cv.addEventListener('keydown', function (ev) {
+        const k = ev.key;
+        if (k === 'Enter') {
+            restart();
+        }
+        else if (k === ' ') {
+            setPaused(!paused);
+        }
+        else if (!onKey(k)) {
+            return;
+        }
+        ev.preventDefault();
+        wake();
+        after();
+    });
+    if (restartBtn) {
+        restartBtn.addEventListener('click', function () { wake(); restart(); after(); });
+    }
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () { wake(); setPaused(!paused); after(); });
+    }
+    // 모양 스프링 — 점마다 지금 몸통 자세로 옮긴 제자리와의 차의 이 비율만큼 틱마다 속도를 당긴다
+    const SPRING_STIFFNESS = 0.45;
+    // 압력 — 넓이가 처음보다 줄어든 비율에 이 값을 곱해 점을 바깥(법선)으로 민다
+    const PRESSURE = 0.8;
+    // 납작함 상한 — 높이가 처음 높이의 (1 - 이 값) 아래로는 눌리지 않는다
+    const SQUASH_LIMIT = 0.42;
+    const JELLY_GRAVITY = 0.42;
+    // 외곽 점 수 — 글자 가운데에서 같은 각도 간격으로 쏜 광선이 글자 화소에 마지막으로 닿은 자리
+    const HULL_POINTS = 28;
+    // 외곽 점을 글자 밖으로 띄우는 여백(px)
+    const HULL_PAD = 6;
+    const JELLY_DAMPING = 0.02;
+    // 바로 서려는 힘 — 모양 스프링의 목표 각도를 지금 각도의 (1 - 이 값) 배로 잡는다
+    const UPRIGHT_PULL = 0.15;
+    const DEMO_LOOP_MS = 3400;
+    const TXT_RUN = '文字がつぶれてふくらんでいます';
+    const TXT_REST = 'やわらかく着地 — Enterでもう一度';
+    const GLYPHS = layoutWord(WORD, 72, 380, 240, 120);
+    // 글자 외곽 점 뽑기 — 화면 밖 캔버스에 글자를 그리고, 가운데에서 쏜 광선마다 바깥에서 안으로 훑어 처음 만난 글자 화소를 고른다
+    function sampleHull(g) {
+        const side = Math.ceil(g.size * 1.5);
+        const off = document.createElement('canvas');
+        off.width = side;
+        off.height = side;
+        const octx = off.getContext('2d');
+        const rs = [];
+        const fallback = Math.min(g.w, g.h) / 2;
+        let data = null;
+        if (octx) {
+            octx.font = fontAt(g.size);
+            octx.textAlign = 'center';
+            octx.textBaseline = 'middle';
+            octx.fillStyle = '#000';
+            octx.fillText(g.ch, side / 2, side / 2 + g.size * 0.04);
+            data = octx.getImageData(0, 0, side, side).data;
+        }
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            const a = (k / HULL_POINTS) * TAU;
+            let hit = fallback;
+            if (data) {
+                for (let r = side / 2 - 1; r > 0; r -= 0.5) {
+                    const x = Math.round(side / 2 + Math.cos(a) * r);
+                    const y = Math.round(side / 2 + Math.sin(a) * r);
+                    if (x >= 0 && y >= 0 && x < side && y < side && data[(y * side + x) * 4 + 3] > 60) {
+                        hit = r;
+                        break;
+                    }
+                }
+            }
+            rs.push(Math.max(hit, g.size * 0.18) + HULL_PAD);
+        }
+        // 이웃 반지름과 두 번 고르게 섞는다 — 획 사이 틈에서 광선이 쑥 들어간 자리가 뾰족하게 남지 않게
+        for (let pass = 0; pass < 2; pass += 1) {
+            const c = rs.slice();
+            for (let k = 0; k < HULL_POINTS; k += 1) {
+                rs[k] = 0.25 * c[(k + HULL_POINTS - 1) % HULL_POINTS] + 0.5 * c[k] + 0.25 * c[(k + 1) % HULL_POINTS];
+            }
+        }
+        const qx = [];
+        const qy = [];
+        let mx = 0;
+        let my = 0;
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            const a = (k / HULL_POINTS) * TAU;
+            qx.push(Math.cos(a) * rs[k]);
+            qy.push(Math.sin(a) * rs[k]);
+            mx += qx[k] / HULL_POINTS;
+            my += qy[k] / HULL_POINTS;
+        }
+        // 점들의 평균을 원점으로 옮긴다 — 평균이 0 이 아니면 모양 스프링이 몸통 전체를 한쪽으로 끄는 힘이 된다.
+        // 글자 가운데는 그만큼 반대쪽(gox, goy)에 남는다
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            qx[k] -= mx;
+            qy[k] -= my;
+        }
+        return { qx: qx, qy: qy, gox: -mx, goy: -my };
+    }
+    const HULLS = GLYPHS.map(sampleHull);
+    function polyArea(xs, ys) {
+        let s = 0;
+        for (let k = 0; k < xs.length; k += 1) {
+            const j = (k + 1) % xs.length;
+            s += xs[k] * ys[j] - xs[j] * ys[k];
+        }
+        return Math.abs(s) / 2;
+    }
+    function extentOf(xs, ys, theta, cx, cy) {
+        const c = Math.cos(theta);
+        const s = Math.sin(theta);
+        let x0 = 1e9;
+        let x1 = -1e9;
+        let y0 = 1e9;
+        let y1 = -1e9;
+        for (let k = 0; k < xs.length; k += 1) {
+            const dx = xs[k] - cx;
+            const dy = ys[k] - cy;
+            const lx = dx * c + dy * s;
+            const ly = -dx * s + dy * c;
+            x0 = Math.min(x0, lx);
+            x1 = Math.max(x1, lx);
+            y0 = Math.min(y0, ly);
+            y1 = Math.max(y1, ly);
+        }
+        return [x1 - x0, y1 - y0];
+    }
+    // 떨어지는 높이를 글자마다 다르게 — 바닥에 닿는 속도가 달라 납작한 정도가 갈린다
+    const DROP_Y = [150, -40, 60, -170, 100, -100, 20, -130, 130];
+    let jellies = [];
+    function onRestart() {
+        jellies = GLYPHS.map(function (g, i) {
+            const q = HULLS[i];
+            const cy = DROP_Y[i % DROP_Y.length];
+            const j = { g: g, qx: q.qx, qy: q.qy, gox: q.gox, goy: q.goy, px: [], py: [], vx: [], vy: [], area0: polyArea(q.qx, q.qy), ext: extentOf(q.qx, q.qy, 0, 0, 0), theta: 0, cx: g.hx, cy: cy, sx: 1, sy: 1, impact: 0 };
+            for (let k = 0; k < HULL_POINTS; k += 1) {
+                j.px.push(g.hx + q.qx[k]);
+                j.py.push(cy + q.qy[k]);
+                j.vx.push(0);
+                j.vy.push(0);
+            }
+            return j;
+        });
+    }
+    // 몸통 자세 — 무게중심과, 제자리 모양(q)을 지금 점들에 가장 잘 겹치는 회전각
+    function pose(j) {
+        let cx = 0;
+        let cy = 0;
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            cx += j.px[k];
+            cy += j.py[k];
+        }
+        cx /= HULL_POINTS;
+        cy /= HULL_POINTS;
+        let num = 0;
+        let den = 0;
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            const dx = j.px[k] - cx;
+            const dy = j.py[k] - cy;
+            num += j.qx[k] * dy - j.qy[k] * dx;
+            den += j.qx[k] * dx + j.qy[k] * dy;
+        }
+        j.cx = cx;
+        j.cy = cy;
+        j.theta = Math.atan2(num, den);
+    }
+    function stepJelly(j) {
+        pose(j);
+        // 제자리 모양은 지금 기운 각도보다 조금 덜 기운 자세로 놓는다 — 그 차가 글자를 바로 세우는 힘이 된다
+        const c = Math.cos(j.theta * (1 - UPRIGHT_PULL));
+        const s = Math.sin(j.theta * (1 - UPRIGHT_PULL));
+        const area = polyArea(j.px, j.py);
+        const deficit = (j.area0 - area) / j.area0;
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            // 모양 스프링 — 지금 자세로 옮긴 제자리 쪽으로
+            const gx = j.cx + j.qx[k] * c - j.qy[k] * s;
+            const gy = j.cy + j.qx[k] * s + j.qy[k] * c;
+            j.vx[k] += (gx - j.px[k]) * SPRING_STIFFNESS;
+            j.vy[k] += (gy - j.py[k]) * SPRING_STIFFNESS + JELLY_GRAVITY;
+            // 압력 — 이웃 두 점을 잇는 방향에 수직인 바깥쪽으로, 줄어든 넓이 비율만큼
+            const a = (k + HULL_POINTS - 1) % HULL_POINTS;
+            const b = (k + 1) % HULL_POINTS;
+            let nx = j.py[b] - j.py[a];
+            let ny = -(j.px[b] - j.px[a]);
+            const nl = Math.max(Math.hypot(nx, ny), 0.0001);
+            nx /= nl;
+            ny /= nl;
+            if (nx * (j.px[k] - j.cx) + ny * (j.py[k] - j.cy) < 0) {
+                nx = -nx;
+                ny = -ny;
+            }
+            j.vx[k] += nx * deficit * PRESSURE * 2;
+            j.vy[k] += ny * deficit * PRESSURE * 2;
+            j.vx[k] *= 1 - JELLY_DAMPING;
+            j.vy[k] *= 1 - JELLY_DAMPING;
+        }
+        let maxY = -1e9;
+        let minY = 1e9;
+        for (let k = 0; k < HULL_POINTS; k += 1) {
+            j.px[k] += j.vx[k];
+            j.py[k] += j.vy[k];
+            if (j.py[k] > FLOOR) {
+                // 바닥에 닿은 첫 순간의 속도를 남겨 둔다 — 납작함이 이 속도에서 나온다
+                if (j.vy[k] > j.impact) {
+                    j.impact = j.vy[k];
+                }
+                j.py[k] = FLOOR;
+                j.vy[k] *= -0.1;
+                j.vx[k] *= 0.8;
+            }
+            j.px[k] = clamp(j.px[k], 4, W - 4);
+            maxY = Math.max(maxY, j.py[k]);
+            minY = Math.min(minY, j.py[k]);
+        }
+        // 납작함 상한 — 높이가 하한 아래면 바닥 쪽(maxY)을 기준으로 위로 늘려 하한에 맞춘다
+        const minH = (1 - SQUASH_LIMIT) * j.ext[1];
+        const hgt = maxY - minY;
+        if (hgt < minH && hgt > 0.0001) {
+            const k2 = minH / hgt;
+            for (let k = 0; k < HULL_POINTS; k += 1) {
+                j.py[k] = maxY - (maxY - j.py[k]) * k2;
+                if (j.vy[k] > 0) {
+                    j.vy[k] *= 0.5;
+                }
+            }
+        }
+        pose(j);
+        const e = extentOf(j.px, j.py, j.theta, j.cx, j.cy);
+        j.sx = e[0] / j.ext[0];
+        j.sy = e[1] / j.ext[1];
+    }
+    function step() {
+        if (age < LEAD_MS) {
+            return;
+        }
+        for (let i = 0; i < jellies.length; i += 1) {
+            stepJelly(jellies[i]);
+        }
+    }
+    function wobble() {
+        let m = 0;
+        for (let i = 0; i < jellies.length; i += 1) {
+            const j = jellies[i];
+            for (let k = 0; k < HULL_POINTS; k += 1) {
+                m = Math.max(m, Math.abs(j.vx[k]) + Math.abs(j.vy[k]));
+            }
+        }
+        return m;
+    }
+    function stateText() { return still || (age > LEAD_MS + 400 && wobble() < 0.6) ? TXT_REST : TXT_RUN; }
+    // 외곽 점 사이 가운데를 지나는 2차 곡선으로 닫는다 — 꼭짓점이 각지지 않고 젤리처럼 둥글게
+    function hullPath(j) {
+        const n = HULL_POINTS;
+        ctx.beginPath();
+        ctx.moveTo((j.px[n - 1] + j.px[0]) / 2, (j.py[n - 1] + j.py[0]) / 2);
+        for (let k = 0; k < n; k += 1) {
+            const b = (k + 1) % n;
+            ctx.quadraticCurveTo(j.px[k], j.py[k], (j.px[k] + j.px[b]) / 2, (j.py[k] + j.py[b]) / 2);
+        }
+        ctx.closePath();
+    }
+    function draw() {
+        clearStage();
+        drawFloor();
+        for (let i = 0; i < jellies.length; i += 1) {
+            const j = jellies[i];
+            floorShadow(j.cx, j.cy + (j.ext[1] * j.sy) / 2, (j.ext[0] * j.sx) / 2);
+        }
+        for (let i = 0; i < jellies.length; i += 1) {
+            const j = jellies[i];
+            hullPath(j);
+            ctx.fillStyle = rgba(j.g.col, 0.92);
+            ctx.fill();
+            // 윤기 — 몸통이 납작해질수록 옆으로 퍼진다(가로·세로 늘림을 그대로 받는다)
+            ctx.save();
+            ctx.translate(j.cx, j.cy);
+            ctx.rotate(j.theta);
+            ctx.fillStyle = rgba(PAPER, 0.32);
+            ctx.beginPath();
+            ctx.ellipse(-j.ext[0] * 0.18 * j.sx, -j.ext[1] * 0.26 * j.sy, j.ext[0] * 0.16 * j.sx, j.ext[1] * 0.08 * j.sy, -0.3, 0, TAU);
+            ctx.fill();
+            ctx.restore();
+            // 글자 가운데 — 몸통 무게중심에서 제자리 차(gox, goy)를 지금 자세로 돌리고 늘린 자리
+            const c = Math.cos(j.theta);
+            const s = Math.sin(j.theta);
+            const ox = j.gox * j.sx;
+            const oy = j.goy * j.sy;
+            drawGlyph(j.g, j.cx + ox * c - oy * s, j.cy + ox * s + oy * c, j.theta, j.sx, j.sy, INK);
+        }
+    }
+    function demoDrive(t) { }
+    // 누른 자리 가까운 젤리를 위로 튕긴다 — 점마다 같은 속도를 더해 모양은 그대로 날아오른다
+    function onPointer(type, x, y) {
+        if (type !== 'down') {
+            return false;
+        }
+        for (let i = 0; i < jellies.length; i += 1) {
+            const j = jellies[i];
+            if (Math.hypot(j.cx - x, j.cy - y) > 70) {
+                continue;
+            }
+            j.impact = 0;
+            for (let k = 0; k < HULL_POINTS; k += 1) {
+                j.vy[k] -= 10;
+                j.vx[k] += (j.cx - x) * 0.04;
+            }
+        }
+        return false;
+    }
+    // 아래 방향키 — 모두 아래로 세게 내리꽂아 크게 눌리게, 위 방향키 — 위로 튕기기
+    function onKey(k) {
+        if (k !== 'ArrowDown' && k !== 'ArrowUp') {
+            return false;
+        }
+        const v = k === 'ArrowDown' ? 9 : -10;
+        for (let i = 0; i < jellies.length; i += 1) {
+            const j = jellies[i];
+            j.impact = 0;
+            for (let p = 0; p < HULL_POINTS; p += 1) {
+                j.vy[p] += v;
+            }
+        }
+        if (age < LEAD_MS) {
+            age = LEAD_MS;
+        }
+        return true;
+    }
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            if (!paused) {
+                clock += FIXED_DT;
+                if (demo) {
+                    demoTick(clock);
+                }
+                tick();
+            }
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 내려앉은 결과로, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            after();
+        }
+        else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') {
+        reduceQuery.addEventListener('change', onMotionPref);
+    }
+    restart();
+    if (still) {
+        after();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') {
+            reduceQuery.removeEventListener('change', onMotionPref);
+        }
+    };
+})();
+</script>
+</body>
+</html>
