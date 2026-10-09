@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>응결 높이에서 평평해지는 뭉게구름 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cl is-demo" id="cl">
+  <canvas class="cl__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="바닥에서 오르는 공기 덩이 점들이 점선으로 표시한 응결 높이를 넘는 순간부터 퍼프를 남겨, 밑면이 평평한 뭉게구름이 자라고 오를 힘을 잃은 꼭대기는 옆으로 퍼진다"></canvas>
+  <p class="cl__status" data-role="status" aria-live="off">하늘을 읽는 중</p>
+  <button class="cl__pause" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cl");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 0~1 사이를 3차로 부드럽게 — 양 끝에서 기울기 0
+    function smooth01(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // edge0 에서 0, edge1 에서 1 로 부드럽게 넘어가는 문턱
+    function band(edge0, edge1, x) { return smooth01((x - edge0) / (edge1 - edge0)); }
+    function toRad(deg) { return deg * Math.PI / 180; }
+    // 시드 고정 난수 — 같은 시드면 같은 시연 (32비트 xorshift 에 곱셈 섞기 한 번)
+    function seeded(seed) {
+        let s = (seed * 2654435761) >>> 0 || 1;
+        return function () {
+            s ^= s << 13;
+            s >>>= 0;
+            s ^= s >>> 17;
+            s ^= s << 5;
+            s >>>= 0;
+            return (Math.imul(s, 0x9e3779b1) >>> 0) / 4294967296;
+        };
+    }
+    // ── 노이즈 ──────────────────────────────────────────────────
+    // 격자 꼭짓점마다 정수 해시로 0~1 값 하나 — 같은 (ix, iy, seed) 면 늘 같은 값
+    function latticeValue(ix, iy, seed) {
+        let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1103515245)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 값 노이즈 — 둘레 네 꼭짓점 값을 3차로 부드럽게 섞는다. 결과 0~1
+    function valueNoise(x, y, seed) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uy = fy * fy * (3 - 2 * fy);
+        const a = latticeValue(ix, iy, seed);
+        const b = latticeValue(ix + 1, iy, seed);
+        const c = latticeValue(ix, iy + 1, seed);
+        const d = latticeValue(ix + 1, iy + 1, seed);
+        return lerp(lerp(a, b, ux), lerp(c, d, ux), uy);
+    }
+    // 여러 겹 노이즈 합 — 겹마다 빈도 2배·세기 절반으로 octaves 겹을 더해 전체 세기 합으로 나눈다. 결과 0~1
+    function layeredNoise(x, y, octaves, seed) {
+        let sum = 0;
+        let amp = 1;
+        let norm = 0;
+        let f = 1;
+        for (let k = 0; k < octaves; k += 1) {
+            sum += valueNoise(x * f, y * f, seed + k * 101) * amp;
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    // 정수 나머지를 늘 0 이상으로
+    function wrapIndex(i, n) { const r = i % n; return r < 0 ? r + n : r; }
+    // 주기 값 노이즈 — 가로 격자 번호를 period 로 나머지 처리해, x 가 period 만큼 가면 처음과 같은 값이 된다
+    function periodicNoise(x, y, period, seed) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uy = fy * fy * (3 - 2 * fy);
+        const x0 = wrapIndex(ix, period);
+        const x1 = wrapIndex(ix + 1, period);
+        const a = latticeValue(x0, iy, seed);
+        const b = latticeValue(x1, iy, seed);
+        const c = latticeValue(x0, iy + 1, seed);
+        const d = latticeValue(x1, iy + 1, seed);
+        return lerp(lerp(a, b, ux), lerp(c, d, ux), uy);
+    }
+    // 주기 여러 겹 노이즈 합 — 겹마다 빈도와 주기를 함께 2배로 해, 모든 겹이 같은 거리에서 한 바퀴를 돈다
+    function periodicLayered(x, y, period, octaves, seed) {
+        let sum = 0;
+        let amp = 1;
+        let norm = 0;
+        let f = 1;
+        for (let k = 0; k < octaves; k += 1) {
+            sum += periodicNoise(x * f, y * f, period * f, seed + k * 101) * amp;
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    function makeField(gw, gh) { return { gw: gw, gh: gh, v: new Float32Array(gw * gh) }; }
+    // 칸 사이 값을 네 칸 섞어 읽는다 — 격자 밖은 0
+    function sampleField(f, x, y) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        if (ix < 0 || iy < 0 || ix >= f.gw - 1 || iy >= f.gh - 1) {
+            return 0;
+        }
+        const fx = x - ix;
+        const fy = y - iy;
+        const i = iy * f.gw + ix;
+        const a = f.v[i];
+        const b = f.v[i + 1];
+        const c = f.v[i + f.gw];
+        const d = f.v[i + f.gw + 1];
+        return lerp(lerp(a, b, fx), lerp(c, d, fx), fy);
+    }
+    // 구름 양 — 짙기가 level 을 넘는 칸의 몫(0~1)
+    function coverOf(f, level) {
+        let n = 0;
+        for (let i = 0; i < f.v.length; i += 1) {
+            if (f.v[i] > level) {
+                n += 1;
+            }
+        }
+        return n / f.v.length;
+    }
+    // ── 파스텔 팔레트 ────────────────────────────────────────────
+    // 하늘·구름·땅은 파스텔, 구름 아랫면·그림자처럼 명도로 읽히는 것은 명도 차를 크게 둔다. 글자는 진한 INK
+    const PAPER = [250, 246, 240];
+    const INK = [40, 36, 54];
+    const SKY_HIGH = [124, 160, 222];
+    const SKY_LOW = [198, 216, 244];
+    const CLOUD = [253, 251, 255];
+    const CLOUD_SHADE = [142, 140, 182];
+    const LAVENDER = [190, 176, 232];
+    const PEACH = [250, 202, 172];
+    const ROSE = [236, 168, 182];
+    const BUTTER = [250, 226, 156];
+    const MINT = [168, 214, 188];
+    const GRASS = [160, 204, 146];
+    const GRASS_SHADE = [76, 118, 98];
+    const CORAL_DEEP = [176, 66, 54];
+    const MINT_DEEP = [32, 110, 86];
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // ── 상태 줄 낱말 ─────────────────────────────────────────────
+    // 지금 하늘 — 구름 양(5% 단위)·해 높이(땅에서 잰 각, 도)·바람 방향. 숫자를 반올림해 글자가 매 프레임 바뀌지 않게
+    function windName(dir) {
+        if (dir > 0) {
+            return '오른쪽으로';
+        }
+        if (dir < 0) {
+            return '왼쪽으로';
+        }
+        return '잔잔함';
+    }
+    function skyText(cover, sunDeg, windDir) {
+        return '구름 양 {c}% · 해 높이 {s}° · 바람 {w}'
+            .replace('{c}', String(Math.round(clamp(cover, 0, 1) * 20) * 5))
+            .replace('{s}', String(Math.round(sunDeg)))
+            .replace('{w}', windName(windDir));
+    }
+    // 장면 시계(초) — 장면 계산이 고치고 화면 쪽이 읽는다
+    let sceneT = 0;
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘지 않게
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function makePix(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const x = c.getContext('2d');
+        return { w: w, h: h, img: x.createImageData(w, h), c: c, x: x };
+    }
+    // 화소 하나 쓰기(불투명)
+    function putPx(p, i, c) {
+        const d = p.img.data;
+        const k = i * 4;
+        d[k] = c[0];
+        d[k + 1] = c[1];
+        d[k + 2] = c[2];
+        d[k + 3] = 255;
+    }
+    // 판을 화면 자리 (dx, dy, dw, dh) 로 늘려 그린다 — 부드럽게 늘려 칸 경계가 보이지 않게
+    function blit(p, dx, dy, dw, dh) {
+        p.x.putImageData(p.img, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(p.c, dx, dy, dw, dh);
+    }
+    function fillAll(c) {
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function disc(x, y, r, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x, y, r, width, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function seg(x1, y1, x2, y2, width, c, a, dash) {
+        if (a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.setLineDash(dash > 0 ? [dash, dash] : []);
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.lineWidth = width;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function frameBox(x, y, w, h, r, width, c, a) {
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function text(s, x, y, c, a, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    // 글자 이름표 — 밝은 알약 위에 진한 글자
+    function tag(s, x, y, fg, px, align) {
+        ctx.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctx.measureText(s).width + px * 1.1;
+        const left = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+        box(left, y - px * 0.82, w, px * 1.64, px * 0.82, PAPER, 0.92);
+        text(s, left + w / 2, y + 0.5, fg, 1, px, 700, 'center');
+    }
+    // 위아래 두 색 하늘 — 화면 쪽 꾸밈 한 겹
+    function skyGradient(top, bottom, y0, y1) {
+        const g = ctx.createLinearGradient(0, y0, 0, y1);
+        g.addColorStop(0, rgba(top, 1));
+        g.addColorStop(1, rgba(bottom, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, y0, W, y1 - y0);
+    }
+    // 상태 줄 — 글자가 바뀔 때만 고친다
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    // ── 03 응결 높이에서 평평해지는 뭉게구름 ───────────────────────
+    // 옆에서 본 하늘. 높이 h = 땅(GROUND_Y)에서 잰 화면 px(위가 +). 온도는 화면 단위 상대값이다(실제 기온이 아니다)
+    const GROUND_Y = 272;
+    // 주변 공기 — 땅에서 ENV_LAPSE 씩 h 1px 마다 식고, 덮개 높이 CAP_H 위로는 더 식지 않는다(덮개를 넘은 덩이는 젖은 비율로 식기만 해 곧 부력을 잃고 멈춘다)
+    const ENV_LAPSE = 0.06;
+    const CAP_H = 170;
+    // 덩이 — 마른 동안은 DRY_LAPSE 씩, 응결 높이 CONDENSE_H 를 넘으면 MOIST_LAPSE 씩 식는다(물방울이 맺히며 열을 내놓아 덜 식는다)
+    const DRY_LAPSE = 0.08;
+    const MOIST_LAPSE = 0.04;
+    const CONDENSE_H = 112;
+    // 부력 = (덩이 온도 − 주변 온도) × BUOYANCY, 저항 = 속도 × DRAG (px/초²)
+    const BUOYANCY = 30;
+    const DRAG = 1.6;
+    // 오를 힘을 잃은 꼭대기(위로 속도 < SPREAD_SPEED)는 가운데에서 먼 쪽으로 SPREAD_ACCEL 만큼 밀려 옆으로 퍼진다
+    const SPREAD_SPEED = 14;
+    const SPREAD_ACCEL = 46;
+    // 퍼프 — 응결 높이 위 덩이가 반지름 PUFF_CELLS 칸 안에 초당 PUFF_RATE 만큼 짙기를 남긴다. 짙기는 초당 FADE_RATE 몫씩 옅어진다
+    const PUFF_CELLS = 4;
+    const PUFF_RATE = 3.5;
+    const FADE_RATE = 0.12;
+    const SINK_SPEED = 6;
+    const PARCEL_COUNT = 70;
+    const SOURCE_X = 240;
+    const GRID_W = 160;
+    const GRID_H = 100;
+    const CELL = W / GRID_W;
+    const SUN_DEG_03 = 62;
+    const LOOP_S = 12;
+    const START_T = 4.5;
+    const REST_T = 8;
+    const parcels = [];
+    const cloud03 = makeField(GRID_W, GRID_H);
+    let spawnRand = seeded(303);
+    function envTemp(h) { return -ENV_LAPSE * Math.min(h, CAP_H); }
+    // 덩이가 dh 만큼 오를 때 식는 양 — 응결 높이 아래는 마른 비율, 위는 젖은 비율
+    function coolBy(h0, dh) {
+        const h1 = h0 + dh;
+        const below = Math.max(0, Math.min(h1, CONDENSE_H) - Math.min(h0, CONDENSE_H));
+        return below * DRY_LAPSE + (dh - below) * MOIST_LAPSE;
+    }
+    function spawn(p, h) {
+        p.x = SOURCE_X + (spawnRand() - 0.5) * 120;
+        p.h = h;
+        p.vx = (spawnRand() - 0.5) * 6;
+        p.vh = 10 + spawnRand() * 10;
+        // 출발 온도 차 — 주변보다 2.6~3.4 만큼 따뜻하게(이번 높이에서 마른 비율로 식었을 몫을 뺀다)
+        p.temp = envTemp(0) + 2.6 + spawnRand() * 0.8 - coolBy(0, h);
+        p.age = 0;
+        p.seed = spawnRand() * 1000;
+    }
+    function reset() {
+        spawnRand = seeded(303);
+        cloud03.v.fill(0);
+        parcels.length = 0;
+        for (let i = 0; i < PARCEL_COUNT; i += 1) {
+            const p = { x: 0, h: 0, vx: 0, vh: 0, temp: 0, age: 0, seed: 0 };
+            spawn(p, (i / PARCEL_COUNT) * CONDENSE_H * 0.9);
+            parcels.push(p);
+        }
+    }
+    function buoyancy(p) { return (p.temp - envTemp(p.h)) * BUOYANCY; }
+    function stepParcel(p, dt) {
+        const a = buoyancy(p) - DRAG * p.vh;
+        p.vh += a * dt;
+        const dh = p.vh * dt;
+        p.temp -= dh > 0 ? coolBy(p.h, dh) : (dh * DRY_LAPSE);
+        p.h += dh;
+        let ax = Math.sin(sceneT * 1.7 + p.seed) * 4 - DRAG * p.vx;
+        if (p.h > CONDENSE_H && p.vh < SPREAD_SPEED) {
+            ax += (p.x >= SOURCE_X ? 1 : -1) * SPREAD_ACCEL;
+        }
+        p.vx += ax * dt;
+        p.x += p.vx * dt;
+        p.age += dt;
+        if (p.h < 0) {
+            p.h = 0;
+            p.vh = 0;
+        }
+        if (p.age > 9 || p.x < -20 || p.x > W + 20 || (p.h < 4 && p.vh <= 0 && p.age > 1)) {
+            spawn(p, 0);
+        }
+    }
+    // 응결 높이 위 덩이만 짙기를 남긴다 — 칸의 높이가 응결 높이 아래면 칠하지 않아 밑면이 평평하다
+    // 가라앉는 덩이(아래로 SINK_SPEED 보다 빠름)는 데워져 물방울이 마르므로 남기지 않는다 — 구름 옆에 아래로 늘어진 줄이 생기지 않게
+    function stampPuff(p, dt) {
+        if (p.h < CONDENSE_H || p.vh < -SINK_SPEED) {
+            return;
+        }
+        const cx = p.x / CELL;
+        const cy = (GROUND_Y - p.h) / CELL;
+        const baseRow = (GROUND_Y - CONDENSE_H) / CELL;
+        for (let oy = -PUFF_CELLS; oy <= PUFF_CELLS; oy += 1) {
+            const gy = Math.round(cy) + oy;
+            if (gy < 0 || gy >= GRID_H || gy > baseRow) {
+                continue;
+            }
+            for (let ox = -PUFF_CELLS; ox <= PUFF_CELLS; ox += 1) {
+                const gx = Math.round(cx) + ox;
+                if (gx < 0 || gx >= GRID_W) {
+                    continue;
+                }
+                const r = Math.hypot(gx - cx, gy - cy) / PUFF_CELLS;
+                if (r >= 1) {
+                    continue;
+                }
+                const i = gy * GRID_W + gx;
+                cloud03.v[i] = Math.min(1, cloud03.v[i] + PUFF_RATE * dt * (1 - r * r));
+            }
+        }
+    }
+    function update(dt) {
+        const keep = 1 - FADE_RATE * dt;
+        for (let i = 0; i < cloud03.v.length; i += 1) {
+            cloud03.v[i] *= keep;
+        }
+        for (const p of parcels) {
+            stepParcel(p, dt);
+            stampPuff(p, dt);
+        }
+    }
+    // 가장 낮은 구름 칸의 높이(px) — 짙기 > level 인 칸 가운데 땅에서 가장 낮은 줄
+    function cloudBaseH(level) {
+        for (let gy = GRID_H - 1; gy >= 0; gy -= 1) {
+            for (let gx = 0; gx < GRID_W; gx += 1) {
+                if (cloud03.v[gy * GRID_W + gx] > level) {
+                    return GROUND_Y - (gy + 1) * CELL;
+                }
+            }
+        }
+        return -1;
+    }
+    // ── 03 화면 ──────────────────────────────────────────────────
+    const pix03 = makePix(GRID_W, GRID_H);
+    // 해 쪽(오른쪽 위) 칸으로 몇 칸 걸으며 짙기를 더해 아랫면·그늘을 어둡게
+    const SHADE_STEPS_03 = 6;
+    function draw() {
+        const d = pix03.img.data;
+        for (let gy = 0; gy < GRID_H; gy += 1) {
+            const sky = mix(SKY_HIGH, SKY_LOW, gy / GRID_H);
+            for (let gx = 0; gx < GRID_W; gx += 1) {
+                const i = gy * GRID_W + gx;
+                let c = sky;
+                const v0 = cloud03.v[i];
+                if (v0 > 0.01) {
+                    // 뭉게 결 — 여러 겹 노이즈 합이 천천히 위로 흘러 꼭대기가 끓어오르듯 보이게(짙기를 0.55~1.45 배)
+                    const tex = layeredNoise(gx * CELL / 16, gy * CELL / 16 + sceneT * 0.35, 3, 31);
+                    const v = Math.min(1.2, v0 * (0.55 + 0.9 * tex));
+                    let s = 0;
+                    for (let k = 1; k <= SHADE_STEPS_03; k += 1) {
+                        const sx = gx + k;
+                        const sy = gy - k;
+                        if (sx >= GRID_W || sy < 0) {
+                            break;
+                        }
+                        s += cloud03.v[sy * GRID_W + sx];
+                    }
+                    const lit = Math.exp(-0.32 * s);
+                    const cl = mix(CLOUD_SHADE, CLOUD, 0.2 + 0.8 * lit * (0.7 + 0.5 * tex));
+                    c = mix(sky, cl, 1 - Math.exp(-4.5 * v));
+                }
+                const k = i * 4;
+                d[k] = c[0];
+                d[k + 1] = c[1];
+                d[k + 2] = c[2];
+                d[k + 3] = 255;
+            }
+        }
+        blit(pix03, 0, 0, W, H);
+        disc(424, 46, 20, BUTTER, 1);
+        // 공기 덩이 — 응결 높이 아래만 산호 점으로(아직 보이지 않는 공기). 위로 올라간 덩이는 구름 속에 묻힌다
+        for (const p of parcels) {
+            if (p.h < CONDENSE_H) {
+                disc(p.x, GROUND_Y - p.h, 3.2, CORAL_DEEP, 0.65);
+            }
+        }
+        const baseY = GROUND_Y - CONDENSE_H;
+        seg(0, baseY, W, baseY, 1.5, INK, 0.55, 5);
+        tag('응결 높이', 12, baseY + 14, INK, 11, 'left');
+        box(0, GROUND_Y, W, H - GROUND_Y, 0, GRASS, 1);
+        seg(0, GROUND_Y, W, GROUND_Y, 2, GRASS_SHADE, 0.8, 0);
+    }
+    function statusText() { return skyText(coverOf(cloud03, 0.15), SUN_DEG_03, 0); }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 버튼을 누르면 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 오래 숨었다 돌아온 첫 프레임도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    function advance(dt) {
+        sceneT += dt;
+        if (LOOP_S > 0 && sceneT >= LOOP_S) {
+            sceneT -= LOOP_S;
+            reset();
+        }
+        update(dt);
+    }
+    // 처음부터 t 초까지 1/60초 고정 걸음으로 감아 둔다 — 첫 화면·정지 장면이 빈 하늘로 시작하지 않게
+    function runTo(t) {
+        sceneT = 0;
+        reset();
+        const h = 1 / 60;
+        while (sceneT + h <= t) {
+            advance(h);
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw();
+        pushStatus(statusText());
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 대표 순간(REST_T 초)의 하늘 한 장
+    function showRest() {
+        stopLoop();
+        runTo(REST_T);
+        draw();
+        pushStatus(statusText());
+    }
+    // 자동 시연은 START_T 초 자리에서 시작한다(첫 화면에 장면 핵심이 보이게). LOOP_S 가 있는 장면은 한 바퀴를 돌면 0초부터
+    function play() {
+        runTo(START_T);
+        draw();
+        pushStatus(statusText());
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 정지 장면, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw();
+    }, { signal: off.signal });
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
