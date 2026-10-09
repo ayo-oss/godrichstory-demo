@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Sightline Score Map That Cools Where Heads in Front Block the View — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cf is-demo" id="cf">
+  <canvas class="cf__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="A fan-shaped seat map colored by a score that blends the clearance over the heads in front with distance and angle, plus a side section of the picked row."></canvas>
+  <div class="cf__pick" role="group" aria-label="Pick a seat (arrow keys work too)">
+    <button class="cf__btn" data-role="prev" type="button">Prev seat</button>
+    <button class="cf__btn" data-role="next" type="button">Next seat</button>
+  </div>
+  <p class="cf__status" data-role="status" aria-live="off">Scoring the views</p>
+  <button class="cf__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cf");
+    if (!root) return;
+    // 판 좌표 — 캔버스 안은 늘 480×300. 화면에 보이는 크기와 상관없이 계산은 이 좌표로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 따라가기 비율 — 1 − e^(−rate·dt). 프레임 시간이 달라도 1초에 같은 만큼 다가간다
+    function follow(rate, dt) { return 1 - Math.exp(-rate * dt); }
+    // 1/60초마다 ease 만큼 다가가는 비율을 dt 초로 환산 — 1 − (1 − ease)^(dt × 60)
+    function easeStep(ease, dt) { return 1 - Math.pow(1 - ease, dt * 60); }
+    // 시드 고정 난수 — 같은 시드면 같은 시연이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 지수 간격 — 평균 mean 인 도착 간격. u 는 0 이상 1 미만 난수
+    function expGap(u, mean) { return -Math.log(1 - u) * mean; }
+    function pad2(n) { return n < 10 ? '0' + n : String(n); }
+    function makeSpring(x) { return { x: x, v: 0, to: x }; }
+    const SPRING_SUBSTEP = 1 / 240;
+    function stepSpring(s, stiffness, damping, dt) {
+        let left = dt;
+        while (left > 1e-9) {
+            const h = Math.min(SPRING_SUBSTEP, left);
+            s.v += (stiffness * (s.to - s.x) - damping * s.v) * h;
+            s.x += s.v * h;
+            left -= h;
+        }
+    }
+    function snapSpring(s, x) { s.x = x; s.v = 0; s.to = x; }
+    // ── 부채꼴 객석 (화면 좌표) ───────────────────────────────────
+    // 무대 중심(HALL_CX, HALL_CY)에서 줄 i 의 반지름 r = ROW_R0 + i × ROW_GAP. 각도 0 = 무대에서 똑바로 아래, 왼쪽이 음수
+    const HALL_CX = 240;
+    const HALL_CY = 18;
+    const HALL_ROWS = 10;
+    const ROW_R0 = 62;
+    const ROW_GAP = 18;
+    const FAN_HALF = 0.98;
+    // 통로 두 줄기의 각도 — 통로 폭 AISLE_W(px)는 줄마다 AISLE_W / r 라디안의 틈이 된다
+    const AISLE_ANGLES = [-0.34, 0.34];
+    const AISLE_W = 14;
+    // 좌석 하나가 호 위에서 차지하는 길이(px)
+    const SEAT_W = 16;
+    const ROW_LETTERS = 'ABCDEFGHJKLMNPQRST';
+    function seatLabel(row, k) { return ROW_LETTERS.charAt(row) + '-' + pad2(k + 1); }
+    // 줄마다 — 부채꼴 전체 각을 통로 틈으로 끊은 구간마다 호 길이(각 × 반지름)를 좌석 폭으로 나눈 몫이 그 구간 자리 수,
+    // 자리 중심은 구간 각을 자리 수로 똑같이 나눈 칸의 가운데
+    function buildHall(rows, r0, gap, seatW, aisleW) {
+        const seats = [];
+        const rowStart = [];
+        const rowCount = [];
+        const segs = [];
+        for (let i = 0; i < rows; i += 1) {
+            const r = r0 + i * gap;
+            const bounds = [-FAN_HALF];
+            for (const a of AISLE_ANGLES) {
+                const half = aisleW / 2 / r;
+                bounds.push(a - half, a + half);
+            }
+            bounds.push(FAN_HALF);
+            rowStart.push(seats.length);
+            let k = 0;
+            for (let s = 0; s + 1 < bounds.length; s += 2) {
+                const a0 = bounds[s];
+                const span = bounds[s + 1] - a0;
+                const n = Math.floor(span * r / seatW);
+                const seg = [];
+                for (let j = 0; j < n; j += 1) {
+                    const ang = a0 + (j + 0.5) * span / n;
+                    seg.push(seats.length);
+                    seats.push({ row: i, k: k, ang: ang, r: r, x: HALL_CX + r * Math.sin(ang), y: HALL_CY + r * Math.cos(ang), label: seatLabel(i, k), seg: segs.length });
+                    k += 1;
+                }
+                segs.push(seg);
+            }
+            rowCount.push(k);
+        }
+        return { seats: seats, rowStart: rowStart, rowCount: rowCount, segs: segs };
+    }
+    const HALL = buildHall(HALL_ROWS, ROW_R0, ROW_GAP, SEAT_W, AISLE_W);
+    // 옆 자리·앞뒤 줄로 옮기기 — 앞뒤 줄은 각도가 가장 가까운 자리
+    function hallNeighbor(idx, dk, dr) {
+        const s = HALL.seats[idx];
+        if (dr !== 0) {
+            const row = clamp(s.row + dr, 0, HALL_ROWS - 1);
+            let best = HALL.rowStart[row];
+            for (let j = 0; j < HALL.rowCount[row]; j += 1) {
+                const c = HALL.rowStart[row] + j;
+                if (Math.abs(HALL.seats[c].ang - s.ang) < Math.abs(HALL.seats[best].ang - s.ang)) {
+                    best = c;
+                }
+            }
+            return best;
+        }
+        const k = clamp(s.k + dk, 0, HALL.rowCount[s.row] - 1);
+        return HALL.rowStart[s.row] + k;
+    }
+    function findSeat(label) {
+        for (let i = 0; i < HALL.seats.length; i += 1) {
+            if (HALL.seats[i].label === label) {
+                return i;
+            }
+        }
+        return 0;
+    }
+    // ── 시야 (단면, 미터) ────────────────────────────────────────
+    // 줄 i 는 무대 앞끝에서 rowDist(i) 떨어져 있고 바닥이 i × rake 만큼 높다. 앉은 눈높이는 그 바닥 + EYE_H
+    const FIRST_ROW_M = 2.4;
+    const ROW_DEPTH_M = 0.95;
+    const RAKE_STEP = 0.12;
+    const EYE_H = 1.15;
+    const STAGE_H = 0.95;
+    const STAGE_W_M = 8;
+    const STAGE_D_M = 5;
+    // 앞사람 눈 위로 시선이 이만큼(미터) 지나가면 머리에 가리지 않는다고 본다
+    const C_GOOD = 0.12;
+    const DIST_NEAR_M = 4;
+    const DIST_FAR_M = 12;
+    // 무대 폭이 눈에 차지하는 각 — 이 각을 넘으면 고개를 돌려야 무대 양끝이 보인다
+    const FOV_OK_DEG = 50;
+    const FOV_BAD_DEG = 100;
+    // 무대 앞끝을 내려다보거나 올려다보는 각
+    const PITCH_OK_DEG = 8;
+    const PITCH_BAD_DEG = 28;
+    // 정면에서 벗어난 각(라디안)
+    const SIDE_OK = 0.25;
+    const SIDE_BAD = 1.0;
+    // 점수 무게 — 틈 · 거리 · 무대 폭 · 높낮이 · 옆 각 (합 1)
+    const SCORE_WEIGHTS = [0.3, 0.1, 0.35, 0.1, 0.15];
+    function rowDist(i) { return FIRST_ROW_M + i * ROW_DEPTH_M; }
+    function eyeY(i, rake) { return i * rake + EYE_H; }
+    // 틈(미터) — 줄 i 의 눈에서 무대 앞끝(높이 stageH)까지 그은 직선이 앞줄 자리(거리 rowDist(i−1))를 지날 때의 높이 − 앞줄 눈높이.
+    // 직선 높이 = stageH + (내 눈 − stageH) × (앞줄 거리 / 내 거리). 맨 앞줄은 앞사람이 없으므로 C_GOOD 로 친다
+    function clearance(i, stageH, rake) {
+        if (i <= 0) {
+            return C_GOOD;
+        }
+        const e = eyeY(i, rake);
+        const lineAt = stageH + (e - stageH) * (rowDist(i - 1) / rowDist(i));
+        return lineAt - eyeY(i - 1, rake);
+    }
+    function viewOf(row, ang, stageH, rake) {
+        const d = rowDist(row);
+        const c = clearance(row, stageH, rake);
+        const fov = 2 * Math.atan(STAGE_W_M / 2 / d) * 180 / Math.PI;
+        const pitch = Math.atan2(eyeY(row, rake) - stageH, d) * 180 / Math.PI;
+        const parts = [
+            clamp(c / C_GOOD, 0, 1),
+            1 - smooth((d - DIST_NEAR_M) / (DIST_FAR_M - DIST_NEAR_M)),
+            1 - smooth((fov - FOV_OK_DEG) / (FOV_BAD_DEG - FOV_OK_DEG)),
+            1 - smooth((Math.abs(pitch) - PITCH_OK_DEG) / (PITCH_BAD_DEG - PITCH_OK_DEG)),
+            1 - smooth((Math.abs(ang) - SIDE_OK) / (SIDE_BAD - SIDE_OK))
+        ];
+        let score = 0;
+        for (let k = 0; k < parts.length; k += 1) {
+            score += SCORE_WEIGHTS[k] * parts[k];
+        }
+        return { clear: c, fov: fov, pitch: pitch, parts: parts, score: score };
+    }
+    function hallScores(stageH, rake) {
+        return HALL.seats.map(function (s) { return viewOf(s.row, s.ang, stageH, rake).score; });
+    }
+    // ── 원근 투영 (미터) ─────────────────────────────────────────
+    // 무대 앞끝 가운데가 원점. x right, y 위, z 객석 쪽. 자리의 눈 = (ρ sin 각, 눈높이, ρ cos 각), ρ = rowDist(줄)
+    function v3sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+    function v3dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function v3cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+    function v3norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
+    function v3lerp(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    const NEAR_M = 0.15;
+    // 무대 위 이 점을 바라본다 — 배우 가슴 높이쯤
+    const LOOK_AT = [0, STAGE_H + 1.1, -1.6];
+    function seatEye(row, ang, rake) {
+        const rho = rowDist(row);
+        return [rho * Math.sin(ang), eyeY(row, rake), rho * Math.cos(ang)];
+    }
+    function lookAt(eye, target, focal, cx, cy) {
+        const fwd = v3norm(v3sub(target, eye));
+        const right = v3norm(v3cross(fwd, [0, 1, 0]));
+        const up = v3cross(right, fwd);
+        return { eye: eye, right: right, up: up, fwd: fwd, focal: focal, cx: cx, cy: cy };
+    }
+    // 투영 — 카메라 기준 깊이 z 로 나눈다: x' = cx + f·x/z, y' = cy − f·y/z. 깊이가 NEAR_M 보다 가까우면 깊이를 음수로 돌려 버리게 한다
+    function project(cam, p) {
+        const rel = v3sub(p, cam.eye);
+        const z = v3dot(rel, cam.fwd);
+        if (z < NEAR_M) {
+            return [0, 0, -1];
+        }
+        return [cam.cx + cam.focal * v3dot(rel, cam.right) / z, cam.cy - cam.focal * v3dot(rel, cam.up) / z, z];
+    }
+    // 앞줄 머리 — 눈보다 HEAD_UP 위에 중심, 반지름 가로 HEAD_RX · 세로 HEAD_RY (미터)
+    const HEAD_UP = 0.06;
+    const HEAD_RX = 0.1;
+    const HEAD_RY = 0.13;
+    function headsAhead(cam, row, rake) {
+        const out = [];
+        for (const s of HALL.seats) {
+            if (s.row >= row) {
+                continue;
+            }
+            const e = seatEye(s.row, s.ang, rake);
+            const p = project(cam, [e[0], e[1] + HEAD_UP, e[2]]);
+            if (p[2] <= 0) {
+                continue;
+            }
+            out.push({ sx: p[0], sy: p[1], rx: cam.focal * HEAD_RX / p[2], ry: cam.focal * HEAD_RY / p[2], z: p[2] });
+        }
+        return out;
+    }
+    // 무대 가림 — 무대 앞끝 선과 배우 가슴 높이 선에서 STAGE_SAMPLES 점씩 찍어, 더 가까운 머리 타원 안에 든 점의 비율
+    const STAGE_SAMPLES = 41;
+    function stageOcclusion(cam, heads) {
+        let hidden = 0;
+        let total = 0;
+        const lines = [[STAGE_H, 0], [LOOK_AT[1], LOOK_AT[2]]];
+        for (const ln of lines) {
+            for (let k = 0; k < STAGE_SAMPLES; k += 1) {
+                const x = lerp(-STAGE_W_M / 2, STAGE_W_M / 2, k / (STAGE_SAMPLES - 1));
+                const p = project(cam, [x, ln[0], ln[1]]);
+                if (p[2] <= 0 || p[0] < 0 || p[0] > W || p[1] < 0 || p[1] > H) {
+                    continue;
+                }
+                total += 1;
+                for (const h of heads) {
+                    if (h.z >= p[2]) {
+                        continue;
+                    }
+                    const dx = (p[0] - h.sx) / h.rx;
+                    const dy = (p[1] - h.sy) / h.ry;
+                    if (dx * dx + dy * dy <= 1) {
+                        hidden += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        return total ? hidden / total : 0;
+    }
+    // ── 영화관 격자 (04 · 05) ────────────────────────────────────
+    // 줄 CIN_ROWS × 열 CIN_COLS, 통로는 CIN_AISLES 열 앞. 자리 번호 = 줄 × CIN_COLS + 열
+    const CIN_ROWS = 8;
+    const CIN_COLS = 14;
+    const CIN_AISLES = [3, 11];
+    const CELL_W = 22;
+    const CELL_H = 18;
+    const CELL_GAP = 4;
+    const AISLE_PX = 16;
+    const GRID_TOP = 62;
+    // 가장 좋은 줄과 그 앞뒤로 점수가 0 이 되는 줄 수
+    const BEST_ROW = 5;
+    const ROW_SPREAD = 6;
+    function cinX(c) {
+        let aisles = 0;
+        for (const a of CIN_AISLES) {
+            if (c >= a) {
+                aisles += 1;
+            }
+        }
+        const total = CIN_COLS * (CELL_W + CELL_GAP) - CELL_GAP + CIN_AISLES.length * AISLE_PX;
+        return (W - total) / 2 + c * (CELL_W + CELL_GAP) + aisles * AISLE_PX;
+    }
+    function cinY(r) { return GRID_TOP + r * (CELL_H + CELL_GAP); }
+    // 격자 점수 — 줄은 BEST_ROW 에서 멀수록 제곱으로, 열은 가운데에서 멀수록 제곱으로 깎는다
+    function gridScore(r, c) {
+        const rowK = 1 - Math.pow((r - BEST_ROW) / ROW_SPREAD, 2);
+        const mid = (CIN_COLS - 1) / 2;
+        const colK = 1 - 0.7 * Math.pow((c - mid) / mid, 2);
+        return clamp(rowK, 0, 1) * colK;
+    }
+    function gridSegments() {
+        const out = [];
+        for (let r = 0; r < CIN_ROWS; r += 1) {
+            let seg = [];
+            for (let c = 0; c < CIN_COLS; c += 1) {
+                if (CIN_AISLES.indexOf(c) >= 0 && seg.length) {
+                    out.push(seg);
+                    seg = [];
+                }
+                seg.push(r * CIN_COLS + c);
+            }
+            out.push(seg);
+        }
+        return out;
+    }
+    function gridLabel(id) { return ROW_LETTERS.charAt(Math.floor(id / CIN_COLS)) + '-' + pad2(id % CIN_COLS + 1); }
+    function findBlocks(segs, free, score, size) {
+        const out = [];
+        segs.forEach(function (seg, si) {
+            for (let s = 0; s + size <= seg.length; s += 1) {
+                const ids = seg.slice(s, s + size);
+                if (!ids.every(function (id) { return free[id]; })) {
+                    continue;
+                }
+                let sum = 0;
+                for (const id of ids) {
+                    sum += score[id];
+                }
+                let orphan = -1;
+                const L = s - 1;
+                if (L >= 0 && free[seg[L]] && (L - 1 < 0 || !free[seg[L - 1]])) {
+                    orphan = seg[L];
+                }
+                const R = s + size;
+                if (R < seg.length && free[seg[R]] && (R + 1 >= seg.length || !free[seg[R + 1]])) {
+                    orphan = seg[R];
+                }
+                out.push({ seg: si, start: s, ids: ids, sum: sum, orphan: orphan });
+            }
+        });
+        return out;
+    }
+    // 가장 높은 후보 — allowOrphan 이 거짓이면 외톨이 빈칸을 남기는 후보는 건너뛴다. 없으면 −1
+    function bestBlock(blocks, allowOrphan) {
+        let best = -1;
+        blocks.forEach(function (b, i) {
+            if (!allowOrphan && b.orphan >= 0) {
+                return;
+            }
+            if (best < 0 || b.sum > blocks[best].sum + 1e-9) {
+                best = i;
+            }
+        });
+        return best;
+    }
+    // 좌석 상태 — 색만이 아니라 무늬로도 갈린다. 빈자리 = 연한 바탕 + 진한 테두리, 팔린 자리 = 회색 + 빗금, 잡아 둔 자리 = 버터 + 굵은 테두리, 고른 자리 = 민트 + 체크
+    const SEAT_FREE = 0;
+    const SEAT_SOLD = 1;
+    const SEAT_HELD = 2;
+    const SEAT_MINE = 3;
+    // 장면 시계(초)와 상태 줄 글자 — 장면 계산이 고치고, 화면 쪽이 읽어 그린다
+    let sceneT = 0;
+    let simStatus = '';
+    // 파스텔 팔레트 — 크림 바탕 위 라벤더·민트·버터·산호. 팔린 자리·글자는 진한 쪽으로 명도 차를 둔다
+    const PAPER = [251, 247, 238];
+    const PAPER_DIM = [241, 234, 220];
+    const GRID = [226, 218, 204];
+    const INK = [44, 38, 58];
+    const INK_SOFT = [112, 104, 126];
+    const CREAM = [255, 251, 242];
+    const LAVENDER = [190, 174, 236];
+    const MINT = [150, 212, 186];
+    const BUTTER = [244, 220, 140];
+    const CORAL = [242, 160, 140];
+    const SKY = [160, 200, 236];
+    const PINK = [242, 182, 206];
+    const SOLD = [176, 168, 186];
+    const MINT_DEEP = [36, 120, 92];
+    const CORAL_DEEP = [186, 70, 56];
+    const VIOLET_DEEP = [86, 56, 168];
+    // 무대 조명 — 따뜻한 미색
+    const STAGE_LIGHT = [252, 236, 204];
+    const STAGE_WOOD = [214, 182, 150];
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 점수 색 — 0 은 차가운 하늘, 0.5 는 연한 미색, 1 은 따뜻한 살구
+    const SCORE_COLD = [150, 182, 228];
+    const SCORE_MID = [238, 228, 204];
+    const SCORE_WARM = [244, 160, 120];
+    function scoreColor(v) {
+        const c = clamp(v, 0, 1);
+        return c < 0.5 ? mix(SCORE_COLD, SCORE_MID, c * 2) : mix(SCORE_MID, SCORE_WARM, (c - 0.5) * 2);
+    }
+    // 점수 0~1 을 화면 글자 0~100 으로
+    function pct(v) { return Math.round(clamp(v, 0, 1) * 100); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearStage(c) {
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function label(s, x, y, c, a, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function fillRound(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        roundRectPath(x, y, w, h, r);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function hatchIn(w, h, spacing, c, a) {
+        ctx.beginPath();
+        for (let s = -h; s < w; s += spacing) {
+            ctx.moveTo(s, h);
+            ctx.lineTo(s + h, 0);
+        }
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function checkIn(w, h, c, a) {
+        ctx.beginPath();
+        ctx.moveTo(w * 0.24, h * 0.52);
+        ctx.lineTo(w * 0.43, h * 0.72);
+        ctx.lineTo(w * 0.78, h * 0.3);
+        ctx.lineWidth = Math.max(1.4, Math.min(w, h) * 0.14);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    // 자리 하나 — 가운데 (x, y), 폭 w · 높이 h, 회전 rot(라디안), 바탕색 fill. 등받이는 위쪽(무대 반대쪽)에 얇은 띠로
+    function drawSeat(x, y, w, h, rot, state, fill, a) {
+        if (a <= 0.01 || w < 0.5) {
+            return;
+        }
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.translate(-w / 2, -h / 2);
+        const base = state === SEAT_SOLD ? SOLD : fill;
+        roundRectPath(0, 0, w, h, Math.min(w, h) * 0.3);
+        ctx.fillStyle = rgba(base, a);
+        ctx.fill();
+        if (state === SEAT_SOLD) {
+            ctx.save();
+            ctx.clip();
+            hatchIn(w, h, Math.max(2.5, w / 3.2), INK, 0.55 * a);
+            ctx.restore();
+        }
+        roundRectPath(0, 0, w, h, Math.min(w, h) * 0.3);
+        ctx.lineWidth = state === SEAT_HELD ? 2 : (state === SEAT_MINE ? 1.6 : 1.1);
+        ctx.strokeStyle = rgba(state === SEAT_MINE ? MINT_DEEP : INK, (state === SEAT_SOLD ? 0.4 : 0.8) * a);
+        ctx.stroke();
+        if (state === SEAT_MINE) {
+            checkIn(w, h, MINT_DEEP, a);
+        }
+        // 등받이
+        if (h >= 8) {
+            ctx.fillStyle = rgba(INK, 0.16 * a);
+            ctx.fillRect(w * 0.18, h - Math.max(2, h * 0.16), w * 0.64, Math.max(1.5, h * 0.12));
+        }
+        ctx.restore();
+    }
+    // 남은 시간 고리 — 자리 둘레에 남은 몫(left 0~1)만큼 시계 방향 호
+    function holdRing(x, y, r, left, c, a) {
+        if (left <= 0 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + TAU * clamp(left, 0, 1));
+        ctx.lineWidth = 2.4;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    // 무대 — 위쪽 가운데 둥근 띠와 따뜻한 조명 번짐
+    function drawStageArc(cx, cy, r, glow) {
+        const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, r * 3.2);
+        g.addColorStop(0, rgba(STAGE_LIGHT, 0.95 * glow));
+        g.addColorStop(1, rgba(STAGE_LIGHT, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, cy + r * 3.2);
+        ctx.beginPath();
+        ctx.ellipse(cx, cy - 6, r * 1.5, r * 0.62, 0, 0, Math.PI);
+        ctx.closePath();
+        ctx.fillStyle = rgba(STAGE_WOOD, 1);
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgba(INK, 0.55);
+        ctx.stroke();
+    }
+    function polyline(pts, c, a, width) {
+        if (pts.length < 4) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(pts[0], pts[1]);
+        for (let i = 2; i < pts.length; i += 2) {
+            ctx.lineTo(pts[i], pts[i + 1]);
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    // 작은 알약 이름표
+    function pill(s, x, y, bg, fg, a, px) {
+        ctx.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctx.measureText(s).width + px * 1.2;
+        fillRound(x - w / 2, y - px * 0.85, w, px * 1.7, px * 0.85, bg, a);
+        label(s, x, y + 0.5, fg, a, px, 700, 'center');
+    }
+    // 상태 줄 — 바뀔 때만 글자를 고친다
+    let shownStatus = '';
+    function pushStatus() {
+        if (!statusEl || simStatus === shownStatus) {
+            return;
+        }
+        shownStatus = simStatus;
+        statusEl.textContent = simStatus;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 자리 고르기 — 진짜 버튼 두 개(Prev seat·Next seat)와 방향키. left·right = 같은 줄 옆 자리, 위·아래 = 앞뒤 줄의 각도가 가장 가까운 자리.
+    // 고르면 시연 표시를 떼고(wake) 항목의 onPick 이 장면을 그 자리에 맞춘 뒤, 동작 줄이기 중이어도 곧바로 한 장 다시 그린다
+    const prevEl = root.querySelector('[data-role="prev"]');
+    const nextEl = root.querySelector('[data-role="next"]');
+    let pickIdx = -1;
+    function movePick(dk, dr) {
+        pickIdx = pickIdx < 0 ? PICK_START : hallNeighbor(pickIdx, dk, dr);
+        wake();
+        onPick(pickIdx);
+        draw();
+        pushStatus();
+    }
+    if (prevEl) {
+        prevEl.addEventListener('click', function () { movePick(-1, 0); }, { signal: off.signal });
+    }
+    if (nextEl) {
+        nextEl.addEventListener('click', function () { movePick(1, 0); }, { signal: off.signal });
+    }
+    const PICK_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    root.addEventListener('keydown', function (e) {
+        const m = PICK_KEYS[e.key];
+        if (!m) {
+            return;
+        }
+        e.preventDefault();
+        movePick(m[0], m[1]);
+    }, { signal: off.signal });
+    // 02 — 시야 점수 지도. 자리마다 viewOf 가 앞줄 위 틈·거리·무대 폭 각·높낮이 각·옆 각을 0~1 로 바꿔 SCORE_WEIGHTS 로 더하고,
+    // 무대 높이가 STAGE_SWING 만큼 오르내리면 틈이 바뀌어 지도 전체가 다시 물든다
+    const STAGE_START_S = 0.2;
+    const STAGE_SWING = 0.45;
+    const STAGE_PERIOD_S = 2.4;
+    // 점수 계산이 무대 쪽에서 바깥으로 퍼져 나가는 빠르기(px/초)
+    const SWEEP_PX_S = 520;
+    // 칠한 색이 새 점수를 따라가는 비율(1/초)
+    const COLOR_FOLLOW_RATE = 14;
+    const PICK_START = findSeat('E-07');
+    const LOOP_S = 7.2;
+    const STATUS_SCORE = '{s} view score {p} · clearance over the row ahead {c}cm · stage height {h}m';
+    let stageH02 = STAGE_H;
+    let manual02 = -1;
+    let focus02 = PICK_START;
+    const shown02 = HALL.seats.map(function () { return 0.5; });
+    const target02 = hallScores(STAGE_H, RAKE_STEP);
+    function stageAt02(t) {
+        return t < STAGE_START_S ? STAGE_H : STAGE_H + STAGE_SWING * Math.sin(TAU * (t - STAGE_START_S) / STAGE_PERIOD_S);
+    }
+    // 퍼짐 — 무대 중심에서 그 자리까지 거리(px)가 아직 닿지 않았으면 0, 닿으면 1
+    function reach02(i) {
+        return smooth((sceneT * SWEEP_PX_S - (HALL.seats[i].r - ROW_R0 + 20)) / 60);
+    }
+    function reset() {
+        stageH02 = STAGE_H;
+        for (let i = 0; i < shown02.length; i += 1) {
+            shown02[i] = 0.5;
+        }
+        focus02 = manual02 >= 0 ? manual02 : PICK_START;
+    }
+    function recolor02(dt, snap) {
+        const sc = hallScores(stageH02, RAKE_STEP);
+        const k = snap ? 1 : follow(COLOR_FOLLOW_RATE, dt);
+        for (let i = 0; i < sc.length; i += 1) {
+            target02[i] = sc[i];
+            const want = snap ? sc[i] : lerp(0.5, sc[i], reach02(i));
+            shown02[i] = lerp(shown02[i], want, k);
+        }
+    }
+    function statusFor02() {
+        const s = HALL.seats[focus02];
+        const v = viewOf(s.row, s.ang, stageH02, RAKE_STEP);
+        simStatus = STATUS_SCORE.replace('{s}', s.label).replace('{p}', String(pct(v.score))).replace('{c}', (v.clear * 100).toFixed(1)).replace('{h}', stageH02.toFixed(2));
+    }
+    function update(dt) {
+        stageH02 = stageAt02(sceneT);
+        recolor02(dt, false);
+        statusFor02();
+    }
+    function restPose() {
+        sceneT = 3;
+        stageH02 = STAGE_H;
+        recolor02(0, true);
+        statusFor02();
+    }
+    function onPick(idx) {
+        manual02 = idx;
+        focus02 = idx;
+        if (still) {
+            recolor02(0, true);
+        }
+        statusFor02();
+    }
+    // 자리 칸 — 줄 반지름 ± ROW_GAP/2, 각 ± 좌석 폭/2 의 고리 조각을 점수 색으로 칠한다
+    function sector02(s, c) {
+        const r0 = s.r - ROW_GAP / 2 + 1;
+        const r1 = s.r + ROW_GAP / 2 - 1;
+        const half = (SEAT_W / 2 - 0.9) / s.r;
+        // 화면 각 = π/2 − 아래 기준 각
+        const a0 = Math.PI / 2 - s.ang - half;
+        const a1 = Math.PI / 2 - s.ang + half;
+        ctx.beginPath();
+        ctx.arc(HALL_CX, HALL_CY, r1, a0, a1);
+        ctx.arc(HALL_CX, HALL_CY, r0, a1, a0, true);
+        ctx.closePath();
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fill();
+    }
+    // 옆에서 본 단면 — 줄마다 바닥 계단, 앉은 눈 점, 고른 줄의 눈에서 무대 앞끝까지 시선, 앞줄 눈 위의 틈
+    const SEC_X = 10;
+    const SEC_Y = 10;
+    const SEC_W = 146;
+    const SEC_H = 62;
+    function section02() {
+        fillRound(SEC_X, SEC_Y, SEC_W, SEC_H, 8, CREAM, 0.94);
+        roundRectPath(SEC_X, SEC_Y, SEC_W, SEC_H, 8);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = rgba(INK, 0.35);
+        ctx.stroke();
+        const maxD = rowDist(HALL_ROWS - 1) + 0.6;
+        const maxY = eyeY(HALL_ROWS - 1, 0.3) + 0.4;
+        const px = function (d) { return SEC_X + 8 + d / maxD * (SEC_W - 16); };
+        const py = function (y) { return SEC_Y + SEC_H - 6 - y / maxY * (SEC_H - 12); };
+        // 무대
+        ctx.fillStyle = rgba(STAGE_WOOD, 1);
+        ctx.fillRect(SEC_X + 4, py(stageH02), px(0) - SEC_X - 4, py(0) - py(stageH02));
+        const row = HALL.seats[focus02].row;
+        for (let i = 0; i < HALL_ROWS; i += 1) {
+            const x0 = px(rowDist(i) - ROW_DEPTH_M / 2);
+            const x1 = px(rowDist(i) + ROW_DEPTH_M / 2);
+            ctx.fillStyle = rgba(i === row ? LAVENDER : PAPER_DIM, 1);
+            ctx.fillRect(x0, py(i * RAKE_STEP), x1 - x0, py(0) - py(i * RAKE_STEP));
+            ctx.beginPath();
+            ctx.arc(px(rowDist(i)), py(eyeY(i, RAKE_STEP)), i === row - 1 ? 2.6 : 1.8, 0, TAU);
+            ctx.fillStyle = rgba(i === row - 1 ? CORAL_DEEP : INK_SOFT, 1);
+            ctx.fill();
+        }
+        const ex = px(rowDist(row));
+        const ey = py(eyeY(row, RAKE_STEP));
+        polyline([ex, ey, px(0), py(stageH02)], VIOLET_DEEP, 0.95, 1.4);
+        if (row > 0) {
+            const c = clearance(row, stageH02, RAKE_STEP);
+            const ax = px(rowDist(row - 1));
+            const lineY = py(eyeY(row - 1, RAKE_STEP) + c);
+            polyline([ax, py(eyeY(row - 1, RAKE_STEP)), ax, lineY], c < 0 ? CORAL_DEEP : MINT_DEEP, 1, 2);
+        }
+    }
+    function legend02() {
+        const x = 372;
+        const y = 238;
+        for (let k = 0; k < 50; k += 1) {
+            ctx.fillStyle = rgba(scoreColor(k / 49), 1);
+            ctx.fillRect(x + k * 1.8, y, 2, 8);
+        }
+        label('0', x - 4, y + 4, INK_SOFT, 1, 9, 700, 'right');
+        label('100', x + 94, y + 4, INK_SOFT, 1, 9, 700, 'left');
+    }
+    function draw() {
+        clearStage(PAPER);
+        drawStageArc(HALL_CX, HALL_CY, 34, 0.6 + 0.4 * clamp((stageH02 - STAGE_H + STAGE_SWING) / (2 * STAGE_SWING), 0, 1));
+        HALL.seats.forEach(function (s, i) { sector02(s, scoreColor(shown02[i])); });
+        // 고른 자리 — 테두리와 점수
+        const f = HALL.seats[focus02];
+        ctx.save();
+        sector02(f, scoreColor(shown02[focus02]));
+        ctx.lineWidth = 2.4;
+        ctx.strokeStyle = rgba(INK, 1);
+        ctx.stroke();
+        ctx.restore();
+        pill(f.label + ' · ' + pct(target02[focus02]), f.x, f.y - 18, INK, CREAM, 1, 10);
+        section02();
+        legend02();
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 장면 시계를 dt 만큼 — 한 바퀴(LOOP_S)를 넘으면 처음 배치로 되돌려 다시 시연한다
+    function advance(dt) {
+        sceneT += dt;
+        if (sceneT >= LOOP_S) {
+            sceneT -= LOOP_S;
+            reset();
+        }
+        update(dt);
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw();
+        pushStatus();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 시연이 끝난 최종 배치 한 장만 그린다
+    function showRest() {
+        stopLoop();
+        sceneT = 0;
+        reset();
+        restPose();
+        draw();
+        pushStatus();
+    }
+    function play() {
+        sceneT = 0;
+        reset();
+        draw();
+        pushStatus();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 루프를 멈추고, 돌아오면 시계를 다시 맞춰 시작한다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 최종 배치로 멈추고, 꺼지면 시연을 처음부터
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw();
+    }, { signal: off.signal });
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
