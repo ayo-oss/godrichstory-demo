@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Raffle Board Where Name Balls Fall Through Pins — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pb is-demo" id="pb">
+  <canvas class="pb__canvas" data-role="canvas" width="480" height="300" aria-hidden="true"></canvas>
+  <div class="pb__head">
+    <p class="pb__status" data-role="status" aria-live="off">Drawing — 8 balls falling</p>
+    <div class="pb__controls">
+      <button type="button" class="pb__btn" data-role="redraw">Draw again</button>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pb");
+    if (!root) return;
+    // 논리 무대 — 물리는 화면 폭과 상관없이 이 480×300 좌표에서만 돈다. 화면이 넓든 좁든 그릴 때만 배율을 곱한다
+    const W = 480;
+    const H = 300;
+    // 한 틱 = 16ms 고정. 실제 프레임 간격이 흔들려도 계산은 같은 걸음으로만 나아간다
+    const FIXED_DT = 16;
+    const DT = FIXED_DT / 1000;
+    const TAU = Math.PI * 2;
+    // 머리 띠 높이(논리 px) — 상태 줄과 버튼이 이 띠 위에 겹친다
+    const HEADER = 30;
+    // 시연이 끝난 판을 이만큼(ms) 보여 준 뒤 같은 시드로 처음부터 다시 돈다
+    const LOOP_HOLD_MS = 1600;
+    // 파스텔 팔레트 — 어두운 판 위에 밝은 공·핀을 얹어 명도 차로 움직임이 읽힌다
+    const BG = [30, 27, 48];
+    const BG_LOW = [46, 39, 70];
+    const BAND = [20, 18, 32];
+    const GUIDE = [104, 94, 140];
+    const CREAM = [255, 248, 234];
+    const SKY = [146, 208, 255];
+    const PINK = [255, 172, 200];
+    const MINT = [144, 232, 202];
+    const LILAC = [202, 182, 255];
+    const PEACH = [255, 208, 172];
+    const LEMON = [250, 234, 156];
+    const AQUA = [156, 238, 236];
+    const CORAL = [255, 184, 166];
+    const INK = [28, 24, 40];
+    const BALL_COLORS = [PEACH, MINT, SKY, PINK, LILAC, LEMON, AQUA, CORAL, CREAM];
+    // 공 이름표 — 실제 사람 이름 대신 글자
+    const LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 같은 출발 자리·같은 결과가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seedValue) {
+        let s = seedValue >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function makeBall(x, y, r, color, label) {
+        return { x: x, y: y, vx: 0, vy: 0, r: r, color: color, label: label, trail: [], slow: 0, finishMs: -1, mul: 1, out: false };
+    }
+    // 속도를 먼저 갱신하는 적분 — 이번 걸음의 힘(중력)으로 속도를 바꾼 뒤, 그 새 속도로 자리를 옮긴다. h 는 초
+    function integrate(b, gx, gy, h) {
+        b.vx += gx * h;
+        b.vy += gy * h;
+        b.x += b.vx * h;
+        b.y += b.vy * h;
+    }
+    function capSpeed(b, max) {
+        const s = Math.hypot(b.vx, b.vy);
+        if (s > max) {
+            b.vx *= max / s;
+            b.vy *= max / s;
+        }
+    }
+    // 마지막 충돌 — 법선(공 쪽을 향함)과 닿은 자리. Bumpers hit·키커가 이 법선 방향으로 덧힘을 준다
+    const contact = { nx: 0, ny: -1, px: 0, py: 0 };
+    // 원-원 충돌(움직이지 않는 원: 핀·Bumpers hit) — 겹친 깊이만큼 법선 방향 바깥으로 밀어내고,
+    // 법선 방향 속도를 되튐 계수 e 만큼 뒤집는다. 돌려주는 값: 안 닿음 -1 · 닿았지만 멀어지는 중 0 · 다가오던 빠르기(px/s)
+    function hitCircle(b, cx, cy, cr, e) {
+        const dx = b.x - cx;
+        const dy = b.y - cy;
+        const d = Math.hypot(dx, dy);
+        const overlap = b.r + cr - d;
+        if (overlap <= 0) {
+            return -1;
+        }
+        // 중심이 정확히 겹치면 방향을 정할 수 없다 — 위로 민다
+        const nx = d > 1e-9 ? dx / d : 0;
+        const ny = d > 1e-9 ? dy / d : -1;
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+        contact.nx = nx;
+        contact.ny = ny;
+        contact.px = cx + nx * cr;
+        contact.py = cy + ny * cr;
+        const vn = b.vx * nx + b.vy * ny;
+        if (vn >= 0) {
+            return 0;
+        }
+        b.vx -= (1 + e) * vn * nx;
+        b.vy -= (1 + e) * vn * ny;
+        return -vn;
+    }
+    // 선분 위 가장 가까운 점 — 공 중심에서 선분으로 내린 수선의 발. t 는 0(시작점)~1(끝점)로 자른다
+    function closestOnSegment(px, py, ax, ay, bx, by) {
+        const ex = bx - ax;
+        const ey = by - ay;
+        const len2 = ex * ex + ey * ey;
+        const t = len2 > 0 ? clamp(((px - ax) * ex + (py - ay) * ey) / len2, 0, 1) : 0;
+        return [ax + ex * t, ay + ey * t, t];
+    }
+    // 원-선분 충돌 — 가장 가까운 점까지 거리가 (반지름 + 선 두께의 반)보다 짧으면 겹친 만큼 밀어낸다.
+    // 선분이 움직이면(도는 Flipper·풍차 막대) 접점의 속도(svx, svy)에 대한 상대 속도로 되튐을 잰다.
+    // grip 은 이번 걸음에 접선 방향 상대 속도에서 덜어 내는 몫 — 0 이면 미끄럼, 07 구름 마찰은 0 보다 크다
+    function hitSegment(b, ax, ay, bx, by, half, e, svx, svy, grip) {
+        const c = closestOnSegment(b.x, b.y, ax, ay, bx, by);
+        const dx = b.x - c[0];
+        const dy = b.y - c[1];
+        const d = Math.hypot(dx, dy);
+        const overlap = b.r + half - d;
+        if (overlap <= 0) {
+            return -1;
+        }
+        let nx = 0;
+        let ny = -1;
+        if (d > 1e-9) {
+            nx = dx / d;
+            ny = dy / d;
+        }
+        else {
+            // 중심이 선 위에 올라탔다 — 선분의 왼쪽 법선으로 민다
+            const L = Math.hypot(bx - ax, by - ay) || 1;
+            nx = (by - ay) / L;
+            ny = -(bx - ax) / L;
+        }
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+        contact.nx = nx;
+        contact.ny = ny;
+        contact.px = c[0];
+        contact.py = c[1];
+        const rvx = b.vx - svx;
+        const rvy = b.vy - svy;
+        const vn = rvx * nx + rvy * ny;
+        if (vn >= 0) {
+            return 0;
+        }
+        const tvx = (rvx - vn * nx) * (1 - grip);
+        const tvy = (rvy - vn * ny) * (1 - grip);
+        b.vx = svx + tvx - e * vn * nx;
+        b.vy = svy + tvy - e * vn * ny;
+        return -vn;
+    }
+    // 움직이지 않는 벽 묶음 — 선분 하나하나에 hitSegment
+    function hitWalls(b, segs, e) {
+        for (let i = 0; i < segs.length; i += 1) {
+            const s = segs[i];
+            hitSegment(b, s[0], s[1], s[2], s[3], 0, e, 0, 0, 0);
+        }
+    }
+    // 공-공 충돌 — 같은 무게. 겹친 깊이를 반씩 나눠 밀어내고, 법선 방향 속도를 되튐 계수만큼 주고받는다
+    function hitBalls(a, b, e) {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.hypot(dx, dy);
+        const overlap = a.r + b.r - d;
+        if (overlap <= 0) {
+            return -1;
+        }
+        const nx = d > 1e-9 ? dx / d : 1;
+        const ny = d > 1e-9 ? dy / d : 0;
+        a.x -= nx * overlap * 0.5;
+        a.y -= ny * overlap * 0.5;
+        b.x += nx * overlap * 0.5;
+        b.y += ny * overlap * 0.5;
+        const vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (vn >= 0) {
+            return 0;
+        }
+        const j = -(1 + e) * vn * 0.5;
+        a.vx -= j * nx;
+        a.vy -= j * ny;
+        b.vx += j * nx;
+        b.vy += j * ny;
+        return -vn;
+    }
+    function pushTrail(b, n) {
+        b.trail.push(b.x, b.y);
+        while (b.trail.length > n * 2) {
+            b.trail.splice(0, 2);
+        }
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const status = statusEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 꼬리의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 버튼을 처음 누르는 순간 시연(가상 입력·같은 판 되풀이)을 멈추고 결과를 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    // 지금 판의 시드와 시각(ms). 시각은 16ms 고정 스텝으로만 는다
+    let seed = 0;
+    let clock = 0;
+    // 화면 배율 — 논리 1px 이 화면 CSS px 몇 개인가. 그릴 때만 쓰고 물리 계산에는 넣지 않는다
+    let viewScale = 1;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text) {
+        if (status.textContent !== text) {
+            status.textContent = text;
+        }
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const cssW = cv.getBoundingClientRect().width || W;
+        viewScale = cssW / W;
+        const k = viewScale * dpr;
+        cv.width = Math.max(1, Math.round(W * k));
+        cv.height = Math.max(1, Math.round(H * k));
+        // 그릴 때만 논리 좌표 → 화소 배율을 곱한다
+        ctx.setTransform(k, 0, 0, k, 0, 0);
+    }
+    function clearStage() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG, 1));
+        g.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 머리 띠 — 상태 줄과 버튼 뒤의 어두운 띠. 판을 다 그린 뒤 맨 위에 덮는다
+    function drawBand() {
+        ctx.fillStyle = rgba(BAND, 0.92);
+        ctx.fillRect(0, 0, W, HEADER);
+    }
+    function strokeSeg(s, width, c, a) {
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(s[0], s[1]);
+        ctx.lineTo(s[2], s[3]);
+        ctx.stroke();
+    }
+    // 꼬리 — 지나온 자리를 이을수록 굵고 진하게
+    function drawTrail(b, c, width) {
+        const t = b.trail;
+        const n = t.length / 2;
+        ctx.lineCap = 'round';
+        for (let i = 1; i < n; i += 1) {
+            const k = i / n;
+            ctx.strokeStyle = rgba(c, 0.55 * k);
+            ctx.lineWidth = width * k;
+            ctx.beginPath();
+            ctx.moveTo(t[i * 2 - 2], t[i * 2 - 1]);
+            ctx.lineTo(t[i * 2], t[i * 2 + 1]);
+            ctx.stroke();
+        }
+    }
+    // 공 — 바닥 그림자 → 왼쪽 위가 밝은 둥근 몸통 → 진한 테두리 → 이름표 글자
+    function drawBall(b) {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(b.x + 2, b.y + 3, b.r, 0, TAU);
+        ctx.fill();
+        const g = ctx.createRadialGradient(b.x - b.r * 0.35, b.y - b.r * 0.4, b.r * 0.1, b.x, b.y, b.r);
+        g.addColorStop(0, rgba(mixRGB(b.color, CREAM, 0.75), 1));
+        g.addColorStop(1, rgba(b.color, 1));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, TAU);
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgba(INK, 0.6);
+        ctx.stroke();
+        if (b.label) {
+            ctx.fillStyle = rgba(INK, 1);
+            ctx.font = '700 ' + Math.round(b.r * 1.25) + 'px ' + FONT_FAMILY;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(b.label, b.x, b.y + 0.5);
+        }
+    }
+    function drawText(text, x, y, size, c, a, align) {
+        ctx.fillStyle = rgba(c, a);
+        ctx.font = '600 ' + size + 'px ' + FONT_FAMILY;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, x, y);
+    }
+    // 01 이름 공 추첨판 — 엇갈린 핀 숲 + 원-원 충돌(겹친 만큼 밀어내기·되튐 계수) + 서브스텝 + 시드 고정 난수
+    // 핀 줄 수 — 짝수 줄 9 marbles·홀수 줄 8 marbles, 줄마다 반 칸씩 어긋난다
+    const PEG_ROWS = 7;
+    // 되튐 계수 — 닿기 전 법선 방향 빠르기 가운데 되돌려 받는 몫(0 이면 붙고 1 이면 그대로 튄다). 핀·벽·공끼리 같은 값
+    const RESTITUTION = 0.5;
+    // 한 틱(16ms)을 몇 번으로 잘게 나눠 계산하나 — 적으면 빠른 공이 한 걸음에 핀을 많이 파고든다
+    const SUBSTEPS = 4;
+    const GRAVITY = 760;
+    const BALL_COUNT = 8;
+    const BALL_R = 8;
+    const PEG_R = 4;
+    const PEG_GAP_X = 44;
+    const PEG_GAP_Y = 22;
+    const PEG_TOP = 74;
+    // 벽 쪽 덧핀 자리 — 벽에서 핀 중심까지(px). 틈(14 - 핀 반지름 4 = 10px)이 공 지름(16px)보다 좁아 벽 타기를 막는다
+    const PEG_WALL_GAP = 14;
+    const WALL_L = 24;
+    const WALL_R = 456;
+    // 결승선 — 공 전체가 이 아래로 내려가면 지난 것으로 센다. 맨 먼저 지난 공이 당첨
+    const FINISH_Y = 238;
+    const FLOOR_Y = 292;
+    const SLOTS = 8;
+    // 끼임 — 결승선 위에서 이 빠르기(px/s) 아래로 STUCK_MS 동안 머물면 끼었다고 보고 좌우 한쪽으로 쳐 준다
+    const STUCK_SPEED = 12;
+    const STUCK_MS = 500;
+    const STUCK_KICK = 90;
+    const MAX_SPEED = 1400;
+    const MAX_RUN_MS = 14000;
+    const DEMO_SEED = 4761;
+    const SETTLE_TICKS = 1200;
+    const MID_X = (WALL_L + WALL_R) / 2;
+    const pegs = [];
+    for (let r = 0; r < PEG_ROWS; r += 1) {
+        const count = r % 2 === 0 ? 9 : 8;
+        for (let k = 0; k < count; k += 1) {
+            pegs.push({ x: MID_X + (k - (count - 1) / 2) * PEG_GAP_X, y: PEG_TOP + r * PEG_GAP_Y, glow: 0 });
+        }
+        // 홀수 줄은 벽 쪽 틈이 넓어 공이 벽을 타고 핀 없이 곧장 떨어진다 — 벽에서 PEG_WALL_GAP 떨어진 자리에 핀을 하나씩 더 박는다
+        if (r % 2 === 1) {
+            pegs.push({ x: WALL_L + PEG_WALL_GAP, y: PEG_TOP + r * PEG_GAP_Y, glow: 0 });
+            pegs.push({ x: WALL_R - PEG_WALL_GAP, y: PEG_TOP + r * PEG_GAP_Y, glow: 0 });
+        }
+    }
+    const SLOT_W = (WALL_R - WALL_L) / SLOTS;
+    const walls = [[WALL_L, HEADER, WALL_L, FLOOR_Y], [WALL_R, HEADER, WALL_R, FLOOR_Y], [WALL_L, FLOOR_Y, WALL_R, FLOOR_Y]];
+    // 칸 칸막이 — 결승선 조금 아래부터 바닥까지
+    const dividers = [];
+    for (let i = 1; i < SLOTS; i += 1) {
+        dividers.push([WALL_L + i * SLOT_W, FINISH_Y + 8, WALL_L + i * SLOT_W, FLOOR_Y]);
+    }
+    let rng = makeRng(1);
+    let balls = [];
+    // 결승선을 지난 순서(공 번호)
+    let order = [];
+    let stuckCount = 0;
+    let calmTicks = 0;
+    function slotOf(b) { return clamp(Math.floor((b.x - WALL_L) / SLOT_W), 0, SLOTS - 1); }
+    function onRestart() {
+        rng = makeRng(seed);
+        balls = [];
+        for (let i = 0; i < BALL_COUNT; i += 1) {
+            // 출발 자리 — 가운데에 한 줄로 모아 두고, 시드 난수로 몇 px 씩 비켜 놓는다(이 몇 px 이 결과를 가른다)
+            const b = makeBall(MID_X + (i - (BALL_COUNT - 1) / 2) * 21 + (rng() - 0.5) * 6, 46 + (rng() - 0.5) * 4, BALL_R, BALL_COLORS[i % BALL_COLORS.length], LABELS[i]);
+            b.vx = (rng() - 0.5) * 60;
+            balls.push(b);
+        }
+        order = [];
+        stuckCount = 0;
+        calmTicks = 0;
+        for (let i = 0; i < pegs.length; i += 1) {
+            pegs[i].glow = 0;
+        }
+    }
+    function collideWorld(b) {
+        for (let i = 0; i < pegs.length; i += 1) {
+            const p = pegs[i];
+            // 세로로 먼 핀은 건너뛴다
+            if (Math.abs(p.y - b.y) > b.r + PEG_R) {
+                continue;
+            }
+            const vn = hitCircle(b, p.x, p.y, PEG_R, RESTITUTION);
+            if (vn > 0) {
+                p.glow = Math.min(1, p.glow + vn / 500);
+            }
+        }
+        hitWalls(b, walls, RESTITUTION);
+        for (let i = 0; i < dividers.length; i += 1) {
+            const s = dividers[i];
+            hitSegment(b, s[0], s[1], s[2], s[3], 1.5, RESTITUTION, 0, 0, 0);
+        }
+    }
+    // 한 틱 — 16ms 를 SUBSTEPS 걸음으로 잘라: 적분 → 공끼리 → 핀·벽·칸막이. 걸음이 작을수록 한 번에 파고드는 깊이가 얕다
+    function step() {
+        const hs = DT / SUBSTEPS;
+        for (let s = 0; s < SUBSTEPS; s += 1) {
+            for (let i = 0; i < balls.length; i += 1) {
+                integrate(balls[i], 0, GRAVITY, hs);
+            }
+            for (let i = 0; i < balls.length; i += 1) {
+                for (let j = i + 1; j < balls.length; j += 1) {
+                    hitBalls(balls[i], balls[j], RESTITUTION);
+                }
+            }
+            for (let i = 0; i < balls.length; i += 1) {
+                collideWorld(balls[i]);
+                capSpeed(balls[i], MAX_SPEED);
+            }
+        }
+        let calm = true;
+        for (let i = 0; i < balls.length; i += 1) {
+            const b = balls[i];
+            const sp = Math.hypot(b.vx, b.vy);
+            if (b.finishMs < 0 && b.y - b.r > FINISH_Y) {
+                b.finishMs = clock;
+                order.push(i);
+            }
+            if (b.finishMs < 0 && sp < STUCK_SPEED) {
+                b.slow += FIXED_DT;
+                if (b.slow >= STUCK_MS) {
+                    // 끼임 탈출 — 시드 난수로 좌우를 골라 옆으로 치고 살짝 띄운다
+                    b.vx += (rng() < 0.5 ? -1 : 1) * STUCK_KICK;
+                    b.vy -= STUCK_KICK * 0.3;
+                    b.slow = 0;
+                    stuckCount += 1;
+                }
+            }
+            else {
+                b.slow = 0;
+            }
+            if (b.finishMs < 0 || sp > 20) {
+                calm = false;
+            }
+            pushTrail(b, 14);
+        }
+        calmTicks = calm ? calmTicks + 1 : 0;
+        for (let i = 0; i < pegs.length; i += 1) {
+            pegs[i].glow *= 0.9;
+        }
+    }
+    function finished() { return calmTicks >= 20 || clock >= MAX_RUN_MS; }
+    function onControl(role, down) {
+        // Draw again — 시드를 하나 올려 출발 자리의 몇 px 이 달라진다
+        if (role === 'redraw' && down) {
+            seed += 1;
+            restart();
+        }
+    }
+    function draw() {
+        clearStage();
+        const win = order.length ? balls[order[0]] : null;
+        for (let k = 0; k < SLOTS; k += 1) {
+            const lit = win !== null && slotOf(win) === k;
+            ctx.fillStyle = lit ? rgba(LEMON, 0.34) : rgba(GUIDE, k % 2 ? 0.14 : 0.22);
+            ctx.fillRect(WALL_L + k * SLOT_W, FINISH_Y + 8, SLOT_W, FLOOR_Y - FINISH_Y - 8);
+        }
+        for (let i = 0; i < walls.length; i += 1) {
+            strokeSeg(walls[i], 3, CREAM, 0.45);
+        }
+        for (let i = 0; i < dividers.length; i += 1) {
+            strokeSeg(dividers[i], 3, CREAM, 0.5);
+        }
+        ctx.setLineDash([6, 6]);
+        strokeSeg([WALL_L, FINISH_Y, WALL_R, FINISH_Y], 2, LEMON, 0.8);
+        ctx.setLineDash([]);
+        for (let i = 0; i < pegs.length; i += 1) {
+            const p = pegs[i];
+            // 맞은 핀 — 다가오던 빠르기만큼 빛이 번졌다가 틱마다 0.9 배로 잦아든다
+            if (p.glow > 0.02) {
+                ctx.fillStyle = rgba(LILAC, 0.5 * p.glow);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, PEG_R + 8 * p.glow, 0, TAU);
+                ctx.fill();
+            }
+            ctx.fillStyle = rgba(CREAM, 1);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, PEG_R, 0, TAU);
+            ctx.fill();
+        }
+        for (let i = 0; i < balls.length; i += 1) {
+            drawTrail(balls[i], balls[i].color, balls[i].r * 1.2);
+        }
+        for (let i = 0; i < balls.length; i += 1) {
+            drawBall(balls[i]);
+        }
+        if (win) {
+            ctx.strokeStyle = rgba(LEMON, 0.95);
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(win.x, win.y, win.r + 4 + Math.sin(clock / 90) * 1.5, 0, TAU);
+            ctx.stroke();
+        }
+        drawBand();
+    }
+    function stateText() {
+        if (order.length) {
+            return 'Winner: ' + balls[order[0]].label;
+        }
+        return 'Drawing — ' + BALL_COUNT + ' balls falling';
+    }
+    // ── 공통 꼬리: 시계·버튼·동작 줄이기·정리 ──
+    // 결과를 보여 준 시간(ms) — 시연 중 판이 끝나면 LOOP_HOLD_MS 뒤 같은 시드로 다시 돈다
+    let holdMs = 0;
+    function restart() {
+        clock = 0;
+        holdMs = 0;
+        onRestart();
+    }
+    // 한 틱 — 시뮬레이션 시각을 16ms 올리고 항목 계산(step)을 한 번 돌린다
+    function tick() {
+        clock += FIXED_DT;
+        step();
+        if (demo && !still && finished()) {
+            holdMs += FIXED_DT;
+            if (holdMs >= LOOP_HOLD_MS) {
+                restart();
+            }
+        }
+    }
+    function render() {
+        draw();
+        say(stateText());
+    }
+    // 동작 줄이기 — 같은 시드 판을 화면에 그리지 않고 끝까지(끝이 없는 장면은 SETTLE_TICKS 틱까지) 계산한 뒤 마지막 장면만 그린다
+    function settle() {
+        for (let k = 0; k < SETTLE_TICKS; k += 1) {
+            clock += FIXED_DT;
+            step();
+            if (finished()) {
+                break;
+            }
+        }
+    }
+    // 입력 한 번 뒤 — 동작 줄이기면 그 입력이 낳은 결과까지 바로 계산해 그린다
+    function after() {
+        if (still) {
+            settle();
+        }
+        render();
+    }
+    function control(role, down) {
+        wake();
+        onControl(role, down);
+        after();
+    }
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    // 버튼 — data-role 을 항목의 onControl 에 넘긴다. data-hold 가 있으면 누르고 있는 동안 true, 떼면 false
+    const buttons = Array.from(root.querySelectorAll('button[data-role]'));
+    buttons.forEach(function (btn) {
+        const role = btn.getAttribute('data-role') || '';
+        if (!btn.hasAttribute('data-hold')) {
+            // 한 번 누르는 버튼 — 마우스·손가락·Enter·Space 모두 click 하나로 들어온다
+            btn.addEventListener('click', function () { control(role, true); }, { signal: off.signal });
+            return;
+        }
+        let down = false;
+        function setHeld(v) {
+            if (down === v) {
+                return;
+            }
+            down = v;
+            btn.classList.toggle('is-held', v);
+            control(role, v);
+        }
+        // 누르고 있는 버튼 — 손가락·마우스는 pointerdown·up, 키보드는 Space·Enter 의 keydown·keyup
+        btn.addEventListener('pointerdown', function (ev) {
+            if (ev.button !== 0) {
+                return;
+            }
+            btn.setPointerCapture(ev.pointerId);
+            setHeld(true);
+        }, { signal: off.signal });
+        btn.addEventListener('pointerup', function () { setHeld(false); }, { signal: off.signal });
+        btn.addEventListener('pointercancel', function () { setHeld(false); }, { signal: off.signal });
+        btn.addEventListener('lostpointercapture', function () { setHeld(false); }, { signal: off.signal });
+        btn.addEventListener('keydown', function (ev) {
+            if (ev.key !== ' ' && ev.key !== 'Enter') {
+                return;
+            }
+            ev.preventDefault();
+            setHeld(true);
+        }, { signal: off.signal });
+        btn.addEventListener('keyup', function (ev) {
+            if (ev.key !== ' ' && ev.key !== 'Enter') {
+                return;
+            }
+            ev.preventDefault();
+            setHeld(false);
+        }, { signal: off.signal });
+        btn.addEventListener('blur', function () { setHeld(false); }, { signal: off.signal });
+        // 길게 누를 때 뜨는 메뉴를 막는다
+        btn.addEventListener('contextmenu', function (ev) { ev.preventDefault(); }, { signal: off.signal });
+    });
+    function onResize() {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize, { signal: off.signal });
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            tick();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 같은 시드 판의 마지막 장면을, 꺼지면 루프를 다시 돈다
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            if (demo) {
+                restart();
+            }
+            after();
+        }
+        else {
+            startLoop();
+        }
+    }
+    reduceQuery.addEventListener('change', onMotionPref, { signal: off.signal });
+    seed = DEMO_SEED;
+    restart();
+    // probe-hook
+    if (still) {
+        settle();
+        render();
+    }
+    else {
+        render();
+        startLoop();
+    }
+    return function () {
+        window.cancelAnimationFrame(rafId);
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
