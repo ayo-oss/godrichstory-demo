@@ -1,0 +1,1206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Deduction Hint That Overlaps Neighbor Constraints to Find Certain Cells — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vj is-demo" id="vj">
+  <div class="vj__pad" data-role="pad" tabindex="0" role="application" aria-label="Minesweeper stage: arrow keys move between cells, Enter opens, F flags, P pauses, N steps once, R restarts">
+    <canvas class="vj__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="In an opened board, the closed neighbor sets of two numbered cells are compared, and when one sits wholly inside the other the mine count of the leftover cells comes from a subtraction. A line runs from the two source numbers to the certain cells, safe cells open and mine cells get a flag, and six such deductions follow in a row"></canvas>
+  </div>
+  <p class="vj__status" data-role="status" aria-live="off">Minesweeper demo</p>
+  <div class="vj__ctrl">
+    <button class="vj__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+    <button class="vj__step" data-role="step" type="button">Step</button>
+  </div>
+  <p class="vj__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("vj");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function ease(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 선형 합동 생성기(곱 1664525, 더함 1013904223). 같은 시드면 같은 판
+    function seeded(seed) {
+        let s = (seed >>> 0) || 1;
+        return function () {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 파스텔 팔레트 — 닫힌 칸은 라벤더, 열린 칸은 크림, 지뢰·깃발은 분홍
+    const BG_TOP = [248, 244, 252];
+    const BG_BOT = [228, 234, 250];
+    const TILE = [196, 186, 240];
+    const TILE_HI = [226, 219, 250];
+    const TILE_LO = [160, 150, 214];
+    const OPEN = [252, 249, 244];
+    const OPEN_BED = [226, 220, 236];
+    const WATER = [168, 206, 244];
+    const ROSE = [240, 150, 176];
+    const ROSE_DEEP = [190, 52, 86];
+    const MINT = [150, 214, 190];
+    const BUTTER = [250, 224, 140];
+    const LAV = [188, 172, 236];
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    // 숫자 색 — 칸 숫자는 색이 기능이라 숫자마다 다르게. 크림 바탕 위에서 4.5:1 이상
+    const NUM_COL = [INK, [30, 78, 196], [22, 112, 60], [186, 40, 60], [88, 50, 160], [150, 70, 10], [10, 110, 120], [40, 36, 54], [90, 90, 100]];
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 장면 시계(초)·판 반복 번호·시간표 — 시간표는 (시각, 할 일) 목록이고 시각이 지나면 한 번씩 부른다
+    let sceneT = 0;
+    let lap = 0;
+    let script = [];
+    let evAt = 0;
+    function newBoard(cols, rows, count) {
+        const b = { cols: cols, rows: rows, count: count, mine: [], num: [], st: [], openT: [], exT: [], flT: [], xT: [], placed: false };
+        for (let i = 0; i < cols * rows; i += 1) {
+            b.mine.push(false);
+            b.num.push(0);
+            b.st.push(0);
+            b.openT.push(0);
+            b.exT.push(-1);
+            b.flT.push(-1);
+            b.xT.push(-1);
+        }
+        return b;
+    }
+    // 이웃 칸 — 판 가장자리를 넘는 칸은 넣지 않는다(경계 검사가 여기 한 곳)
+    function nbrs(b, i) {
+        const x = i % b.cols;
+        const y = Math.floor(i / b.cols);
+        const out = [];
+        for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+                const nx = x + dx;
+                const ny = y + dy;
+                if (nx >= 0 && nx < b.cols && ny >= 0 && ny < b.rows) {
+                    out.push(ny * b.cols + nx);
+                }
+            }
+        }
+        return out;
+    }
+    function calcNums(b) {
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            let n = 0;
+            if (!b.mine[i]) {
+                for (const j of nbrs(b, i)) {
+                    if (b.mine[j]) {
+                        n += 1;
+                    }
+                }
+            }
+            b.num[i] = n;
+        }
+    }
+    // 지뢰 배치 — 모든 칸을 시드로 섞어 앞에서 count 칸에 놓는다. safe 가 있으면 그 칸과 이웃 여덟 칸의 지뢰는
+    // 섞인 순서 뒤쪽의 빈 칸으로 옮긴다. 옮긴 목록 [원래 칸, 새 칸] 을 돌려준다
+    function placeMines(b, seed, safe) {
+        const n = b.cols * b.rows;
+        const rng = seeded(seed);
+        const order = [];
+        for (let i = 0; i < n; i += 1) {
+            order.push(i);
+        }
+        for (let i = n - 1; i > 0; i -= 1) {
+            const j = Math.floor(rng() * (i + 1));
+            const t = order[i];
+            order[i] = order[j];
+            order[j] = t;
+        }
+        const zone = [];
+        for (let i = 0; i < n; i += 1) {
+            zone.push(false);
+        }
+        if (safe >= 0) {
+            zone[safe] = true;
+            for (const j of nbrs(b, safe)) {
+                zone[j] = true;
+            }
+        }
+        const moves = [];
+        let next = b.count;
+        for (let i = 0; i < n; i += 1) {
+            b.mine[i] = false;
+        }
+        for (let k = 0; k < b.count; k += 1) {
+            const c = order[k];
+            if (!zone[c]) {
+                b.mine[c] = true;
+                continue;
+            }
+            while (next < n && (zone[order[next]] || b.mine[order[next]])) {
+                next += 1;
+            }
+            b.mine[order[next]] = true;
+            moves.push([c, order[next]]);
+            next += 1;
+        }
+        b.placed = true;
+        calcNums(b);
+        return moves;
+    }
+    // 번져 열기 — src 의 칸에서 시작해 숫자 0 인 칸의 이웃으로 번진다. 칸마다 거리 d 를 세어 openT = t0 + d·delay.
+    // 깃발 칸과 지뢰 칸은 열지 않는다. 새로 연 칸 목록을 연 순서대로 돌려준다
+    function revealFrom(b, src, t0, delay) {
+        const todo = src.slice();
+        const out = [];
+        while (todo.length > 0) {
+            let k = 0;
+            for (let j = 1; j < todo.length; j += 1) {
+                if (todo[j].d < todo[k].d) {
+                    k = j;
+                }
+            }
+            const cur = todo.splice(k, 1)[0];
+            if (b.st[cur.i] !== 0 || b.mine[cur.i]) {
+                continue;
+            }
+            b.st[cur.i] = 1;
+            b.openT[cur.i] = t0 + cur.d * delay;
+            out.push(cur.i);
+            if (b.num[cur.i] === 0) {
+                for (const j of nbrs(b, cur.i)) {
+                    if (b.st[j] === 0) {
+                        todo.push({ i: j, d: cur.d + 1 });
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    // 열지 않고 번짐 크기만 센다 — 시작 칸에서 닿는 닫힌 칸 수
+    function floodSize(b, i) {
+        if (b.st[i] !== 0 || b.mine[i]) {
+            return 0;
+        }
+        const seen = [];
+        for (let k = 0; k < b.cols * b.rows; k += 1) {
+            seen.push(false);
+        }
+        const q = [i];
+        seen[i] = true;
+        let n = 0;
+        while (q.length > 0) {
+            const c = q.pop();
+            n += 1;
+            if (b.num[c] !== 0) {
+                continue;
+            }
+            for (const j of nbrs(b, c)) {
+                if (!seen[j] && b.st[j] === 0 && !b.mine[j]) {
+                    seen[j] = true;
+                    q.push(j);
+                }
+            }
+        }
+        return n;
+    }
+    function flagsAround(b, i) {
+        let n = 0;
+        for (const j of nbrs(b, i)) {
+            if (b.st[j] === 2) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    // 코드 열기 — 열린 숫자 칸 둘레의 깃발 수가 숫자와 같을 때만 남은 닫힌 이웃 목록을 준다
+    function chordList(b, i) {
+        if (b.st[i] !== 1 || b.num[i] === 0 || flagsAround(b, i) !== b.num[i]) {
+            return [];
+        }
+        const out = [];
+        for (const j of nbrs(b, i)) {
+            if (b.st[j] === 0) {
+                out.push(j);
+            }
+        }
+        return out;
+    }
+    function countSt(b, s) {
+        let n = 0;
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            if (b.st[i] === s) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    // 눈에 열려 있는 칸 수 — 열기가 예약돼 시각이 아직 안 된 칸은 세지 않는다
+    function countOpen(b) {
+        let n = 0;
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            if (b.st[i] === 1 && sceneT >= b.openT[i]) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    function countEx(b, t) {
+        let n = 0;
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            if (b.exT[i] >= 0 && b.exT[i] <= t) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    function cloneBoard(b) {
+        const c = newBoard(b.cols, b.rows, b.count);
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            c.mine[i] = b.mine[i];
+            c.num[i] = b.num[i];
+            c.st[i] = b.st[i];
+            c.openT[i] = b.openT[i];
+        }
+        c.placed = b.placed;
+        return c;
+    }
+    function consOf(b) {
+        const out = [];
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            if (b.st[i] !== 1 || b.num[i] === 0) {
+                continue;
+            }
+            const u = [];
+            for (const j of nbrs(b, i)) {
+                if (b.st[j] === 0) {
+                    u.push(j);
+                }
+            }
+            if (u.length > 0) {
+                out.push({ c: i, u: u, r: b.num[i] - flagsAround(b, i) });
+            }
+        }
+        return out;
+    }
+    function subsetOf(x, y) {
+        for (const v of x) {
+            if (y.indexOf(v) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // 두 조건을 겹친다 — A 의 닫힌 이웃이 B 의 것에 통째로 들어 있으면, B 에만 있는 칸들의 지뢰 수는 r_B − r_A 다.
+    // 0 이면 전부 안전, 칸 수와 같으면 전부 지뢰. 한 숫자만으로 이미 정해지는 경우는 두 숫자 힌트로 세지 않는다
+    function pairHint(cs) {
+        for (const B of cs) {
+            if (B.r === 0 || B.r === B.u.length) {
+                continue;
+            }
+            for (const A of cs) {
+                if (A.c === B.c || A.u.length >= B.u.length || !subsetOf(A.u, B.u)) {
+                    continue;
+                }
+                const diff = B.u.filter(function (v) { return A.u.indexOf(v) < 0; });
+                const rd = B.r - A.r;
+                if (rd === 0) {
+                    return { kind: 0, cells: diff, a: A.c, b: B.c };
+                }
+                if (rd === diff.length) {
+                    return { kind: 1, cells: diff, a: A.c, b: B.c };
+                }
+            }
+        }
+        return null;
+    }
+    function singleHint(cs) {
+        for (const A of cs) {
+            if (A.r === 0) {
+                return { kind: 0, cells: A.u.slice(), a: A.c, b: -1 };
+            }
+            if (A.r === A.u.length) {
+                return { kind: 1, cells: A.u.slice(), a: A.c, b: -1 };
+            }
+        }
+        return null;
+    }
+    function findHint(b) {
+        const cs = consOf(b);
+        const p = pairHint(cs);
+        return p ? p : singleHint(cs);
+    }
+    function applyHint(b, h, t0, delay) {
+        if (h.kind === 1) {
+            for (const c of h.cells) {
+                b.st[c] = 2;
+                b.flT[c] = t0;
+            }
+        }
+        else {
+            const src = [];
+            for (const c of h.cells) {
+                src.push({ i: c, d: 0 });
+            }
+            revealFrom(b, src, t0, delay);
+        }
+    }
+    // ── 확률 ─────────────────────────────────────────────────
+    function comb(n, k) {
+        if (k < 0 || k > n) {
+            return 0;
+        }
+        let r = 1;
+        for (let i = 1; i <= k; i += 1) {
+            r = r * (n - k + i) / i;
+        }
+        return r;
+    }
+    // 모든 닫힌 칸의 지뢰 확률(−1 은 닫힌 칸이 아님). 경계 칸(열린 숫자와 맞닿은 닫힌 칸)은 조건을 모두 만족하는 배치를
+    // 하나씩 세고, 경계 밖 칸은 남은 지뢰를 경계 배치마다 C(바깥 칸, Mines left)가지로 나눠 가진다
+    const PROB_NODE_CAP = 300000;
+    let probNodes = 0;
+    function probMap(b) {
+        const n = b.cols * b.rows;
+        const out = [];
+        const fi = [];
+        for (let i = 0; i < n; i += 1) {
+            out.push(-1);
+            fi.push(-1);
+        }
+        const F = [];
+        const cs = consOf(b);
+        for (const c of cs) {
+            for (const j of c.u) {
+                if (fi[j] < 0) {
+                    fi[j] = F.length;
+                    F.push(j);
+                }
+            }
+        }
+        const cc = [];
+        for (let k = 0; k < F.length; k += 1) {
+            cc.push([]);
+        }
+        cs.forEach(function (c, ci) { for (const j of c.u) {
+            cc[fi[j]].push(ci);
+        } });
+        const got = [];
+        const left = [];
+        for (const c of cs) {
+            got.push(0);
+            left.push(c.u.length);
+        }
+        const asg = [];
+        for (let k = 0; k < F.length; k += 1) {
+            asg.push(0);
+        }
+        const sol = [];
+        const cm = [];
+        for (let m = 0; m <= F.length; m += 1) {
+            sol.push(0);
+            const row = [];
+            for (let k = 0; k < F.length; k += 1) {
+                row.push(0);
+            }
+            cm.push(row);
+        }
+        probNodes = 0;
+        function rec(k, mines) {
+            probNodes += 1;
+            if (probNodes > PROB_NODE_CAP) {
+                return;
+            }
+            if (k === F.length) {
+                sol[mines] += 1;
+                for (let f = 0; f < F.length; f += 1) {
+                    if (asg[f] === 1) {
+                        cm[mines][f] += 1;
+                    }
+                }
+                return;
+            }
+            for (let v = 0; v <= 1; v += 1) {
+                let ok = true;
+                for (const ci of cc[k]) {
+                    got[ci] += v;
+                    left[ci] -= 1;
+                    if (got[ci] > cs[ci].r || got[ci] + left[ci] < cs[ci].r) {
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    asg[k] = v;
+                    rec(k + 1, mines + v);
+                }
+                for (const ci of cc[k]) {
+                    got[ci] -= v;
+                    left[ci] += 1;
+                }
+            }
+        }
+        rec(0, 0);
+        let hidden = 0;
+        let flags = 0;
+        const inner = [];
+        for (let i = 0; i < n; i += 1) {
+            if (b.st[i] === 0) {
+                hidden += 1;
+                if (fi[i] < 0) {
+                    inner.push(i);
+                }
+            }
+            if (b.st[i] === 2) {
+                flags += 1;
+            }
+        }
+        const M = b.count - flags;
+        let total = 0;
+        let innerMines = 0;
+        const pf = [];
+        for (let k = 0; k < F.length; k += 1) {
+            pf.push(0);
+        }
+        for (let m = 0; m <= F.length; m += 1) {
+            if (sol[m] === 0) {
+                continue;
+            }
+            const w = comb(inner.length, M - m);
+            if (w === 0) {
+                continue;
+            }
+            total += w * sol[m];
+            innerMines += w * sol[m] * (M - m);
+            for (let k = 0; k < F.length; k += 1) {
+                pf[k] += w * cm[m][k];
+            }
+        }
+        const fallback = hidden > 0 ? clamp(M / hidden, 0, 1) : 0;
+        for (let i = 0; i < n; i += 1) {
+            if (b.st[i] !== 0) {
+                continue;
+            }
+            if (total <= 0 || probNodes > PROB_NODE_CAP) {
+                out[i] = fallback;
+            }
+            else if (fi[i] >= 0) {
+                out[i] = pf[fi[i]] / total;
+            }
+            else {
+                out[i] = innerMines / total / inner.length;
+            }
+        }
+        return out;
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const padEl = root.querySelector('[data-role="pad"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const stepEl = root.querySelector('[data-role="step"]');
+    const doneEl = root.querySelector('[data-role="done"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !stepEl || !doneEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const stepBtn = stepEl;
+    const doneP = doneEl;
+    const pad = padEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘지 않게
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function skyFill(top, bot) {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(top, 1));
+        g.addColorStop(1, rgba(bot, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function disc(x, y, r, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x, y, r, width, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function seg(x1, y1, x2, y2, width, c, a) {
+        if (a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.lineWidth = width;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function outline(x, y, w, h, r, width, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function text(s, x, y, c, a, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    // 글자 이름표 — 바탕 알약 위에 글자
+    function tag(s, x, y, bg, fg, px, align) {
+        ctx.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctx.measureText(s).width + px * 1.1;
+        const left = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+        box(left, y - px * 0.82, w, px * 1.64, px * 0.82, bg, 0.92);
+        text(s, left + w / 2, y + 0.5, fg, 1, px, 700, 'center');
+    }
+    // 판 자리 — 열·행에 맞춰 칸 크기 gs 와 왼쪽 위 (gx, gy) 를 정한다. 위·아래 여백은 상태 줄·계량기 자리
+    let gx = 0;
+    let gy = 0;
+    let gs = 28;
+    let gCols = 15;
+    let gRows = 8;
+    function fitGeo(cols, rows, top, bottom) {
+        gCols = cols;
+        gRows = rows;
+        gs = Math.min(Math.floor((W - 24) / cols), Math.floor((H - top - bottom) / rows), 32);
+        gx = (W - gs * cols) / 2;
+        gy = top + (H - top - bottom - gs * rows) / 2;
+    }
+    function cellX(i) { return gx + (i % gCols) * gs; }
+    function cellY(i) { return gy + Math.floor(i / gCols) * gs; }
+    function cellCx(i) { return cellX(i) + gs / 2; }
+    function cellCy(i) { return cellY(i) + gs / 2; }
+    function mineGlyph(x, y, r, c, a) {
+        for (let k = 0; k < 8; k += 1) {
+            const an = k * TAU / 8;
+            seg(x + Math.cos(an) * r * 0.55, y + Math.sin(an) * r * 0.55, x + Math.cos(an) * r * 1.12, y + Math.sin(an) * r * 1.12, Math.max(1.4, r * 0.24), c, a);
+        }
+        disc(x, y, r * 0.78, c, a);
+        disc(x - r * 0.26, y - r * 0.26, r * 0.22, [255, 255, 255], a * 0.8);
+    }
+    function flagGlyph(x, y, s, a) {
+        seg(x - s * 0.1, y - s * 0.34, x - s * 0.1, y + s * 0.34, Math.max(1.6, s * 0.08), INK, a);
+        ctx.beginPath();
+        ctx.moveTo(x - s * 0.1, y - s * 0.34);
+        ctx.lineTo(x + s * 0.3, y - s * 0.14);
+        ctx.lineTo(x - s * 0.1, y + s * 0.06);
+        ctx.closePath();
+        ctx.fillStyle = rgba(ROSE_DEEP, a);
+        ctx.fill();
+        box(x - s * 0.3, y + s * 0.32, s * 0.4, s * 0.1, s * 0.05, INK, a);
+    }
+    function numGlyph(n, x, y, s, a) {
+        if (n <= 0) {
+            return;
+        }
+        text(String(n), x, y + 0.5, NUM_COL[n], a, Math.round(s * 0.62), 800, 'center');
+    }
+    function hiddenTile(x, y, s, a) {
+        box(x + 1, y + 2, s - 2, s - 2, 4, TILE_LO, a);
+        box(x + 1, y + 1, s - 2, s - 3, 4, TILE, a);
+        box(x + 3, y + 2, s - 6, 2, 1, TILE_HI, a * 0.9);
+    }
+    // 판 그리기 — 상태(st·openT·exT·flT·xT)를 칸으로 옮길 뿐 규칙은 건드리지 않는다.
+    // off 는 칸을 밀어 놓는 값(충격파), tint 는 칸 위에 덮는 색, nums 가 거짓이면 열린 칸 숫자를 그리지 않는다
+    const OPEN_S = 0.28;
+    function drawCells(b, off, tint, nums) {
+        for (let i = 0; i < b.cols * b.rows; i += 1) {
+            let x = cellX(i);
+            let y = cellY(i);
+            if (off) {
+                const o = off(i);
+                x += o[0];
+                y += o[1];
+            }
+            const open = b.st[i] === 1 && sceneT >= b.openT[i];
+            const p = b.st[i] === 1 ? clamp((sceneT - b.openT[i]) / OPEN_S, 0, 1) : 0;
+            const ex = b.exT[i] >= 0 && sceneT >= b.exT[i];
+            const cx = x + gs / 2;
+            const cy = y + gs / 2;
+            if (open) {
+                // 눌렸다 올라오는 칸 — 닫힌 색에서 크림색으로 바뀌며 폭이 최대 16% 줄었다 돌아온다
+                const sc = 1 - 0.16 * Math.sin(p * Math.PI);
+                const w = (gs - 2) * sc;
+                box(x + 1, y + 1, gs - 2, gs - 2, 4, OPEN_BED, 1);
+                box(cx - w / 2, cy - w / 2, w, w, 4, mix(TILE, OPEN, ease(p)), 1);
+                if (nums && !b.mine[i]) {
+                    numGlyph(b.num[i], cx, cy, gs, clamp((p - 0.4) / 0.6, 0, 1));
+                }
+            }
+            else if (ex) {
+                const k = clamp((sceneT - b.exT[i]) / 0.2, 0, 1);
+                box(x + 1, y + 1, gs - 2, gs - 2, 4, OPEN_BED, 1);
+                disc(cx, cy, gs * 0.62, [96, 70, 92], 0.22 * k);
+                mineGlyph(cx, cy, gs * (0.22 + 0.12 * ease(k)), INK, 1);
+            }
+            else {
+                hiddenTile(x, y, gs, 1);
+            }
+            if (b.st[i] === 2 && b.flT[i] >= 0 && sceneT >= b.flT[i]) {
+                const q = sceneT - b.flT[i];
+                const dy = -30 * Math.exp(-9 * q) * Math.cos(15 * q);
+                disc(cx, cy + gs * 0.36, gs * 0.2, INK, 0.16 * clamp(q * 8, 0, 1));
+                flagGlyph(cx, cy + dy, gs, clamp(q * 8, 0, 1));
+            }
+            if (tint) {
+                const tc = tint(i);
+                if (tc) {
+                    box(x + 1, y + 1, gs - 2, gs - 2, 4, [tc[0], tc[1], tc[2]], tc[3]);
+                }
+            }
+            if (b.xT[i] >= 0 && sceneT >= b.xT[i]) {
+                const k = clamp((sceneT - b.xT[i]) / 0.2, 0, 1);
+                const r = gs * 0.3 * ease(k);
+                seg(cx - r, cy - r, cx + r, cy + r, 3, ROSE_DEEP, 1);
+                seg(cx - r, cy + r, cx + r, cy - r, 3, ROSE_DEEP, 1);
+            }
+        }
+    }
+    // 사람이 칸을 직접 누를 때 쓰는 기본 동작 — 장면마다 쓰는 규칙(첫 클릭 안전·번져 열기·코드 열기·지뢰 터짐)은 위 판 로직 그대로다
+    function loseBoard(b, i) {
+        const ix = i % b.cols;
+        const iy = Math.floor(i / b.cols);
+        for (let j = 0; j < b.cols * b.rows; j += 1) {
+            if (!b.mine[j] || b.exT[j] >= 0) {
+                continue;
+            }
+            const d = Math.hypot((j % b.cols) - ix, Math.floor(j / b.cols) - iy);
+            b.exT[j] = sceneT + d * 0.05;
+        }
+        b.exT[i] = sceneT;
+    }
+    function manualAct(b, seed, i, delay) {
+        if (b.st[i] === 2) {
+            return;
+        }
+        if (!b.placed) {
+            placeMines(b, seed, i);
+        }
+        if (b.st[i] === 1) {
+            const list = chordList(b, i);
+            const src = [];
+            list.forEach(function (c, k) {
+                if (b.mine[c]) {
+                    loseBoard(b, c);
+                }
+                else {
+                    src.push({ i: c, d: k });
+                }
+            });
+            revealFrom(b, src, sceneT, delay);
+            return;
+        }
+        if (b.mine[i]) {
+            loseBoard(b, i);
+            return;
+        }
+        revealFrom(b, [{ i: i, d: 0 }], sceneT, delay);
+    }
+    function manualFlag(b, i) {
+        if (b.st[i] === 0) {
+            b.st[i] = 2;
+            b.flT[i] = sceneT;
+        }
+        else if (b.st[i] === 2) {
+            b.st[i] = 0;
+            b.flT[i] = -1;
+        }
+    }
+    // 정지 장면 한 장 — 열린 판을 보여 주는 시각(초)과 첫 판이 앞서 시작하는 시각(초)은 장면 상수 START_S·REST_S
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    // 사람이 직접 하는 중이면 시간표는 멈추고 애니메이션만 흐른다
+    let manual = false;
+    let curOn = false;
+    let kx = 0;
+    let ky = 0;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    function takeOver() {
+        if (manual) {
+            return;
+        }
+        manual = true;
+        onTake();
+        wake();
+        if (!curOn) {
+            curOn = true;
+            kx = Math.floor(gCols / 2);
+            ky = Math.floor(gRows / 2);
+        }
+    }
+    // 한 판 시연이 끝났음을 스크린리더에 한 번만 알린다 — 판이 되풀이돼도 다시 읽지 않는다
+    let doneSaid = false;
+    function checkDone() {
+        if (!manual && !doneSaid && sceneT >= LAP_S - 0.6) {
+            doneSaid = true;
+            doneP.textContent = statusText();
+        }
+    }
+    function advance(dt) {
+        sceneT += dt;
+        if (!manual) {
+            while (evAt < script.length && script[evAt].t <= sceneT) {
+                const ev = script[evAt];
+                evAt += 1;
+                ev.f();
+            }
+            if (sceneT >= LAP_S) {
+                lap += 1;
+                begin();
+                return;
+            }
+        }
+        update(dt);
+    }
+    // 첫 판은 START_S 만큼 앞서 시작한다 — 판이 이미 진행 중인 장면에서 보인다
+    function runTo(t) {
+        while (sceneT < t - 1e-6) {
+            advance(Math.min(1 / 30, t - sceneT));
+        }
+    }
+    function begin() {
+        sceneT = 0;
+        evAt = 0;
+        script = [];
+        build();
+        if (lap === 0 && !still) {
+            runTo(START_S);
+        }
+    }
+    const DT_MAX = 0.05;
+    const SETTLE_FRAMES = 8;
+    const SETTLE_DT = 0.04;
+    function drawCursor() {
+        if (!curOn) {
+            return;
+        }
+        const i = ky * gCols + kx;
+        outline(cellX(i) + 1, cellY(i) + 1, gs - 2, gs - 2, 5, 3, INK, 1);
+        outline(cellX(i) - 1, cellY(i) - 1, gs + 2, gs + 2, 6, 1.5, PAPER, 0.9);
+    }
+    function showNow() {
+        draw();
+        drawCursor();
+        pushStatus(statusText());
+        checkDone();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 판이 열린 정지 장면 한 장
+    function showRest() {
+        stopLoop();
+        lap = 0;
+        sceneT = 0;
+        evAt = 0;
+        script = [];
+        build();
+        runTo(REST_S);
+        showNow();
+    }
+    function play() {
+        begin();
+        showNow();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }
+    function restart() {
+        manual = false;
+        doneSaid = false;
+        lap += 1;
+        begin();
+        for (let k = 0; k < SETTLE_FRAMES; k += 1) {
+            update(SETTLE_DT);
+        }
+        showNow();
+    }
+    // Step — 멈춘 채 시간표의 다음 일 하나를 부른다. 더 부를 일이 없거나 직접 하던 중이면 다음 판을 연다
+    function stepOnce() {
+        wake();
+        if (!paused) {
+            paused = true;
+            pauseBtn.setAttribute('aria-pressed', 'true');
+            stopLoop();
+        }
+        if (manual || evAt >= script.length) {
+            restart();
+            return;
+        }
+        sceneT = Math.max(sceneT, script[evAt].t);
+        advance(0);
+        for (let k = 0; k < SETTLE_FRAMES; k += 1) {
+            sceneT += SETTLE_DT;
+            update(SETTLE_DT);
+        }
+        showNow();
+    }
+    function moveCur(dx, dy) {
+        kx = clamp(kx + dx, 0, gCols - 1);
+        ky = clamp(ky + dy, 0, gRows - 1);
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    stepBtn.addEventListener('click', stepOnce, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. 방향키는 칸 이동, Enter·Space 는 칸 열기, F 는 깃발, P 는 Pause, N 은 Step, R 은 다시
+    pad.addEventListener('keydown', function (e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) {
+            return;
+        }
+        const k = e.key;
+        if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown') {
+            e.preventDefault();
+            takeOver();
+            moveCur(k === 'ArrowLeft' ? -1 : (k === 'ArrowRight' ? 1 : 0), k === 'ArrowUp' ? -1 : (k === 'ArrowDown' ? 1 : 0));
+            showNow();
+        }
+        else if (k === 'Enter' || k === ' ') {
+            e.preventDefault();
+            takeOver();
+            onAct(ky * gCols + kx);
+            showNow();
+        }
+        else if (k === 'f' || k === 'F') {
+            e.preventDefault();
+            takeOver();
+            onFlag(ky * gCols + kx);
+            showNow();
+        }
+        else if (k === 'p' || k === 'P') {
+            togglePause();
+        }
+        else if (k === 'n' || k === 'N') {
+            stepOnce();
+        }
+        else if (k === 'r' || k === 'R') {
+            restart();
+        }
+    }, { signal: off.signal });
+    // 마우스·터치 — 누른 칸 열기, 오른쪽 버튼은 깃발
+    function cellFromEvent(e) {
+        const rect = cv.getBoundingClientRect();
+        const px = (e.clientX - rect.left) / rect.width * W;
+        const py = (e.clientY - rect.top) / rect.height * H;
+        const cx = Math.floor((px - gx) / gs);
+        const cy = Math.floor((py - gy) / gs);
+        if (cx < 0 || cx >= gCols || cy < 0 || cy >= gRows) {
+            return -1;
+        }
+        return cy * gCols + cx;
+    }
+    pad.addEventListener('click', function (e) {
+        const c = cellFromEvent(e);
+        if (c < 0) {
+            return;
+        }
+        takeOver();
+        kx = c % gCols;
+        ky = Math.floor(c / gCols);
+        onAct(c);
+        showNow();
+    }, { signal: off.signal });
+    pad.addEventListener('contextmenu', function (e) {
+        const c = cellFromEvent(e);
+        if (c < 0) {
+            return;
+        }
+        e.preventDefault();
+        takeOver();
+        kx = c % gCols;
+        ky = Math.floor(c / gCols);
+        onFlag(c);
+        showNow();
+    }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 열린 판 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            lap = 0;
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // ── 05 이웃 조건을 겹쳐 확실한 칸을 가려내는 추론 힌트 ────────────────────────
+    const COLS = 16;
+    const ROWS = 8;
+    const MINES = 22;
+    const SEED = 4945;
+    const LAP_S = 10.8;
+    const START_S = 0.0;
+    const REST_S = 6.0;
+    // 번져 열기 지연(초). 힌트 하나는 FIND→APPLY 사이 0.9초 동안 근거를 보여 준 뒤 적용한다
+    const OPEN_DELAY = 0.07;
+    const HINT_GAP = 1.4;
+    const HINT_SHOW = 0.9;
+    const HINT_FIRST = 1.9;
+    let B = newBoard(COLS, ROWS, MINES);
+    let hint = null;
+    let hintT = -9;
+    let hr = [0, 0];
+    let nHint = 0;
+    let center = 0;
+    function build() {
+        fitGeo(COLS, ROWS, 44, 14);
+        center = 3 * COLS + 8;
+        const base = SEED + (lap % 2) * 53;
+        for (let k = 0; k < 120; k += 1) {
+            B = newBoard(COLS, ROWS, MINES);
+            placeMines(B, base + k, center);
+            revealFrom(B, [{ i: center, d: 0 }], -9, 0);
+            const c = cloneBoard(B);
+            let pairs = 0;
+            let mineHints = 0;
+            let total = 0;
+            for (let s = 0; s < 6; s += 1) {
+                const h = findHint(c);
+                if (!h) {
+                    break;
+                }
+                total += 1;
+                if (h.b >= 0) {
+                    pairs += 1;
+                }
+                if (h.kind === 1) {
+                    mineHints += 1;
+                }
+                applyHint(c, h, -9, 0);
+            }
+            if (total >= 6 && pairs >= 4 && mineHints >= 1 && countSt(B, 1) >= 30) {
+                break;
+            }
+        }
+        // 시연은 판을 처음부터 열어 보이게 — 첫 칸을 연 판을 닫아 두었다가 0.2초에 연다
+        B.st = B.st.map(function () { return 0; });
+        hint = null;
+        nHint = 0;
+        script.push({ t: 0.2, f: function () { revealFrom(B, [{ i: center, d: 0 }], sceneT, OPEN_DELAY); } });
+        for (let k = 0; k < 6; k += 1) {
+            script.push({ t: HINT_FIRST + HINT_GAP * k, f: find });
+            script.push({ t: HINT_FIRST + HINT_GAP * k + HINT_SHOW, f: apply });
+        }
+    }
+    function find() {
+        const h = findHint(B);
+        hint = h;
+        hintT = sceneT;
+        if (!h) {
+            return;
+        }
+        const cs = consOf(B);
+        for (const c of cs) {
+            if (c.c === h.a) {
+                hr[0] = c.r;
+            }
+            if (c.c === h.b) {
+                hr[1] = c.r;
+            }
+        }
+    }
+    function apply() {
+        if (!hint) {
+            return;
+        }
+        applyHint(B, hint, sceneT, OPEN_DELAY);
+        nHint += 1;
+        hint = null;
+    }
+    function update(dt) { if (dt < 0) {
+        return;
+    } }
+    function unknownOf(i) { return nbrs(B, i).filter(function (j) { return B.st[j] === 0; }); }
+    function tintOf(i) {
+        if (!hint || manual) {
+            return null;
+        }
+        const k = ease((sceneT - hintT) / 0.3);
+        if (hint.cells.indexOf(i) >= 0) {
+            const done = ease((sceneT - hintT - 0.5) / 0.3);
+            const c = hint.kind === 0 ? MINT : ROSE;
+            return [c[0], c[1], c[2], 0.35 * k + 0.5 * done];
+        }
+        if (unknownOf(hint.a).indexOf(i) >= 0) {
+            return [BUTTER[0], BUTTER[1], BUTTER[2], 0.7 * k];
+        }
+        if (hint.b >= 0 && unknownOf(hint.b).indexOf(i) >= 0) {
+            return [LAV[0], LAV[1], LAV[2], 0.6 * k];
+        }
+        return null;
+    }
+    function draw() {
+        skyFill(BG_TOP, BG_BOT);
+        drawCells(B, null, tintOf, true);
+        if (!hint || manual) {
+            return;
+        }
+        const age = sceneT - hintT;
+        const srcs = hint.b >= 0 ? [hint.a, hint.b] : [hint.a];
+        for (const s of srcs) {
+            outline(cellX(s) + 1, cellY(s) + 1, gs - 2, gs - 2, 4, 3, INK, 0.9 * ease(age / 0.25));
+        }
+        // 근거 숫자에서 확실한 칸으로 이어지는 선 — 0.3초에서 0.6초 사이에 그어진다
+        const lk = ease((age - 0.3) / 0.3);
+        const shown = hint.cells.slice(0, 4);
+        for (const s of srcs) {
+            for (const t of shown) {
+                seg(cellCx(s), cellCy(s), lerp(cellCx(s), cellCx(t), lk), lerp(cellCy(s), cellCy(t), lk), 2, INK, 0.7);
+            }
+        }
+        if (hint.b >= 0 && lk > 0.5) {
+            const t = hint.cells[0];
+            const ty = cellCy(t) - gs * 1.05 < 40 ? cellCy(t) + gs * 1.05 : cellCy(t) - gs * 1.05;
+            tag('{b} − {a} = {d}'.replace('{b}', String(hr[1])).replace('{a}', String(hr[0])).replace('{d}', String(hr[1] - hr[0])), cellCx(t), ty, hint.kind === 0 ? MINT : ROSE, INK, 11, 'center');
+        }
+    }
+    function statusText() {
+        const o = String(countOpen(B));
+        const f = String(countSt(B, 2));
+        if (!manual && hint) {
+            return (hint.kind === 0 ? 'Deduction {k} - {c} safe cells' : 'Deduction {k} - {c} mine cells').replace('{k}', String(nHint + 1)).replace('{c}', String(hint.cells.length));
+        }
+        if (!manual && sceneT >= LAP_S - 0.6) {
+            return 'Deduction done - {k} hints - {f} flags'.replace('{k}', String(nHint)).replace('{f}', f);
+        }
+        return '{o} cells open - {f} flags'.replace('{o}', o).replace('{f}', f);
+    }
+    function onAct(i) { manualAct(B, SEED, i, OPEN_DELAY); }
+    function onFlag(i) { manualFlag(B, i); }
+    function onTake() { hint = null; }
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
