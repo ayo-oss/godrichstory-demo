@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ほうきの風が通って落ち葉を掃き散らす庭 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="lf is-demo" id="lf">
+  <canvas class="lf__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="上から見た庭で、ほうきが曲がった道に沿って進み、落ち葉を押し散らして当たった葉がくるりと回る。"></canvas>
+  <button class="lf__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("lf");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    // 시계 — rAF 타임스탬프를 쌓아 16ms 고정 스텝으로만 진행한다
+    const FIXED_DT = 16;
+    const STEP_S = FIXED_DT / 1000;
+    // 한 프레임에 따라잡는 시간 상한(ms) — 숨었던 탭이 돌아와 첫 간격이 수 초여도 이만큼만 쌓는다
+    const DT_MAX = 100;
+    const MAX_STEPS = 6;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 옅은 하늘·크림 바탕 위에 잎을 얹고, 줄기·흙·그늘은 진한 쪽으로 명도 차를 둔다
+    const SKY_TOP = [212, 230, 243];
+    const SKY_LOW = [253, 245, 231];
+    const CREAM = [255, 250, 241];
+    const INK = [70, 54, 58];
+    const BARK = [118, 88, 76];
+    const BARK_DEEP = [82, 60, 54];
+    const SOIL = [228, 208, 180];
+    const SOIL_DEEP = [176, 146, 118];
+    const APRICOT = [240, 166, 114];
+    const PEACH = [246, 194, 156];
+    const BUTTER = [238, 206, 110];
+    const MAPLE = [222, 112, 98];
+    const SAGE = [146, 182, 132];
+    const LEAF_COLORS = [APRICOT, BUTTER, MAPLE, PEACH, SAGE];
+    // 잎 모양 셋 — 0 둥근 잎 · 1 다섯 갈래 잎 · 2 길쭉한 잎. 윤곽은 꼭지 쪽이 x = −1, 끝이 x = +1 인 단위 좌표
+    const LEAF_KINDS = 3;
+    const OUTLINE_POINTS = 72;
+    // 스프라이트는 기준 크기로 한 번만 그리고, 찍을 때는 크기 배율만 곱한다
+    const SPRITE_SIZE = 48;
+    const SPRITE_RES = 2;
+    const CAPTION_FONT = '600 11px system-ui, sans-serif';
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 같은 잎 배치·같은 바람이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 부드러운 2D 노이즈 — 정수 격자점마다 시드로 정한 값(−1~1)을 두고 칸 안은 3차 곡선으로 섞는다
+    function makeNoise(seed) {
+        const rng = makeRng(seed);
+        const perm = new Uint8Array(512);
+        const vals = new Float32Array(256);
+        for (let i = 0; i < 256; i += 1) {
+            vals[i] = rng() * 2 - 1;
+            perm[i] = i;
+        }
+        for (let i = 255; i > 0; i -= 1) {
+            const j = Math.floor(rng() * (i + 1));
+            const tmp = perm[i];
+            perm[i] = perm[j];
+            perm[j] = tmp;
+        }
+        for (let i = 0; i < 256; i += 1) {
+            perm[i + 256] = perm[i];
+        }
+        function corner(ix, iy) { return vals[perm[(ix & 255) + perm[iy & 255]]]; }
+        return function (x, y) {
+            const ix = Math.floor(x);
+            const iy = Math.floor(y);
+            const fx = x - ix;
+            const fy = y - iy;
+            const u = fx * fx * (3 - 2 * fx);
+            const v = fy * fy * (3 - 2 * fy);
+            const top = lerp(corner(ix, iy), corner(ix + 1, iy), u);
+            const low = lerp(corner(ix, iy + 1), corner(ix + 1, iy + 1), u);
+            return lerp(top, low, v);
+        };
+    }
+    // 잎 윤곽 — 사진 없이 곡선으로. 둘레를 OUTLINE_POINTS 점으로 나눈다
+    function leafOutline(kind) {
+        const pts = [];
+        for (let i = 0; i < OUTLINE_POINTS; i += 1) {
+            const a = i / OUTLINE_POINTS * TAU;
+            const c = Math.cos(a);
+            const s = Math.sin(a);
+            if (kind === 1) {
+                // 다섯 갈래 — 반지름이 둘레를 따라 다섯 번 부풀었다 들어간다
+                const r = 0.6 + 0.4 * Math.pow(Math.abs(Math.cos(2.5 * a)), 0.8);
+                pts.push([r * c, r * s * 0.95]);
+            }
+            else if (kind === 2) {
+                pts.push([c, 0.3 * s * (1 - 0.25 * c)]);
+            }
+            else {
+                // 둥근 잎 — 꼭지 쪽이 넓고 끝으로 갈수록 좁아지는 물방울
+                pts.push([c, 0.52 * s * (1 - 0.3 * c)]);
+            }
+        }
+        return pts;
+    }
+    const OUTLINES = [leafOutline(0), leafOutline(1), leafOutline(2)];
+    // 잎맥 선분 — 가운데 맥 하나와 곁맥. 갈래 잎은 갈래 끝마다 하나
+    function leafVeins(kind) {
+        const out = [];
+        if (kind === 1) {
+            const base = [-0.4, 0];
+            for (let k = -2; k <= 2; k += 1) {
+                const a = k * 0.4 * Math.PI;
+                out.push([base, [Math.cos(a) * 0.86, Math.sin(a) * 0.82]]);
+            }
+            return out;
+        }
+        const halfW = kind === 2 ? 0.3 : 0.52;
+        const taper = kind === 2 ? 0.25 : 0.3;
+        out.push([[-1, 0], [0.92, 0]]);
+        const roots = [-0.55, -0.15, 0.25, 0.6];
+        for (let i = 0; i < roots.length; i += 1) {
+            const x0 = roots[i];
+            const x1 = Math.min(0.95, x0 + 0.32);
+            const y1 = halfW * Math.sqrt(Math.max(0, 1 - x1 * x1)) * (1 - taper * x1) * 0.8;
+            out.push([[x0, 0], [x1, y1]]);
+            out.push([[x0, 0], [x1, -y1]]);
+        }
+        return out;
+    }
+    const VEINS = [leafVeins(0), leafVeins(1), leafVeins(2)];
+    function leafPathOn(g, kind, k) {
+        const pts = OUTLINES[kind];
+        g.beginPath();
+        g.moveTo(pts[0][0] * k, pts[0][1] * k);
+        for (let i = 1; i < pts.length; i += 1) {
+            g.lineTo(pts[i][0] * k, pts[i][1] * k);
+        }
+        g.closePath();
+    }
+    // 스프라이트 흐림 — 가로·세로 상자 평균을 두 번. 투명 가장자리가 검게 번지지 않게 알파를 곱한 값으로 섞는다
+    function blurSprite(g, side, r) {
+        const img = g.getImageData(0, 0, side, side);
+        const d = img.data;
+        const n = side * side;
+        const buf = new Float32Array(n * 4);
+        const tmp = new Float32Array(n * 4);
+        for (let i = 0; i < n; i += 1) {
+            const a = d[i * 4 + 3] / 255;
+            buf[i * 4] = d[i * 4] * a;
+            buf[i * 4 + 1] = d[i * 4 + 1] * a;
+            buf[i * 4 + 2] = d[i * 4 + 2] * a;
+            buf[i * 4 + 3] = d[i * 4 + 3];
+        }
+        const span = r * 2 + 1;
+        for (let pass = 0; pass < 2; pass += 1) {
+            for (let y = 0; y < side; y += 1) {
+                for (let x = 0; x < side; x += 1) {
+                    for (let ch = 0; ch < 4; ch += 1) {
+                        let sum = 0;
+                        for (let k = -r; k <= r; k += 1) {
+                            sum += buf[(y * side + clamp(x + k, 0, side - 1)) * 4 + ch];
+                        }
+                        tmp[(y * side + x) * 4 + ch] = sum / span;
+                    }
+                }
+            }
+            for (let y = 0; y < side; y += 1) {
+                for (let x = 0; x < side; x += 1) {
+                    for (let ch = 0; ch < 4; ch += 1) {
+                        let sum = 0;
+                        for (let k = -r; k <= r; k += 1) {
+                            sum += tmp[(clamp(y + k, 0, side - 1) * side + x) * 4 + ch];
+                        }
+                        buf[(y * side + x) * 4 + ch] = sum / span;
+                    }
+                }
+            }
+        }
+        for (let i = 0; i < n; i += 1) {
+            const a = buf[i * 4 + 3];
+            const inv = a > 0.5 ? 255 / a : 0;
+            d[i * 4] = buf[i * 4] * inv;
+            d[i * 4 + 1] = buf[i * 4 + 1] * inv;
+            d[i * 4 + 2] = buf[i * 4 + 2] * inv;
+            d[i * 4 + 3] = a;
+        }
+        g.putImageData(img, 0, 0);
+    }
+    const spriteCache = new Map();
+    // 함정 1 실물 계수 — 잎 경로를 실제로 그린 횟수(spriteBuilds)와 스프라이트를 찍은 횟수(leafBlits)
+    let spriteBuilds = 0;
+    let leafBlits = 0;
+    // 같은 모양·같은 색·같은 흐림이면 한 번만 그린다. 뒷면은 크림을 섞은 옅은 색으로 따로 한 장
+    function spriteFor(kind, color, blur) {
+        const key = kind + '|' + color.join(',') + '|' + blur;
+        const hit = spriteCache.get(key);
+        if (hit) {
+            return hit;
+        }
+        spriteBuilds += 1;
+        const pad = 3 + Math.ceil(blur * 2);
+        const side = Math.ceil((SPRITE_SIZE + pad * 2) * SPRITE_RES);
+        const cvs = document.createElement('canvas');
+        cvs.width = side;
+        cvs.height = side;
+        const sp = { cv: cvs, half: side / SPRITE_RES / 2 };
+        spriteCache.set(key, sp);
+        const g = cvs.getContext('2d');
+        if (!g) {
+            return sp;
+        }
+        const k = SPRITE_SIZE * SPRITE_RES / 2;
+        g.translate(side / 2, side / 2);
+        // 꼭지
+        g.beginPath();
+        g.moveTo(-k * 0.95, 0);
+        g.lineTo(-k * 1.18, k * 0.05);
+        g.lineWidth = 1.6 * SPRITE_RES;
+        g.strokeStyle = rgba(mixRGB(color, INK, 0.5), 1);
+        g.stroke();
+        leafPathOn(g, kind, k);
+        g.fillStyle = rgba(color, 1);
+        g.fill();
+        g.lineWidth = 1.1 * SPRITE_RES;
+        g.strokeStyle = rgba(mixRGB(color, INK, 0.38), 0.95);
+        g.stroke();
+        const veins = VEINS[kind];
+        g.beginPath();
+        for (let i = 0; i < veins.length; i += 1) {
+            g.moveTo(veins[i][0][0] * k, veins[i][0][1] * k);
+            g.lineTo(veins[i][1][0] * k, veins[i][1][1] * k);
+        }
+        g.lineWidth = 0.8 * SPRITE_RES;
+        g.strokeStyle = rgba(mixRGB(color, INK, 0.3), 0.75);
+        g.stroke();
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        if (blur > 0) {
+            blurSprite(g, side, Math.round(blur * SPRITE_RES));
+        }
+        return sp;
+    }
+    function backColor(c) { return mixRGB(c, CREAM, 0.5); }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    // 스프라이트 찍기 — 자리(x, y)·크기·회전, squash 는 잎 면이 돌아 보이는 세로 납작함(0~1)
+    function blitLeaf(sp, x, y, size, angle, squash, alpha) {
+        leafBlits += 1;
+        const k = size / SPRITE_SIZE;
+        ctx.save();
+        ctx.globalAlpha = clamp(alpha, 0, 1);
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.scale(k, k * Math.max(0.06, squash));
+        ctx.drawImage(sp.cv, -sp.half, -sp.half, sp.half * 2, sp.half * 2);
+        ctx.restore();
+    }
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 뗀다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    // 포인터 자리(판 좌표) — 판 밖이면 −1
+    let hoverX = -1;
+    let hoverY = -1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearSky() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(SKY_TOP, 1));
+        g.addColorStop(1, rgba(SKY_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function drawGround(y) {
+        const g = ctx.createLinearGradient(0, y, 0, H);
+        g.addColorStop(0, rgba(SOIL, 1));
+        g.addColorStop(1, rgba(SOIL_DEEP, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, y, W, H - y);
+        ctx.fillStyle = rgba(SOIL_DEEP, 0.9);
+        ctx.fillRect(0, y, W, 1.5);
+    }
+    // 판 위 설명 글 — 크림 알약 바탕에 진한 글자
+    function drawCaption(text, x, y, alignRight) {
+        ctx.font = CAPTION_FONT;
+        const bw = ctx.measureText(text).width + 14;
+        const bh = 20;
+        const bx = alignRight ? x - bw : x;
+        ctx.fillStyle = rgba(CREAM, 0.9);
+        ctx.beginPath();
+        ctx.moveTo(bx + 8, y);
+        ctx.arcTo(bx + bw, y, bx + bw, y + bh, 8);
+        ctx.arcTo(bx + bw, y + bh, bx, y + bh, 8);
+        ctx.arcTo(bx, y + bh, bx, y, 8);
+        ctx.arcTo(bx, y, bx + bw, y, 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 7, y + bh / 2 + 0.5);
+    }
+    function fmt(v, digits) { return v.toFixed(digits); }
+    const YARD_LEAVES = 150;
+    const BROOM_RADIUS = 66;
+    // 충격량 세기(px/s, 빗자루 바로 앞에서) · 엇갈린 몫이 회전으로 바뀌는 비율 · 바닥 마찰(1/초)
+    const PUSH_GAIN = 1400;
+    const SPIN_GAIN = 0.05;
+    const YARD_FRICTION = 3.4;
+    const BROOM_SPEED = 170;
+    const PATH_SAMPLES = 160;
+    const YARD_START_MS = 200;
+    const BROOM_LABEL = '押し出し = (1 − d/R)² · R {r}px';
+    const HIT_LABEL = '当たった葉 {n}枚';
+    let yard = [];
+    let pathPts = [];
+    let pathLen = [];
+    let t07 = 0;
+    let broomX = 0;
+    let broomY = 0;
+    let headX = 1;
+    let headY = 0;
+    let hits = 0;
+    // 빗자루 길 — 왼쪽에서 오른쪽으로 두 번 굽는 곡선. 점 사이 거리를 쌓아 누적 길이로 매개한다
+    function makePath() {
+        pathPts = [];
+        pathLen = [];
+        let acc = 0;
+        for (let i = 0; i <= PATH_SAMPLES; i += 1) {
+            const u = i / PATH_SAMPLES;
+            const p = [30 + u * 420, 156 + 78 * Math.sin(u * TAU * 1.25 + 0.4) * (0.6 + 0.4 * u)];
+            if (i > 0) {
+                acc += Math.hypot(p[0] - pathPts[i - 1][0], p[1] - pathPts[i - 1][1]);
+            }
+            pathPts.push(p);
+            pathLen.push(acc);
+        }
+    }
+    // 누적 길이 s 자리 — 이분 탐색으로 구간을 찾아 그 안에서 선형 보간
+    function pathAt(s, out) {
+        const total = pathLen[pathLen.length - 1];
+        const q = clamp(s, 0, total);
+        let lo = 0;
+        let hi = pathLen.length - 1;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (pathLen[mid] <= q) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        const seg = pathLen[hi] - pathLen[lo] || 1;
+        const k = (q - pathLen[lo]) / seg;
+        out[0] = lerp(pathPts[lo][0], pathPts[hi][0], k);
+        out[1] = lerp(pathPts[lo][1], pathPts[hi][1], k);
+        return Math.atan2(pathPts[hi][1] - pathPts[lo][1], pathPts[hi][0] - pathPts[lo][0]);
+    }
+    const broomTmp = [0, 0];
+    function build() {
+        makePath();
+        const rng = makeRng(4797);
+        yard = [];
+        for (let i = 0; i < YARD_LEAVES; i += 1) {
+            yard.push({ x: 20 + rng() * 440, y: 20 + rng() * 260, vx: 0, vy: 0, ang: rng() * TAU, spin: 0, hop: 0, kind: i % LEAF_KINDS, color: i % LEAF_COLORS.length, size: 18 + rng() * 12, hit: false });
+        }
+        t07 = 0;
+        hits = 0;
+        pathAt(0, broomTmp);
+        broomX = broomTmp[0];
+        broomY = broomTmp[1];
+    }
+    function loopLength() { return YARD_START_MS + pathLen[pathLen.length - 1] / BROOM_SPEED * 1000 + 1400; }
+    function step(dt) {
+        t07 += dt * 1000;
+        if (t07 < YARD_START_MS) {
+            return;
+        }
+        const px = broomX;
+        const py = broomY;
+        if (hoverX >= 0) {
+            // 포인터가 판 위에 있으면 빗자루가 포인터를 따라간다
+            broomX = lerp(broomX, hoverX, 0.25);
+            broomY = lerp(broomY, hoverY, 0.25);
+        }
+        else {
+            pathAt((t07 - YARD_START_MS) / 1000 * BROOM_SPEED, broomTmp);
+            broomX = broomTmp[0];
+            broomY = broomTmp[1];
+        }
+        const mv = Math.hypot(broomX - px, broomY - py);
+        if (mv > 0.01) {
+            headX = (broomX - px) / mv;
+            headY = (broomY - py) / mv;
+        }
+        for (let i = 0; i < yard.length; i += 1) {
+            const lf = yard[i];
+            const dx = lf.x - broomX;
+            const dy = lf.y - broomY;
+            const d = Math.hypot(dx, dy);
+            if (d < BROOM_RADIUS && mv > 0.01) {
+                const w = (1 - d / BROOM_RADIUS) * (1 - d / BROOM_RADIUS);
+                const ax = d > 0.01 ? dx / d : headX;
+                const ay = d > 0.01 ? dy / d : headY;
+                // 미는 방향 = 바깥 방향과 빗자루 진행 방향을 섞은 것
+                const jx = (0.55 * ax + 0.45 * headX) * w * PUSH_GAIN * dt;
+                const jy = (0.55 * ay + 0.45 * headY) * w * PUSH_GAIN * dt;
+                lf.vx += jx;
+                lf.vy += jy;
+                // 진행 방향과 바깥 방향의 외적 — 옆구리를 맞은 잎일수록 세게 돈다
+                lf.spin += (headX * ay - headY * ax) * w * PUSH_GAIN * SPIN_GAIN * dt;
+                lf.hop = Math.min(1, lf.hop + w * 4 * dt);
+                if (!lf.hit) {
+                    lf.hit = true;
+                    hits += 1;
+                }
+            }
+            const fr = Math.exp(-YARD_FRICTION * dt);
+            lf.vx *= fr;
+            lf.vy *= fr;
+            lf.spin *= fr;
+            lf.hop *= Math.exp(-2.5 * dt);
+            lf.x += lf.vx * dt;
+            lf.y += lf.vy * dt;
+            lf.ang += lf.spin * dt;
+            // 마당 담장 — 판 밖으로 나가면 튕겨 돌아온다
+            if (lf.x < 8) {
+                lf.x = 8;
+                lf.vx = Math.abs(lf.vx) * 0.4;
+            }
+            if (lf.x > W - 8) {
+                lf.x = W - 8;
+                lf.vx = -Math.abs(lf.vx) * 0.4;
+            }
+            if (lf.y < 8) {
+                lf.y = 8;
+                lf.vy = Math.abs(lf.vy) * 0.4;
+            }
+            if (lf.y > H - 8) {
+                lf.y = H - 8;
+                lf.vy = -Math.abs(lf.vy) * 0.4;
+            }
+        }
+    }
+    // 동작 줄이기 — 빗자루가 길 끝까지 지나간 뒤의 마당
+    function finalScene() {
+        build();
+        const n = Math.ceil((loopLength() - 400) / FIXED_DT);
+        for (let i = 0; i < n; i += 1) {
+            step(STEP_S);
+        }
+    }
+    function onWake() { }
+    function drawYard() {
+        const g = ctx.createLinearGradient(0, 0, W, H);
+        g.addColorStop(0, rgba(SOIL, 1));
+        g.addColorStop(1, rgba(mixRGB(SOIL, SOIL_DEEP, 0.35), 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+        // 정해 둔 길 — 옅은 점선
+        ctx.setLineDash([3, 7]);
+        ctx.strokeStyle = rgba(SOIL_DEEP, 0.9);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < pathPts.length; i += 1) {
+            if (i === 0) {
+                ctx.moveTo(pathPts[i][0], pathPts[i][1]);
+            }
+            else {
+                ctx.lineTo(pathPts[i][0], pathPts[i][1]);
+            }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    function drawBroom() {
+        const ang = Math.atan2(headY, headX);
+        // 밀어내기 장 테두리
+        const ring = ctx.createRadialGradient(broomX, broomY, 0, broomX, broomY, BROOM_RADIUS);
+        ring.addColorStop(0, rgba(CREAM, 0.5));
+        ring.addColorStop(1, rgba(CREAM, 0));
+        ctx.fillStyle = ring;
+        ctx.beginPath();
+        ctx.arc(broomX, broomY, BROOM_RADIUS, 0, TAU);
+        ctx.fill();
+        ctx.save();
+        ctx.translate(broomX, broomY);
+        ctx.rotate(ang);
+        // 자루 — 진행 반대쪽으로 뻗는다
+        ctx.strokeStyle = rgba(BARK, 1);
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-6, 0);
+        ctx.lineTo(-64, 18);
+        ctx.stroke();
+        // 솔 — 진행 방향에 가로로 놓인 부채꼴
+        ctx.fillStyle = rgba(BUTTER, 1);
+        ctx.strokeStyle = rgba(BARK_DEEP, 1);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-8, -20);
+        ctx.lineTo(10, -26);
+        ctx.lineTo(10, 26);
+        ctx.lineTo(-8, 20);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        for (let k = -3; k <= 3; k += 1) {
+            ctx.moveTo(-6, k * 6);
+            ctx.lineTo(9, k * 7.5);
+        }
+        ctx.strokeStyle = rgba(mixRGB(BUTTER, BARK_DEEP, 0.5), 0.9);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+    }
+    function draw() {
+        drawYard();
+        // 그림자 먼저 — 뜬 잎일수록 그림자가 멀어진다
+        for (let i = 0; i < yard.length; i += 1) {
+            const lf = yard[i];
+            if (lf.hop < 0.05) {
+                continue;
+            }
+            ctx.fillStyle = rgba(SOIL_DEEP, 0.4 * lf.hop);
+            ctx.beginPath();
+            ctx.ellipse(lf.x + 6 * lf.hop, lf.y + 8 * lf.hop, lf.size * 0.45, lf.size * 0.2, lf.ang, 0, TAU);
+            ctx.fill();
+        }
+        for (let i = 0; i < yard.length; i += 1) {
+            const lf = yard[i];
+            blitLeaf(spriteFor(lf.kind, LEAF_COLORS[lf.color], 0), lf.x, lf.y, lf.size * (1 + 0.25 * lf.hop), lf.ang, 1, 1);
+        }
+        if (t07 >= YARD_START_MS) {
+            drawBroom();
+        }
+        drawCaption(BROOM_LABEL.replace('{r}', fmt(BROOM_RADIUS, 0)), 8, 8, false);
+        drawCaption(HIT_LABEL.replace('{n}', fmt(hits, 0)), W - 8, 8, true);
+    }
+    // 一時停止 단추 — aria-pressed 가 참이면 멈춘 상태. 동작 줄이기면 멈춘 채로 시작한다
+    let paused = still;
+    // 지금 판이 동작 줄이기 한 장면인가 — 사람이 재생을 누르면 처음부터 다시 시작한다
+    let stillShown = false;
+    let ready = false;
+    // 정리 뒤(리액트 언마운트)에 늦게 온 알림이 일을 시작하지 않게
+    let alive = true;
+    // 시연 시계(ms) — 16ms 고정 스텝으로만 늘어난다
+    let clock = 0;
+    function syncPause() { pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false'); }
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        onWake();
+    }
+    // 포인터 자리를 판 좌표(480×300)로 — 화면에 보이는 캔버스 크기와 상관없이
+    function toBoard(ev) {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) * W / Math.max(1, r.width), (ev.clientY - r.top) * H / Math.max(1, r.height)];
+    }
+    function render() { draw(); }
+    cv.addEventListener('pointermove', function (ev) {
+        const p = toBoard(ev);
+        hoverX = p[0];
+        hoverY = p[1];
+        wake();
+        if (paused && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    cv.addEventListener('pointerleave', function () {
+        hoverX = -1;
+        hoverY = -1;
+        if (paused && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (paused || !alive) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // dt 상한 — 한 프레임에 DT_MAX 까지만 쌓는다. 숨었던 탭이 돌아와 간격이 수 초여도 잎이 순간이동하지 않게
+        acc += Math.min(ts - lastTs, DT_MAX);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < MAX_STEPS) {
+            clock += FIXED_DT;
+            if (clock >= loopLength()) {
+                clock = 0;
+                build();
+            }
+            step(STEP_S);
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 기준을 새로 잡는다 — 첫 프레임 간격을 0 으로
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 잎이 이미 내려앉은 한 장면만 그린다
+    function showStill() {
+        stopLoop();
+        finalScene();
+        stillShown = true;
+        render();
+    }
+    function play() {
+        clock = 0;
+        stillShown = false;
+        build();
+        render();
+        startLoop();
+    }
+    pauseBtn.addEventListener('click', function () {
+        wake();
+        paused = !paused;
+        syncPause();
+        if (paused) {
+            stopLoop();
+            render();
+            return;
+        }
+        // 동작 줄이기여도 사람이 직접 누르면 재생한다 — 한 장면에서 처음부터
+        if (stillShown) {
+            play();
+        }
+        else {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 내려앉은 장면에서 멈추고, 꺼지면 시연을 처음부터
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (!ready) {
+            return;
+        }
+        paused = still;
+        syncPause();
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    reduceQuery.addEventListener('change', onMotionPref, { signal: off.signal });
+    // 탭이 숨으면 루프를 세우고, 돌아오면 시계를 다시 잡아 숨어 있던 시간을 한 번에 따라잡지 않는다
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+            return;
+        }
+        if (!paused && ready) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        if (ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    function begin() {
+        fitCanvas();
+        build();
+        ready = true;
+        syncPause();
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    begin();
+    return function () {
+        alive = false;
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
