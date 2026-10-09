@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A 3D Sphere of Words That Spins — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wc is-demo" id="wc">
+  <canvas class="wc__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="A 3D sphere of words arranged over a ball and turning slowly."></canvas>
+  <ol class="wc__list" data-role="list" aria-label="Words ranked by frequency"></ol>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("wc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 어두운 판 위에 밝은 파스텔 글자를 얹어 명도 차로 글자가 읽힌다
+    const BG = [30, 27, 44];
+    const BG_LOW = [44, 38, 64];
+    const GUIDE = [104, 96, 140];
+    const CREAM = [255, 248, 234];
+    const PEACH = [255, 204, 168];
+    const MINT = [140, 228, 196];
+    const SKY = [140, 204, 255];
+    const LEMON = [246, 230, 148];
+    const LILAC = [198, 176, 255];
+    const PINK = [255, 170, 198];
+    const WORD_COLORS = [PEACH, MINT, SKY, LEMON, LILAC, PINK];
+    // 글꼴 — 기기에 이미 있는 시스템 글꼴 목록만. 바깥에서 글꼴 파일을 불러오지 않는다
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    const FONT_WEIGHT = 700;
+    // 크기 = SIZE_MAX × (횟수 / 1위 횟수)^SIZE_EXPONENT. 0.5(제곱근)면 글자 넓이(크기의 제곱)가 횟수에 비례한다
+    const SIZE_EXPONENT = 0.5;
+    const SIZE_MAX = 50;
+    const SIZE_MIN = 10;
+    function sizeFor(count, top) {
+        return Math.max(SIZE_MIN, SIZE_MAX * Math.pow(count / top, SIZE_EXPONENT));
+    }
+    // meetings·설문에서 흔히 나오는 낱말과 횟수 — 많이 나온 순. theme 은 0 Pace · 1 Together · 2 How we work · 3 Growing
+    const VOCAB = [
+        { text: 'collaboration', count: 24, theme: 1 },
+        { text: 'communication', count: 19, theme: 1 },
+        { text: 'deadline', count: 16, theme: 0 },
+        { text: 'feedback', count: 14, theme: 2 },
+        { text: 'schedule', count: 12, theme: 0 },
+        { text: 'growth', count: 11, theme: 3 },
+        { text: 'sharing', count: 10, theme: 2 },
+        { text: 'trust', count: 9, theme: 1 },
+        { text: 'meetings', count: 8, theme: 0 },
+        { text: 'priorities', count: 8, theme: 0 },
+        { text: 'rest', count: 7, theme: 3 },
+        { text: 'goals', count: 7, theme: 0 },
+        { text: 'kindness', count: 6, theme: 1 },
+        { text: 'docs', count: 6, theme: 2 },
+        { text: 'praise', count: 6, theme: 1 },
+        { text: 'focus', count: 5, theme: 0 },
+        { text: 'automation', count: 5, theme: 2 },
+        { text: 'learning', count: 5, theme: 3 },
+        { text: 'reviews', count: 4, theme: 2 },
+        { text: 'cheering', count: 4, theme: 1 },
+        { text: 'challenge', count: 4, theme: 3 },
+        { text: 'planning', count: 4, theme: 0 },
+        { text: 'questions', count: 3, theme: 2 },
+        { text: 'balance', count: 3, theme: 3 },
+        { text: 'thanks', count: 3, theme: 1 },
+        { text: 'speed', count: 3, theme: 0 },
+        { text: 'data', count: 3, theme: 2 },
+        { text: 'leeway', count: 3, theme: 3 },
+        { text: 'retros', count: 2, theme: 0 },
+        { text: 'support', count: 2, theme: 1 },
+        { text: 'experiments', count: 2, theme: 2 },
+        { text: 'habits', count: 2, theme: 3 },
+        { text: 'quality', count: 2, theme: 2 },
+        { text: 'mood', count: 2, theme: 1 },
+        { text: 'change', count: 2, theme: 3 },
+        { text: 'launch', count: 2, theme: 0 },
+        { text: 'cleanup', count: 1, theme: 2 },
+        { text: 'roles', count: 1, theme: 1 },
+        { text: 'fun', count: 1, theme: 1 },
+        { text: 'notes', count: 1, theme: 0 },
+        { text: 'efficiency', count: 1, theme: 0 },
+        { text: 'onboarding', count: 1, theme: 2 },
+        { text: 'connection', count: 1, theme: 1 },
+        { text: 'ideas', count: 1, theme: 3 },
+        { text: 'stability', count: 1, theme: 3 },
+        { text: 'transparency', count: 1, theme: 2 },
+        { text: 'customers', count: 1, theme: 2 },
+        { text: 'practice', count: 1, theme: 3 }
+    ];
+    // 횟수 문구 — 1 은 따로 둔다(영어판의 단수형 자리)
+    const COUNT_LABEL = '{n} mentions';
+    const COUNT_ONE = '1 mention';
+    const TOP_LABEL = 'Most frequent:';
+    // 캔버스 요약에서 1~3위 앞에 붙는 말 — 09 투표판은 자기 말로 바꾼다
+    let rankHeading = TOP_LABEL;
+    function countText(n) { return n === 1 ? COUNT_ONE : COUNT_LABEL.replace('{n}', String(n)); }
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 같은 배치·일정표가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 튀어나오기 — 감쇠 진동 1 − e^(−POP_DAMP·t)·cos(POP_FREQ·t), t 는 초. goals 크기를 한 번 넘겼다가 자리 잡는다
+    const POP_DAMP = 7;
+    const POP_FREQ = 11;
+    function popScale(t) {
+        if (t <= 0) {
+            return 0;
+        }
+        return 1 - Math.exp(-POP_DAMP * t) * Math.cos(POP_FREQ * t);
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const listEl = root.querySelector('[data-role="list"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !listEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const list = listEl;
+    // 캔버스 요약 — HTML 에 적힌 장면 설명 뒤에 지금 1~3위를 덧붙인다
+    const baseAria = cv.getAttribute('aria-label') || '';
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 뗀다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    // 포인터 자리(판 좌표) — 판 밖이면 -1
+    let hoverX = -1;
+    let hoverY = -1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearStage() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG, 1));
+        g.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function fontOf(size) { return FONT_WEIGHT + ' ' + size.toFixed(1) + 'px ' + FONT_FAMILY; }
+    function roundRectPath(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+    // 놓인 낱말 그리기 — 상자 가운데를 중심으로 scale 배·angle 라디안 돌리고 lift 만큼 띄운다. 비트 칸을 만든 자리와 같은 기준선에 찍는다
+    function drawPlaced(p, alpha, scale, angle, lift, color) {
+        if (alpha <= 0.002 || scale <= 0.001) {
+            return;
+        }
+        const cx = p.x + p.w / 2;
+        const cy = p.y + p.h / 2;
+        ctx.save();
+        ctx.translate(cx, cy - lift);
+        if (angle !== 0) {
+            ctx.rotate(angle);
+        }
+        if (scale !== 1) {
+            ctx.scale(scale, scale);
+        }
+        ctx.font = fontOf(p.size);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(color, alpha);
+        ctx.fillText(p.text, p.x + p.dx - cx, p.y + p.dy - cy);
+        ctx.restore();
+    }
+    function hitPlaced(p) {
+        return hoverX >= p.x && hoverX <= p.x + p.w && hoverY >= p.y && hoverY <= p.y + p.h;
+    }
+    // 포인터 아래 낱말 — 뒤에 그린 것이 위에 있으니 뒤에서부터 찾는다. shown(i) 가 거짓인 낱말은 건너뛴다
+    function pickPlaced(ps, shown) {
+        if (hoverX < 0) {
+            return -1;
+        }
+        for (let i = ps.length - 1; i >= 0; i -= 1) {
+            if (shown(i) && hitPlaced(ps[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    function drawHalo(x, y, w, h) {
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgba(CREAM, 0.9);
+        roundRectPath(x - 3, y - 2, w + 6, h + 4, 6);
+        ctx.stroke();
+    }
+    // 말풍선 — 낱말과 횟수를 크림 바탕에 진한 글자로
+    function drawTip(label, ax, ay) {
+        ctx.font = fontOf(11);
+        const bw = ctx.measureText(label).width + 16;
+        const bh = 22;
+        const bx = clamp(ax - bw / 2, 4, W - bw - 4);
+        const by = ay - bh - 8 < 4 ? ay + 10 : ay - bh - 8;
+        ctx.fillStyle = rgba(CREAM, 0.96);
+        roundRectPath(bx, by, bw, bh, 8);
+        ctx.fill();
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, bx + bw / 2, by + bh / 2 + 0.5);
+    }
+    // 판 위 설명 글 — 어두운 알약 바탕에 작은 크림 글자. 돌려주는 값은 차지한 상자 [x, y, w, h]
+    function drawCaption(text, x, y, alignRight) {
+        ctx.font = fontOf(11);
+        const bw = ctx.measureText(text).width + 14;
+        const bh = 20;
+        const bx = alignRight ? x - bw : x;
+        ctx.fillStyle = rgba(BG, 0.82);
+        roundRectPath(bx, y, bw, bh, 8);
+        ctx.fill();
+        ctx.fillStyle = rgba(CREAM, 0.92);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 7, y + bh / 2 + 0.5);
+        return [bx, y, bw, bh];
+    }
+    // 구에 올릴 낱말 수와 구 반지름(px)
+    const SPHERE_COUNT = 42;
+    const SPHERE_R = 120;
+    // 황금각 — 한 점마다 경도를 π(3 − √5) 라디안(약 137.5°)씩 돌리고 위도는 고르게 내려, 구 위에 점이 고르게 흩어진다
+    const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+    // 원근 — 눈은 구 가운데에서 CAMERA_DIST(구 반지름 단위) 앞. 크기 배율 = CAMERA_DIST / (CAMERA_DIST + z)
+    const CAMERA_DIST = 3.2;
+    // 저절로 도는 빠르기(라디안/초)와 포인터 쪽 기울기 — 최대 TILT_MAX 라디안, 틱마다 남은 차의 TILT_FOLLOW 만큼 따라간다
+    const AUTO_SPIN = 0.55;
+    const TILT_MAX = 0.6;
+    const TILT_FOLLOW = 0.08;
+    const SIZE_SCALE = 0.62;
+    // 구 위 글자의 가장 작은 크기(px, 원근 배율 전) — 뒤쪽으로 돌아가도 읽힐 만큼
+    const STAR_MIN_SIZE = 9;
+    const SHUFFLE_SEED = 4777;
+    // 동작 줄이기에서 멈춰 보일 각
+    const STILL_YAW = 0.7;
+    // 가상 포인터 일정표 — [시각 ms, x, y]. 손대지 않으면 이 길을 따라 포인터가 움직이는 것처럼 기운다
+    const POINTER_SCHEDULE = [[0, 240, 150], [300, 240, 150], [1300, 392, 92], [2300, 372, 232], [3300, 104, 214], [4300, 118, 82], [5300, 240, 150], [6000, 240, 150]];
+    const LOOP_MS = 6000;
+    let stars = [];
+    let yaw = 0;
+    let tiltX = 0;
+    let tiltY = 0;
+    let t = 0;
+    let lastT = -1;
+    // 고르게 흩은 점 — i 번째 점의 높이는 1 − (i + 0.5) × 2 / n, 경도는 i × GOLDEN_ANGLE
+    function spherePoint(i, n) {
+        const y = 1 - (i + 0.5) * 2 / n;
+        const r = Math.sqrt(Math.max(0, 1 - y * y));
+        const phi = i * GOLDEN_ANGLE;
+        return [Math.cos(phi) * r, y, Math.sin(phi) * r];
+    }
+    function build() {
+        const n = Math.min(SPHERE_COUNT, VOCAB.length);
+        // 큰 낱말이 한쪽 극에 몰리지 않게 자리 번호를 시드로 섞는다
+        const slots = [];
+        for (let i = 0; i < n; i += 1) {
+            slots.push(i);
+        }
+        const rng = makeRng(SHUFFLE_SEED);
+        for (let i = n - 1; i > 0; i -= 1) {
+            const j = Math.floor(rng() * (i + 1));
+            const tmp = slots[i];
+            slots[i] = slots[j];
+            slots[j] = tmp;
+        }
+        const top = VOCAB[0].count;
+        stars = [];
+        for (let i = 0; i < n; i += 1) {
+            const p = spherePoint(slots[i], n);
+            stars.push({ e: VOCAB[i], ux: p[0], uy: p[1], uz: p[2], size: Math.max(STAR_MIN_SIZE, sizeFor(VOCAB[i].count, top) * SIZE_SCALE), color: WORD_COLORS[i % WORD_COLORS.length] });
+        }
+    }
+    function pointerAt(ms) {
+        const s = POINTER_SCHEDULE;
+        for (let i = 0; i < s.length - 1; i += 1) {
+            if (ms <= s[i + 1][0]) {
+                const k = smooth((ms - s[i][0]) / Math.max(1, s[i + 1][0] - s[i][0]));
+                return [lerp(s[i][1], s[i + 1][1], k), lerp(s[i][2], s[i + 1][2], k)];
+            }
+        }
+        return [W / 2, H / 2];
+    }
+    // 회전 + 원근 투영 — 세로축으로 (yaw + tiltY), 가로축으로 tiltX 돌린 뒤 z 가 클수록(멀수록) 작게
+    function project(ux, uy, uz) {
+        const a = yaw + tiltY;
+        const x1 = ux * Math.cos(a) - uz * Math.sin(a);
+        const z1 = ux * Math.sin(a) + uz * Math.cos(a);
+        const y2 = uy * Math.cos(tiltX) - z1 * Math.sin(tiltX);
+        const z2 = uy * Math.sin(tiltX) + z1 * Math.cos(tiltX);
+        const k = CAMERA_DIST / (CAMERA_DIST + z2);
+        return [W / 2 + x1 * SPHERE_R * k, H / 2 - y2 * SPHERE_R * k, z2, k];
+    }
+    function loopLength() { return LOOP_MS; }
+    function step(ms) {
+        if (lastT < 0) {
+            yaw = 0;
+            tiltX = 0;
+            tiltY = 0;
+        }
+        lastT = ms;
+        t = ms;
+        yaw += AUTO_SPIN * FIXED_DT / 1000;
+        const ptr = hoverX >= 0 ? [hoverX, hoverY] : (demo ? pointerAt(ms) : [W / 2, H / 2]);
+        const goalY = (ptr[0] - W / 2) / (W / 2) * TILT_MAX;
+        const goalX = -(ptr[1] - H / 2) / (H / 2) * TILT_MAX;
+        tiltY += (goalY - tiltY) * TILT_FOLLOW;
+        tiltX += (goalX - tiltX) * TILT_FOLLOW;
+    }
+    function finalScene() {
+        yaw = STILL_YAW;
+        tiltX = 0;
+        tiltY = 0;
+        lastT = -1;
+    }
+    function onWake() { }
+    function ring(pts, n) {
+        for (let i = 0; i < n; i += 1) {
+            const u = pts(i);
+            const p = project(u[0], u[1], u[2]);
+            ctx.fillStyle = rgba(GUIDE, 0.18 + (1 - p[2]) * 0.22);
+            ctx.fillRect(p[0] - 1, p[1] - 1, 2, 2);
+        }
+    }
+    function draw() {
+        clearStage();
+        // 구 가장자리와 적도·자오선 — 점선 고리로 회전이 읽히게
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = rgba(GUIDE, 0.28);
+        ctx.beginPath();
+        ctx.arc(W / 2, H / 2, SPHERE_R * CAMERA_DIST / Math.sqrt(CAMERA_DIST * CAMERA_DIST - 1), 0, TAU);
+        ctx.stroke();
+        ring(function (i) { return [Math.cos(i / 48 * TAU), 0, Math.sin(i / 48 * TAU)]; }, 48);
+        ring(function (i) { return [0, Math.cos(i / 48 * TAU), Math.sin(i / 48 * TAU)]; }, 48);
+        const shown = stars.map(function (s, i) {
+            const p = project(s.ux, s.uy, s.uz);
+            return { i: i, x: p[0], y: p[1], z: p[2], k: p[3] };
+        });
+        // 깊이 정렬 — 먼 것부터 그려 가까운 낱말이 위에 온다
+        shown.sort(function (a, b) { return b.z - a.z; });
+        let hi = -1;
+        for (let n = 0; n < shown.length; n += 1) {
+            const sh = shown[n];
+            const s = stars[sh.i];
+            const near = (1 - sh.z) / 2;
+            ctx.font = fontOf(s.size * sh.k);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = rgba(mixRGB(s.color, BG, (1 - near) * 0.55), lerp(0.25, 1, near));
+            ctx.fillText(s.e.text, sh.x, sh.y);
+            if (hoverX >= 0 && sh.z < 0) {
+                const hw = ctx.measureText(s.e.text).width / 2;
+                const hh = s.size * sh.k / 2;
+                if (Math.abs(hoverX - sh.x) <= hw && Math.abs(hoverY - sh.y) <= hh) {
+                    hi = n;
+                }
+            }
+        }
+        // 가상 포인터 — 시연 중 기울기가 따라가는 자리
+        if (demo && hoverX < 0) {
+            const p = pointerAt(t);
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = rgba(CREAM, 0.75);
+            ctx.beginPath();
+            ctx.arc(p[0], p[1], 7, 0, TAU);
+            ctx.stroke();
+            ctx.fillStyle = rgba(CREAM, 0.9);
+            ctx.beginPath();
+            ctx.arc(p[0], p[1], 2, 0, TAU);
+            ctx.fill();
+        }
+        if (hi >= 0) {
+            const sh = shown[hi];
+            const s = stars[sh.i];
+            drawTip(s.e.text + ' · ' + countText(s.e.count), sh.x, sh.y - s.size * sh.k / 2);
+        }
+    }
+    function ranking() {
+        return stars.map(function (s) { return [s.e.text, s.e.count, countText(s.e.count)]; });
+    }
+    // 글꼴 준비가 끝나 배치를 계산했는가
+    let ready = false;
+    // cleanup 뒤(리액트 언마운트)에 늦게 온 글꼴 준비 알림이 일을 시작하지 않게
+    let alive = true;
+    // 시연 시계(ms) — 16ms 고정 스텝으로만 늘어난다
+    let clock = 0;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        onWake();
+    }
+    // 포인터 자리를 판 좌표(480×300)로 — 화면에 보이는 캔버스 크기와 상관없이
+    function toBoard(ev) {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) * W / Math.max(1, r.width), (ev.clientY - r.top) * H / Math.max(1, r.height)];
+    }
+    cv.addEventListener('pointermove', function (ev) {
+        const p = toBoard(ev);
+        hoverX = p[0];
+        hoverY = p[1];
+        wake();
+        if (still && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    cv.addEventListener('pointerleave', function () {
+        hoverX = -1;
+        hoverY = -1;
+        if (still && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    // 숨긴 목록 — 순위나 횟수가 바뀐 때만 다시 쓴다. 캔버스 요약에는 1~3위를 붙인다
+    let listKey = '';
+    function syncList() {
+        const rows = ranking();
+        const key = rows.map(function (r) { return r[0] + ':' + r[1]; }).join('|');
+        if (key === listKey) {
+            return;
+        }
+        listKey = key;
+        while (list.firstChild) {
+            list.removeChild(list.firstChild);
+        }
+        for (let i = 0; i < rows.length; i += 1) {
+            const li = document.createElement('li');
+            li.textContent = rows[i][0] + ' — ' + rows[i][2];
+            list.appendChild(li);
+        }
+        const top = rows.slice(0, 3).map(function (r) { return r[0] + ' ' + r[2]; }).join(', ');
+        cv.setAttribute('aria-label', baseAria + ' ' + rankHeading + ' ' + top);
+    }
+    function render() {
+        draw();
+        syncList();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            step(clock % loopLength());
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 배치를 끝까지 계산한 마지막 한 장면만 그린다
+    function showStill() {
+        stopLoop();
+        finalScene();
+        render();
+    }
+    function play() {
+        clock = 0;
+        step(0);
+        render();
+        startLoop();
+    }
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 마지막 장면에서 멈추고, 꺼지면 시연을 처음부터
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (!ready) {
+            return;
+        }
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    reduceQuery.addEventListener('change', onMotionPref, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        if (ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    function begin() {
+        if (!alive) {
+            return;
+        }
+        fitCanvas();
+        build();
+        ready = true;
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    // 글꼴 — 준비(document.fonts.ready)가 끝난 뒤에 글자 폭을 잰다. 준비 전에 재면 나중에 바뀐 글꼴과 비트 칸이 어긋난다
+    const fontSet = document.fonts;
+    // 늦게 도착한 글꼴 — 배치를 마친 뒤 글꼴이 새로 들어오면 글자 폭을 다시 재 배치를 다시 계산한다
+    fontSet.addEventListener('loadingdone', function () {
+        if (!ready || !alive) {
+            return;
+        }
+        build();
+        if (still) {
+            finalScene();
+        }
+        render();
+    }, { signal: off.signal });
+    fontSet.ready.then(begin);
+    return function () {
+        alive = false;
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>

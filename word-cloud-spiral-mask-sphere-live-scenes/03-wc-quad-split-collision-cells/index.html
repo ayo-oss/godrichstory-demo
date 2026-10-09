@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>칸을 넷씩 쪼개 빨리 찾는 충돌 검사 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wc is-demo" id="wc">
+  <canvas class="wc__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="판을 네 칸씩 쪼갠 격자 위에 작은 단어까지 빽빽하게 채워 넣는 워드 클라우드."></canvas>
+  <ol class="wc__list" data-role="list" aria-label="빈도 순 낱말 목록"></ol>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("wc");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 어두운 판 위에 밝은 파스텔 글자를 얹어 명도 차로 글자가 읽힌다
+    const BG = [30, 27, 44];
+    const BG_LOW = [44, 38, 64];
+    const GUIDE = [104, 96, 140];
+    const CREAM = [255, 248, 234];
+    const PEACH = [255, 204, 168];
+    const MINT = [140, 228, 196];
+    const SKY = [140, 204, 255];
+    const LEMON = [246, 230, 148];
+    const LILAC = [198, 176, 255];
+    const PINK = [255, 170, 198];
+    const WORD_COLORS = [PEACH, MINT, SKY, LEMON, LILAC, PINK];
+    // 글꼴 — 기기에 이미 있는 시스템 글꼴 목록만. 바깥에서 글꼴 파일을 불러오지 않는다
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    const FONT_WEIGHT = 700;
+    // 크기 = SIZE_MAX × (횟수 / 1위 횟수)^SIZE_EXPONENT. 0.5(제곱근)면 글자 넓이(크기의 제곱)가 횟수에 비례한다
+    const SIZE_EXPONENT = 0.5;
+    const SIZE_MAX = 50;
+    const SIZE_MIN = 10;
+    function sizeFor(count, top) {
+        return Math.max(SIZE_MIN, SIZE_MAX * Math.pow(count / top, SIZE_EXPONENT));
+    }
+    // 회의·설문에서 흔히 나오는 낱말과 횟수 — 많이 나온 순. theme 은 0 일의 속도 · 1 함께하기 · 2 일하는 방식 · 3 배우고 자라기
+    const VOCAB = [
+        { text: '협업', count: 24, theme: 1 },
+        { text: '소통', count: 19, theme: 1 },
+        { text: '마감', count: 16, theme: 0 },
+        { text: '피드백', count: 14, theme: 2 },
+        { text: '일정', count: 12, theme: 0 },
+        { text: '성장', count: 11, theme: 3 },
+        { text: '공유', count: 10, theme: 2 },
+        { text: '신뢰', count: 9, theme: 1 },
+        { text: '회의', count: 8, theme: 0 },
+        { text: '우선순위', count: 8, theme: 0 },
+        { text: '휴식', count: 7, theme: 3 },
+        { text: '목표', count: 7, theme: 0 },
+        { text: '배려', count: 6, theme: 1 },
+        { text: '문서', count: 6, theme: 2 },
+        { text: '칭찬', count: 6, theme: 1 },
+        { text: '집중', count: 5, theme: 0 },
+        { text: '자동화', count: 5, theme: 2 },
+        { text: '학습', count: 5, theme: 3 },
+        { text: '리뷰', count: 4, theme: 2 },
+        { text: '응원', count: 4, theme: 1 },
+        { text: '도전', count: 4, theme: 3 },
+        { text: '계획', count: 4, theme: 0 },
+        { text: '질문', count: 3, theme: 2 },
+        { text: '균형', count: 3, theme: 3 },
+        { text: '감사', count: 3, theme: 1 },
+        { text: '속도', count: 3, theme: 0 },
+        { text: '데이터', count: 3, theme: 2 },
+        { text: '여유', count: 3, theme: 3 },
+        { text: '회고', count: 2, theme: 0 },
+        { text: '지원', count: 2, theme: 1 },
+        { text: '실험', count: 2, theme: 2 },
+        { text: '습관', count: 2, theme: 3 },
+        { text: '품질', count: 2, theme: 2 },
+        { text: '분위기', count: 2, theme: 1 },
+        { text: '변화', count: 2, theme: 3 },
+        { text: '출시', count: 2, theme: 0 },
+        { text: '정리', count: 1, theme: 2 },
+        { text: '역할', count: 1, theme: 1 },
+        { text: '재미', count: 1, theme: 1 },
+        { text: '기록', count: 1, theme: 0 },
+        { text: '효율', count: 1, theme: 0 },
+        { text: '온보딩', count: 1, theme: 2 },
+        { text: '연결', count: 1, theme: 1 },
+        { text: '아이디어', count: 1, theme: 3 },
+        { text: '안정', count: 1, theme: 3 },
+        { text: '투명성', count: 1, theme: 2 },
+        { text: '고객', count: 1, theme: 2 },
+        { text: '연습', count: 1, theme: 3 }
+    ];
+    // 횟수 문구 — 1 은 따로 둔다(영어판의 단수형 자리)
+    const COUNT_LABEL = '{n}회';
+    const COUNT_ONE = '1회';
+    const TOP_LABEL = '가장 많이 나온 말:';
+    // 캔버스 요약에서 1~3위 앞에 붙는 말 — 09 투표판은 자기 말로 바꾼다
+    let rankHeading = TOP_LABEL;
+    function countText(n) { return n === 1 ? COUNT_ONE : COUNT_LABEL.replace('{n}', String(n)); }
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 같은 배치·일정표가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 튀어나오기 — 감쇠 진동 1 − e^(−POP_DAMP·t)·cos(POP_FREQ·t), t 는 초. 목표 크기를 한 번 넘겼다가 자리 잡는다
+    const POP_DAMP = 7;
+    const POP_FREQ = 11;
+    function popScale(t) {
+        if (t <= 0) {
+            return 0;
+        }
+        return 1 - Math.exp(-POP_DAMP * t) * Math.cos(POP_FREQ * t);
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const listEl = root.querySelector('[data-role="list"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !listEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const list = listEl;
+    // 캔버스 요약 — HTML 에 적힌 장면 설명 뒤에 지금 1~3위를 덧붙인다
+    const baseAria = cv.getAttribute('aria-label') || '';
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 뗀다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    // 포인터 자리(판 좌표) — 판 밖이면 -1
+    let hoverX = -1;
+    let hoverY = -1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearStage() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG, 1));
+        g.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function fontOf(size) { return FONT_WEIGHT + ' ' + size.toFixed(1) + 'px ' + FONT_FAMILY; }
+    function roundRectPath(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+    // 놓인 낱말 그리기 — 상자 가운데를 중심으로 scale 배·angle 라디안 돌리고 lift 만큼 띄운다. 비트 칸을 만든 자리와 같은 기준선에 찍는다
+    function drawPlaced(p, alpha, scale, angle, lift, color) {
+        if (alpha <= 0.002 || scale <= 0.001) {
+            return;
+        }
+        const cx = p.x + p.w / 2;
+        const cy = p.y + p.h / 2;
+        ctx.save();
+        ctx.translate(cx, cy - lift);
+        if (angle !== 0) {
+            ctx.rotate(angle);
+        }
+        if (scale !== 1) {
+            ctx.scale(scale, scale);
+        }
+        ctx.font = fontOf(p.size);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = rgba(color, alpha);
+        ctx.fillText(p.text, p.x + p.dx - cx, p.y + p.dy - cy);
+        ctx.restore();
+    }
+    function hitPlaced(p) {
+        return hoverX >= p.x && hoverX <= p.x + p.w && hoverY >= p.y && hoverY <= p.y + p.h;
+    }
+    // 포인터 아래 낱말 — 뒤에 그린 것이 위에 있으니 뒤에서부터 찾는다. shown(i) 가 거짓인 낱말은 건너뛴다
+    function pickPlaced(ps, shown) {
+        if (hoverX < 0) {
+            return -1;
+        }
+        for (let i = ps.length - 1; i >= 0; i -= 1) {
+            if (shown(i) && hitPlaced(ps[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    function drawHalo(x, y, w, h) {
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgba(CREAM, 0.9);
+        roundRectPath(x - 3, y - 2, w + 6, h + 4, 6);
+        ctx.stroke();
+    }
+    // 말풍선 — 낱말과 횟수를 크림 바탕에 진한 글자로
+    function drawTip(label, ax, ay) {
+        ctx.font = fontOf(11);
+        const bw = ctx.measureText(label).width + 16;
+        const bh = 22;
+        const bx = clamp(ax - bw / 2, 4, W - bw - 4);
+        const by = ay - bh - 8 < 4 ? ay + 10 : ay - bh - 8;
+        ctx.fillStyle = rgba(CREAM, 0.96);
+        roundRectPath(bx, by, bw, bh, 8);
+        ctx.fill();
+        ctx.fillStyle = rgba(BG, 1);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, bx + bw / 2, by + bh / 2 + 0.5);
+    }
+    // 판 위 설명 글 — 어두운 알약 바탕에 작은 크림 글자. 돌려주는 값은 차지한 상자 [x, y, w, h]
+    function drawCaption(text, x, y, alignRight) {
+        ctx.font = fontOf(11);
+        const bw = ctx.measureText(text).width + 14;
+        const bh = 20;
+        const bx = alignRight ? x - bw : x;
+        ctx.fillStyle = rgba(BG, 0.82);
+        roundRectPath(bx, y, bw, bh, 8);
+        ctx.fill();
+        ctx.fillStyle = rgba(CREAM, 0.92);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 7, y + bh / 2 + 0.5);
+        return [bx, y, bw, bh];
+    }
+    // 반지름이 일정하게 늘어나는 나선 — 걸음 i 에서 각 = i × SPIRAL_TURN(라디안), 반지름 = i × SPIRAL_STEP(px).
+    // 한 바퀴(2π / SPIRAL_TURN 걸음)마다 반지름이 같은 폭만큼 커진다. 가로는 SPIRAL_ASPECT 배로 늘려 넓은 판을 고르게 훑는다
+    const SPIRAL_STEP = 0.35;
+    const SPIRAL_TURN = 0.1;
+    const SPIRAL_ASPECT = 1.6;
+    // 나선을 끝낼 걸음 — 반지름이 판 대각선 절반에 닿으면 그만 찾는다
+    const SPIRAL_LIMIT = Math.ceil(Math.hypot(W, H) / 2 / SPIRAL_STEP);
+    // 지금까지 나선에서 내디딘 걸음 수 — 자리 하나 찾는 데 든 일
+    let spiralSteps = 0;
+    function spiralAt(i) {
+        const a = i * SPIRAL_TURN;
+        const r = i * SPIRAL_STEP;
+        return [Math.cos(a) * r * SPIRAL_ASPECT, Math.sin(a) * r];
+    }
+    const QUAD_CAPACITY = 4;
+    const QUAD_MAX_DEPTH = 6;
+    // 놓을 낱말 수 — 앞 낱말 전부를 놓은 뒤 남는 칸은 같은 낱말을 FILL_SIZES 크기로 다시 써서 채운다
+    const WORD_TARGET = 160;
+    const FILL_SIZES = [11, 10, 9, 8];
+    const SIZE_SCALE = 0.8;
+    const BOX_PAD = 1;
+    const CENTER_Y = 136;
+    // 아래 설명 띠 위까지만 낱말을 놓는다
+    const FLOOR_Y = H - 30;
+    // 겹침 검사 횟수 — treeChecks 는 칸 나누기로 걸러낸 뒤 실제로 견준 상자 수, pairChecks 는 놓인 상자를 하나씩 다 견줬다면 든 수
+    let treeChecks = 0;
+    let pairChecks = 0;
+    let words = [];
+    let boxes = [];
+    let marks = new Int32Array(0);
+    let markStamp = 0;
+    let mainCount = 0;
+    let loopMs = 6000;
+    let t = 0;
+    const CHECK_LABEL = '낱말 {n}개 · 겹침 검사 {t}회 · 하나씩 다 비교하면 {p}회';
+    function makeNode(x, y, w, h, depth) {
+        return { x: x, y: y, w: w, h: h, depth: depth, ids: [], kids: null };
+    }
+    function boxesTouch(a, b) {
+        return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    }
+    // 넣기 — 상자가 걸친 칸마다 번호를 적는다. 칸이 넘치면 넷으로 쪼개 그 칸의 번호를 아래 칸으로 다시 나눠 넣는다
+    function quadInsert(n, id, all) {
+        if (!boxesTouch(n, all[id])) {
+            return;
+        }
+        if (n.kids) {
+            for (let k = 0; k < 4; k += 1) {
+                quadInsert(n.kids[k], id, all);
+            }
+            return;
+        }
+        n.ids.push(id);
+        if (n.ids.length > QUAD_CAPACITY && n.depth < QUAD_MAX_DEPTH) {
+            const hw = n.w / 2;
+            const hh = n.h / 2;
+            n.kids = [makeNode(n.x, n.y, hw, hh, n.depth + 1), makeNode(n.x + hw, n.y, hw, hh, n.depth + 1),
+                makeNode(n.x, n.y + hh, hw, hh, n.depth + 1), makeNode(n.x + hw, n.y + hh, hw, hh, n.depth + 1)];
+            const old = n.ids;
+            n.ids = [];
+            for (let i = 0; i < old.length; i += 1) {
+                for (let k = 0; k < 4; k += 1) {
+                    quadInsert(n.kids[k], old[i], all);
+                }
+            }
+        }
+    }
+    // 칸 나누기로 겹침 찾기 — b 가 걸친 칸에 든 상자만 견준다. 여러 칸에 걸친 상자는 marks 로 한 번만 센다
+    function quadHits(n, b, all) {
+        if (!boxesTouch(n, b)) {
+            return false;
+        }
+        if (n.kids) {
+            for (let k = 0; k < 4; k += 1) {
+                if (quadHits(n.kids[k], b, all)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (let i = 0; i < n.ids.length; i += 1) {
+            const id = n.ids[i];
+            if (marks[id] === markStamp) {
+                continue;
+            }
+            marks[id] = markStamp;
+            treeChecks += 1;
+            if (boxesTouch(all[id], b)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // 하나씩 다 견주기 — 칸 나누기가 없을 때 드는 일(첫 겹침에서 멈춘다)
+    function pairHits(b, all) {
+        for (let i = 0; i < all.length; i += 1) {
+            pairChecks += 1;
+            if (boxesTouch(all[i], b)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let tree = makeNode(0, 0, W, FLOOR_Y, 0);
+    function measureBox(text, size) {
+        ctx.font = fontOf(size);
+        const m = ctx.measureText(text);
+        const left = Math.ceil(m.actualBoundingBoxLeft);
+        const asc = Math.ceil(m.actualBoundingBoxAscent);
+        const w = left + Math.ceil(m.actualBoundingBoxRight) + BOX_PAD * 2;
+        const h = asc + Math.ceil(m.actualBoundingBoxDescent) + BOX_PAD * 2;
+        return [w, h, BOX_PAD + left, BOX_PAD + asc];
+    }
+    // 나선을 따라가며 첫 빈자리 — 두 방식으로 같은 답을 내며 각자의 검사 횟수를 센다
+    function placeBox(e, size, color) {
+        const m = measureBox(e.text, size);
+        const tree0 = treeChecks;
+        const pairs0 = pairChecks;
+        for (let i = 0; i < SPIRAL_LIMIT; i += 1) {
+            spiralSteps += 1;
+            const p = spiralAt(i);
+            const b = { x: Math.round(W / 2 + p[0] - m[0] / 2), y: Math.round(CENTER_Y + p[1] - m[1] / 2), w: m[0], h: m[1] };
+            if (b.x < 2 || b.y < 2 || b.x + b.w > W - 2 || b.y + b.h > FLOOR_Y) {
+                continue;
+            }
+            markStamp += 1;
+            const hit = quadHits(tree, b, boxes);
+            // 비교용 — 같은 자리를 하나씩 다 견주는 방식으로도 재서 횟수만 센다(답은 칸 나누기 쪽을 쓴다)
+            pairHits(b, boxes);
+            if (!hit) {
+                const id = boxes.length;
+                boxes.push(b);
+                quadInsert(tree, id, boxes);
+                const pl = { text: e.text, count: e.count, theme: e.theme, size: size, x: b.x, y: b.y, w: b.w, h: b.h, dx: m[2], dy: m[3], color: color, shrinks: 0 };
+                return { p: pl, box: b, tree: treeChecks - tree0, pairs: pairChecks - pairs0 };
+            }
+        }
+        return null;
+    }
+    function build() {
+        const top = VOCAB[0].count;
+        words = [];
+        boxes = [];
+        tree = makeNode(0, 0, W, FLOOR_Y, 0);
+        treeChecks = 0;
+        pairChecks = 0;
+        marks = new Int32Array(WORD_TARGET + 1);
+        markStamp = 0;
+        const plan = [];
+        for (let i = 0; i < VOCAB.length; i += 1) {
+            plan.push([VOCAB[i], sizeFor(VOCAB[i].count, top) * SIZE_SCALE, WORD_COLORS[i % WORD_COLORS.length]]);
+        }
+        for (let f = 0; f < FILL_SIZES.length; f += 1) {
+            for (let i = 0; i < VOCAB.length; i += 1) {
+                plan.push([VOCAB[(i * 7 + f * 5) % VOCAB.length], FILL_SIZES[f], mixRGB(WORD_COLORS[(i + f) % WORD_COLORS.length], BG, 0.3)]);
+            }
+        }
+        for (let i = 0; i < plan.length && words.length < WORD_TARGET; i += 1) {
+            const wd = placeBox(plan[i][0], plan[i][1], plan[i][2]);
+            if (wd) {
+                words.push(wd);
+            }
+            if (i === VOCAB.length - 1) {
+                mainCount = words.length;
+            }
+        }
+        loopMs = appearAt(words.length) + 300 + 1500 + 400 + 200;
+    }
+    // 나타나는 시각 — 앞 낱말은 34ms, 채우는 작은 낱말은 12ms 간격
+    function appearAt(i) {
+        return 200 + (i < mainCount ? i * 34 : mainCount * 34 + (i - mainCount) * 12);
+    }
+    function loopLength() { return loopMs; }
+    function step(ms) { t = ms; }
+    function holdEnd() { return loopMs - 600; }
+    function finalScene() { t = holdEnd() - 1; }
+    function onWake() { }
+    // 그릴 칸 — 지금까지 나타난 낱말 수가 바뀔 때만 그 낱말들로 칸 나누기를 다시 만든다
+    let shownTree = makeNode(0, 0, W, FLOOR_Y, 0);
+    let shownCount = -1;
+    function treeFor(k) {
+        if (k === shownCount) {
+            return shownTree;
+        }
+        shownCount = k;
+        shownTree = makeNode(0, 0, W, FLOOR_Y, 0);
+        const part = boxes.slice(0, k);
+        for (let i = 0; i < k; i += 1) {
+            quadInsert(shownTree, i, part);
+        }
+        return shownTree;
+    }
+    function strokeCells(n, alpha) {
+        if (!n.kids) {
+            return;
+        }
+        ctx.strokeStyle = rgba(GUIDE, alpha * (0.85 - n.depth * 0.1));
+        ctx.beginPath();
+        ctx.moveTo(n.x + n.w / 2, n.y);
+        ctx.lineTo(n.x + n.w / 2, n.y + n.h);
+        ctx.moveTo(n.x, n.y + n.h / 2);
+        ctx.lineTo(n.x + n.w, n.y + n.h / 2);
+        ctx.stroke();
+        for (let k = 0; k < 4; k += 1) {
+            strokeCells(n.kids[k], alpha);
+        }
+    }
+    function fillLeaves(n, b, alpha) {
+        if (!boxesTouch(n, b)) {
+            return;
+        }
+        if (n.kids) {
+            for (let k = 0; k < 4; k += 1) {
+                fillLeaves(n.kids[k], b, alpha);
+            }
+            return;
+        }
+        // 아직 한 번도 안 쪼갠 판(깊이 0)은 칠하지 않는다 — 판 전체가 한 칸이라 걸러낸 것이 없다
+        if (n.depth === 0) {
+            return;
+        }
+        ctx.fillStyle = rgba(SKY, alpha);
+        ctx.fillRect(n.x, n.y, n.w, n.h);
+    }
+    function group(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+    function draw() {
+        clearStage();
+        const fade = 1 - smooth((t - holdEnd()) / 400);
+        let k = 0;
+        while (k < words.length && t >= appearAt(k)) {
+            k += 1;
+        }
+        const shown = treeFor(k);
+        // 막 놓인 낱말이 걸친 칸 — 이 칸에 든 상자만 견줬다
+        if (k > 0) {
+            const age = (t - appearAt(k - 1)) / 1000;
+            fillLeaves(shown, words[k - 1].box, clamp(0.16 - age * 0.4, 0, 0.16) * fade);
+        }
+        ctx.lineWidth = 1;
+        strokeCells(shown, 0.75 * fade);
+        let tc = 0;
+        let pc = 0;
+        for (let i = 0; i < k; i += 1) {
+            const wd = words[i];
+            tc += wd.tree;
+            pc += wd.pairs;
+            const age = (t - appearAt(i)) / 1000;
+            drawPlaced(wd.p, clamp(age * 12, 0, 1) * fade, i < mainCount ? popScale(age * 1.4) : 1, 0, 0, wd.p.color);
+        }
+        drawCaption(CHECK_LABEL.replace('{n}', String(k)).replace('{t}', group(tc)).replace('{p}', group(pc)), 8, H - 26, false);
+        const hi = pickPlaced(words.map(function (wd) { return wd.p; }), function (i) { return i < k; });
+        if (hi >= 0 && fade > 0.5) {
+            const p = words[hi].p;
+            drawHalo(p.x, p.y, p.w, p.h);
+            drawTip(p.text + ' · ' + countText(p.count), p.x + p.w / 2, p.y);
+        }
+    }
+    function ranking() {
+        return VOCAB.map(function (e) { return [e.text, e.count, countText(e.count)]; });
+    }
+    // 글꼴 준비가 끝나 배치를 계산했는가
+    let ready = false;
+    // 정리 뒤(리액트 언마운트)에 늦게 온 글꼴 준비 알림이 일을 시작하지 않게
+    let alive = true;
+    // 시연 시계(ms) — 16ms 고정 스텝으로만 늘어난다
+    let clock = 0;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        onWake();
+    }
+    // 포인터 자리를 판 좌표(480×300)로 — 화면에 보이는 캔버스 크기와 상관없이
+    function toBoard(ev) {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) * W / Math.max(1, r.width), (ev.clientY - r.top) * H / Math.max(1, r.height)];
+    }
+    cv.addEventListener('pointermove', function (ev) {
+        const p = toBoard(ev);
+        hoverX = p[0];
+        hoverY = p[1];
+        wake();
+        if (still && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    cv.addEventListener('pointerleave', function () {
+        hoverX = -1;
+        hoverY = -1;
+        if (still && ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    // 숨긴 목록 — 순위나 횟수가 바뀐 때만 다시 쓴다. 캔버스 요약에는 1~3위를 붙인다
+    let listKey = '';
+    function syncList() {
+        const rows = ranking();
+        const key = rows.map(function (r) { return r[0] + ':' + r[1]; }).join('|');
+        if (key === listKey) {
+            return;
+        }
+        listKey = key;
+        while (list.firstChild) {
+            list.removeChild(list.firstChild);
+        }
+        for (let i = 0; i < rows.length; i += 1) {
+            const li = document.createElement('li');
+            li.textContent = rows[i][0] + ' — ' + rows[i][2];
+            list.appendChild(li);
+        }
+        const top = rows.slice(0, 3).map(function (r) { return r[0] + ' ' + r[2]; }).join(', ');
+        cv.setAttribute('aria-label', baseAria + ' ' + rankHeading + ' ' + top);
+    }
+    function render() {
+        draw();
+        syncList();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            clock += FIXED_DT;
+            step(clock % loopLength());
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 배치를 끝까지 계산한 마지막 한 장면만 그린다
+    function showStill() {
+        stopLoop();
+        finalScene();
+        render();
+    }
+    function play() {
+        clock = 0;
+        step(0);
+        render();
+        startLoop();
+    }
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 마지막 장면에서 멈추고, 꺼지면 시연을 처음부터
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (!ready) {
+            return;
+        }
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    reduceQuery.addEventListener('change', onMotionPref, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        if (ready) {
+            render();
+        }
+    }, { signal: off.signal });
+    function begin() {
+        if (!alive) {
+            return;
+        }
+        fitCanvas();
+        build();
+        ready = true;
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    // 글꼴 — 준비(document.fonts.ready)가 끝난 뒤에 글자 폭을 잰다. 준비 전에 재면 나중에 바뀐 글꼴과 비트 칸이 어긋난다
+    const fontSet = document.fonts;
+    // 늦게 도착한 글꼴 — 배치를 마친 뒤 글꼴이 새로 들어오면 글자 폭을 다시 재 배치를 다시 계산한다
+    fontSet.addEventListener('loadingdone', function () {
+        if (!ready || !alive) {
+            return;
+        }
+        build();
+        if (still) {
+            finalScene();
+        }
+        render();
+    }, { signal: off.signal });
+    fontSet.ready.then(begin);
+    return function () {
+        alive = false;
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
