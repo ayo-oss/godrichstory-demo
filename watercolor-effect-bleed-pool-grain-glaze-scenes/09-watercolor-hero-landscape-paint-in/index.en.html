@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Watercolor Landscape Hero That Paints Itself from Sky Wash to Dry-Brush Hills — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="wc is-demo" id="wc">
+  <canvas class="wc__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="A watercolor landscape where a sky bleed, far hills, dry brush hills and water drop blooms are painted in turn over the paper grain."></canvas>
+  <p class="wc__status" data-role="status" aria-live="off">Laying the paper grain</p>
+  <button class="wc__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("wc");
+    if (!root) return;
+    // 판 좌표 — 캔버스 안은 늘 480×300. 화면에 보이는 크기와 상관없이 그리기 좌표는 이 판으로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    // 화소 격자 — 픽셀 연산(색 합성·종이 결)은 320×200 에서 하고 화면에는 늘려 그린다
+    const OW = 320;
+    const OH = 200;
+    // 계산 격자 — 물·안료 확산처럼 무거운 계산은 가로 160 칸 격자에서 (한 칸 = 판 3px)
+    const GW = 160;
+    const GH = 100;
+    // 고정 걸음(초) — 같은 시드면 몇 번을 다시 그려도 같은 그림이 나오도록 계산은 1/30초씩 나아간다
+    const STEP = 1 / 30;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 같은 시드면 같은 얼룩·물방울·붓털이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 종 모양 난수 — 균일 난수 넷의 합을 평균 0·표준편차 1 로 맞춘 값. 대부분 ±1 안, 가끔 ±2 를 넘는다
+    function normalRandom(rng) {
+        return (rng() + rng() + rng() + rng() - 2) * 1.7320508;
+    }
+    // 격자 점마다 정해진 값(0~1) — 정수 좌표 두 개와 시드를 섞는다
+    function hash2(ix, iy, seed) {
+        let h = Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263) ^ Math.imul(seed, 1274126177);
+        h = Math.imul(h ^ (h >>> 13), 1103515245);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 2차원 값 노이즈 — 정수 격자 네 점의 값을 부드럽게 보간한 0~1. 종이 높이·경계 흔들기·꽃잎 반지름에 쓴다
+    function valueNoise(x, y, seed) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uy = fy * fy * (3 - 2 * fy);
+        const a = hash2(ix, iy, seed);
+        const b = hash2(ix + 1, iy, seed);
+        const c = hash2(ix, iy + 1, seed);
+        const d = hash2(ix + 1, iy + 1, seed);
+        return lerp(lerp(a, b, ux), lerp(c, d, ux), uy);
+    }
+    // 두 옥타브 — 굵은 결(0.65) 위에 두 배 촘촘한 결(0.35)을 겹친다
+    function noise2(x, y, seed) {
+        return valueNoise(x, y, seed) * 0.65 + valueNoise(x * 2 + 17.3, y * 2 + 5.1, seed + 101) * 0.35;
+    }
+    // 둘레를 따라 한 바퀴 이어지는 노이즈 — 각 θ 를 원 위의 점으로 바꿔 2차원 노이즈를 읽으므로 0 과 2π 에서 값이 같다
+    function ringNoise(theta, freq, seed) {
+        return noise2(Math.cos(theta) * freq + 50, Math.sin(theta) * freq + 50, seed);
+    }
+    // 파스텔 안료 — 흰 종이에 한 겹 칠했을 때 돌아오는 빛(0~255). 진하게 쌓이면 곱으로 깊어진다
+    const PAPER = [250, 245, 232];
+    const INK = [58, 50, 74];
+    const SKY = [146, 192, 230];
+    const BUTTER = [246, 214, 118];
+    const CORAL = [240, 148, 132];
+    const SAGE = [142, 192, 152];
+    const LAVENDER = [178, 158, 226];
+    const PINK = [240, 164, 194];
+    const INDIGO = [128, 136, 196];
+    // 순환 — 그리기 → 머묾 → 씻겨 지워짐 → 처음부터. 시간 t(초)가 어디쯤인지 0~1 로
+    function phaseOf(t, start, length) { return clamp((t - start) / length, 0, 1); }
+    function pigment(c) {
+        return { r: Math.log(Math.max(c[0], 1) / 255), g: Math.log(Math.max(c[1], 1) / 255), b: Math.log(Math.max(c[2], 1) / 255) };
+    }
+    // 젖은 물기 — 마르기 전의 색면을 살짝 어둡고 차갑게 보이게 하는 옅은 회청색 한 겹
+    const WATER = [214, 224, 236];
+    // 화면 버퍼 — 화소마다 RGB(0~1) 세 칸. 프레임마다 새 배열을 만들지 않고 이 한 벌을 다시 쓴다
+    const OUT = new Float32Array(OW * OH * 3);
+    // 종이 높이맵 — 0(골)~1(마루). 처음 한 번만 계산한다
+    const PAPER_HEIGHT = new Float32Array(OW * OH);
+    // 종이 요철 음영 — 비스듬한 빛이 결의 기울기에 닿아 생기는 밝기 배율
+    const PAPER_SHADE = new Float32Array(OW * OH);
+    // 종이 결 크기 — 노이즈 한 칸이 화소 몇 개인가 (작을수록 촘촘한 결)
+    const GRAIN_SIZE = 2.6;
+    // 결 음영 세기 — 왼쪽 위에서 든 빛 방향으로 오르막이면 밝게, 내리막이면 어둡게
+    const GRAIN_LIGHT = 0.36;
+    function buildPaper(seed, relief) {
+        let lo = 1;
+        let hi = 0;
+        for (let y = 0; y < OH; y += 1) {
+            for (let x = 0; x < OW; x += 1) {
+                const h = noise2(x / GRAIN_SIZE, y / GRAIN_SIZE, seed);
+                PAPER_HEIGHT[y * OW + x] = h;
+                lo = Math.min(lo, h);
+                hi = Math.max(hi, h);
+            }
+        }
+        // 높이를 0~1 로 다시 펴서 골과 마루가 끝까지 쓰이게 한다
+        const span = Math.max(hi - lo, 1e-6);
+        for (let i = 0; i < OW * OH; i += 1) {
+            PAPER_HEIGHT[i] = (PAPER_HEIGHT[i] - lo) / span;
+        }
+        for (let y = 0; y < OH; y += 1) {
+            for (let x = 0; x < OW; x += 1) {
+                const gx = PAPER_HEIGHT[y * OW + Math.min(x + 1, OW - 1)] - PAPER_HEIGHT[y * OW + Math.max(x - 1, 0)];
+                const gy = PAPER_HEIGHT[Math.min(y + 1, OH - 1) * OW + x] - PAPER_HEIGHT[Math.max(y - 1, 0) * OW + x];
+                // 빛은 왼쪽 위에서 — 기울기를 (−1, −1)/√2 방향에 내린 값이 양이면 빛을 마주 본다
+                const lit = -(gx + gy) * 0.7071;
+                PAPER_SHADE[y * OW + x] = clamp(1 + GRAIN_LIGHT * relief * lit * 0.25, 0.82, 1.08);
+            }
+        }
+    }
+    // 색 합성 — 진하기 격자 여러 장(gw×gh)을 화소 격자로 늘려 읽고, 안료마다 진하기 × 로그 비율을 더한 뒤 지수로 되돌려 종이 색에 곱한다
+    // gran 은 안료마다 종이 골에 고이는 정도: 진하기 × (1 + gran × (1 − 2 × 높이)) — 골(0)은 1 + gran 배, 마루(1)는 1 − gran 배
+    // over 가 true 면 종이부터 다시 칠하지 않고 지금 OUT 위에 곱으로 덧칠한다(격자 크기가 다른 층을 한 장면에 겹칠 때)
+    function compose(fields, gw, gh, pigs, gran, over) {
+        const sx = gw / OW;
+        const sy = gh / OH;
+        const n = fields.length;
+        const pr = PAPER[0] / 255;
+        const pg = PAPER[1] / 255;
+        const pb = PAPER[2] / 255;
+        for (let y = 0; y < OH; y += 1) {
+            const fy = clamp((y + 0.5) * sy - 0.5, 0, gh - 1);
+            const y0 = Math.min(Math.floor(fy), gh - 2 < 0 ? 0 : gh - 2);
+            const ty = fy - y0;
+            for (let x = 0; x < OW; x += 1) {
+                const fx = clamp((x + 0.5) * sx - 0.5, 0, gw - 1);
+                const x0 = Math.min(Math.floor(fx), gw - 2);
+                const tx = fx - x0;
+                const i00 = y0 * gw + x0;
+                const i10 = i00 + 1;
+                const i01 = i00 + gw;
+                const i11 = i01 + 1;
+                const p = y * OW + x;
+                const h = PAPER_HEIGHT[p];
+                let lr = 0;
+                let lg = 0;
+                let lb = 0;
+                for (let k = 0; k < n; k += 1) {
+                    const f = fields[k];
+                    let d = (f[i00] * (1 - tx) + f[i10] * tx) * (1 - ty) + (f[i01] * (1 - tx) + f[i11] * tx) * ty;
+                    if (d <= 0) {
+                        continue;
+                    }
+                    if (gran[k] !== 0) {
+                        d *= Math.max(0, 1 + gran[k] * (1 - 2 * h));
+                    }
+                    const pk = pigs[k];
+                    lr += pk.r * d;
+                    lg += pk.g * d;
+                    lb += pk.b * d;
+                }
+                if (over) {
+                    if (lr !== 0 || lg !== 0 || lb !== 0) {
+                        OUT[p * 3] *= Math.exp(lr);
+                        OUT[p * 3 + 1] *= Math.exp(lg);
+                        OUT[p * 3 + 2] *= Math.exp(lb);
+                    }
+                    continue;
+                }
+                const s = PAPER_SHADE[p];
+                OUT[p * 3] = pr * s * Math.exp(lr);
+                OUT[p * 3 + 1] = pg * s * Math.exp(lg);
+                OUT[p * 3 + 2] = pb * s * Math.exp(lb);
+            }
+        }
+    }
+    // 씻어 내기 앞머리 띠 폭(화소) — 물이 지나가는 가장자리가 이만큼 부드럽게 번진다
+    const WASH_SOFT = 26;
+    // 씻어 내기 — 물이 왼쪽에서 오른쪽으로 쓸고 지나간 자리는 종이로 돌아간다. 앞머리는 줄마다 노이즈로 흔들리고 젖은 띠가 살짝 어둡다
+    function washOver(p, seed) {
+        if (p <= 0) {
+            return;
+        }
+        const pr = PAPER[0] / 255;
+        const pg = PAPER[1] / 255;
+        const pb = PAPER[2] / 255;
+        for (let y = 0; y < OH; y += 1) {
+            const front = lerp(-WASH_SOFT - 50, OW + WASH_SOFT + 50, p) + (noise2(y / 46, p * 1.5, seed) - 0.5) * 70;
+            for (let x = 0; x < OW; x += 1) {
+                const k = smooth((front - x) / WASH_SOFT);
+                if (k <= 0) {
+                    continue;
+                }
+                const i = y * OW + x;
+                const s = PAPER_SHADE[i];
+                const tint = 1 - 0.07 * (1 - Math.abs(2 * k - 1));
+                OUT[i * 3] = lerp(OUT[i * 3], pr * s, k) * tint;
+                OUT[i * 3 + 1] = lerp(OUT[i * 3 + 1], pg * s, k) * tint;
+                OUT[i * 3 + 2] = lerp(OUT[i * 3 + 2], pb * s, k) * (1 - 0.03 * (1 - Math.abs(2 * k - 1)));
+            }
+        }
+    }
+    // 순환 끝의 씻어 내기 — 그리기(PAINT_TIME)와 머묾(HOLD_TIME)이 지난 뒤 WASH_TIME 동안
+    function washAt(t, seed) {
+        washOver(phaseOf(t, PAINT_TIME + HOLD_TIME, WASH_TIME), seed);
+    }
+    // 바탕 다각형 — 가운데 (cx, cy), 반지름 rx·ry 근처에 꼭짓점 sides 개를 둘레로 고르게 놓되 반지름을 ±15% 흔든다
+    function basePolygon(cx, cy, rx, ry, sides, rng) {
+        const pts = [];
+        for (let i = 0; i < sides; i += 1) {
+            const a = TAU * i / sides;
+            const k = 0.85 + 0.3 * rng();
+            pts.push(cx + Math.cos(a) * rx * k, cy + Math.sin(a) * ry * k);
+        }
+        return pts;
+    }
+    // 변 쪼개 흔들기 — 각 변의 가운데 점을 (변 길이 × jitter × 0.5 × 종 모양 난수) 만큼 변의 법선 방향으로 밀어 꼭짓점 사이에 끼운다
+    // depth 번 되풀이하면 꼭짓점이 2^depth 배가 되고, 짧아진 변일수록 덜 밀려 굵은 굴곡 위에 잔 굴곡이 얹힌다
+    function deformPolygon(pts, depth, jitter, rng) {
+        let cur = pts;
+        for (let d = 0; d < depth; d += 1) {
+            const next = [];
+            const n = cur.length / 2;
+            for (let i = 0; i < n; i += 1) {
+                const j = (i + 1) % n;
+                const ax = cur[2 * i];
+                const ay = cur[2 * i + 1];
+                const bx = cur[2 * j];
+                const by = cur[2 * j + 1];
+                const len = Math.hypot(bx - ax, by - ay) || 1;
+                const push = normalRandom(rng) * jitter * len * 0.5;
+                next.push(ax, ay, (ax + bx) / 2 + (by - ay) / len * push, (ay + by) / 2 - (bx - ax) / len * push);
+            }
+            cur = next;
+        }
+        return cur;
+    }
+    // 스캔라인 채우기의 교차점 자리 — 한 줄에서 다각형 변과 만나는 x 를 모아 정렬한다 (다시 쓰는 버퍼)
+    const CROSS = new Float64Array(4096);
+    // 다각형 안쪽 칸(칸 가운데 기준)에 amount 를 더한다. 좌표는 판(480×300), 격자는 gw×gh
+    function fillPolygon(field, gw, gh, pts, amount) {
+        const n = pts.length / 2;
+        const kx = gw / W;
+        const ky = gh / H;
+        let top = gh;
+        let bottom = 0;
+        for (let i = 0; i < n; i += 1) {
+            top = Math.min(top, pts[2 * i + 1] * ky);
+            bottom = Math.max(bottom, pts[2 * i + 1] * ky);
+        }
+        const r0 = Math.max(0, Math.floor(top));
+        const r1 = Math.min(gh - 1, Math.ceil(bottom));
+        for (let row = r0; row <= r1; row += 1) {
+            const py = (row + 0.5) / ky;
+            let c = 0;
+            for (let i = 0; i < n && c < CROSS.length; i += 1) {
+                const j = (i + 1) % n;
+                const ay = pts[2 * i + 1];
+                const by = pts[2 * j + 1];
+                if ((ay <= py && by > py) || (by <= py && ay > py)) {
+                    const ax = pts[2 * i];
+                    const bx = pts[2 * j];
+                    CROSS[c] = (ax + (py - ay) / (by - ay) * (bx - ax)) * kx;
+                    c += 1;
+                }
+            }
+            // 삽입 정렬 — 한 줄의 교차점은 많아야 수십 개
+            for (let a = 1; a < c; a += 1) {
+                const v = CROSS[a];
+                let b = a - 1;
+                while (b >= 0 && CROSS[b] > v) {
+                    CROSS[b + 1] = CROSS[b];
+                    b -= 1;
+                }
+                CROSS[b + 1] = v;
+            }
+            for (let a = 0; a + 1 < c; a += 2) {
+                const x0 = Math.max(0, Math.ceil(CROSS[a] - 0.5));
+                const x1 = Math.min(gw - 1, Math.floor(CROSS[a + 1] - 0.5));
+                for (let x = x0; x <= x1; x += 1) {
+                    field[row * gw + x] += amount;
+                }
+            }
+        }
+    }
+    // 젖은 칸 번짐 한 걸음 — 칸마다 이웃 네 칸의 평균 쪽으로 rate 만큼 다가가되, 이웃과 주고받는 몫에 두 칸의 물 가운데 적은 쪽을 곱한다
+    // 물이 0 인 칸과는 아무것도 주고받지 않으므로 마른 칸에서 번짐이 멈춘다. 주고받기라 안료 총량은 그대로이고, rate ≤ 1 이면 값이 튀지 않는다
+    function wetDiffuse(p, water, gw, gh, rate, before) {
+        before.set(p);
+        const k = rate * 0.25;
+        for (let y = 0; y < gh; y += 1) {
+            for (let x = 0; x < gw; x += 1) {
+                const i = y * gw + x;
+                const wi = water[i];
+                if (wi <= 0) {
+                    continue;
+                }
+                if (x + 1 < gw) {
+                    const j = i + 1;
+                    const g = Math.min(wi, water[j]);
+                    if (g > 0) {
+                        const flow = k * g * (before[j] - before[i]);
+                        p[i] += flow;
+                        p[j] -= flow;
+                    }
+                }
+                if (y + 1 < gh) {
+                    const j = i + gw;
+                    const g = Math.min(wi, water[j]);
+                    if (g > 0) {
+                        const flow = k * g * (before[j] - before[i]);
+                        p[i] += flow;
+                        p[j] -= flow;
+                    }
+                }
+            }
+        }
+    }
+    // 붓 대기 — (cx, cy)(판 좌표) 둘레에 종 모양으로 안료를 넣는다. 젖은 칸에만 들어간다
+    function touchPigment(p, water, gw, gh, cx, cy, radius, amount) {
+        const kx = gw / W;
+        const gx = cx * kx;
+        const gy = cy * kx;
+        const rr = radius * kx;
+        const x0 = Math.max(0, Math.floor(gx - rr * 2.5));
+        const x1 = Math.min(gw - 1, Math.ceil(gx + rr * 2.5));
+        const y0 = Math.max(0, Math.floor(gy - rr * 2.5));
+        const y1 = Math.min(gh - 1, Math.ceil(gy + rr * 2.5));
+        for (let y = y0; y <= y1; y += 1) {
+            for (let x = x0; x <= x1; x += 1) {
+                const i = y * gw + x;
+                if (water[i] <= 0) {
+                    continue;
+                }
+                const d2 = ((x + 0.5 - gx) * (x + 0.5 - gx) + (y + 0.5 - gy) * (y + 0.5 - gy)) / (rr * rr);
+                p[i] += amount * Math.exp(-d2 * 0.5);
+            }
+        }
+    }
+    // 곡선 위 한 점 — u 는 0(시작)~1(끝). 결과는 curveX·curveY 에 (새 배열을 만들지 않으려고)
+    let curveX = 0;
+    let curveY = 0;
+    function curveAt(c, u) {
+        const v = 1 - u;
+        const a = v * v * v;
+        const b = 3 * v * v * u;
+        const d = 3 * v * u * u;
+        const e = u * u * u;
+        curveX = a * c[0] + b * c[2] + d * c[4] + e * c[6];
+        curveY = a * c[1] + b * c[3] + d * c[5] + e * c[7];
+    }
+    function makeBristles(count, thirstMin, thirstMax, rng) {
+        const out = [];
+        for (let i = 0; i < count; i += 1) {
+            out.push({
+                offset: -1 + 2 * (i + 0.5) / count + (rng() - 0.5) * 0.6 / count,
+                thirst: thirstMin + (thirstMax - thirstMin) * rng(),
+                seed: Math.floor(rng() * 100000),
+            });
+        }
+        return out;
+    }
+    // 점 찍기 — 진하기 격자(gw×gh)에 판 좌표 (x, y) 둘레 반지름 radius(판 px) 의 부드러운 원으로 amount 를 더한다
+    function stampDot(field, gw, gh, x, y, radius, amount) {
+        const k = gw / W;
+        const gx = x * k;
+        const gy = y * k;
+        const r = Math.max(radius * k, 0.5);
+        const x0 = Math.max(0, Math.floor(gx - r - 1));
+        const x1 = Math.min(gw - 1, Math.ceil(gx + r + 1));
+        const y0 = Math.max(0, Math.floor(gy - r - 1));
+        const y1 = Math.min(gh - 1, Math.ceil(gy + r + 1));
+        for (let yy = y0; yy <= y1; yy += 1) {
+            for (let xx = x0; xx <= x1; xx += 1) {
+                const d = Math.hypot(xx + 0.5 - gx, yy + 0.5 - gy);
+                const cover = clamp(r + 0.5 - d, 0, 1);
+                if (cover > 0) {
+                    field[yy * gw + xx] += amount * cover;
+                }
+            }
+        }
+    }
+    // 붓 한 토막 — 곡선의 u0 → u1 구간을 판 0.8px 걸음으로 따라가며 가닥마다 점을 찍는다
+    // 물(water)이 그 가닥의 문턱 + 노이즈 흔들림보다 적으면 그 자리에서는 찍지 않는다 → 문턱이 높은 가닥부터 끊긴다
+    function brushSegment(field, gw, gh, c, u0, u1, water, bristles, halfWidth, dotRadius, ink, wobble) {
+        curveAt(c, u0);
+        let px = curveX;
+        let py = curveY;
+        curveAt(c, u1);
+        const len = Math.hypot(curveX - px, curveY - py);
+        const steps = Math.max(1, Math.ceil(len / 0.8));
+        let drawn = 0;
+        for (let s = 1; s <= steps; s += 1) {
+            const u = lerp(u0, u1, s / steps);
+            curveAt(c, u);
+            const x = curveX;
+            const y = curveY;
+            const tl = Math.hypot(x - px, y - py) || 1;
+            const nx = -(y - py) / tl;
+            const ny = (x - px) / tl;
+            px = x;
+            py = y;
+            for (let b = 0; b < bristles.length; b += 1) {
+                const br = bristles[b];
+                const flicker = (valueNoise(u * 40, b * 3.7, br.seed) - 0.5) * 0.16;
+                if (water < br.thirst + flicker) {
+                    continue;
+                }
+                const off = br.offset * halfWidth + (valueNoise(u * 9, b * 1.3, br.seed + 1) - 0.5) * wobble;
+                stampDot(field, gw, gh, x + nx * off, y + ny * off, dotRadius, ink);
+                drawn += 1;
+            }
+        }
+        return drawn;
+    }
+    // 꽃잎 테두리 반지름 r(θ) — 기본 반지름 × 퍼진 정도 × (1 ± petal). 각마다 둘레 노이즈가 달라 꽃잎처럼 울퉁불퉁하다
+    function bloomRadius(d, grow, angle, petal) {
+        return d.r * grow * (1 + petal * (ringNoise(angle, 2.4, d.seed) - 0.5) * 2);
+    }
+    // 물방울 밀기 — 젖은 칸 가운데 지금 테두리 r(θ) 바로 안쪽 띠에 든 칸의 안료를 frac 만큼, 방울 가운데에서 먼 쪽 이웃 칸으로 보낸다
+    // 테두리가 넓어지는 동안 앞머리 바로 바깥에 안료가 쌓이고, 방울 안은 맑은 물로 옅어진다. 방울 안 칸은 물을 1 로 다시 채운다
+    function pushBloom(field, water, gw, gh, d, grow, petal, frac, band, wetMin, delta) {
+        const k = gw / W;
+        const reach = d.r * (1 + petal) * grow * k + 2;
+        const cx = d.x * k;
+        const cy = d.y * k;
+        const x0 = Math.max(1, Math.floor(cx - reach));
+        const x1 = Math.min(gw - 2, Math.ceil(cx + reach));
+        const y0 = Math.max(1, Math.floor(cy - reach));
+        const y1 = Math.min(gh - 2, Math.ceil(cy + reach));
+        for (let y = y0; y <= y1; y += 1) {
+            for (let x = x0; x <= x1; x += 1) {
+                delta[y * gw + x] = 0;
+            }
+        }
+        for (let y = y0; y <= y1; y += 1) {
+            for (let x = x0; x <= x1; x += 1) {
+                const i = y * gw + x;
+                if (water[i] < wetMin) {
+                    continue;
+                }
+                const dx = x + 0.5 - cx;
+                const dy = y + 0.5 - cy;
+                const dist = Math.hypot(dx, dy);
+                const rr = bloomRadius(d, grow, Math.atan2(dy, dx), petal) * k;
+                if (dist >= rr) {
+                    continue;
+                }
+                // 방울 안은 맑은 물로 다시 적신다. 밀기는 앞머리 쪽 띠(반지름의 바깥 band 비율)에서만 — 가운데에는 옅은 안료가 남는다
+                water[i] = 1;
+                if (dist < rr * (1 - band)) {
+                    continue;
+                }
+                const j = (y + Math.round(dy / dist)) * gw + (x + Math.round(dx / dist));
+                if (water[j] < wetMin) {
+                    continue;
+                }
+                const move = field[i] * frac;
+                delta[i] -= move;
+                delta[j] += move;
+            }
+        }
+        for (let y = y0; y <= y1; y += 1) {
+            for (let x = x0; x <= x1; x += 1) {
+                field[y * gw + x] += delta[y * gw + x];
+            }
+        }
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    // 화소 격자를 담는 바깥에 안 보이는 캔버스 — ImageData 한 장을 만들어 두고 프레임마다 내용만 바꿔 쓴다
+    const bufEl = document.createElement('canvas');
+    bufEl.width = OW;
+    bufEl.height = OH;
+    const bufRaw = bufEl.getContext('2d');
+    if (!canvasEl || !ctxRaw || !pauseEl || !bufRaw) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const bufCtx = bufRaw;
+    const frameImage = bufCtx.createImageData(OW, OH);
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 화면 버퍼(OUT, 0~1)를 8비트로 옮겨 바깥 캔버스에 놓고, 판 크기로 부드럽게 늘려 그린다
+    function present() {
+        const px = frameImage.data;
+        for (let i = 0, j = 0; i < OW * OH; i += 1, j += 3) {
+            px[i * 4] = OUT[j] * 255;
+            px[i * 4 + 1] = OUT[j + 1] * 255;
+            px[i * 4 + 2] = OUT[j + 2] * 255;
+            px[i * 4 + 3] = 255;
+        }
+        bufCtx.putImageData(frameImage, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bufEl, 0, 0, W, H);
+    }
+    // 09 수채 풍경 첫 화면 — 종이 결 → 젖은 Wet sky bleed(03) → Glazing far hills(01·08) → 앞 언덕 마른 붓(05) → 하늘의 Water drop blooms(07) 순서로, 같은 시드에서 같은 풍경을 그린다
+    // Wet sky bleed 빠르기와 되풀이 횟수 — 03 과 같은 젖은 칸 번짐
+    const SKY_DIFFUSE = 0.3;
+    const SKY_SUBSTEPS = 8;
+    // 물을 바르며 함께 까는 하늘 바탕 진하기 — 위는 하늘색, 지평선 쪽은 분홍
+    const SKY_BASE = 0.42;
+    // 하늘 물이 마르는 빠르기 — 물방울 꽃이 피는 BLOOM_AT(3.5초) 뒤까지 젖어 있도록 느리게
+    const SKY_EVAPORATION = 0.09;
+    // 산 한 겹의 진하기와 겹 수 — 01 의 흔든 다각형을 옅게 쌓는다
+    const RIDGE_ALPHA = 0.075;
+    const RIDGE_SHEETS = 9;
+    const RIDGE_JITTER = 0.32;
+    // 언덕 붓질 — 05 와 같은 붓털 계산
+    const HILL_BRISTLES = 18;
+    const HILL_DRY = 0.0019;
+    // Water drop blooms — 07 과 같은 밀기
+    const HERO_PETAL = 0.36;
+    const HERO_PUSH = 0.18;
+    // 자동 시연이 미리 그려 두고 시작하는 시각(초)
+    const DEMO_START = 1.4;
+    const PAINT_TIME = 4.6;
+    const HOLD_TIME = 2.2;
+    const WASH_TIME = 1.3;
+    const SEED = 4829;
+    // 장면 순서(초) — 상태 줄 글자도 이 시각으로 바뀐다
+    const SKY_AT = 0.2;
+    const RIDGE_AT = 1.4;
+    const HILL_AT = 2.5;
+    const BLOOM_AT = 3.5;
+    const STAGE_SKY = 'Wet sky bleed';
+    const STAGE_RIDGE = 'Glazing far hills';
+    const STAGE_HILL = 'Dry brush hills';
+    const STAGE_BLOOM = 'Water drop blooms';
+    const STAGE_DONE = 'Finished';
+    const STAGE_WASH = 'Washing away';
+    const STAGE_PAPER = 'Laying the paper grain';
+    function stageName(t) {
+        if (t >= PAINT_TIME + HOLD_TIME) {
+            return STAGE_WASH;
+        }
+        if (t >= PAINT_TIME) {
+            return STAGE_DONE;
+        }
+        if (t >= BLOOM_AT) {
+            return STAGE_BLOOM;
+        }
+        if (t >= HILL_AT) {
+            return STAGE_HILL;
+        }
+        if (t >= RIDGE_AT) {
+            return STAGE_RIDGE;
+        }
+        if (t >= SKY_AT) {
+            return STAGE_SKY;
+        }
+        return STAGE_PAPER;
+    }
+    // 하늘 — 물 격자 하나와 안료 셋(하늘·라벤더·분홍)
+    const skyWater = new Float32Array(GW * GH);
+    const skyBlue = new Float32Array(GW * GH);
+    const skyLilac = new Float32Array(GW * GH);
+    const skyRose = new Float32Array(GW * GH);
+    const skyTmp = new Float32Array(GW * GH);
+    const skyFields = [skyBlue, skyLilac, skyRose];
+    // 하늘 바탕을 이미 깐 칸 — 한 칸에 한 번만
+    const skyLaid = new Uint8Array(GW * GH);
+    // 산 두 줄(먼 쪽 인디고, 가까운 쪽 세이지)
+    const ridgeFar = new Float32Array(GW * GH);
+    const ridgeNear = new Float32Array(GW * GH);
+    // 언덕 붓질 — 가는 붓털이 보이게 화소 격자 크기로
+    const hillField = new Float32Array(OW * OH);
+    const hillDeep = new Float32Array(OW * OH);
+    const gridFields = [skyBlue, skyLilac, skyRose, ridgeFar, ridgeNear];
+    const gridPigs = [pigment(SKY), pigment(LAVENDER), pigment(PINK), pigment(INDIGO), pigment(SAGE)];
+    const gridGran = [0, 0, 0, 0.35, 0.3];
+    const brushFields = [hillField, hillDeep];
+    const brushPigs = [pigment(SAGE), pigment(SKY)];
+    const brushGran = [0.3, 0.2];
+    const SKY_DABS = [
+        { x: 70, y: 40, at: 0.35, field: 0, amount: 0.9 },
+        { x: 400, y: 36, at: 0.45, field: 0, amount: 0.9 },
+        { x: 236, y: 30, at: 0.55, field: 0, amount: 0.8 },
+        { x: 150, y: 86, at: 0.7, field: 1, amount: 1.1 },
+        { x: 340, y: 92, at: 0.8, field: 1, amount: 1.1 },
+        { x: 60, y: 128, at: 0.95, field: 2, amount: 1.0 },
+        { x: 250, y: 126, at: 1.05, field: 2, amount: 1.0 },
+        { x: 430, y: 120, at: 1.15, field: 2, amount: 1.0 },
+    ];
+    const RIDGES = [
+        { base: 116, amp: 40, field: ridgeFar, start: RIDGE_AT },
+        { base: 180, amp: 30, field: ridgeNear, start: RIDGE_AT + 0.5 },
+    ];
+    const HILL_STROKES = [
+        { curve: [-10, 232, 140, 204, 320, 262, 490, 222], start: HILL_AT, duration: 0.6, field: 0 },
+        { curve: [-10, 262, 160, 240, 300, 288, 490, 252], start: HILL_AT + 0.3, duration: 0.6, field: 0 },
+        { curve: [-10, 290, 150, 270, 330, 304, 490, 280], start: HILL_AT + 0.6, duration: 0.55, field: 1 },
+    ];
+    const HERO_DROPS = [
+        { x: 118, y: 62, r: 30, at: BLOOM_AT, seed: SEED + 1 },
+        { x: 346, y: 54, r: 26, at: BLOOM_AT + 0.35, seed: SEED + 2 },
+    ];
+    const hillU = HILL_STROKES.map(function () { return 0; });
+    const hillWater = HILL_STROKES.map(function () { return 1; });
+    let hillBristles = [];
+    let dabsDone = 0;
+    const ridgeSheets = RIDGES.map(function () { return 0; });
+    let ridgeShapes = [];
+    const hillLen = HILL_STROKES.map(function (s) {
+        let len = 0;
+        curveAt(s.curve, 0);
+        let x = curveX;
+        let y = curveY;
+        for (let i = 1; i <= 100; i += 1) {
+            curveAt(s.curve, i / 100);
+            len += Math.hypot(curveX - x, curveY - y);
+            x = curveX;
+            y = curveY;
+        }
+        return len;
+    });
+    buildPaper(SEED, 1.3);
+    // 산등성이 다각형 — 판 왼쪽 바깥에서 오른쪽 바깥까지 노이즈로 오르내리는 능선, 아래는 판 바닥까지 닫는다
+    function ridgePolygon(r, k) {
+        const pts = [];
+        for (let i = 0; i <= 12; i += 1) {
+            const x = -20 + i * 520 / 12;
+            pts.push(x, r.base - r.amp * (noise2(x / 70, k * 4.2, SEED + 30) - 0.5) * 4);
+        }
+        pts.push(500, 310, -20, 310);
+        return pts;
+    }
+    function reset() {
+        const rng = makeRng(SEED);
+        skyWater.fill(0);
+        skyBlue.fill(0);
+        skyLilac.fill(0);
+        skyRose.fill(0);
+        skyLaid.fill(0);
+        ridgeFar.fill(0);
+        ridgeNear.fill(0);
+        hillField.fill(0);
+        hillDeep.fill(0);
+        dabsDone = 0;
+        ridgeShapes = RIDGES.map(function (r, k) { return ridgePolygon(r, k); });
+        for (let k = 0; k < RIDGES.length; k += 1) {
+            ridgeSheets[k] = 0;
+        }
+        hillBristles = HILL_STROKES.map(function () { return makeBristles(HILL_BRISTLES, 0.05, 0.6, rng); });
+        for (let k = 0; k < HILL_STROKES.length; k += 1) {
+            hillU[k] = 0;
+            hillWater[k] = 1;
+        }
+    }
+    function update(dt, t) {
+        // ① 하늘 — 위에서 아래로 맑은 물을 바르고(지평선 아래는 마른 채), 물감을 찍어 젖은 칸으로만 번지게 한다
+        const wetLine = phaseOf(t, SKY_AT, 0.3) * 170;
+        const dried = Math.max(0, t - SKY_AT - 0.3) * SKY_EVAPORATION;
+        for (let y = 0; y < GH; y += 1) {
+            const py = (y + 0.5) * H / GH;
+            for (let x = 0; x < GW; x += 1) {
+                const i = y * GW + x;
+                const horizon = 150 + (noise2(x / 12, 1.7, SEED + 3) - 0.5) * 20;
+                const w = py < wetLine && py < horizon ? clamp((horizon - py) / 12, 0, 1) : 0;
+                skyWater[i] = Math.max(0, w - dried);
+                if (w > 0 && !skyLaid[i]) {
+                    skyLaid[i] = 1;
+                    const v = py / 150;
+                    skyBlue[i] += SKY_BASE * (1 - v) * w;
+                    skyRose[i] += SKY_BASE * 0.8 * v * v * w;
+                }
+            }
+        }
+        while (dabsDone < SKY_DABS.length && t >= SKY_DABS[dabsDone].at) {
+            const d = SKY_DABS[dabsDone];
+            touchPigment(skyFields[d.field], skyWater, GW, GH, d.x, d.y, 30, d.amount);
+            dabsDone += 1;
+        }
+        // ⑤ Water drop blooms — 아직 젖은 하늘에 맑은 방울을 떨어뜨려 안료를 꽃잎 테두리로 민다
+        for (let k = 0; k < HERO_DROPS.length; k += 1) {
+            const d = HERO_DROPS[k];
+            if (t < d.at) {
+                continue;
+            }
+            const grow = 1 - Math.exp(-(t - d.at) / 0.3);
+            for (let f = 0; f < 3; f += 1) {
+                pushBloom(skyFields[f], skyWater, GW, GH, d, grow, HERO_PETAL, HERO_PUSH, 0.4, 0.1, skyTmp);
+            }
+        }
+        for (let s = 0; s < SKY_SUBSTEPS; s += 1) {
+            for (let f = 0; f < 3; f += 1) {
+                wetDiffuse(skyFields[f], skyWater, GW, GH, SKY_DIFFUSE, skyTmp);
+            }
+        }
+        // ② Glazing far hills — 능선 다각형을 장마다 다시 흔들어 옅게 쌓는다
+        for (let k = 0; k < RIDGES.length; k += 1) {
+            const want = Math.floor(RIDGE_SHEETS * phaseOf(t, RIDGES[k].start, 0.8));
+            while (ridgeSheets[k] < want) {
+                const sheet = deformPolygon(ridgeShapes[k], 4, RIDGE_JITTER, makeRng(SEED * 10 + k * 100 + ridgeSheets[k]));
+                fillPolygon(RIDGES[k].field, GW, GH, sheet, RIDGE_ALPHA);
+                ridgeSheets[k] += 1;
+            }
+        }
+        // ③ 앞 언덕 마른 붓 — 빨라질수록 물이 줄어 붓털이 갈라진다
+        for (let k = 0; k < HILL_STROKES.length; k += 1) {
+            const s = HILL_STROKES[k];
+            if (t < s.start || hillU[k] >= 1) {
+                continue;
+            }
+            const u = Math.pow(phaseOf(t, s.start, s.duration), 1.6);
+            const speed = (u - hillU[k]) * hillLen[k] / dt;
+            hillWater[k] = Math.max(0, hillWater[k] - (0.2 + HILL_DRY * speed) * dt);
+            const w = hillWater[k];
+            brushSegment(brushFields[s.field], OW, OH, s.curve, hillU[k], u, w, hillBristles[k], 26, lerp(0.9, 4, w), 0.12 * (0.5 + 0.5 * w), 3);
+            hillU[k] = u;
+        }
+    }
+    function render(t) {
+        compose(gridFields, GW, GH, gridPigs, gridGran);
+        compose(brushFields, OW, OH, brushPigs, brushGran, true);
+        washAt(t, SEED);
+    }
+    // 09 그리기 — 풍경을 합성해 놓고, 지금 그리는 단계를 상태 줄 글자로 알린다(바뀔 때만 고친다)
+    let shownStage = '';
+    function draw() {
+        render(simTime);
+        present();
+        const stage = stageName(simTime);
+        if (statusEl && stage !== shownStage) {
+            statusEl.textContent = stage;
+            shownStage = stage;
+        }
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 한 바퀴 — 그리기 → 머묾 → 씻겨 지워짐. 끝나면 같은 시드로 처음부터 다시 그린다
+    const CYCLE = PAINT_TIME + HOLD_TIME + WASH_TIME;
+    // 그림 시계(초)와 고정 걸음에 아직 못 넣은 나머지 시간
+    let simTime = 0;
+    let pending = 0;
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 고정 걸음 하나 — 그리는 동안만 계산을 나아가게 하고, 한 바퀴가 끝나면 처음 상태로 되돌린다
+    function stepOnce() {
+        simTime += STEP;
+        if (simTime >= CYCLE) {
+            simTime = 0;
+            reset();
+            return;
+        }
+        if (simTime <= PAINT_TIME) {
+            update(STEP, simTime);
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        pending += Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        while (pending >= STEP) {
+            stepOnce();
+            pending -= STEP;
+        }
+        draw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임에 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고, 같은 시드로 그리기 끝까지 한 번에 계산한 Finished 그림 한 장만 보여 준다
+    function showFinished() {
+        stopLoop();
+        reset();
+        simTime = 0;
+        while (simTime + STEP <= PAINT_TIME) {
+            simTime += STEP;
+            update(STEP, simTime);
+        }
+        simTime = PAINT_TIME;
+        draw();
+    }
+    function play() {
+        reset();
+        simTime = 0;
+        pending = 0;
+        // 자동 시연은 DEMO_START 초까지 미리 그려 둔 채 시작한다 — 페이지를 열자마자 빈 종이만 보이지 않게(사람이 다시 시작하면 0초부터)
+        if (demo) {
+            while (simTime + STEP <= DEMO_START) {
+                stepOnce();
+            }
+        }
+        draw();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 그리기를 멈추고, 돌아오면 시계를 다시 맞춰 이어 그린다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 Finished 그림으로 멈추고, 꺼지면 처음부터 다시 그린다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showFinished();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw();
+    }, { signal: off.signal });
+    fitCanvas();
+    if (still) {
+        showFinished();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
