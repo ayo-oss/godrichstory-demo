@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Line of Text That Curls into a Ring at Constant Length — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="cf is-demo" id="cf">
+  <canvas class="cf__canvas" data-role="canvas" width="480" height="300" aria-hidden="true"></canvas>
+  <p class="cf__sr">ONE LINE CURLS INTO A RING AT FULL LENGTH</p>
+  <p class="cf__status" data-role="status" aria-live="off">Curling the line</p>
+  <button class="cf__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("cf");
+    if (!root) return;
+    // 판 좌표 — 캔버스 안은 늘 480×300. 화면에 보이는 크기와 상관없이 계산은 이 좌표로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 따라가기 비율 — 1 − e^(−rate·dt). 프레임 시간이 달라도 1초에 같은 만큼 다가간다
+    function follow(rate, dt) { return 1 - Math.exp(-rate * dt); }
+    // 1/60초마다 ease 만큼 다가가는 비율을 dt 초로 환산 — 1 − (1 − ease)^(dt × 60)
+    function easeStep(ease, dt) { return 1 - Math.pow(1 - ease, dt * 60); }
+    // 시드 고정 난수 — 같은 시드면 같은 시연이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function deg(rad) { return rad * 180 / Math.PI; }
+    function makeSpring(x) { return { x: x, v: 0, to: x }; }
+    const SPRING_SUBSTEP = 1 / 240;
+    function stepSpring(s, stiffness, damping, dt) {
+        let left = dt;
+        while (left > 1e-9) {
+            const h = Math.min(SPRING_SUBSTEP, left);
+            s.v += (stiffness * (s.to - s.x) - damping * s.v) * h;
+            s.x += s.v * h;
+            left -= h;
+        }
+    }
+    function snapSpring(s, x) { s.x = x; s.v = 0; s.to = x; }
+    function roughWidth(ch, px, weight) {
+        const wide = ch.charCodeAt(0) >= 0x1100;
+        const base = ch === ' ' ? 0.28 : (wide ? 0.95 : 0.6);
+        return px * base * (weight >= 700 ? 1.06 : 1);
+    }
+    // 글꼴이 다 온 뒤 잰 폭
+    let glyphWidth = roughWidth;
+    // 대체 글꼴로 잰 폭 — 09 가 「글꼴이 오기 전에 잰 폭」 을 흉내 낼 때만 쓴다
+    let fallbackWidth = roughWidth;
+    // 글자 나누기 — 한 글자씩(서로게이트 쌍도 한 글자)
+    function glyphsOf(s) { return Array.from(s); }
+    function widthsOf(gs, px, weight, m) {
+        return gs.map(function (g) { return m(g, px, weight); });
+    }
+    function sum(xs) { let s = 0; for (const x of xs) {
+        s += x;
+    } return s; }
+    function arcTotal(ws, tracking) { return sum(ws) + tracking * Math.max(0, ws.length - 1); }
+    // 글꼴 축소 몫 — 줄이지 않아도 들어가면 1
+    function arcScale(ws, px, tracking, r, inner, span) {
+        const total = arcTotal(ws, tracking);
+        const need = total / Math.max(1, r - inner * px);
+        return need > span ? span * r / (total + span * inner * px) : 1;
+    }
+    function fitArc(ws, px, tracking, r, inner, span, center, dir, allowShrink) {
+        return placeArc(ws, px, tracking, r, inner, allowShrink ? arcScale(ws, px, tracking, r, inner, span) : 1, center, dir);
+    }
+    // 정한 축소 몫으로 놓기 — 위·아래 반원이 같은 글꼴 크기를 쓰도록 둘 중 작은 몫을 넘겨받는다
+    function placeArc(ws, px, tracking, r, inner, scale, center, dir) {
+        const n = ws.length;
+        const total = arcTotal(ws, tracking);
+        const need = total / Math.max(1, r - inner * px);
+        const layR = Math.max(1, r - inner * px * scale);
+        const theta = [];
+        let acc = 0;
+        for (let i = 0; i < n; i += 1) {
+            theta.push(center + dir * (acc + ws[i] / 2 - total / 2) * scale / layR);
+            acc += ws[i] + tracking;
+        }
+        return { theta: theta, px: px * scale, scale: scale, total: total, layR: layR, need: need };
+    }
+    // 같은 각도로 놓기(비교판) — 폭은 보지 않고 전체 각을 글자 수로 똑같이 나눈다
+    function equalArc(n, spanUsed, center, dir) {
+        const out = [];
+        const step = spanUsed / Math.max(1, n);
+        for (let i = 0; i < n; i += 1) {
+            out.push(center + dir * (i + 0.5 - n / 2) * step);
+        }
+        return out;
+    }
+    // 이웃 두 글자가 글자 아래 모서리(반지름 r − 0.5·글자 높이)에서 겹친 길이(px). 양수면 부딪힌다.
+    // 각 간격 × 아래 모서리 반지름 − 두 글자 반폭 합 이 음수인 만큼이 겹침
+    const GLYPH_DROP = 0.5;
+    function innerOverlaps(theta, ws, scale, r, px) {
+        const rin = r - GLYPH_DROP * px;
+        const out = [];
+        for (let i = 0; i + 1 < theta.length; i += 1) {
+            const room = Math.abs(theta[i + 1] - theta[i]) * rin;
+            out.push((ws[i] + ws[i + 1]) / 2 * scale - room);
+        }
+        return out;
+    }
+    function arcTable(rf, drf, th0, th1, step) {
+        const th = [th0];
+        const s = [0];
+        let acc = 0;
+        const n = Math.max(1, Math.ceil((th1 - th0) / step));
+        const h = (th1 - th0) / n;
+        for (let i = 0; i < n; i += 1) {
+            // 걸음 가운데의 값으로 더한다 — 걸음 끝 값보다 같은 걸음에서 오차가 작다
+            const m = th0 + (i + 0.5) * h;
+            const r = rf(m);
+            const dr = drf(m);
+            acc += Math.sqrt(r * r + dr * dr) * h;
+            th.push(th0 + (i + 1) * h);
+            s.push(acc);
+        }
+        return { th: th, s: s };
+    }
+    function thetaAt(t, s) {
+        const last = t.s.length - 1;
+        if (s <= 0) {
+            return t.th[0];
+        }
+        if (s >= t.s[last]) {
+            return t.th[last];
+        }
+        let lo = 0;
+        let hi = last;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (t.s[mid] <= s) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        const k = (s - t.s[lo]) / Math.max(1e-9, t.s[hi] - t.s[lo]);
+        return lerp(t.th[lo], t.th[hi], k);
+    }
+    function arcLength(t) { return t.s[t.s.length - 1]; }
+    // 극좌표 곡선의 접선 각(화면 좌표, y 아래) — 점 (r cosθ, r sinθ) 을 θ 로 미분한 방향
+    function tangentAngle(r, dr, th) {
+        return Math.atan2(dr * Math.sin(th) + r * Math.cos(th), dr * Math.cos(th) - r * Math.sin(th));
+    }
+    // 장면 시계(s)와 상태 줄 글자 — 장면 계산이 고치고, 화면 쪽이 읽어 그린다
+    let sceneT = 0;
+    let simStatus = '';
+    // 파스텔 팔레트 — 크림 바탕 위 라벤더·민트·버터·산호. 글자는 진한 쪽으로 명도 차를 둔다
+    const PAPER = [251, 247, 238];
+    const PAPER_DIM = [241, 234, 220];
+    const INK = [44, 38, 58];
+    const INK_SOFT = [112, 104, 126];
+    const CREAM = [255, 251, 242];
+    const LAVENDER = [196, 182, 238];
+    const MINT = [164, 218, 196];
+    const BUTTER = [246, 224, 150];
+    const CORAL = [244, 170, 152];
+    const SKY = [170, 206, 238];
+    const PINK = [244, 190, 212];
+    const MINT_DEEP = [36, 116, 90];
+    const CORAL_DEEP = [178, 66, 52];
+    const VIOLET_DEEP = [84, 58, 160];
+    const BROWN_DEEP = [104, 62, 40];
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    // 대체 글꼴 — 09 가 「글꼴이 오기 전에 잰 폭」 을 흉내 낼 때만 쓴다
+    const FALLBACK_STACK = 'monospace';
+    // 잰 폭은 100px 기준으로 한 번만 재 두고 크기에 비례해 쓴다. 글꼴이 새로 오면 통째로 비운다
+    const widthCache = {};
+    function measureWith(stack) {
+        return function (ch, px, weight) {
+            const key = stack + '|' + weight + '|' + ch;
+            let w = widthCache[key];
+            if (w === undefined) {
+                ctx.font = weight + ' 100px ' + stack;
+                w = ctx.measureText(ch).width;
+                widthCache[key] = w;
+            }
+            return w * px / 100;
+        };
+    }
+    function remeasure() {
+        for (const k of Object.keys(widthCache)) {
+            delete widthCache[k];
+        }
+        glyphWidth = measureWith(FONT_STACK);
+        fallbackWidth = measureWith(FALLBACK_STACK);
+        relayout();
+    }
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearStage(c) {
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function setFont(px, weight, stack) {
+        ctx.font = weight + ' ' + px.toFixed(2) + 'px ' + stack;
+    }
+    function label(s, x, y, c, a, px, weight, align) {
+        setFont(px, weight, FONT_STACK);
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    // 글자 하나를 (x, y) 가운데에 rot 라디안 돌려 찍는다. sx·sy 는 가로·세로 배율(음수 sx 는 거울)
+    function glyphAt(ch, x, y, rot, px, weight, c, a, sx, sy) {
+        if (a <= 0.01 || px < 0.5) {
+            return;
+        }
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.scale(sx, sy);
+        setFont(px, weight, FONT_STACK);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+    }
+    // 기울인 글자 — 글자 자기 좌표에서 가로로 skew(라디안)만큼 민다(윗부분이 앞으로)
+    function glyphLean(ch, x, y, rot, px, weight, c, a, skew) {
+        if (a <= 0.01 || px < 0.5) {
+            return;
+        }
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.transform(1, 0, -Math.tan(skew), 1, 0, 0);
+        setFont(px, weight, FONT_STACK);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+    }
+    // 원 위 글자 — 중심 (cx, cy), 반지름 r, 각 th. turn 은 글자를 원에 맞춰 세우는 각(위 반원 +π/2, 아래 반원 −π/2)
+    function ringGlyph(ch, cx, cy, r, th, turn, px, weight, c, a) {
+        glyphAt(ch, cx + r * Math.cos(th), cy + r * Math.sin(th), th + turn, px, weight, c, a, 1, 1);
+    }
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.arcTo(x + w, y, x + w, y + rr, rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+        ctx.lineTo(x + rr, y + h);
+        ctx.arcTo(x, y + h, x, y + h - rr, rr);
+        ctx.lineTo(x, y + rr);
+        ctx.arcTo(x, y, x + rr, y, rr);
+        ctx.closePath();
+    }
+    function fillRound(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        roundRectPath(x, y, w, h, r);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x, y, r, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x, y, r, width, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    // 그림자 — 떠 있는 높이 lift(0~1)가 클수록 멀리·흐리게·넓게 떨어진다
+    function softShadow(x, y, r, lift) {
+        const off = 4 + 14 * lift;
+        const g = ctx.createRadialGradient(x + off * 0.4, y + off, r * 0.6, x + off * 0.4, y + off, r * (1.05 + 0.25 * lift));
+        g.addColorStop(0, rgba(INK, 0.26 - 0.14 * lift));
+        g.addColorStop(1, rgba(INK, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x + off * 0.4, y + off, r * (1.05 + 0.25 * lift), 0, TAU);
+        ctx.fill();
+    }
+    // 작은 알약 이름표
+    function pill(s, x, y, bg, fg, a, px) {
+        setFont(px, 700, FONT_STACK);
+        const w = ctx.measureText(s).width + px * 1.2;
+        fillRound(x - w / 2, y - px * 0.85, w, px * 1.7, px * 0.85, bg, a);
+        label(s, x, y + 0.5, fg, a, px, 700, 'center');
+    }
+    // 상태 줄 — 바뀔 때만 글자를 고친다
+    let shownStatus = '';
+    function pushStatus() {
+        if (!statusEl || simStatus === shownStatus) {
+            return;
+        }
+        shownStatus = simStatus;
+        statusEl.textContent = simStatus;
+    }
+    // 03 — 길이를 지킨 채 원으로 말리는 한 줄. 말림 각 φ 가 스프링으로 0 → CURL_TARGET 으로 가고, 반지름 R = 문구 길이 L / φ 라
+    // 어느 순간에도 호 길이가 L 그대로다. 원 중심은 문구 가운데 점의 위쪽 법선 위 R 거리.
+    // φ 가 STRAIGHT_EPS 보다 작으면 R 이 무한대로 커지므로 0 으로 나누지 않고 곧은 줄로 그린다
+    const LINE_TEXT = 'ONE LINE CURLS INTO A RING AT FULL LENGTH';
+    const LINE_PX = 18;
+    const LINE_WEIGHT = 800;
+    const LINE_TRACKING = 1;
+    const LINE_CX = 240;
+    const LINE_Y = 236;
+    const CURL_TARGET = TAU * 0.92;
+    const CURL_STIFFNESS = 120;
+    const CURL_DAMPING = 9;
+    const STRAIGHT_EPS = 1e-3;
+    const CURL_AT_S = 0.2;
+    const UNCURL_AT_S = 1.9;
+    const LOOP_S = 3.2;
+    const STATUS_CURL = 'curl {p}° · radius {r}px · length stays {l}px';
+    const lineGlyphs03 = glyphsOf(LINE_TEXT);
+    let lineWidths03 = [];
+    let lineLen03 = 1;
+    // 글자 i 의 가운데가 문구 가운데에서 떨어진 호 길이
+    let lineS03 = [];
+    const curl03 = makeSpring(0);
+    function relayout() {
+        lineWidths03 = widthsOf(lineGlyphs03, LINE_PX, LINE_WEIGHT, glyphWidth);
+        lineLen03 = arcTotal(lineWidths03, LINE_TRACKING);
+        lineS03 = [];
+        let acc = 0;
+        for (const w of lineWidths03) {
+            lineS03.push(acc + w / 2 - lineLen03 / 2);
+            acc += w + LINE_TRACKING;
+        }
+    }
+    // 호 길이 s 인 자리 — 곧은 줄이면 (가운데 + s, 바닥 줄), 말렸으면 반지름 R 원 위 각 α = s / R 자리
+    function curlPoint(s, phi, len, cx, y0) {
+        if (Math.abs(phi) < STRAIGHT_EPS) {
+            return { x: cx + s, y: y0, rot: 0 };
+        }
+        const r = len / phi;
+        const a = s / r;
+        return { x: cx + r * Math.sin(a), y: y0 - r + r * Math.cos(a), rot: -a };
+    }
+    function curlTarget03(t) { return t >= CURL_AT_S && t < UNCURL_AT_S ? CURL_TARGET : 0; }
+    function reset() { snapSpring(curl03, 0); }
+    function statusFor03() {
+        const phi = curl03.x;
+        const r = Math.abs(phi) < STRAIGHT_EPS ? 0 : lineLen03 / phi;
+        simStatus = STATUS_CURL.replace('{p}', String(Math.round(deg(phi)))).replace('{r}', r ? String(Math.round(r)) : '∞').replace('{l}', String(Math.round(lineLen03)));
+    }
+    function update(dt) {
+        curl03.to = curlTarget03(sceneT);
+        stepSpring(curl03, CURL_STIFFNESS, CURL_DAMPING, dt);
+        statusFor03();
+    }
+    function restPose() {
+        snapSpring(curl03, CURL_TARGET);
+        statusFor03();
+    }
+    // 03 화면 — 흐린 곧은 줄(처음 자리)과 지금 반지름의 안내 원, 가운데 말림 각 부채꼴. 글자 색은 문구 앞에서 뒤로 보라 → 초록
+    const LABEL_SAME = 'arc length = original line';
+    function bindInput(signal) { void signal; }
+    function draw() {
+        clearStage(PAPER);
+        const phi = curl03.x;
+        // 처음 자리 — 곧은 줄의 흐린 바닥 선
+        ctx.beginPath();
+        ctx.moveTo(LINE_CX - lineLen03 / 2, LINE_Y + LINE_PX * 0.75);
+        ctx.lineTo(LINE_CX + lineLen03 / 2, LINE_Y + LINE_PX * 0.75);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = rgba(INK, 0.18);
+        ctx.stroke();
+        if (Math.abs(phi) > 0.15) {
+            const r = lineLen03 / phi;
+            const cy = LINE_Y - r;
+            // 안내 원 — 말린 문구가 그 위에 놓이는 원. 반지름이 줄수록 안쪽 면이 진해진다
+            disc(LINE_CX, cy, Math.abs(r) - LINE_PX * 0.7, BUTTER, clamp(Math.abs(phi) / CURL_TARGET, 0, 1) * 0.9);
+            ctx.setLineDash([4, 5]);
+            ring(LINE_CX, cy, Math.abs(r), 1.2, INK, 0.3);
+            ctx.setLineDash([]);
+            // 말림 각 부채꼴 — 원 중심에서 문구 양 끝까지
+            const a0 = Math.PI / 2 - phi / 2;
+            ctx.beginPath();
+            ctx.moveTo(LINE_CX, cy);
+            ctx.arc(LINE_CX, cy, clamp(Math.abs(r) * 0.42, 10, 40), phi > 0 ? a0 : a0 + phi, phi > 0 ? a0 + phi : a0);
+            ctx.closePath();
+            ctx.fillStyle = rgba(LAVENDER, 0.85);
+            ctx.fill();
+            label(Math.round(deg(phi)) + '°', LINE_CX, cy, INK, 1, 13, 800, 'center');
+        }
+        const n = lineGlyphs03.length;
+        lineGlyphs03.forEach(function (g, i) {
+            const p = curlPoint(lineS03[i], phi, lineLen03, LINE_CX, LINE_Y);
+            glyphAt(g, p.x, p.y, p.rot, LINE_PX, LINE_WEIGHT, mix(VIOLET_DEEP, MINT_DEEP, i / Math.max(1, n - 1)), 1, 1, 1);
+        });
+        pill(LABEL_SAME, 96, 22, CREAM, INK, 1, 10);
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 한 프레임에 넘기는 시간 상한(s) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 장면 시계를 dt 만큼 — 한 바퀴(LOOP_S)를 넘으면 처음 배치로 되돌려 다시 시연한다
+    function advance(dt) {
+        sceneT += dt;
+        if (sceneT >= LOOP_S) {
+            sceneT -= LOOP_S;
+            reset();
+        }
+        update(dt);
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw();
+        pushStatus();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 시연이 끝난 최종 배치 한 장만 그린다
+    function showRest() {
+        stopLoop();
+        sceneT = 0;
+        reset();
+        restPose();
+        draw();
+        pushStatus();
+    }
+    function play() {
+        sceneT = 0;
+        reset();
+        draw();
+        pushStatus();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 루프를 멈추고, 돌아오면 시계를 다시 맞춰 시작한다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still && fontsReady) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 최종 배치로 멈추고, 꺼지면 시연을 처음부터
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw();
+    }, { signal: off.signal });
+    bindInput(off.signal);
+    fitCanvas();
+    // 글자 폭은 글꼴이 다 온 뒤에 잰다 — 그 전에 잰 폭은 대체 글꼴의 폭이라 글꼴이 바뀌는 순간 자리가 틀어진다.
+    // 나중에 다른 글꼴이 더 오면(loadingdone) 다시 잰다
+    let fontsReady = false;
+    document.fonts.addEventListener('loadingdone', function () {
+        if (!fontsReady) {
+            return;
+        }
+        remeasure();
+        draw();
+    }, { signal: off.signal });
+    document.fonts.ready.then(function () {
+        if (off.signal.aborted) {
+            return;
+        }
+        fontsReady = true;
+        remeasure();
+        if (still) {
+            showRest();
+        }
+        else {
+            play();
+        }
+    });
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
