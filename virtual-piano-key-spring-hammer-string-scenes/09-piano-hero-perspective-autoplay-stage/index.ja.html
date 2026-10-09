@@ -1,0 +1,979 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>遠近の舞台でひとりでに演奏するピアノ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pn is-demo" id="pn">
+  <canvas class="pn__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="遠近の舞台で鍵盤が近づく棒に合わせてひとりでに弾き、ふたに光が映る場面。"></canvas>
+  <div class="pn__keys" data-role="keys" data-key-class="pn__key" role="group" aria-label="鍵盤 — キーボードの A S D F G H J K が白鍵、W E T Y U が黒鍵"></div>
+  <button class="pn__sound" data-role="sound" type="button" aria-pressed="false">音を出す</button>
+  <p class="pn__live" data-role="live" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("pn");
+    if (!root) return;
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const DT_SEC = FIXED_DT / 1000;
+    const TAU = Math.PI * 2;
+    // 파스텔 팔레트 — 크림 바탕, 상아 흰건반, 짙은 남색 검은건반. 음 이름 글자는 진한 INK 로 읽힌다
+    const BG_TOP = [255, 248, 236];
+    const BG_LOW = [248, 234, 216];
+    const IVORY = [255, 252, 244];
+    const IVORY_SHADE = [236, 226, 210];
+    const IVORY_SIDE = [212, 198, 180];
+    const NAVY = [40, 46, 88];
+    const NAVY_TOP = [70, 78, 128];
+    const NAVY_SIDE = [22, 26, 56];
+    const INK = [34, 36, 62];
+    const INK_SOFT = [92, 88, 118];
+    const PEACH = [255, 188, 156];
+    const MINT = [140, 218, 192];
+    const SKY = [150, 200, 246];
+    const LILAC = [196, 180, 248];
+    const LEMON = [248, 224, 140];
+    const ROSE = [246, 166, 188];
+    const GLOWS = [PEACH, MINT, SKY, LILAC, LEMON, ROSE];
+    const FONT_FAMILY = '"Segoe UI", "Malgun Gothic", "Hiragino Sans", "Noto Sans KR", sans-serif';
+    // 음 이름 — 음 번호를 12 로 나눈 나머지(0 = ド)로 고른다. 로케일마다 문구.json 이 바꾼다
+    const NOTE_NAMES = ['ド', 'ド♯', 'レ', 'レ♯', 'ミ', 'ファ', 'ファ♯', 'ソ', 'ソ♯', 'ラ', 'ラ♯', 'シ'];
+    const BLACK_PCS = [1, 3, 6, 8, 10];
+    function pcOf(m) { return ((m % 12) + 12) % 12; }
+    function isBlack(m) { return BLACK_PCS.indexOf(pcOf(m)) >= 0; }
+    function noteName(m) { return NOTE_NAMES[pcOf(m)]; }
+    // 음 높이 — 69번 음(가운데 ド 위의 ラ)을 440Hz 로 두고 반음 하나마다 2^(1/12) 배
+    const A4_MIDI = 69;
+    const A4_HZ = 440;
+    function freqOf(m) { return A4_HZ * Math.pow(2, (m - A4_MIDI) / 12); }
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mixRGB(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 시드면 같은 불꽃·흔들림이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 鍵盤 스프링 — 가속도 = −강성 × (위치 − 목표) − 감쇠 × 속도. 위치 1 은 鍵盤 바닥, 넘으면 KEYBED_BOUNCE 만큼만 되튄다
+    const KEY_SPRING_STIFFNESS = 420;
+    const KEY_SPRING_DAMPING = 16;
+    const KEYBED_BOUNCE = 0.3;
+    function makeSpring() { return { x: 0, v: 0, target: 0 }; }
+    function stepSpring(s, k, c, dt) {
+        const a = -k * (s.x - s.target) - c * s.v;
+        s.v += a * dt;
+        s.x += s.v * dt;
+        if (s.x > 1) {
+            s.x = 1;
+            s.v = -s.v * KEYBED_BOUNCE;
+        }
+    }
+    // 음마다 스프링 하나 — 치면 목표 1(바닥)로, 세기 × PRESS_KICK 만큼 아래로 밀어 넣는 속도 덤을 얹는다. 떼면 목표 0
+    const PRESS_KICK = 14;
+    const springs = new Map();
+    function springOf(m) {
+        let s = springs.get(m);
+        if (!s) {
+            s = makeSpring();
+            springs.set(m, s);
+        }
+        return s;
+    }
+    function stepSprings() {
+        springs.forEach(function (s) { stepSpring(s, KEY_SPRING_STIFFNESS, KEY_SPRING_DAMPING, DT_SEC); });
+    }
+    function resetSprings() {
+        springs.forEach(function (s) { s.x = 0; s.v = 0; s.target = 0; });
+    }
+    function pressSpring(m, vel) {
+        const s = springOf(m);
+        s.target = 1;
+        s.v += vel * PRESS_KICK;
+    }
+    function releaseSpring(m) { springOf(m).target = 0; }
+    function keyDepth(m) { const s = springs.get(m); return s ? shown(s) : 0; }
+    function keyTint(m) { return isHeld(m) ? 1 : clamp(keyDepth(m), 0, 1); }
+    function keyGlow(m) { return GLOWS[pcOf(m) % GLOWS.length]; }
+    // 평평한 鍵盤 弦 — lo~hi 음을 x0~x1 폭에 흰건반 기준으로 고르게 놓고, 검은건반은 흰건반 경계 위에 좁고 짧게
+    const BLACK_WIDTH_RATIO = 0.58;
+    const BLACK_HEIGHT_RATIO = 0.62;
+    function whiteCount(lo, hi) {
+        let n = 0;
+        for (let m = lo; m <= hi; m += 1) {
+            if (!isBlack(m)) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    function layoutFlat(lo, hi, x0, x1, top, bottom) {
+        const ww = (x1 - x0) / whiteCount(lo, hi);
+        const whites = [];
+        const blacks = [];
+        let i = 0;
+        for (let m = lo; m <= hi; m += 1) {
+            if (isBlack(m)) {
+                const bw = ww * BLACK_WIDTH_RATIO;
+                blacks.push({ midi: m, black: true, x: x0 + i * ww - bw / 2, y: top, w: bw, h: (bottom - top) * BLACK_HEIGHT_RATIO });
+            }
+            else {
+                whites.push({ midi: m, black: false, x: x0 + i * ww, y: top, w: ww, h: bottom - top });
+                i += 1;
+            }
+        }
+        return whites.concat(blacks);
+    }
+    // 컴퓨터 자판 한 弦 = 한 옥타브 — 가운데 弦 A S D F G H J K 가 흰건반, 윗줄 W E T Y U 가 검은건반 (자판 배열과 상관없이 ev.code 로)
+    const KEY_CODES = ['KeyA', 'KeyW', 'KeyS', 'KeyE', 'KeyD', 'KeyF', 'KeyT', 'KeyG', 'KeyY', 'KeyH', 'KeyU', 'KeyJ', 'KeyK'];
+    // 동시 음 수 상한 — 열 음을 한꺼번에 눌러도 MAX_VOICES 개만 울리고, 넘치면 가장 오래된 음을 놓는다. 화면도 같은 상한으로 그린다
+    const MAX_VOICES = 6;
+    const voices = [];
+    function allocVoice(pool, midi, startMs, auto) {
+        const freed = [];
+        for (let i = pool.length - 1; i >= 0; i -= 1) {
+            if (pool[i].midi === midi) {
+                freed.push(pool[i]);
+                pool.splice(i, 1);
+            }
+        }
+        while (pool.length >= MAX_VOICES) {
+            const old = pool.shift();
+            if (old) {
+                freed.push(old);
+            }
+        }
+        pool.push({ midi: midi, startMs: startMs, auto: auto, nodes: null, gain: null });
+        return freed;
+    }
+    function findVoice(midi) {
+        for (let i = 0; i < voices.length; i += 1) {
+            if (voices[i].midi === midi) {
+                return voices[i];
+            }
+        }
+        return null;
+    }
+    // 소리 — 기본 꺼짐. AudioContext 는 「音を出す」 버튼의 클릭 핸들러(tail) 안에서만 만든다
+    let audio = null;
+    let master = null;
+    let soundOn = false;
+    // 두 시계 맞추기 — 소리를 켠 순간의 오디오 시각(초)과 화면 시계(ms)를 짝으로 적어 두고, 그 뒤로는 오디오 시계로 화면 시계를 끈다
+    let audioBaseSec = 0;
+    let clockBaseMs = 0;
+    function screenToAudioSec(ms) { return audioBaseSec + (ms - clockBaseMs) / 1000; }
+    function audioToScreenMs(sec) { return clockBaseMs + (sec - audioBaseSec) * 1000; }
+    // 오실레이터 합성 — 사인파 배음 넷(크기 PARTIAL_GAINS)을 더하고, 치는 순간 ATTACK_SEC 만에 올라갔다 DECAY_SEC 동안 잦아든다
+    const PARTIAL_GAINS = [1, 0.42, 0.18, 0.08];
+    const ATTACK_SEC = 0.006;
+    const DECAY_SEC = 1.6;
+    const RELEASE_SEC = 0.09;
+    const MASTER_GAIN = 0.16;
+    function synthStart(v, vel, atMs) {
+        if (!audio || !master || !soundOn) {
+            return;
+        }
+        const t0 = Math.max(audio.currentTime, screenToAudioSec(atMs));
+        const g = audio.createGain();
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(0.25 + 0.75 * vel, t0 + ATTACK_SEC);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + DECAY_SEC);
+        g.connect(master);
+        const f = freqOf(v.midi);
+        const nodes = [];
+        for (let i = 0; i < PARTIAL_GAINS.length; i += 1) {
+            const o = audio.createOscillator();
+            const pg = audio.createGain();
+            o.type = 'sine';
+            o.frequency.setValueAtTime(f * (i + 1), t0);
+            pg.gain.setValueAtTime(PARTIAL_GAINS[i] / PARTIAL_GAINS.length, t0);
+            o.connect(pg);
+            pg.connect(g);
+            o.start(t0);
+            o.stop(t0 + DECAY_SEC + 0.05);
+            nodes.push(o);
+        }
+        v.nodes = nodes;
+        v.gain = g;
+    }
+    function synthStop(v, atMs) {
+        if (!audio || !v.gain || !v.nodes) {
+            return;
+        }
+        const t0 = Math.max(audio.currentTime, screenToAudioSec(atMs));
+        v.gain.gain.cancelScheduledValues(t0);
+        v.gain.gain.setTargetAtTime(0.0001, t0, RELEASE_SEC / 3);
+        for (let i = 0; i < v.nodes.length; i += 1) {
+            try {
+                v.nodes[i].stop(t0 + RELEASE_SEC * 2);
+            }
+            catch (e) { /* 이미 멈춘 노드 */ }
+        }
+        v.nodes = null;
+        v.gain = null;
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const keysEl = root.querySelector('[data-role="keys"]');
+    const soundEl = root.querySelector('[data-role="sound"]');
+    const liveEl = root.querySelector('[data-role="live"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !keysEl || !soundEl || !liveEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const keysBox = keysEl;
+    const soundBtn = soundEl;
+    const live = liveEl;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 뗀다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function clearStage(top, low) {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(top, 1));
+        g.addColorStop(1, rgba(low, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function fontOf(size, weight) { return weight + ' ' + size.toFixed(1) + 'px ' + FONT_FAMILY; }
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+    // 판 위 설명 글 — 크림 알약 바탕에 진한 글자. 돌려주는 값은 알약 폭
+    function drawCaption(text, x, y, alignRight) {
+        ctx.font = fontOf(11, 600);
+        const bw = ctx.measureText(text).width + 14;
+        const bx = alignRight ? x - bw : x;
+        ctx.fillStyle = rgba(IVORY, 0.92);
+        roundRectPath(bx, y, bw, 20, 8);
+        ctx.fill();
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 7, y + 10.5);
+        return bw;
+    }
+    // 평평한 鍵盤 그리기 — depth(m) 0~1 만큼 앞쪽이 내려가 앞턱이 얇아지고, tint(m) 0~1 만큼 그 음의 빛깔로 물든다. ox 는 가로로 밀린 만큼(보이는 창의 왼쪽 끝)
+    const KEY_LIP = 7;
+    function drawFlatKeys(keys, depth, tint, glow, names, ox = 0) {
+        ctx.save();
+        ctx.translate(-ox, 0);
+        for (let i = 0; i < keys.length; i += 1) {
+            const k = keys[i];
+            if (k.black || k.x - ox > W || k.x + k.w - ox < 0) {
+                continue;
+            }
+            const d = clamp(depth(k.midi), -0.2, 1);
+            const drop = d * (KEY_LIP - 2);
+            const face = mixRGB(mixRGB(IVORY, IVORY_SHADE, Math.max(0, d) * 0.6), glow(k.midi), tint(k.midi) * 0.75);
+            ctx.fillStyle = rgba(face, 1);
+            roundRectPath(k.x + 0.75, k.y, k.w - 1.5, k.h - KEY_LIP + drop, 3);
+            ctx.fill();
+            ctx.fillStyle = rgba(IVORY_SIDE, 1);
+            ctx.fillRect(k.x + 0.75, k.y + k.h - KEY_LIP + drop, k.w - 1.5, KEY_LIP - drop);
+            if (names && k.w >= 14) {
+                ctx.font = fontOf(Math.min(11, k.w * 0.42), 700);
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'alphabetic';
+                ctx.fillStyle = rgba(INK, 1);
+                ctx.fillText(noteName(k.midi), k.x + k.w / 2, k.y + k.h - KEY_LIP - 6 + drop);
+            }
+        }
+        for (let i = 0; i < keys.length; i += 1) {
+            const k = keys[i];
+            if (!k.black || k.x - ox > W || k.x + k.w - ox < 0) {
+                continue;
+            }
+            const d = clamp(depth(k.midi), -0.2, 1);
+            const drop = d * 4;
+            const face = mixRGB(NAVY, glow(k.midi), tint(k.midi) * 0.55);
+            ctx.fillStyle = rgba(NAVY_SIDE, 1);
+            roundRectPath(k.x, k.y, k.w, k.h + 2, 2);
+            ctx.fill();
+            ctx.fillStyle = rgba(face, 1);
+            roundRectPath(k.x + 1, k.y, k.w - 2, k.h - 6 + drop, 2);
+            ctx.fill();
+            ctx.fillStyle = rgba(mixRGB(NAVY_TOP, glow(k.midi), tint(k.midi) * 0.5), 1);
+            ctx.fillRect(k.x + 2, k.y + k.h - 9 + drop, k.w - 4, 3);
+        }
+        ctx.restore();
+    }
+    // 원근 무대 — 鍵盤 弦(가운데 ド 60 ~ 두 옥타브 위 ド 84)이 앞에 놓이고, 그 뒤로 막대가 소실점에서 다가온다. 위는 반사하는 뚜껑
+    const LO = 60;
+    const HI = 84;
+    // 투영 — 바닥(높이 h = 0)의 깊이 z 는 화면 y = HORIZON_Y + (DEPTH_K − h × Z0) ÷ (z + Z0), 가로는 x × Z0 ÷ (z + Z0)
+    const HORIZON_Y = 58;
+    const Z0 = 150;
+    const DEPTH_K = (280 - HORIZON_Y) * Z0;
+    const VANISH_X = 240;
+    const WHITE_W = 30;
+    const KEY_LEN = 64;
+    const KEY_THICK = 14;
+    const KEY_TRAVEL = 6;
+    const BLACK_LEN = 40;
+    const BLACK_RISE = 7;
+    const Z_FAR = 900;
+    // 박자 → 초 → 깊이 — 04 와 같은 시간 매핑을 깊이 축으로. 1초에 Z_SPEED 만큼 다가온다
+    const TEMPO_BPM = 104;
+    const Z_SPEED = 420;
+    const BEAT_MS = 60000 / TEMPO_BPM;
+    const SONG_BEATS = 16;
+    const LOOP_MS = SONG_BEATS * BEAT_MS;
+    const LEAD_IN_MS = 300;
+    // 뚜껑 반사 — 투영한 막대를 수평선에서 뒤집어 LID_FLIP 배로 눌러 그리고, 수평선에서 멀어질수록 e^(−거리/LID_FALLOFF) 로 어두워진다
+    const LID_FLIP = 0.26;
+    const LID_FALLOFF = 70;
+    const LID_REFLECT = 0.75;
+    // 직접 지은 곡 — 왼손 두 음 화음 + 오른손 선율 [시작 박, 음, 길이 박, 세기]
+    const SONG = [
+        [0, 60, 1.9, 0.6], [0, 67, 1.9, 0.5], [2, 62, 1.9, 0.6], [2, 69, 1.9, 0.5], [4, 64, 1.9, 0.6], [4, 71, 1.9, 0.5],
+        [6, 65, 1.9, 0.6], [6, 72, 1.9, 0.5], [8, 62, 1.9, 0.6], [8, 69, 1.9, 0.5], [10, 67, 1.9, 0.6], [10, 74, 1.9, 0.5],
+        [12, 64, 1.9, 0.6], [12, 72, 1.9, 0.5], [14, 60, 1.9, 0.6], [14, 67, 1.9, 0.5],
+        [0.5, 76, 0.45, 0.8], [1, 79, 0.45, 0.8], [1.5, 84, 0.9, 0.9], [3, 83, 0.45, 0.7], [3.5, 81, 0.45, 0.7],
+        [4, 79, 0.9, 0.8], [5, 76, 0.45, 0.7], [5.5, 77, 0.45, 0.7], [6, 79, 1.4, 0.9], [8, 81, 0.45, 0.8],
+        [8.5, 79, 0.45, 0.7], [9, 78, 0.45, 0.8], [9.5, 76, 0.45, 0.7], [10, 74, 0.9, 0.8], [11, 79, 0.45, 0.7],
+        [11.5, 81, 0.45, 0.7], [12, 83, 0.9, 0.9], [13, 84, 0.45, 0.8], [13.5, 79, 0.45, 0.7], [14, 76, 1.7, 0.8]
+    ];
+    const CLOCK_LABEL = '一つの時計 · テンポ {bpm} · 棒 → 鍵盤 → ふたの反射';
+    let keys9 = [];
+    let songMs = 0;
+    let songPrev = 0;
+    function projX(x, z) { return VANISH_X + x * Z0 / (z + Z0); }
+    function projY(h, z) { return HORIZON_Y + (DEPTH_K - h * Z0) / (z + Z0); }
+    function keyOf(m) {
+        for (let i = 0; i < keys9.length; i += 1) {
+            if (keys9[i].midi === m) {
+                return keys9[i];
+            }
+        }
+        return null;
+    }
+    // 막대 앞 끝의 깊이 — 시작 시각까지 남은 초 × Z_SPEED 만큼 鍵盤 뒤 끝(KEY_LEN)보다 멀다
+    function barFrontZ(startMs, nowMs) { return KEY_LEN + (startMs - nowMs) / 1000 * Z_SPEED; }
+    function barDepthLen(beats) { return beats * BEAT_MS / 1000 * Z_SPEED; }
+    function build() {
+        keys9 = [];
+        const total = whiteCount(LO, HI) * WHITE_W;
+        let i = 0;
+        for (let m = LO; m <= HI; m += 1) {
+            const left = -total / 2 + i * WHITE_W;
+            if (isBlack(m)) {
+                keys9.push({ midi: m, black: true, x0: left - WHITE_W * 0.29, x1: left + WHITE_W * 0.29, zFront: KEY_LEN - BLACK_LEN });
+            }
+            else {
+                keys9.push({ midi: m, black: false, x0: left + 1, x1: left + WHITE_W - 1, zFront: 0 });
+                i += 1;
+            }
+        }
+    }
+    function reset() { resetSprings(); songMs = -LEAD_IN_MS; songPrev = -LEAD_IN_MS; }
+    function loopLength() { return LOOP_MS; }
+    function step(ms, prev) {
+        songPrev = songMs;
+        songMs = clock - LEAD_IN_MS;
+        const lap = Math.floor(songMs / LOOP_MS);
+        // 막대 앞 끝이 鍵盤 뒤 끝 깊이를 지나는 순간 누르고, 뒤 끝이 지나는 순간 뗀다
+        for (let k = lap - 1; k <= lap; k += 1) {
+            for (let i = 0; i < SONG.length; i += 1) {
+                const n = SONG[i];
+                const st = n[0] * BEAT_MS + k * LOOP_MS;
+                const z0 = barFrontZ(st, songPrev);
+                const z1 = barFrontZ(st, songMs);
+                const len = barDepthLen(n[2]);
+                if (z0 + len > KEY_LEN && z1 + len <= KEY_LEN) {
+                    release(n[1], true);
+                }
+                if (z0 > KEY_LEN && z1 <= KEY_LEN && autoAllowed()) {
+                    press(n[1], n[3], true);
+                }
+            }
+        }
+        stepSprings();
+    }
+    function finalScene() {
+        songMs = 1.6 * BEAT_MS;
+        const mids = [60, 67, 84];
+        for (let i = 0; i < mids.length; i += 1) {
+            const s = springOf(mids[i]);
+            s.target = 1;
+            s.x = 1;
+        }
+    }
+    function onNoteOn(midi, vel, auto) { pressSpring(midi, vel); }
+    function onNoteOff(midi, auto) { releaseSpring(midi); }
+    function keyBase() { return 72; }
+    function keyPan() { return 0; }
+    function onDrag(x, y, down) { }
+    function onKeyFocus(midi) { }
+    function onWake() { }
+    function keyRects() {
+        const out = [];
+        for (let i = 0; i < keys9.length; i += 1) {
+            const k = keys9[i];
+            const top = k.black ? BLACK_RISE : 0;
+            const x0 = Math.min(projX(k.x0, k.zFront), projX(k.x0, KEY_LEN));
+            const x1 = Math.max(projX(k.x1, k.zFront), projX(k.x1, KEY_LEN));
+            const y0 = projY(top, KEY_LEN);
+            const y1 = projY(k.black ? 0 : -KEY_THICK, k.zFront);
+            out.push({ midi: k.midi, black: k.black, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+        }
+        return out.sort(function (p, q) { return (p.black ? 1 : 0) - (q.black ? 1 : 0); });
+    }
+    function poly(pts, fill) {
+        ctx.beginPath();
+        for (let i = 0; i < pts.length; i += 1) {
+            if (i === 0) {
+                ctx.moveTo(pts[i][0], pts[i][1]);
+            }
+            else {
+                ctx.lineTo(pts[i][0], pts[i][1]);
+            }
+        }
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+    }
+    function barQuad(b, h) {
+        return [[projX(b.x0, b.zf), projY(h, b.zf)], [projX(b.x1, b.zf), projY(h, b.zf)], [projX(b.x1, b.zb), projY(h, b.zb)], [projX(b.x0, b.zb), projY(h, b.zb)]];
+    }
+    function visibleBars() {
+        const out = [];
+        const lap = Math.floor(songMs / LOOP_MS);
+        for (let k = lap; k <= lap + 1; k += 1) {
+            for (let i = 0; i < SONG.length; i += 1) {
+                const n = SONG[i];
+                const zf = barFrontZ(n[0] * BEAT_MS + k * LOOP_MS, songMs);
+                const zb = zf + barDepthLen(n[2]);
+                if (zb <= KEY_LEN || zf >= Z_FAR) {
+                    continue;
+                }
+                const key = keyOf(n[1]);
+                if (!key) {
+                    continue;
+                }
+                const inset = key.black ? 1 : 3;
+                out.push({ x0: key.x0 + inset, x1: key.x1 - inset, zf: Math.max(zf, KEY_LEN), zb: Math.min(zb, Z_FAR), c: keyGlow(n[1]), black: key.black });
+            }
+        }
+        // 화가 순서 — 먼 것부터 그려 가까운 것이 위에 덮이게
+        return out.sort(function (a, b) { return b.zf - a.zf; });
+    }
+    function drawKey9(k) {
+        const d = keyDepth(k.midi);
+        const top = k.black ? BLACK_RISE : 0;
+        const bottom = k.black ? 0 : -KEY_THICK;
+        // 뒤 끝을 축으로 앞 끝만 KEY_TRAVEL × 눌림 만큼 내려간다
+        const drop = d * KEY_TRAVEL;
+        const tint = keyTint(k.midi);
+        const glow = keyGlow(k.midi);
+        const tf = top - drop;
+        const front = [[projX(k.x0, k.zFront), projY(tf, k.zFront)], [projX(k.x1, k.zFront), projY(tf, k.zFront)], [projX(k.x1, k.zFront), projY(bottom - drop, k.zFront)], [projX(k.x0, k.zFront), projY(bottom - drop, k.zFront)]];
+        const face = [[projX(k.x0, k.zFront), projY(tf, k.zFront)], [projX(k.x1, k.zFront), projY(tf, k.zFront)], [projX(k.x1, KEY_LEN), projY(top, KEY_LEN)], [projX(k.x0, KEY_LEN), projY(top, KEY_LEN)]];
+        if (k.black) {
+            poly(front, rgba(NAVY_SIDE, 1));
+            poly(face, rgba(mixRGB(NAVY, glow, tint * 0.5), 1));
+            return;
+        }
+        poly(front, rgba(mixRGB(IVORY_SIDE, glow, tint * 0.4), 1));
+        poly(face, rgba(mixRGB(IVORY, glow, tint * 0.6), 1));
+        ctx.font = fontOf(10, 700);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.fillText(noteName(k.midi), projX((k.x0 + k.x1) / 2, 12), projY(tf * 0.8, 12));
+    }
+    function draw() {
+        // 뚜껑 — 수평선 위 짙은 면
+        const lid = ctx.createLinearGradient(0, 0, 0, HORIZON_Y);
+        lid.addColorStop(0, rgba(NAVY_SIDE, 1));
+        lid.addColorStop(1, rgba(NAVY, 1));
+        ctx.fillStyle = lid;
+        ctx.fillRect(0, 0, W, HORIZON_Y);
+        const floor = ctx.createLinearGradient(0, HORIZON_Y, 0, H);
+        floor.addColorStop(0, rgba(mixRGB(LILAC, BG_TOP, 0.35), 1));
+        floor.addColorStop(1, rgba(BG_LOW, 1));
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, HORIZON_Y, W, H - HORIZON_Y);
+        // 길 — 흰건반 경계마다 소실점으로 모이는 선
+        const total = whiteCount(LO, HI) * WHITE_W;
+        ctx.strokeStyle = rgba(IVORY, 0.55);
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= whiteCount(LO, HI); i += 1) {
+            const x = -total / 2 + i * WHITE_W;
+            ctx.beginPath();
+            ctx.moveTo(projX(x, KEY_LEN), projY(0, KEY_LEN));
+            ctx.lineTo(projX(x, Z_FAR), projY(0, Z_FAR));
+            ctx.stroke();
+        }
+        // 박자 선 — 04 의 박자 선과 같은 식을 깊이로
+        const fb = Math.floor(songMs / BEAT_MS);
+        for (let b = fb; b < fb + 10; b += 1) {
+            const z = barFrontZ(b * BEAT_MS, songMs);
+            if (z <= KEY_LEN || z >= Z_FAR) {
+                continue;
+            }
+            ctx.strokeStyle = rgba(IVORY, b % 4 === 0 ? 0.7 : 0.3);
+            ctx.lineWidth = b % 4 === 0 ? 2 : 1;
+            ctx.beginPath();
+            ctx.moveTo(projX(-total / 2, z), projY(0, z));
+            ctx.lineTo(projX(total / 2, z), projY(0, z));
+            ctx.stroke();
+        }
+        // 눌린 鍵盤 길의 빛
+        for (let i = 0; i < keys9.length; i += 1) {
+            const k = keys9[i];
+            const t = keyTint(k.midi);
+            if (t < 0.03) {
+                continue;
+            }
+            poly([[projX(k.x0, KEY_LEN), projY(0, KEY_LEN)], [projX(k.x1, KEY_LEN), projY(0, KEY_LEN)], [projX(k.x1, KEY_LEN + 260), projY(0, KEY_LEN + 260)], [projX(k.x0, KEY_LEN + 260), projY(0, KEY_LEN + 260)]], rgba(keyGlow(k.midi), 0.5 * t));
+        }
+        const bars = visibleBars();
+        // 뚜껑 반사 — 같은 막대 사각형을 수평선에서 뒤집고 눌러, 수평선에서 먼 것일수록 어둡게
+        for (let i = 0; i < bars.length; i += 1) {
+            const q = barQuad(bars[i], 0);
+            const dist = (q[0][1] + q[2][1]) / 2 - HORIZON_Y;
+            const a = LID_REFLECT * Math.exp(-dist / LID_FALLOFF);
+            if (a < 0.02) {
+                continue;
+            }
+            poly(q.map(function (p) { return [p[0], HORIZON_Y - (p[1] - HORIZON_Y) * LID_FLIP]; }), rgba(bars[i].c, a));
+        }
+        for (let i = 0; i < bars.length; i += 1) {
+            const b = bars[i];
+            poly(barQuad(b, 0), rgba(mixRGB(b.c, INK, b.black ? 0.3 : 0.08), 1));
+            poly([[projX(b.x0, b.zf), projY(5, b.zf)], [projX(b.x1, b.zf), projY(5, b.zf)], [projX(b.x1, b.zf), projY(0, b.zf)], [projX(b.x0, b.zf), projY(0, b.zf)]], rgba(mixRGB(b.c, INK, 0.3), 1));
+            poly(barQuad({ x0: b.x0, x1: b.x1, zf: b.zf, zb: b.zf + Math.min(18, b.zb - b.zf), c: b.c, black: b.black }, 5), rgba(mixRGB(b.c, IVORY, 0.55), 1));
+        }
+        const whites = keys9.filter(function (k) { return !k.black; });
+        const blacks = keys9.filter(function (k) { return k.black; });
+        // 깊이 정렬 — 많이 눌린 건반부터 그려 덜 눌린 이웃이 위에 덮인다
+        whites.sort(function (a, b) { return keyDepth(b.midi) - keyDepth(a.midi); });
+        for (let i = 0; i < whites.length; i += 1) {
+            drawKey9(whites[i]);
+        }
+        for (let i = 0; i < blacks.length; i += 1) {
+            drawKey9(blacks[i]);
+        }
+        drawCaption(CLOCK_LABEL.replace('{bpm}', String(TEMPO_BPM)), 10, 8, false);
+    }
+    // 계산을 마치고 그리기 시작했는가
+    let ready = false;
+    // 정리 뒤(리액트 언마운트)에 늦게 온 일이 다시 시작하지 않게
+    let alive = true;
+    // 화면 시계(ms) — 16ms 고정 스텝으로만 늘어난다. 소리가 켜져 있으면 오디오 시계가 목표를 정한다
+    let clock = 0;
+    let screenTarget = 0;
+    let prevLoop = 0;
+    // 사람이 마지막으로 친 시각 — HUMAN_QUIET_MS 동안 조용하면 자동 시연이 다시 이어진다
+    const HUMAN_QUIET_MS = 2500;
+    let lastHuman = -1e9;
+    function autoAllowed() { return demo || clock - lastHuman > HUMAN_QUIET_MS; }
+    // 스프링 값을 화면에 쓸 때 — 동작 줄이기면 흔들림 없이 목표 자리 그대로
+    function shown(s) { return still ? s.target : s.x; }
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        onWake();
+    }
+    // 음 이름 알림 — 사람이 친 음은 GROUP_MS 안에 든 것끼리 한 줄로, 자동 시연은 한 마디(BAR_MS)에 한 번 모아서
+    const GROUP_MS = 250;
+    const BAR_MS = 2000;
+    const BAR_LABEL = '自動演奏: {names}';
+    let groupNames = [];
+    let lastSpoken = -1e9;
+    let barNames = [];
+    let barIndex = 0;
+    function announce(midi, auto) {
+        const nm = noteName(midi);
+        if (auto) {
+            if (barNames.indexOf(nm) < 0) {
+                barNames.push(nm);
+            }
+            return;
+        }
+        if (clock - lastSpoken > GROUP_MS) {
+            groupNames = [];
+        }
+        if (groupNames.indexOf(nm) < 0) {
+            groupNames.push(nm);
+        }
+        lastSpoken = clock;
+        live.textContent = groupNames.join(' · ');
+    }
+    function flushBar() {
+        const b = Math.floor(clock / BAR_MS);
+        if (b === barIndex) {
+            return;
+        }
+        barIndex = b;
+        if (barNames.length > 0 && clock - lastSpoken > BAR_MS) {
+            live.textContent = BAR_LABEL.replace('{names}', barNames.join(' · '));
+        }
+        barNames = [];
+    }
+    // 鍵盤 버튼 — 그림 위에 투명한 진짜 <button> 을 같은 자리에 겹친다. 눌린 동안 aria-pressed="true"
+    const keyButtons = new Map();
+    function setPressed(midi, on) {
+        const b = keyButtons.get(midi);
+        if (b) {
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        }
+    }
+    function isHeld(midi) { return findVoice(midi) !== null; }
+    function press(midi, vel, auto) {
+        if (!auto) {
+            lastHuman = clock;
+            wake();
+        }
+        const freed = allocVoice(voices, midi, clock, auto);
+        for (let i = 0; i < freed.length; i += 1) {
+            synthStop(freed[i], clock);
+            if (freed[i].midi !== midi) {
+                setPressed(freed[i].midi, false);
+                onNoteOff(freed[i].midi, auto);
+            }
+        }
+        const v = findVoice(midi);
+        if (v) {
+            synthStart(v, vel, clock);
+        }
+        setPressed(midi, true);
+        announce(midi, auto);
+        onNoteOn(midi, vel, auto);
+        if (still && ready) {
+            render();
+        }
+    }
+    function release(midi, auto) {
+        const v = findVoice(midi);
+        if (!v || (auto && !v.auto)) {
+            return;
+        }
+        voices.splice(voices.indexOf(v), 1);
+        synthStop(v, clock);
+        setPressed(midi, false);
+        onNoteOff(midi, auto);
+        if (still && ready) {
+            render();
+        }
+    }
+    function releaseAll() {
+        while (voices.length > 0) {
+            const v = voices[voices.length - 1];
+            release(v.midi, v.auto);
+            if (voices.indexOf(v) >= 0) {
+                voices.splice(voices.indexOf(v), 1);
+            }
+        }
+    }
+    // 악보 따라 치기 — 지난 시각(prev)부터 이번 시각(ms)까지 지나간 시작·끝을 찾는다. 한 바퀴 넘어가면 둘로 나눠 본다
+    function crossed(t, prev, ms) {
+        return prev <= ms ? (t > prev && t <= ms) : (t > prev || t <= ms);
+    }
+    function runSeq(seq, beatMs, ms, prev) {
+        for (let i = 0; i < seq.length; i += 1) {
+            const n = seq[i];
+            if (crossed((n[0] + n[2]) * beatMs, prev, ms)) {
+                release(n[1], true);
+            }
+        }
+        for (let i = 0; i < seq.length; i += 1) {
+            const n = seq[i];
+            if (crossed(n[0] * beatMs, prev, ms) && autoAllowed()) {
+                press(n[1], n[3], true);
+            }
+        }
+    }
+    // 포인터 자리를 판 좌표(480×300)로 — 화면에 보이는 캔버스 크기와 상관없이
+    function toBoard(ev) {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) * W / Math.max(1, r.width), (ev.clientY - r.top) * H / Math.max(1, r.height)];
+    }
+    function buildButtons() {
+        while (keysBox.firstChild) {
+            keysBox.removeChild(keysBox.firstChild);
+        }
+        keyButtons.clear();
+        const rects = keyRects();
+        for (let i = 0; i < rects.length; i += 1) {
+            const k = rects[i];
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = keysBox.getAttribute('data-key-class') || '';
+            // 이름 + 옥타브 번호(가운데 ド = 4) — 두 옥타브 이상인 판에서 같은 이름 건반을 낭독으로도 가른다
+            b.setAttribute('aria-label', noteName(k.midi) + String(Math.floor(k.midi / 12) - 1));
+            b.setAttribute('aria-pressed', isHeld(k.midi) ? 'true' : 'false');
+            b.style.left = (k.x / W * 100).toFixed(3) + '%';
+            b.style.top = (k.y / H * 100).toFixed(3) + '%';
+            b.style.width = (k.w / W * 100).toFixed(3) + '%';
+            b.style.height = (k.h / H * 100).toFixed(3) + '%';
+            const midi = k.midi;
+            b.addEventListener('pointerdown', function (ev) {
+                const r = b.getBoundingClientRect();
+                // 鍵盤 앞쪽(아래)을 칠수록 세게 — 0.45~1
+                press(midi, 0.45 + 0.55 * clamp((ev.clientY - r.top) / Math.max(1, r.height), 0, 1), false);
+            }, { signal: off.signal });
+            b.addEventListener('pointerenter', function (ev) {
+                if ((ev.buttons & 1) === 1) {
+                    press(midi, 0.7, false);
+                }
+            }, { signal: off.signal });
+            const up = function () { const v = findVoice(midi); if (v && !v.auto) {
+                release(midi, false);
+            } };
+            b.addEventListener('pointerup', up, { signal: off.signal });
+            b.addEventListener('pointerleave', up, { signal: off.signal });
+            b.addEventListener('pointercancel', up, { signal: off.signal });
+            // 키보드 — 포커스된 건반에서 Enter·Space 를 누르는 동안 눌리고, 떼면 놓인다
+            b.addEventListener('keydown', function (ev) {
+                if (ev.key !== 'Enter' && ev.key !== ' ') {
+                    return;
+                }
+                ev.preventDefault();
+                if (!ev.repeat) {
+                    press(midi, 0.75, false);
+                }
+            }, { signal: off.signal });
+            b.addEventListener('keyup', function (ev) {
+                if (ev.key !== 'Enter' && ev.key !== ' ') {
+                    return;
+                }
+                ev.preventDefault();
+                up();
+            }, { signal: off.signal });
+            b.addEventListener('focus', function () { onKeyFocus(midi); }, { signal: off.signal });
+            keysBox.appendChild(b);
+            keyButtons.set(midi, b);
+        }
+    }
+    let panShown = 0;
+    function syncPan() {
+        const p = keyPan();
+        if (Math.abs(p - panShown) < 0.05) {
+            return;
+        }
+        panShown = p;
+        keysBox.style.transform = 'translateX(' + (-p / W * 100).toFixed(3) + '%)';
+    }
+    // 컴퓨터 자판 — 가운데 弦 한 줄이 한 옥타브. 누르고 있는 동안 소리가 이어진다(자동 반복은 무시)
+    window.addEventListener('keydown', function (ev) {
+        const i = KEY_CODES.indexOf(ev.code);
+        if (i < 0 || ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) {
+            return;
+        }
+        press(keyBase() + i, 0.75, false);
+    }, { signal: off.signal });
+    window.addEventListener('keyup', function (ev) {
+        const i = KEY_CODES.indexOf(ev.code);
+        if (i < 0) {
+            return;
+        }
+        const v = findVoice(keyBase() + i);
+        if (v && !v.auto) {
+            release(keyBase() + i, false);
+        }
+    }, { signal: off.signal });
+    root.addEventListener('pointermove', function (ev) {
+        const p = toBoard(ev);
+        onDrag(p[0], p[1], (ev.buttons & 1) === 1);
+    }, { signal: off.signal });
+    // 音を出す — AudioContext 를 만드는 곳은 이 클릭 핸들러 하나뿐이다. 켜는 순간 화면 시계를 오디오 시계에 다시 맞춘다
+    const SOUND_ON_LABEL = '音を出す';
+    const SOUND_OFF_LABEL = '音を消す';
+    function syncClocks() {
+        if (!audio) {
+            return;
+        }
+        audioBaseSec = audio.currentTime;
+        clockBaseMs = clock;
+        screenTarget = clock;
+    }
+    soundBtn.addEventListener('click', function () {
+        if (!audio) {
+            audio = new AudioContext();
+            master = audio.createGain();
+            master.gain.value = MASTER_GAIN;
+            master.connect(audio.destination);
+        }
+        soundOn = !soundOn;
+        soundBtn.setAttribute('aria-pressed', soundOn ? 'true' : 'false');
+        soundBtn.textContent = soundOn ? SOUND_OFF_LABEL : SOUND_ON_LABEL;
+        if (soundOn) {
+            syncClocks();
+            audio.resume().then(syncClocks);
+        }
+        else {
+            for (let i = 0; i < voices.length; i += 1) {
+                synthStop(voices[i], clock);
+            }
+            screenTarget = clock;
+        }
+        wake();
+    }, { signal: off.signal });
+    function render() {
+        draw();
+        syncPan();
+    }
+    function tick() {
+        clock += FIXED_DT;
+        const ms = clock % loopLength();
+        step(ms, prevLoop);
+        prevLoop = ms;
+        flushBar();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다
+        const dt = Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        if (soundOn && audio && audio.state === 'running') {
+            screenTarget = audioToScreenMs(audio.currentTime);
+            if (screenTarget - clock > 200) {
+                syncClocks();
+            }
+        }
+        else {
+            screenTarget += dt;
+        }
+        let n = 0;
+        while (clock + FIXED_DT <= screenTarget && n < 8) {
+            tick();
+            n += 1;
+        }
+        if (n === 8) {
+            screenTarget = clock;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 눌린 鍵盤 색과 음 이름만 바뀌는 정지 판 한 장
+    function showStill() {
+        stopLoop();
+        releaseAll();
+        reset();
+        finalScene();
+        render();
+    }
+    function play() {
+        releaseAll();
+        clock = 0;
+        screenTarget = 0;
+        prevLoop = 0;
+        barIndex = 0;
+        reset();
+        render();
+        startLoop();
+    }
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 정지 판으로, 꺼지면 시연을 처음부터
+    function onMotionPref() {
+        still = reduceQuery.matches;
+        if (!ready) {
+            return;
+        }
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    reduceQuery.addEventListener('change', onMotionPref, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        // 화면 폭이 바뀌면 鍵盤 배치(07 은 鍵盤 폭 최소값)와 버튼 자리를 다시 계산한다
+        if (ready) {
+            build();
+            buildButtons();
+            render();
+        }
+    }, { signal: off.signal });
+    function begin() {
+        if (!alive) {
+            return;
+        }
+        fitCanvas();
+        build();
+        buildButtons();
+        ready = true;
+        if (still) {
+            showStill();
+        }
+        else {
+            play();
+        }
+    }
+    begin();
+    return function () {
+        alive = false;
+        stopLoop();
+        off.abort();
+        for (let i = 0; i < voices.length; i += 1) {
+            synthStop(voices[i], clock);
+        }
+        if (audio) {
+            audio.close();
+        }
+    };
+})();
+</script>
+</body>
+</html>
