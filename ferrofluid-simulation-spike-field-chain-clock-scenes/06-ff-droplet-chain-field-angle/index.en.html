@@ -1,0 +1,1049 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Droplet Chains That Line Up with the Field — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ff is-demo" id="ff">
+  <canvas class="ff__canvas" data-role="canvas" width="480" height="300" role="img" tabindex="0" aria-label="Scattered black droplets that link into chains along the field when it turns on and scatter again when it turns off. Arrow keys change the field direction"></canvas>
+  <p class="ff__status" data-role="status" aria-live="off">Droplets lining up</p>
+  <button class="ff__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("ff");
+    if (!root) return;
+    // 장면 시계(초)와 상태 줄 글자 — 장면 계산이 고치고 화면 쪽이 읽어 그린다
+    let sceneT = 0;
+    let simStatus = '';
+    // 계산 좌표 — 캔버스 안은 늘 480×300. 보이는 크기와 상관없이 계산은 이 좌표로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    // 사람이 손댔는가 — 손대면 자석(또는 장면의 조절점)이 정해 둔 길 대신 userX·userY 를 따른다
+    let handsOn = false;
+    let userX = W / 2;
+    let userY = H / 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 0~1 을 부드러운 계단(3x² − 2x³)으로
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 따라가기 비율 1 − e^(−rate·dt) — 프레임 시간이 달라도 1초에 같은 만큼 다가간다
+    function follow(rate, dt) { return 1 - Math.exp(-rate * dt); }
+    // 각을 −π ~ π 로 감는다 — 두 각의 차가 한 바퀴를 넘어 돌아가는 길을 고르지 않게
+    function wrapAngle(a) {
+        let x = a % TAU;
+        if (x > Math.PI) {
+            x -= TAU;
+        }
+        if (x < -Math.PI) {
+            x += TAU;
+        }
+        return x;
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 시연이 다시 나온다 (32비트 자리 밀기 섞기 세 번)
+    function makeRng(seed) {
+        let s = (seed >>> 0) || 1;
+        return function () {
+            s ^= s << 13;
+            s >>>= 0;
+            s ^= s >>> 17;
+            s ^= s << 5;
+            s >>>= 0;
+            return s / 4294967296;
+        };
+    }
+    // 상태 줄 틀 채우기 — {이름} 자리에 값
+    function fill(t, v) {
+        return t.replace(/\{(\w+)\}/g, function (m, k) { return k in v ? String(v[k]) : m; });
+    }
+    const SPRING_SUBSTEP = 1 / 240;
+    function makeSpring(x) { return { x: x, v: 0, to: x }; }
+    function stepSpring(s, stiffness, damping, dt) {
+        let left = dt;
+        while (left > 1e-9) {
+            const h = Math.min(SPRING_SUBSTEP, left);
+            s.v += (stiffness * (s.to - s.x) - damping * s.v) * h;
+            s.x += s.v * h;
+            left -= h;
+        }
+    }
+    // 스프링을 그 값에 바로 앉힌다(속도 0) — 움직임 줄이기·첫 장면
+    function snapSpring(s, x) { s.x = x; s.v = 0; s.to = x; }
+    // 각도 스프링 — 목표와의 차를 −π ~ π 로 감은 뒤 같은 식으로
+    function stepAngleSpring(s, stiffness, damping, dt) {
+        let left = dt;
+        while (left > 1e-9) {
+            const h = Math.min(SPRING_SUBSTEP, left);
+            s.v += (stiffness * wrapAngle(s.to - s.x) - damping * s.v) * h;
+            s.x = wrapAngle(s.x + s.v * h);
+            left -= h;
+        }
+    }
+    // ── 팔레트 (RGB) — 액체는 거의 검정(기능색), 조명·바탕·자기력선은 파스텔, 글자는 진한 색 ──
+    const PAPER = [250, 247, 242];
+    const DISH = [234, 238, 247];
+    const DISH_DEEP = [214, 220, 236];
+    const FLUID = [13, 12, 17];
+    const FLUID_EDGE = [86, 80, 112];
+    const LIGHT_PINK = [255, 190, 210];
+    const LIGHT_SKY = [172, 212, 255];
+    const LAVENDER = [198, 186, 238];
+    const MINT = [168, 222, 200];
+    const BUTTER = [248, 228, 162];
+    const POLE_N = [244, 180, 198];
+    const POLE_S = [170, 204, 240];
+    const INK = [38, 34, 50];
+    const INK_SOFT = [104, 98, 122];
+    const VIOLET_DEEP = [82, 58, 158];
+    const CORAL_DEEP = [174, 62, 52];
+    const CREAM = [255, 251, 244];
+    const FIELD_REF_PX = 60;
+    const field = [0, 0, 0];
+    function fieldAt(poles, x, y, soften) {
+        let bx = 0;
+        let by = 0;
+        let bz = 0;
+        const ref2 = FIELD_REF_PX * FIELD_REF_PX;
+        for (const p of poles) {
+            const dx = x - p.x;
+            const dy = y - p.y;
+            const r2 = dx * dx + dy * dy + soften * soften;
+            const k = p.q * ref2 / (r2 * Math.sqrt(r2));
+            bx += dx * k;
+            by += dy * k;
+            bz += soften * k;
+        }
+        field[0] = bx;
+        field[1] = by;
+        field[2] = bz;
+        return Math.sqrt(bx * bx + by * by + bz * bz);
+    }
+    // ── 엇갈린 세 물결 ──────────────────────────────────────────
+    // 방향이 0°·120°·240° 인 cos 물결 셋을 더하면(−1.5 ~ 3) 세 마루가 겹치는 점이 육각 배열로 놓인다.
+    // 마루 사이 거리 = spacing 이 되도록 물결수 k = 4π / (√3 · spacing). 합을 3 으로 나눈 값에서 HEX_FLOOR 아래는 잘라
+    // 가시 사이를 평평하게 두고, 남은 윗부분을 0~1 로 늘린다(꼭대기 쪽이 곧게 좁아지는 원뿔 모양)
+    const HEX_C = 0.5;
+    const HEX_S = Math.sqrt(3) / 2;
+    const HEX_FLOOR = 0.3;
+    function hexWave(x, y, spacing) {
+        const k = 4 * Math.PI / (Math.sqrt(3) * spacing);
+        const s = Math.cos(k * x) + Math.cos(k * (-HEX_C * x + HEX_S * y)) + Math.cos(k * (-HEX_C * x - HEX_S * y));
+        return Math.max(0, (s / 3 - HEX_FLOOR) / (1 - HEX_FLOOR));
+    }
+    function makeGrid(ox, oy, w, h, cell) {
+        const gw = Math.ceil(w / cell) + 1;
+        const gh = Math.ceil(h / cell) + 1;
+        const n = gw * gh;
+        return { gw: gw, gh: gh, cell: cell, ox: ox, oy: oy, z: new Float32Array(n), wet: new Float32Array(n), amp: new Float32Array(n), vel: new Float32Array(n), target: new Float32Array(n), rgba: new Uint8ClampedArray(n * 4) };
+    }
+    // 칸마다 가시 높이 스프링을 목표(target)로 — 같은 반암시 적분, 1/240초 잔걸음
+    function stepGridSprings(g, stiffness, damping, dt) {
+        let left = dt;
+        const n = g.gw * g.gh;
+        while (left > 1e-9) {
+            const h = Math.min(SPRING_SUBSTEP, left);
+            for (let i = 0; i < n; i += 1) {
+                g.vel[i] += (stiffness * (g.target[i] - g.amp[i]) - damping * g.vel[i]) * h;
+                g.amp[i] += g.vel[i] * h;
+            }
+            left -= h;
+        }
+    }
+    function settleGrid(g) {
+        g.amp.set(g.target);
+        g.vel.fill(0);
+    }
+    // 기울기 색 섞기 — 면이 기운 만큼(1 − n_z) × TILT_MIX 로 가장자리 색을 섞어 가시 옆면이 바탕 검정과 갈리게
+    const TILT_MIX = 0.5;
+    function halfVectors(lights) {
+        return lights.map(function (l) {
+            const ll = Math.hypot(l.x, l.y, l.z) || 1;
+            const hx = l.x / ll;
+            const hy = l.y / ll;
+            const hz = l.z / ll + 1;
+            const hl = Math.hypot(hx, hy, hz) || 1;
+            return { x: hx / hl, y: hy / hl, z: hz / hl, c: l.c, k: l.k };
+        });
+    }
+    // 한 점 칠하기 — 기울기(gx, gy)·덮인 정도 wet·바탕색 bg 로 out[o..o+3] 에 RGBA.
+    // bg 가 null 이면 바탕과 섞지 않고 액체 색에 투명도 wet 을 준다(아래 그림 위에 겹쳐 붙일 때)
+    function shadeOne(gx, gy, wet, bg, hv, shine, out, o) {
+        const inv = 1 / Math.sqrt(gx * gx + gy * gy + 1);
+        const nx = -gx * inv;
+        const ny = -gy * inv;
+        const nz = inv;
+        const tilt = (1 - nz) * TILT_MIX;
+        let r = lerp(FLUID[0], FLUID_EDGE[0], tilt);
+        let g = lerp(FLUID[1], FLUID_EDGE[1], tilt);
+        let b = lerp(FLUID[2], FLUID_EDGE[2], tilt);
+        for (const h of hv) {
+            const d = nx * h.x + ny * h.y + nz * h.z;
+            if (d <= 0) {
+                continue;
+            }
+            const s = Math.pow(d, shine) * h.k;
+            r += h.c[0] * s;
+            g += h.c[1] * s;
+            b += h.c[2] * s;
+        }
+        const a = clamp(wet, 0, 1);
+        if (!bg) {
+            out[o] = Math.min(255, r);
+            out[o + 1] = Math.min(255, g);
+            out[o + 2] = Math.min(255, b);
+            out[o + 3] = a * 255;
+            return;
+        }
+        out[o] = lerp(bg[0], Math.min(255, r), a);
+        out[o + 1] = lerp(bg[1], Math.min(255, g), a);
+        out[o + 2] = lerp(bg[2], Math.min(255, b), a);
+        out[o + 3] = 255;
+    }
+    // 격자 전체 칠하기 — 칸 하나에 한 번. 끝 칸은 안쪽 이웃으로 한쪽 차
+    function shadeGrid(g, bg, lights, shine) {
+        const hv = halfVectors(lights);
+        const gw = g.gw;
+        const gh = g.gh;
+        const z = g.z;
+        let count = 0;
+        for (let j = 0; j < gh; j += 1) {
+            const ju = j > 0 ? j - 1 : j;
+            const jd = j < gh - 1 ? j + 1 : j;
+            for (let i = 0; i < gw; i += 1) {
+                const il = i > 0 ? i - 1 : i;
+                const ir = i < gw - 1 ? i + 1 : i;
+                const k = j * gw + i;
+                const gx = (z[j * gw + ir] - z[j * gw + il]) / ((ir - il) * g.cell);
+                const gy = (z[jd * gw + i] - z[ju * gw + i]) / ((jd - ju) * g.cell);
+                shadeOne(gx, gy, g.wet[k], bg, hv, shine, g.rgba, k * 4);
+                count += 1;
+            }
+        }
+        return count;
+    }
+    const TENSION_RATE = 900;
+    function makeRing(cx, cy, r, n) {
+        const ring = { n: n, x: [], y: [], vx: [], vy: [], area0: 0 };
+        for (let i = 0; i < n; i += 1) {
+            const a = i / n * TAU;
+            ring.x.push(cx + Math.cos(a) * r);
+            ring.y.push(cy + Math.sin(a) * r);
+            ring.vx.push(0);
+            ring.vy.push(0);
+        }
+        ring.area0 = ringArea(ring);
+        return ring;
+    }
+    // 넓이 — 꼭짓점을 차례로 잇는 다각형의 넓이(두 점의 외적을 반씩 더함). makeRing 처럼 각도가 커지는 차례로 놓으면 양수
+    function ringArea(r) {
+        let a = 0;
+        for (let i = 0; i < r.n; i += 1) {
+            const j = (i + 1) % r.n;
+            a += r.x[i] * r.y[j] - r.x[j] * r.y[i];
+        }
+        return a / 2;
+    }
+    function ringCenter(r) {
+        let x = 0;
+        let y = 0;
+        for (let i = 0; i < r.n; i += 1) {
+            x += r.x[i];
+            y += r.y[i];
+        }
+        return [x / r.n, y / r.n];
+    }
+    // Field² 의 기울기 — 1px 떨어진 네 점의 차로
+    function strength2Grad(poles, x, y, soften) {
+        const l = fieldAt(poles, x - 1, y, soften);
+        const r = fieldAt(poles, x + 1, y, soften);
+        const u = fieldAt(poles, x, y - 1, soften);
+        const d = fieldAt(poles, x, y + 1, soften);
+        return [(r * r - l * l) / 2, (d * d - u * u) / 2];
+    }
+    const ringAx = [];
+    const ringAy = [];
+    function ringAccel(r, poles, p) {
+        const n = r.n;
+        const area = ringArea(r);
+        const squeeze = p.pressure * (r.area0 - area) / Math.max(1, Math.abs(r.area0));
+        for (let i = 0; i < n; i += 1) {
+            const a = (i + n - 1) % n;
+            const b = (i + 1) % n;
+            const mx = (r.x[a] + r.x[b]) / 2;
+            const my = (r.y[a] + r.y[b]) / 2;
+            // 바깥 방향 — 앞뒤 점을 잇는 방향 (tx, ty) 를 (ty, −tx) 로 돌린 쪽. 넓이가 양수가 되는 차례로 놓인 고리에서는 이쪽이 바깥
+            const tx = r.x[b] - r.x[a];
+            const ty = r.y[b] - r.y[a];
+            const tl = Math.hypot(tx, ty) || 1;
+            const g = strength2Grad(poles, r.x[i], r.y[i], p.soften);
+            ringAx[i] = p.drag * g[0] + p.tension * TENSION_RATE * (mx - r.x[i]) + squeeze * (ty / tl) - p.viscosity * r.vx[i];
+            ringAy[i] = p.drag * g[1] + p.tension * TENSION_RATE * (my - r.y[i]) + squeeze * (-tx / tl) - p.viscosity * r.vy[i];
+        }
+    }
+    // 한 걸음 — 넘겨받은 dt 를 그대로 한 번에(속도 먼저, 위치 다음). 자르지도 나누지도 않는다
+    function stepRingRaw(r, poles, p, dt) {
+        ringAccel(r, poles, p);
+        for (let i = 0; i < r.n; i += 1) {
+            r.vx[i] += ringAx[i] * dt;
+            r.vy[i] += ringAy[i] * dt;
+            r.x[i] += r.vx[i] * dt;
+            r.y[i] += r.vy[i] * dt;
+        }
+    }
+    // 나눠 걷기 — dt 를 PUDDLE_DT_MAX 에서 자르고, 그것을 PUDDLE_SUBSTEP 이하 잔걸음으로 쪼개 위 걸음을 되풀이
+    const PUDDLE_DT_MAX = 0.05;
+    const PUDDLE_SUBSTEP = 1 / 240;
+    function stepRingSafe(r, poles, p, dt) {
+        let left = Math.min(dt, PUDDLE_DT_MAX);
+        while (left > 1e-9) {
+            const h = Math.min(PUDDLE_SUBSTEP, left);
+            stepRingRaw(r, poles, p, h);
+            left -= h;
+        }
+    }
+    // 고리 안을 높이 격자의 덮인 정도로 — 줄마다 다각형 변과 만나는 x 를 모아 짝수 번째와 홀수 번째 사이를 채운다
+    function ringToWet(r, g, out) {
+        out.fill(0);
+        const xs = [];
+        for (let j = 0; j < g.gh; j += 1) {
+            const y = g.oy + j * g.cell;
+            xs.length = 0;
+            for (let i = 0; i < r.n; i += 1) {
+                const k = (i + 1) % r.n;
+                const y0 = r.y[i];
+                const y1 = r.y[k];
+                if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
+                    xs.push(r.x[i] + (y - y0) / (y1 - y0) * (r.x[k] - r.x[i]));
+                }
+            }
+            xs.sort(function (a, b) { return a - b; });
+            for (let m = 0; m + 1 < xs.length; m += 2) {
+                const i0 = Math.max(0, Math.ceil((xs[m] - g.ox) / g.cell));
+                const i1 = Math.min(g.gw - 1, Math.floor((xs[m + 1] - g.ox) / g.cell));
+                for (let i = i0; i <= i1; i += 1) {
+                    out[j * g.gw + i] = 1;
+                }
+            }
+        }
+    }
+    // 덮인 정도를 이웃 평균으로 times 번 — 가장자리를 둥글게(돔 높이·부드러운 테두리)
+    function blurWet(g, src, times, tmp) {
+        for (let t = 0; t < times; t += 1) {
+            for (let j = 0; j < g.gh; j += 1) {
+                for (let i = 0; i < g.gw; i += 1) {
+                    const k = j * g.gw + i;
+                    const l = i > 0 ? src[k - 1] : 0;
+                    const r = i < g.gw - 1 ? src[k + 1] : 0;
+                    const u = j > 0 ? src[k - g.gw] : 0;
+                    const d = j < g.gh - 1 ? src[k + g.gw] : 0;
+                    tmp[k] = (src[k] * 2 + l + r + u + d) / 6;
+                }
+            }
+            src.set(tmp);
+        }
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    // 화소 배율 — 캔버스 내부 크기에 곱한다. 2 에서 자른다(배율 3 기기에서 화소 수가 2.25배로 늘지 않게)
+    let dpr = 1;
+    function fitCanvas() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function makeBlitter() {
+        const off = document.createElement('canvas');
+        const offCtx = off.getContext('2d');
+        let img = null;
+        return function (data, gw, gh, x, y, w, h) {
+            if (!offCtx) {
+                return;
+            }
+            if (!img || img.width !== gw || img.height !== gh) {
+                off.width = gw;
+                off.height = gh;
+                img = offCtx.createImageData(gw, gh);
+            }
+            img.data.set(data);
+            offCtx.putImageData(img, 0, 0);
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(off, 0, 0, gw, gh, x, y, w, h);
+        };
+    }
+    // 높이 격자 한 장 — 칸 가운데가 표본 점이라 반 칸 바깥에서부터 늘린다
+    const blitMain = makeBlitter();
+    function drawGrid(g) {
+        blitMain(g.rgba, g.gw, g.gh, g.ox - g.cell / 2, g.oy - g.cell / 2, g.gw * g.cell, g.gh * g.cell);
+    }
+    // ── 그리기 도구 ─────────────────────────────────────────────
+    function clearStage(c) {
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    function setFont(px, weight) { ctx.font = weight + ' ' + px.toFixed(1) + 'px ' + FONT_STACK; }
+    function label(s, x, y, c, a, px, weight, align) {
+        setFont(px, weight);
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    function roundRectPath(x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+    function fillRound(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        roundRectPath(x, y, w, h, r);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x, y, r, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x, y, r, width, c, a) {
+        if (r <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function line(x0, y0, x1, y1, width, c, a) {
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    // 작은 이름표 — 둥근 바탕 위 글자
+    function tag(s, x, y, bg, fg, a, px, align) {
+        setFont(px, 700);
+        const w = ctx.measureText(s).width + px * 1.2;
+        const x0 = align === 'left' ? x : (align === 'right' ? x - w : x - w / 2);
+        fillRound(x0, y - px * 0.85, w, px * 1.7, px * 0.85, bg, a);
+        label(s, x0 + w / 2, y + 0.5, fg, a, px, 700, 'center');
+    }
+    // 자석 막대 — 가운데 (x, y), 방향 각 a, 반 길이 half. 앞쪽(N) 분홍·뒤쪽(S) 하늘색 두 칸
+    function drawBarMagnet(x, y, a, half, thick, alpha) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(a);
+        ctx.globalAlpha = alpha;
+        fillRound(-half, -thick / 2, half, thick, thick * 0.3, POLE_S, 1);
+        fillRound(0, -thick / 2, half, thick, thick * 0.3, POLE_N, 1);
+        roundRectPath(-half, -thick / 2, half * 2, thick, thick * 0.3);
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = rgba(INK, 0.75);
+        ctx.stroke();
+        label('N', half * 0.5, 0.5, INK, 0.9, thick * 0.62, 800, 'center');
+        label('S', -half * 0.5, 0.5, INK, 0.9, thick * 0.62, 800, 'center');
+        ctx.restore();
+    }
+    // ── 사람 손 — 포인터 끌기와 키 ──────────────────────────────
+    // 캔버스를 누른 채 움직이면 그 자리가 조절점(userX, userY)이 된다. 키보드는 캔버스에 초점이 있을 때만:
+    // 화살표 8px(Shift 24px) 옮기기 · Enter·Space 가운데로 되돌리기. 항목이 onNudge·onPoint 를 바꿔 끼울 수 있다
+    let pressing = false;
+    function eventPoint(e) {
+        const r = cv.getBoundingClientRect();
+        return [(e.clientX - r.left) * W / Math.max(1, r.width), (e.clientY - r.top) * H / Math.max(1, r.height)];
+    }
+    let onPoint = function (x, y) {
+        userX = clamp(x, 0, W);
+        userY = clamp(y, 0, H);
+    };
+    let onNudge = function (dx, dy, center) {
+        if (center) {
+            userX = W / 2;
+            userY = H / 2;
+            return;
+        }
+        userX = clamp(userX + dx, 0, W);
+        userY = clamp(userY + dy, 0, H);
+    };
+    function bindInput(signal) {
+        cv.addEventListener('pointerdown', function (e) {
+            takeOver();
+            pressing = true;
+            cv.setPointerCapture(e.pointerId);
+            const p = eventPoint(e);
+            onPoint(p[0], p[1]);
+            afterInput();
+        }, { signal: signal });
+        cv.addEventListener('pointermove', function (e) {
+            if (!pressing) {
+                return;
+            }
+            const p = eventPoint(e);
+            onPoint(p[0], p[1]);
+            if (still || paused) {
+                afterInput();
+            }
+        }, { signal: signal });
+        const end = function () { pressing = false; };
+        cv.addEventListener('pointerup', end, { signal: signal });
+        cv.addEventListener('pointercancel', end, { signal: signal });
+        cv.addEventListener('keydown', function (e) {
+            const step = e.shiftKey ? 24 : 8;
+            let dx = 0;
+            let dy = 0;
+            let center = false;
+            if (e.key === 'ArrowLeft') {
+                dx = -step;
+            }
+            else if (e.key === 'ArrowRight') {
+                dx = step;
+            }
+            else if (e.key === 'ArrowUp') {
+                dy = -step;
+            }
+            else if (e.key === 'ArrowDown') {
+                dy = step;
+            }
+            else if (e.key === 'Enter' || e.key === ' ') {
+                center = true;
+            }
+            else {
+                return;
+            }
+            e.preventDefault();
+            takeOver();
+            onNudge(dx, dy, center);
+            afterInput();
+        }, { signal: signal });
+    }
+    // ── 06 자기장 방향으로 줄 서는 방울 사슬 ─────────────────────
+    // 방울 둘을 잇는 선(j → i)과 Field f 가 이루는 각 θ, 거리 r(방울 지름 단위 ρ = r / 지름)로 i 에 주는 힘:
+    //   j → i 방향 성분 = −CHAIN_GAIN × (3cos²θ − 1) / ρ⁴ — 음수면 j 쪽으로 끌림(cos²θ > 1/3, 장과 같은 방향으로 놓였을 때), 양수면 밀림(나란히 옆에 놓였을 때)
+    //   그와 90도 방향 성분 = −CHAIN_GAIN × sin 2θ / ρ⁴ — 잇는 선을 Field 쪽으로 돌려 세운다
+    // 움직임은 힘 × MOBILITY 를 그대로 속도로 쓰는 끈끈한 액체 속 움직임이고, 닿으면(r < 지름) 움직인 뒤 겹친 깊이의 절반씩 서로 밀어 놓는다
+    const DROP_COUNT = 140;
+    const DROP_R_PX = 4.5;
+    const CHAIN_GAIN = 12000;
+    // 닿음 — 힘이 아니라 자리 고치기. 움직인 뒤 겹친 짝마다 겹친 깊이의 절반씩 서로 밀어 놓기를 CONTACT_PASSES 번
+    const CONTACT_PASSES = 2;
+    const MOBILITY = 1;
+    const MAX_SPEED = 260;
+    // 이웃 찾기 — 한 칸이 CUTOFF_PX 인 공간 격자. 자기 칸과 둘레 여덟 칸 안의 방울끼리만 힘을 잰다
+    const CUTOFF_PX = 44;
+    // 장 꺼짐 동안 — 가까운 방울끼리 (1 − r/CUTOFF_PX) 에 비례해 살짝 밀어내 흩어진다
+    const SCATTER_GAIN = 46;
+    // 장 주기 — 켜짐 FIELD_ON_S 초 → 꺼짐 FIELD_OFF_S 초. 장 방향은 FIELD_TURN 라디안 사이를 천천히 오간다
+    const FIELD_ON_AT_S = 0.2;
+    const FIELD_ON_S = 2.6;
+    const FIELD_OFF_S = 1.4;
+    const FIELD_TURN = 0.35;
+    const LOOP_S = FIELD_ON_AT_S + FIELD_ON_S + FIELD_OFF_S;
+    const DROP_SEED = 488;
+    // 그릇 — 가장자리 MARGIN_PX 안쪽으로 부드럽게 되민다
+    const MARGIN_PX = 18;
+    const WALL_PUSH = 40;
+    // 사슬로 세는 거리 — 가운데 사이가 지름 × LINK_RATIO 아래면 이어진 것
+    const LINK_RATIO = 1.15;
+    const STATUS_ON = 'field on · {c} chains · longest chain {l} droplets';
+    const STATUS_OFF = 'field off: scattering · {c} chains · longest chain {l} droplets';
+    let drops = [];
+    let fieldOn = 0;
+    let fieldAngle = 0;
+    let chains = 0;
+    let longest = 1;
+    let links = [];
+    function controlPoint() { return [W / 2 + Math.cos(fieldAngle) * 80, H / 2 + Math.sin(fieldAngle) * 80]; }
+    function scatter() {
+        const rng = makeRng(DROP_SEED);
+        drops = [];
+        let guard = 0;
+        while (drops.length < DROP_COUNT && guard < 20000) {
+            guard += 1;
+            const x = MARGIN_PX + rng() * (W - 2 * MARGIN_PX);
+            const y = MARGIN_PX + rng() * (H - 2 * MARGIN_PX);
+            let ok = true;
+            for (const d of drops) {
+                if (Math.hypot(d.x - x, d.y - y) < DROP_R_PX * 4.4) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                drops.push({ x: x, y: y, fx: 0, fy: 0 });
+            }
+        }
+    }
+    // 장 Field(0~1)와 방향 — 켜질 때·꺼질 때 0.15초에 걸쳐 오르내린다
+    function fieldState(t) {
+        if (handsOn) {
+            fieldOn = 1;
+            fieldAngle = Math.atan2(userY - H / 2, userX - W / 2);
+            return;
+        }
+        const on = t - FIELD_ON_AT_S;
+        fieldOn = on < 0 ? 0 : (on < FIELD_ON_S ? smooth(on / 0.15) : 1 - smooth((on - FIELD_ON_S) / 0.15));
+        fieldAngle = Math.sin(t / LOOP_S * TAU) * FIELD_TURN;
+    }
+    // 공간 격자 — 칸 번호마다 방울 번호 목록
+    let cells = [];
+    const CELL_COLS = Math.ceil(W / CUTOFF_PX);
+    const CELL_ROWS = Math.ceil(H / CUTOFF_PX);
+    function bucket() {
+        cells = [];
+        for (let k = 0; k < CELL_COLS * CELL_ROWS; k += 1) {
+            cells.push([]);
+        }
+        drops.forEach(function (d, i) {
+            const cx = clamp(Math.floor(d.x / CUTOFF_PX), 0, CELL_COLS - 1);
+            const cy = clamp(Math.floor(d.y / CUTOFF_PX), 0, CELL_ROWS - 1);
+            cells[cy * CELL_COLS + cx].push(i);
+        });
+    }
+    let pairChecks = 0;
+    function forces() {
+        const fx = Math.cos(fieldAngle);
+        const fy = Math.sin(fieldAngle);
+        const dia = DROP_R_PX * 2;
+        pairChecks = 0;
+        for (const d of drops) {
+            d.fx = 0;
+            d.fy = 0;
+        }
+        for (let cy = 0; cy < CELL_ROWS; cy += 1) {
+            for (let cx = 0; cx < CELL_COLS; cx += 1) {
+                for (const i of cells[cy * CELL_COLS + cx]) {
+                    for (let oy = -1; oy <= 1; oy += 1) {
+                        for (let ox = -1; ox <= 1; ox += 1) {
+                            const nx = cx + ox;
+                            const ny = cy + oy;
+                            if (nx < 0 || ny < 0 || nx >= CELL_COLS || ny >= CELL_ROWS) {
+                                continue;
+                            }
+                            for (const j of cells[ny * CELL_COLS + nx]) {
+                                if (j <= i) {
+                                    continue;
+                                }
+                                pairChecks += 1;
+                                const a = drops[i];
+                                const b = drops[j];
+                                const dx = a.x - b.x;
+                                const dy = a.y - b.y;
+                                const r = Math.hypot(dx, dy);
+                                if (r > CUTOFF_PX || r < 1e-6) {
+                                    continue;
+                                }
+                                const ux = dx / r;
+                                const uy = dy / r;
+                                let px = 0;
+                                let py = 0;
+                                if (fieldOn > 0) {
+                                    const cos = ux * fx + uy * fy;
+                                    const sin = fx * uy - fy * ux;
+                                    const rho = Math.max(r, dia * 0.9) / dia;
+                                    const k = CHAIN_GAIN * fieldOn / (rho * rho * rho * rho);
+                                    const radial = -k * (3 * cos * cos - 1);
+                                    const turn = -k * 2 * sin * cos;
+                                    px += radial * ux + turn * -uy;
+                                    py += radial * uy + turn * ux;
+                                }
+                                if (fieldOn < 1) {
+                                    const s = SCATTER_GAIN * (1 - fieldOn) * (1 - r / CUTOFF_PX);
+                                    px += s * ux;
+                                    py += s * uy;
+                                }
+                                a.fx += px;
+                                a.fy += py;
+                                b.fx -= px;
+                                b.fy -= py;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    function wall(d) {
+        if (d.x < MARGIN_PX) {
+            d.fx += WALL_PUSH * (MARGIN_PX - d.x);
+        }
+        if (d.x > W - MARGIN_PX) {
+            d.fx -= WALL_PUSH * (d.x - W + MARGIN_PX);
+        }
+        if (d.y < MARGIN_PX) {
+            d.fy += WALL_PUSH * (MARGIN_PX - d.y);
+        }
+        if (d.y > H - MARGIN_PX) {
+            d.fy -= WALL_PUSH * (d.y - H + MARGIN_PX);
+        }
+    }
+    // 사슬 Field — 가까운 짝을 대표 하나로 묶어 묶음 크기를 센다(2개 이상인 묶음 = 사슬)
+    function countChains() {
+        const parent = drops.map(function (d, i) { void d; return i; });
+        const find = function (i) { while (parent[i] !== i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        } return i; };
+        links = [];
+        const lim = DROP_R_PX * 2 * LINK_RATIO;
+        for (let i = 0; i < drops.length; i += 1) {
+            for (let j = i + 1; j < drops.length; j += 1) {
+                if (Math.hypot(drops[i].x - drops[j].x, drops[i].y - drops[j].y) < lim) {
+                    links.push(i, j);
+                    parent[find(i)] = find(j);
+                }
+            }
+        }
+        const size = {};
+        for (let i = 0; i < drops.length; i += 1) {
+            const r = find(i);
+            size[r] = (size[r] || 0) + 1;
+        }
+        chains = 0;
+        longest = 1;
+        for (const k in size) {
+            if (size[k] > 1) {
+                chains += 1;
+            }
+            longest = Math.max(longest, size[k]);
+        }
+    }
+    // 겹친 짝 밀어 놓기 — 같은 공간 격자로 이웃만
+    function separate() {
+        bucket();
+        const dia = DROP_R_PX * 2;
+        for (let cy = 0; cy < CELL_ROWS; cy += 1) {
+            for (let cx = 0; cx < CELL_COLS; cx += 1) {
+                for (const i of cells[cy * CELL_COLS + cx]) {
+                    for (let oy = -1; oy <= 1; oy += 1) {
+                        for (let ox = -1; ox <= 1; ox += 1) {
+                            const nx = cx + ox;
+                            const ny = cy + oy;
+                            if (nx < 0 || ny < 0 || nx >= CELL_COLS || ny >= CELL_ROWS) {
+                                continue;
+                            }
+                            for (const j of cells[ny * CELL_COLS + nx]) {
+                                if (j <= i) {
+                                    continue;
+                                }
+                                const a = drops[i];
+                                const b = drops[j];
+                                const dx = a.x - b.x;
+                                const dy = a.y - b.y;
+                                const r = Math.hypot(dx, dy);
+                                if (r >= dia || r < 1e-6) {
+                                    continue;
+                                }
+                                const push = (dia - r) / 2;
+                                a.x += dx / r * push;
+                                a.y += dy / r * push;
+                                b.x -= dx / r * push;
+                                b.y -= dy / r * push;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const SUBSTEP_S = 1 / 120;
+    function step(dt) {
+        let left = dt;
+        while (left > 1e-9) {
+            const h = Math.min(SUBSTEP_S, left);
+            bucket();
+            forces();
+            for (const d of drops) {
+                wall(d);
+                let vx = d.fx * MOBILITY;
+                let vy = d.fy * MOBILITY;
+                const v = Math.hypot(vx, vy);
+                if (v > MAX_SPEED) {
+                    vx *= MAX_SPEED / v;
+                    vy *= MAX_SPEED / v;
+                }
+                d.x += vx * h;
+                d.y += vy * h;
+            }
+            for (let p = 0; p < CONTACT_PASSES; p += 1) {
+                separate();
+            }
+            left -= h;
+        }
+    }
+    function report() {
+        countChains();
+        simStatus = fill(fieldOn > 0.5 ? STATUS_ON : STATUS_OFF, { c: chains, l: longest });
+    }
+    function reset() {
+        scatter();
+        fieldState(0);
+        report();
+    }
+    function update(dt) {
+        fieldState(sceneT);
+        step(dt);
+        report();
+    }
+    // 움직임 줄이기 — 장을 켠 뒤 1.6초 동안 사슬이 맺힌 모습을 한 번에 계산해 멈춘다
+    function restPose() { sceneT = 1.8; }
+    // 손댄 뒤에는 새 장 방향으로 1초 동안을 한 번에 계산해 멈춘다
+    function settleNow() {
+        if (!handsOn) {
+            scatter();
+            for (let t = 0; t < sceneT; t += 1 / 30) {
+                fieldState(t);
+                step(1 / 30);
+            }
+        }
+        else {
+            fieldState(sceneT);
+            for (let k = 0; k < 30; k += 1) {
+                step(1 / 30);
+            }
+        }
+        fieldState(sceneT);
+        report();
+    }
+    // ── 06 그리기 — 장이 켜진 만큼 진해지는 Field 줄무늬, 잇닿은 방울 사이의 액체 다리, 검은 방울과 작은 반사 ──
+    const STRIPE_GAP_PX = 22;
+    const LABEL_FIELD_DIR = 'Field';
+    function drawStripes() {
+        if (fieldOn <= 0.01) {
+            return;
+        }
+        ctx.save();
+        ctx.translate(W / 2, H / 2);
+        ctx.rotate(fieldAngle);
+        for (let y = -300; y <= 300; y += STRIPE_GAP_PX) {
+            line(-320, y, 320, y, 1.4, LAVENDER, 0.75 * fieldOn);
+        }
+        ctx.restore();
+    }
+    function drawArrow() {
+        const x = 34;
+        const y = 30;
+        const c = Math.cos(fieldAngle);
+        const s = Math.sin(fieldAngle);
+        fillRound(12, 14, 96, 32, 10, CREAM, 0.94);
+        const a = 0.35 + 0.65 * fieldOn;
+        line(x - c * 14, y - s * 14, x + c * 14, y + s * 14, 2.4, VIOLET_DEEP, a);
+        line(x + c * 14, y + s * 14, x + c * 7 - s * 5, y + s * 7 + c * 5, 2.4, VIOLET_DEEP, a);
+        line(x + c * 14, y + s * 14, x + c * 7 + s * 5, y + s * 7 - c * 5, 2.4, VIOLET_DEEP, a);
+        label(LABEL_FIELD_DIR, 56, y, INK, 1, 10, 700, 'left');
+    }
+    function draw() {
+        clearStage(DISH);
+        drawStripes();
+        ctx.lineCap = 'round';
+        for (let m = 0; m < links.length; m += 2) {
+            const a = drops[links[m]];
+            const b = drops[links[m + 1]];
+            line(a.x, a.y, b.x, b.y, DROP_R_PX * 1.3, FLUID, 1);
+        }
+        for (const d of drops) {
+            disc(d.x, d.y, DROP_R_PX, FLUID, 1);
+            disc(d.x - DROP_R_PX * 0.35, d.y - DROP_R_PX * 0.4, DROP_R_PX * 0.32, LIGHT_PINK, 0.9);
+            disc(d.x + DROP_R_PX * 0.4, d.y + DROP_R_PX * 0.35, DROP_R_PX * 0.18, LIGHT_SKY, 0.8);
+        }
+        drawArrow();
+    }
+    // 상태 줄 — 글자가 바뀔 때만 고친다
+    let shownStatus = '';
+    function pushStatus() {
+        if (!statusEl || simStatus === shownStatus) {
+            return;
+        }
+        shownStatus = simStatus;
+        statusEl.textContent = simStatus;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 처음 손대면 — 조절점을 지금 자석 자리에서 시작해 튀지 않게 하고, 정해 둔 길과 시연 되감기를 멈춘다
+    function takeOver() {
+        wake();
+        if (handsOn) {
+            return;
+        }
+        const c = controlPoint();
+        userX = c[0];
+        userY = c[1];
+        handsOn = true;
+    }
+    // 입력 뒤 — 움직임 줄이기면 스프링 없이 바로 그 자리에. 루프가 멈춰 있으면(움직임 줄이기·Pause) 화면과 상태 줄을 한 번 바로 고친다
+    function afterInput() {
+        if (still) {
+            settleNow();
+        }
+        if (still || paused) {
+            draw();
+            pushStatus();
+        }
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 장면 시계를 dt 만큼 — 시연 중에는 한 바퀴(LOOP_S)를 넘으면 처음 상태로 되돌려 다시 시연한다
+    function advance(dt) {
+        sceneT += dt;
+        if (!handsOn && sceneT >= LOOP_S) {
+            sceneT -= LOOP_S;
+            reset();
+        }
+        update(dt);
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw();
+        pushStatus();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프를 돌리지 않고 정해 둔 세기의 멈춘 한 장만 그린다. 사람이 이미 만졌으면 그 자리 그대로
+    function showRest() {
+        stopLoop();
+        if (!handsOn) {
+            sceneT = 0;
+            reset();
+            restPose();
+        }
+        settleNow();
+        draw();
+        pushStatus();
+    }
+    function play() {
+        if (!handsOn) {
+            sceneT = 0;
+            reset();
+        }
+        draw();
+        pushStatus();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 루프를 멈추고, 돌아오면 시계를 다시 맞춰 시작한다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 멈춘 한 장으로, 꺼지면 시연을 처음부터
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    // 창 크기나 화소 배율이 바뀌면 — 캔버스 내부 크기를 새 배율로 다시
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw();
+    }, { signal: off.signal });
+    bindInput(off.signal);
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
