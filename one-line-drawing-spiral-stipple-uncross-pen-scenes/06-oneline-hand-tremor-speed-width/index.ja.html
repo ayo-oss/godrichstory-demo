@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手の震えが混じり、速さで太さが変わるボールペンの線 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld is-demo" id="ld">
+  <canvas class="ld__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="二重のステッチで縁取ったハートを、手の震えが混じるボールペンの線が速い所は細く角は太く描く絵。"></canvas>
+  <button class="ld__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("ld");
+    if (!root) return;
+    // 판 좌표 — 캔버스 안은 늘 480×300. 화면에 보이는 크기와 상관없이 계산은 이 좌표로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 같은 시드면 같은 점 배치·같은 떨림이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 1차원 값 노이즈 — 정수 자리마다 시드로 정한 값(-1~1)을 두고 사이는 부드러운 보간. 손 떨림에 쓴다
+    const NOISE_TABLE = new Float32Array(256);
+    const noiseRng = makeRng(483);
+    for (let i = 0; i < 256; i += 1) {
+        NOISE_TABLE[i] = noiseRng() * 2 - 1;
+    }
+    function smoothNoise(x) {
+        const i = Math.floor(x);
+        const f = x - i;
+        const u = f * f * (3 - 2 * f);
+        return lerp(NOISE_TABLE[i & 255], NOISE_TABLE[(i + 1) & 255], u);
+    }
+    // 도형 거리 — 타원 안이면 음수, 밖이면 양수(px 에 가까운 근사). 원본 그림을 코드로 그릴 때 쓴다
+    function ellipseDist(x, y, cx, cy, rx, ry) {
+        const dx = (x - cx) / rx;
+        const dy = (y - cy) / ry;
+        return (Math.sqrt(dx * dx + dy * dy) - 1) * Math.min(rx, ry);
+    }
+    // 선분까지의 거리(px)
+    function segmentDist(x, y, ax, ay, bx, by) {
+        const vx = bx - ax;
+        const vy = by - ay;
+        const k = clamp(((x - ax) * vx + (y - ay) * vy) / Math.max(1e-9, vx * vx + vy * vy), 0, 1);
+        const ex = x - (ax + vx * k);
+        const ey = y - (ay + vy * k);
+        return Math.sqrt(ex * ex + ey * ey);
+    }
+    // 거리 → 칠한 정도 0~1. 경계 1px 를 부드럽게 넘긴다
+    function fillOf(dist) { return clamp(0.5 - dist, 0, 1); }
+    // 두 점 사이 거리
+    function dist2(ax, ay, bx, by) {
+        const dx = ax - bx;
+        const dy = ay - by;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    // 꺾은선 길이 — xs·ys 를 order 순서로 이었을 때(닫지 않음)
+    function pathLength(xs, ys, order, n) {
+        let sum = 0;
+        for (let i = 1; i < n; i += 1) {
+            sum += dist2(xs[order[i - 1]], ys[order[i - 1]], xs[order[i]], ys[order[i]]);
+        }
+        return sum;
+    }
+    // 파스텔 팔레트 — 미색 종이 바탕 위에 진한 잉크 선. 잉크·종이는 데모 토큰($subject-ink·$subject-cream)과 같은 값
+    const PAPER = [255, 247, 230];
+    const INK = [23, 20, 26];
+    const CORAL = [244, 166, 150];
+    const LAVENDER = [192, 176, 236];
+    const BUTTER = [246, 224, 150];
+    const SAGE = [164, 208, 172];
+    const PINK = [244, 182, 204];
+    const SKY = [164, 206, 236];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 한 장면의 순환 — 그리기 → 머묾 → 지움. 지움이 끝나면 처음부터 다시
+    function cyclePhase(t, drawTime, holdTime) {
+        // 0~1 은 그리는 중, 1~2 는 머무는 중, 2~3 은 지우는 중
+        if (t < drawTime) {
+            return t / drawTime;
+        }
+        if (t < drawTime + holdTime) {
+            return 1 + (t - drawTime) / holdTime;
+        }
+        return 2 + (t - drawTime - holdTime) / ERASE_TIME;
+    }
+    // 지우기 시간(초) — 모든 장면이 같은 빠르기로 종이색으로 돌아간다
+    const ERASE_TIME = 1;
+    // 곡선 공용 — 점 사이를 「이웃 네 점으로 정하는 3차 곡선」(조각마다 가운데 두 점을 지나고 바깥 두 점으로 기울기를 정한다)으로 메우고, 짧은 마디로 쪼개 누적 길이 표를 만든다
+    // 3차 조각 — 두 끝점 p1·p2 와 그 자리의 접선 m1·m2 로 정하는 곡선. t 는 0~1
+    function cubicPiece(p1, p2, m1, m2, t) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * p1 + (t3 - 2 * t2 + t) * m1 + (-2 * t3 + 3 * t2) * p2 + (t3 - t2) * m2;
+    }
+    // 이웃 접선 — 점 i 의 접선 = (다음 점 − 앞 점) ÷ 2. 이음매 양쪽 조각이 같은 접선을 쓰므로 꺾이지 않는다
+    function neighborTangents(px) {
+        const n = px.length;
+        const m = [];
+        for (let i = 0; i < n; i += 1) {
+            m.push((px[Math.min(n - 1, i + 1)] - px[Math.max(0, i - 1)]) / 2);
+        }
+        return m;
+    }
+    // 조각마다 CURVE_STEPS 마디 — 마디 끝마다 누적 길이를 적어 둔다. 길이 표의 칸 수 = 조각 수 × CURVE_STEPS + 1
+    const CURVE_STEPS = 16;
+    function buildCurve(px, py, mx, my) {
+        const xs = [px[0]];
+        const ys = [py[0]];
+        const lens = [0];
+        let total = 0;
+        for (let i = 0; i + 1 < px.length; i += 1) {
+            for (let k = 1; k <= CURVE_STEPS; k += 1) {
+                const t = k / CURVE_STEPS;
+                const x = cubicPiece(px[i], px[i + 1], mx[i], mx[i + 1], t);
+                const y = cubicPiece(py[i], py[i + 1], my[i], my[i + 1], t);
+                total += dist2(x, y, xs[xs.length - 1], ys[ys.length - 1]);
+                xs.push(x);
+                ys.push(y);
+                lens.push(total);
+            }
+        }
+        return { xs: Float32Array.from(xs), ys: Float32Array.from(ys), lens: Float32Array.from(lens), total: total, seams: px.length - 2 };
+    }
+    // 지나는 점들로 곡선 — 이웃 접선을 붙여 buildCurve
+    function curveThrough(px, py) { return buildCurve(px, py, neighborTangents(px), neighborTangents(py)); }
+    // 꺾은선 그대로 — 곡선으로 메우지 않고 점 사이를 곧게 잇되 같은 누적 길이 표를 만든다
+    function polylineCurve(px, py) {
+        const lens = [0];
+        let total = 0;
+        for (let i = 1; i < px.length; i += 1) {
+            total += dist2(px[i], py[i], px[i - 1], py[i - 1]);
+            lens.push(total);
+        }
+        return { xs: Float32Array.from(px), ys: Float32Array.from(py), lens: Float32Array.from(lens), total: total, seams: 0 };
+    }
+    // 길이 s 자리 — 누적 길이 표를 이진 탐색해 s 가 든 마디를 찾고, 그 마디 안에서 비율만큼. 소수 꼭짓점 번호를 돌려준다
+    function indexAtLength(c, s) {
+        if (s <= 0) {
+            return 0;
+        }
+        if (s >= c.total) {
+            return c.lens.length - 1;
+        }
+        let lo = 0;
+        let hi = c.lens.length - 1;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (c.lens[mid] < s) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return lo + (s - c.lens[lo]) / Math.max(1e-9, c.lens[hi] - c.lens[lo]);
+    }
+    // 소수 꼭짓점 번호 → 좌표
+    function pointAtIndex(c, f) {
+        const i = Math.min(Math.floor(f), c.xs.length - 2);
+        const k = f - i;
+        return [lerp(c.xs[i], c.xs[i + 1], k), lerp(c.ys[i], c.ys[i + 1], k)];
+    }
+    // 볼펜 잉크 공용 — 곡선의 법선 방향으로 느린 노이즈를 얹어 손 떨림을 주고, 굽은 곳에서 펜이 느려지게 한 뒤
+    // 굵기 w = PEN_WIDTH / (1 + WIDTH_K·v) 로 빠른 곳은 가늘게, 느린 곳은 굵게
+    // 떨림 한 물결의 길이(px) — 짧을수록 잘게 떤다
+    const TREMOR_WAVE = 34;
+    const PEN_FAST = 560;
+    // 모서리 감속 — 꺾임(라디안/px)이 클수록 v = PEN_FAST / (1 + CORNER_SLOW·꺾임)
+    const CORNER_SLOW = 60;
+    // 감속을 미리 — 앞뒤 이 길이(px) 안에서 가장 큰 꺾임으로 느려진다. 모서리에 닿기 전에 머뭇거린다
+    const CORNER_LOOK = 14;
+    // 가장 느린 빠르기(px/초) — 뾰족한 끝에서 꺾임이 한없이 커져도 펜이 멈춰 서지 않게 바닥을 둔다
+    const PEN_SLOWEST = 70;
+    const PEN_WIDTH = 6;
+    const WIDTH_K = 0.003;
+    // 꼭짓점마다 꺾임(방향 변화 ÷ 마디 길이) → 감속 → 빠르기 v → 굵기, 그리고 지나는 시각 표(∫ ds / v)
+    function inkLine(c, tremor) {
+        const n = c.xs.length;
+        const bend = new Float32Array(n);
+        for (let i = 1; i < n - 1; i += 1) {
+            const a1 = Math.atan2(c.ys[i] - c.ys[i - 1], c.xs[i] - c.xs[i - 1]);
+            const a2 = Math.atan2(c.ys[i + 1] - c.ys[i], c.xs[i + 1] - c.xs[i]);
+            let da = a2 - a1;
+            while (da > Math.PI) {
+                da -= TAU;
+            }
+            while (da < -Math.PI) {
+                da += TAU;
+            }
+            bend[i] = Math.abs(da) / Math.max(1e-6, c.lens[i + 1] - c.lens[i - 1]) * 2;
+        }
+        const xs = new Float32Array(n);
+        const ys = new Float32Array(n);
+        const widths = new Float32Array(n);
+        const times = new Float32Array(n);
+        const speeds = new Float32Array(n);
+        let lo = 0;
+        for (let i = 0; i < n; i += 1) {
+            // 앞뒤 CORNER_LOOK 안의 가장 큰 꺾임
+            while (c.lens[i] - c.lens[lo] > CORNER_LOOK) {
+                lo += 1;
+            }
+            let peak = 0;
+            for (let j = lo; j < n && c.lens[j] - c.lens[i] <= CORNER_LOOK; j += 1) {
+                peak = Math.max(peak, bend[j]);
+            }
+            const v = Math.max(PEN_SLOWEST, PEN_FAST / (1 + CORNER_SLOW * peak));
+            speeds[i] = v;
+            widths[i] = PEN_WIDTH / (1 + WIDTH_K * v);
+            if (i > 0) {
+                times[i] = times[i - 1] + (c.lens[i] - c.lens[i - 1]) / ((v + speeds[i - 1]) / 2);
+            }
+            // 법선 = 진행 방향을 90° 돌린 것. 두 겹 노이즈(긴 물결 + 짧은 물결 절반 세기)를 1.5 로 나눠 −1~1 안팎으로
+            const k0 = Math.max(0, i - 1);
+            const k1 = Math.min(n - 1, i + 1);
+            const tx = c.xs[k1] - c.xs[k0];
+            const ty = c.ys[k1] - c.ys[k0];
+            const tl = Math.max(1e-6, Math.sqrt(tx * tx + ty * ty));
+            const s = c.lens[i];
+            const wob = tremor * (smoothNoise(s / TREMOR_WAVE) + 0.5 * smoothNoise(s / (TREMOR_WAVE / 2.3) + 40)) / 1.5;
+            xs[i] = c.xs[i] - ty / tl * wob;
+            ys[i] = c.ys[i] + tx / tl * wob;
+        }
+        return { xs: xs, ys: ys, widths: widths, times: times, speeds: speeds, total: times[n - 1] };
+    }
+    // 시각 → 소수 꼭짓점 번호 — 지나는 시각 표를 이진 탐색
+    function indexAtTime(ink, t) {
+        if (t <= 0) {
+            return 0;
+        }
+        if (t >= ink.total) {
+            return ink.times.length - 1;
+        }
+        let lo = 0;
+        let hi = ink.times.length - 1;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1;
+            if (ink.times[mid] < t) {
+                lo = mid;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return lo + (t - ink.times[lo]) / Math.max(1e-9, ink.times[hi] - ink.times[lo]);
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 미색 종이 — 위는 조금 밝고 아래는 조금 따뜻하게
+    function clearPaper() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(PAPER, 1));
+        g.addColorStop(1, rgba([250, 238, 216], 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 상태 줄 — 같은 글자면 DOM 을 건드리지 않는다
+    let statusText = '';
+    function setStatus(s) {
+        if (!statusEl || s === statusText) {
+            return;
+        }
+        statusText = s;
+        statusEl.textContent = s;
+    }
+    // 꺾은선 — xs·ys 의 0 번부터 count 개(소수 부분은 마지막 마디를 그만큼만)를 한 번에 긋는다
+    function strokeRun(xs, ys, count, width, color, alpha) {
+        const whole = Math.floor(count);
+        if (whole < 1) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(xs[0], ys[0]);
+        const last = Math.min(whole, xs.length - 1);
+        for (let i = 1; i <= last; i += 1) {
+            ctx.lineTo(xs[i], ys[i]);
+        }
+        const f = count - whole;
+        if (f > 0 && whole + 1 < xs.length) {
+            ctx.lineTo(lerp(xs[whole], xs[whole + 1], f), lerp(ys[whole], ys[whole + 1], f));
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(color, alpha);
+        ctx.stroke();
+    }
+    // 꺾은선 한 토막 — from 번째 꼭짓점부터 to 번째까지(to 의 소수 부분은 마지막 마디를 그만큼만)
+    function strokeSpan(xs, ys, from, to, width, color, alpha) {
+        const end = Math.min(Math.floor(to), xs.length - 1);
+        if (end <= from) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(xs[from], ys[from]);
+        for (let i = from + 1; i <= end; i += 1) {
+            ctx.lineTo(xs[i], ys[i]);
+        }
+        const f = to - Math.floor(to);
+        if (f > 0 && end + 1 < xs.length) {
+            ctx.lineTo(lerp(xs[end], xs[end + 1], f), lerp(ys[end], ys[end + 1], f));
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(color, alpha);
+        ctx.stroke();
+    }
+    // 펜촉 — 지금 긋고 있는 자리. 잉크 점 둘레에 파스텔 고리
+    function drawNib(x, y, ring) {
+        ctx.beginPath();
+        ctx.arc(x, y, 7, 0, TAU);
+        ctx.fillStyle = rgba(ring, 0.75);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x, y, 2.6, 0, TAU);
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.fill();
+    }
+    // 원본 그림 판 — 어둡기 함수(0~1)를 칸마다 칠한 화면 밖 캔버스. 펜이 그리기 전에 옅게 깔아 무엇을 따라 그리는지 보인다
+    function makeSourceLayer(dark, tint) {
+        const layer = document.createElement('canvas');
+        layer.width = W;
+        layer.height = H;
+        const lc = layer.getContext('2d');
+        if (!lc) {
+            return layer;
+        }
+        const img = lc.createImageData(W, H);
+        for (let y = 0; y < H; y += 1) {
+            for (let x = 0; x < W; x += 1) {
+                const d = dark(x + 0.5, y + 0.5);
+                const o = (y * W + x) * 4;
+                img.data[o] = Math.round(lerp(PAPER[0], tint[0], d));
+                img.data[o + 1] = Math.round(lerp(PAPER[1], tint[1], d));
+                img.data[o + 2] = Math.round(lerp(PAPER[2], tint[2], d));
+                img.data[o + 3] = 255;
+            }
+        }
+        lc.putImageData(img, 0, 0);
+        return layer;
+    }
+    // 지우는 중이면 그림 전체를 종이색으로 덮어 간다 — phase 2~3 에서 덮개 불투명도 0→1
+    function eraseVeil(phase) {
+        if (phase <= 2) {
+            return;
+        }
+        ctx.fillStyle = rgba(PAPER, smooth(phase - 2));
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 굵기 칸 — 굵기를 WIDTH_BINS 칸으로 나눠 칸마다 경로 하나로 긋는다(마디마다 stroke 를 부르지 않게)
+    const WIDTH_BINS = 8;
+    function drawInk(ink, upto, color, scale) {
+        const last = Math.min(Math.floor(upto), ink.xs.length - 1);
+        let wMin = 1e9;
+        let wMax = 0;
+        for (let i = 0; i < ink.widths.length; i += 1) {
+            wMin = Math.min(wMin, ink.widths[i]);
+            wMax = Math.max(wMax, ink.widths[i]);
+        }
+        for (let b = 0; b < WIDTH_BINS; b += 1) {
+            ctx.beginPath();
+            let any = false;
+            for (let i = 1; i <= last; i += 1) {
+                const w = (ink.widths[i] + ink.widths[i - 1]) / 2;
+                if (Math.min(WIDTH_BINS - 1, Math.floor((w - wMin) / Math.max(1e-6, wMax - wMin) * WIDTH_BINS)) !== b) {
+                    continue;
+                }
+                ctx.moveTo(ink.xs[i - 1], ink.ys[i - 1]);
+                ctx.lineTo(ink.xs[i], ink.ys[i]);
+                any = true;
+            }
+            if (!any) {
+                continue;
+            }
+            ctx.lineWidth = scale * lerp(wMin, wMax, (b + 0.5) / WIDTH_BINS);
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = rgba(color, 1);
+            ctx.stroke();
+        }
+    }
+    // 06 볼펜 선 — 두 겹 바느질 하트를 한 줄로. 떨림 폭은 TREMOR_AMP(px), 굵기와 감속은 잉크 공용(inkLine)
+    const TREMOR_AMP = 1.2;
+    const HOLD_TIME = 2;
+    // 하트 — x = 16 sin³t, y = −(13 cos t − 5 cos 2t − 2 cos 3t − cos 4t). scale 배로 키워 (240, 136) 에 놓는다
+    function heartPoints(scale, count, reverse) {
+        const px = [];
+        const py = [];
+        for (let k = 0; k <= count; k += 1) {
+            const t = (reverse ? count - k : k) / count * TAU;
+            const s = Math.sin(t);
+            px.push(240 + scale * 16 * s * s * s);
+            py.push(136 - scale * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)));
+        }
+        return [px, py];
+    }
+    // 바깥 하트 한 바퀴 → 안쪽으로 한 걸음 → 안쪽 하트를 거꾸로 한 바퀴. 펜을 떼지 않는다.
+    // 안쪽 하트는 바깥 점을 법선 방향 안쪽으로 STITCH_GAP 만큼 민 것 — 크기만 줄이면 뾰족한 곳에서 두 줄이 붙는다
+    const HEART_SCALE = 8.6;
+    const STITCH_GAP = 7;
+    function stitchedHeart() {
+        const outer = heartPoints(HEART_SCALE, 40, false);
+        const ix = [];
+        const iy = [];
+        const n = outer[0].length - 1;
+        for (let k = n; k >= 0; k -= 1) {
+            const a = (k + n - 1) % n;
+            const b = (k + 1) % n;
+            const tx = outer[0][b] - outer[0][a];
+            const ty = outer[1][b] - outer[1][a];
+            const tl = Math.max(1e-6, Math.sqrt(tx * tx + ty * ty));
+            let nx = -ty / tl;
+            let ny = tx / tl;
+            // 안쪽 = 하트 가운데(240, 150) 쪽으로 가까워지는 법선
+            if (dist2(outer[0][k] + nx, outer[1][k] + ny, 240, 150) > dist2(outer[0][k], outer[1][k], 240, 150)) {
+                nx = -nx;
+                ny = -ny;
+            }
+            ix.push(outer[0][k] + nx * STITCH_GAP);
+            iy.push(outer[1][k] + ny * STITCH_GAP);
+        }
+        return [outer[0].concat(ix), outer[1].concat(iy)];
+    }
+    const heartSrc = stitchedHeart();
+    const heart06 = curveThrough(heartSrc[0], heartSrc[1]);
+    const ink06 = inkLine(heart06, TREMOR_AMP);
+    const DRAW_TIME = ink06.total;
+    const CYCLE = DRAW_TIME + HOLD_TIME + ERASE_TIME;
+    // 첫 화면이 비지 않게 바깥 하트를 조금 그린 자리(0.8초)에서 시작한다 — 순환이 돌면 처음부터 다시 그린다
+    const START_AT = 0.8;
+    const FINISH_T = DRAW_TIME + 0.3;
+    let inkIndex = 0;
+    function reset() { inkIndex = 0; }
+    function update(t, dt) { inkIndex = indexAtTime(ink06, t); }
+    function draw(t) {
+        const phase = cyclePhase(t, DRAW_TIME, HOLD_TIME);
+        clearPaper();
+        // 펠트 조각 — 하트 안을 옅은 분홍으로. 그리는 비율만큼 차오른다
+        ctx.save();
+        ctx.globalAlpha = 0.55 * smooth(Math.min(1, phase) * 1.4);
+        ctx.beginPath();
+        for (let i = 0; i <= 40; i += 1) {
+            if (i === 0) {
+                ctx.moveTo(heartSrc[0][i], heartSrc[1][i]);
+            }
+            else {
+                ctx.lineTo(heartSrc[0][i], heartSrc[1][i]);
+            }
+        }
+        ctx.fillStyle = rgba(PINK, 1);
+        ctx.fill();
+        ctx.restore();
+        // 볼펜 잉크는 남색에 가까운 잉크색 — 바탕 대비를 위해 글자용 잉크와 같은 명도
+        drawInk(ink06, inkIndex, [34, 36, 78], 1);
+        if (phase < 1) {
+            const i = Math.min(Math.floor(inkIndex), ink06.xs.length - 1);
+            drawNib(ink06.xs[i], ink06.ys[i], SKY);
+        }
+        eraseVeil(phase);
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 앞당겨 돌리기 걸음(초) — 시작 자리(START_AT)나 완성 판(FINISH_T)까지 1/60초씩 계산만 하고 그리지 않는다
+    const SKIP_STEP = 1 / 60;
+    // 장면 시계(초) — 순환 하나 안에서의 자리. CYCLE 을 넘으면 0 으로 돌아가 처음부터 다시 그린다
+    let cycleT = 0;
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        const live = root.querySelector('[aria-live]');
+        if (live) {
+            live.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 시계를 to 초까지 계산만 하고 넘긴다
+    function skipTo(to) {
+        while (cycleT + SKIP_STEP <= to) {
+            cycleT += SKIP_STEP;
+            update(cycleT, SKIP_STEP);
+        }
+    }
+    function advance(dt) {
+        cycleT += dt;
+        if (cycleT >= CYCLE) {
+            cycleT = 0;
+            reset();
+        }
+        update(cycleT, dt);
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw(cycleT);
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 다 그려진 한 장(FINISH_T)만 그린다
+    function showFinished() {
+        stopLoop();
+        cycleT = 0;
+        reset();
+        skipTo(FINISH_T);
+        draw(cycleT);
+    }
+    function play() {
+        cycleT = 0;
+        reset();
+        skipTo(START_AT);
+        draw(cycleT);
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 루프를 멈추고, 돌아오면 시계를 다시 맞춰 이어 그린다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 완성 판으로 멈추고, 꺼지면 시연을 처음부터
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showFinished();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw(cycleT);
+    }, { signal: off.signal });
+    fitCanvas();
+    if (still) {
+        showFinished();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>

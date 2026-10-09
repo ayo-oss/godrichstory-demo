@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>엇갈린 두 구간을 뒤집어 풀어 가는 한 줄 경로 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ld is-demo" id="ld">
+  <canvas class="ld__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="가장 가까운 점부터 이은 배송 경로 한 줄이 엇갈린 곳을 하나씩 뒤집어 풀며 총 길이가 줄어드는 지도 그림."></canvas>
+  <p class="ld__status" data-role="status" aria-live="off">총 길이 계산 중</p>
+  <button class="ld__pause" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("ld");
+    if (!root) return;
+    // 판 좌표 — 캔버스 안은 늘 480×300. 화면에 보이는 크기와 상관없이 계산은 이 좌표로 한다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 같은 시드면 같은 점 배치·같은 떨림이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed) {
+        let s = seed >>> 0;
+        return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 1차원 값 노이즈 — 정수 자리마다 시드로 정한 값(-1~1)을 두고 사이는 부드러운 보간. 손 떨림에 쓴다
+    const NOISE_TABLE = new Float32Array(256);
+    const noiseRng = makeRng(483);
+    for (let i = 0; i < 256; i += 1) {
+        NOISE_TABLE[i] = noiseRng() * 2 - 1;
+    }
+    function smoothNoise(x) {
+        const i = Math.floor(x);
+        const f = x - i;
+        const u = f * f * (3 - 2 * f);
+        return lerp(NOISE_TABLE[i & 255], NOISE_TABLE[(i + 1) & 255], u);
+    }
+    // 도형 거리 — 타원 안이면 음수, 밖이면 양수(px 에 가까운 근사). 원본 그림을 코드로 그릴 때 쓴다
+    function ellipseDist(x, y, cx, cy, rx, ry) {
+        const dx = (x - cx) / rx;
+        const dy = (y - cy) / ry;
+        return (Math.sqrt(dx * dx + dy * dy) - 1) * Math.min(rx, ry);
+    }
+    // 선분까지의 거리(px)
+    function segmentDist(x, y, ax, ay, bx, by) {
+        const vx = bx - ax;
+        const vy = by - ay;
+        const k = clamp(((x - ax) * vx + (y - ay) * vy) / Math.max(1e-9, vx * vx + vy * vy), 0, 1);
+        const ex = x - (ax + vx * k);
+        const ey = y - (ay + vy * k);
+        return Math.sqrt(ex * ex + ey * ey);
+    }
+    // 거리 → 칠한 정도 0~1. 경계 1px 를 부드럽게 넘긴다
+    function fillOf(dist) { return clamp(0.5 - dist, 0, 1); }
+    // 두 점 사이 거리
+    function dist2(ax, ay, bx, by) {
+        const dx = ax - bx;
+        const dy = ay - by;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    // 꺾은선 길이 — xs·ys 를 order 순서로 이었을 때(닫지 않음)
+    function pathLength(xs, ys, order, n) {
+        let sum = 0;
+        for (let i = 1; i < n; i += 1) {
+            sum += dist2(xs[order[i - 1]], ys[order[i - 1]], xs[order[i]], ys[order[i]]);
+        }
+        return sum;
+    }
+    // 파스텔 팔레트 — 미색 종이 바탕 위에 진한 잉크 선. 잉크·종이는 데모 토큰($subject-ink·$subject-cream)과 같은 값
+    const PAPER = [255, 247, 230];
+    const INK = [23, 20, 26];
+    const CORAL = [244, 166, 150];
+    const LAVENDER = [192, 176, 236];
+    const BUTTER = [246, 224, 150];
+    const SAGE = [164, 208, 172];
+    const PINK = [244, 182, 204];
+    const SKY = [164, 206, 236];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 한 장면의 순환 — 그리기 → 머묾 → 지움. 지움이 끝나면 처음부터 다시
+    function cyclePhase(t, drawTime, holdTime) {
+        // 0~1 은 그리는 중, 1~2 는 머무는 중, 2~3 은 지우는 중
+        if (t < drawTime) {
+            return t / drawTime;
+        }
+        if (t < drawTime + holdTime) {
+            return 1 + (t - drawTime) / holdTime;
+        }
+        return 2 + (t - drawTime - holdTime) / ERASE_TIME;
+    }
+    // 지우기 시간(초) — 모든 장면이 같은 빠르기로 종이색으로 돌아간다
+    const ERASE_TIME = 1;
+    // 한 줄 경로 공용 — 가장 가까운 점부터 잇고, 엇갈린 두 구간을 찾아 그 사이 순서를 뒤집어 푼다
+    // 거리 비교 횟수 — 사실 측정이 점 수에 따라 일이 얼마나 커지는지 읽는다
+    let greedyChecks = 0;
+    // 가장 가까운 점부터 — start 에서 출발해 아직 안 간 점 가운데 가장 가까운 점으로 간다. 점 n 개면 비교가 약 n²/2 번
+    function greedyOrder(xs, ys, n, start) {
+        const order = new Int32Array(n);
+        const used = new Uint8Array(n);
+        let cur = start;
+        used[cur] = 1;
+        order[0] = cur;
+        for (let k = 1; k < n; k += 1) {
+            let best = -1;
+            let bestD = 1e18;
+            for (let i = 0; i < n; i += 1) {
+                if (used[i]) {
+                    continue;
+                }
+                greedyChecks += 1;
+                const dx = xs[i] - xs[cur];
+                const dy = ys[i] - ys[cur];
+                const dd = dx * dx + dy * dy;
+                if (dd < bestD) {
+                    bestD = dd;
+                    best = i;
+                }
+            }
+            used[best] = 1;
+            order[k] = best;
+            cur = best;
+        }
+        return order;
+    }
+    // 외적 — (b − a) × (c − a). 부호가 c 가 선분 ab 의 왼쪽(+)인지 오른쪽(−)인지 알려 준다
+    function cross3(ax, ay, bx, by, cx, cy) {
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
+    // 두 선분 ab·cd 가 엇갈리는가 — c·d 가 ab 의 서로 다른 쪽에 있고, a·b 도 cd 의 서로 다른 쪽에 있을 때
+    function segmentsCross(ax, ay, bx, by, cx, cy, dx, dy) {
+        const d1 = cross3(ax, ay, bx, by, cx, cy);
+        const d2 = cross3(ax, ay, bx, by, dx, dy);
+        const d3 = cross3(cx, cy, dx, dy, ax, ay);
+        const d4 = cross3(cx, cy, dx, dy, bx, by);
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    }
+    function makeUntangle(order) {
+        return { order: order, n: order.length, i: 0, j: 2, flips: 0, checks: 0, flipsThisPass: 0, done: order.length < 4, lastLo: -1, lastHi: -1 };
+    }
+    // tries 쌍까지만 견주고 돌아온다 — 점이 많아도 한 프레임이 이 일만큼만 붙잡힌다. 이번에 뒤집은 수를 돌려준다
+    function untangleStep(u, xs, ys, tries) {
+        let flipped = 0;
+        const o = u.order;
+        for (let k = 0; k < tries && !u.done; k += 1) {
+            const a = o[u.i];
+            const b = o[u.i + 1];
+            const c = o[u.j];
+            const d = o[u.j + 1];
+            u.checks += 1;
+            if (segmentsCross(xs[a], ys[a], xs[b], ys[b], xs[c], ys[c], xs[d], ys[d])) {
+                // i+1 부터 j 까지 순서를 거꾸로 — a→c, b→d 로 다시 이어져 엇갈림이 사라지고 길이가 줄어든다
+                let lo = u.i + 1;
+                let hi = u.j;
+                u.lastLo = lo;
+                u.lastHi = hi;
+                while (lo < hi) {
+                    const tmp = o[lo];
+                    o[lo] = o[hi];
+                    o[hi] = tmp;
+                    lo += 1;
+                    hi -= 1;
+                }
+                u.flips += 1;
+                u.flipsThisPass += 1;
+                flipped += 1;
+            }
+            u.j += 1;
+            if (u.j > u.n - 2) {
+                u.i += 1;
+                u.j = u.i + 2;
+                if (u.i > u.n - 4) {
+                    if (u.flipsThisPass === 0) {
+                        u.done = true;
+                    }
+                    u.i = 0;
+                    u.j = 2;
+                    u.flipsThisPass = 0;
+                }
+            }
+        }
+        return flipped;
+    }
+    // 엇갈린 구간 쌍의 수 — 모든 쌍을 견줘 센다(사실 측정·완성 판 확인용, 프레임마다 부르지 않는다)
+    function countCrossings(xs, ys, o) {
+        let c = 0;
+        for (let i = 0; i < o.length - 3; i += 1) {
+            for (let j = i + 2; j < o.length - 1; j += 1) {
+                if (segmentsCross(xs[o[i]], ys[o[i]], xs[o[i + 1]], ys[o[i + 1]], xs[o[j]], ys[o[j]], xs[o[j + 1]], ys[o[j + 1]])) {
+                    c += 1;
+                }
+            }
+        }
+        return c;
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // 미색 종이 — 위는 조금 밝고 아래는 조금 따뜻하게
+    function clearPaper() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(PAPER, 1));
+        g.addColorStop(1, rgba([250, 238, 216], 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 상태 줄 — 같은 글자면 DOM 을 건드리지 않는다
+    let statusText = '';
+    function setStatus(s) {
+        if (!statusEl || s === statusText) {
+            return;
+        }
+        statusText = s;
+        statusEl.textContent = s;
+    }
+    // 꺾은선 — xs·ys 의 0 번부터 count 개(소수 부분은 마지막 마디를 그만큼만)를 한 번에 긋는다
+    function strokeRun(xs, ys, count, width, color, alpha) {
+        const whole = Math.floor(count);
+        if (whole < 1) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(xs[0], ys[0]);
+        const last = Math.min(whole, xs.length - 1);
+        for (let i = 1; i <= last; i += 1) {
+            ctx.lineTo(xs[i], ys[i]);
+        }
+        const f = count - whole;
+        if (f > 0 && whole + 1 < xs.length) {
+            ctx.lineTo(lerp(xs[whole], xs[whole + 1], f), lerp(ys[whole], ys[whole + 1], f));
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(color, alpha);
+        ctx.stroke();
+    }
+    // 꺾은선 한 토막 — from 번째 꼭짓점부터 to 번째까지(to 의 소수 부분은 마지막 마디를 그만큼만)
+    function strokeSpan(xs, ys, from, to, width, color, alpha) {
+        const end = Math.min(Math.floor(to), xs.length - 1);
+        if (end <= from) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(xs[from], ys[from]);
+        for (let i = from + 1; i <= end; i += 1) {
+            ctx.lineTo(xs[i], ys[i]);
+        }
+        const f = to - Math.floor(to);
+        if (f > 0 && end + 1 < xs.length) {
+            ctx.lineTo(lerp(xs[end], xs[end + 1], f), lerp(ys[end], ys[end + 1], f));
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(color, alpha);
+        ctx.stroke();
+    }
+    // 펜촉 — 지금 긋고 있는 자리. 잉크 점 둘레에 파스텔 고리
+    function drawNib(x, y, ring) {
+        ctx.beginPath();
+        ctx.arc(x, y, 7, 0, TAU);
+        ctx.fillStyle = rgba(ring, 0.75);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x, y, 2.6, 0, TAU);
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.fill();
+    }
+    // 원본 그림 판 — 어둡기 함수(0~1)를 칸마다 칠한 화면 밖 캔버스. 펜이 그리기 전에 옅게 깔아 무엇을 따라 그리는지 보인다
+    function makeSourceLayer(dark, tint) {
+        const layer = document.createElement('canvas');
+        layer.width = W;
+        layer.height = H;
+        const lc = layer.getContext('2d');
+        if (!lc) {
+            return layer;
+        }
+        const img = lc.createImageData(W, H);
+        for (let y = 0; y < H; y += 1) {
+            for (let x = 0; x < W; x += 1) {
+                const d = dark(x + 0.5, y + 0.5);
+                const o = (y * W + x) * 4;
+                img.data[o] = Math.round(lerp(PAPER[0], tint[0], d));
+                img.data[o + 1] = Math.round(lerp(PAPER[1], tint[1], d));
+                img.data[o + 2] = Math.round(lerp(PAPER[2], tint[2], d));
+                img.data[o + 3] = 255;
+            }
+        }
+        lc.putImageData(img, 0, 0);
+        return layer;
+    }
+    // 지우는 중이면 그림 전체를 종이색으로 덮어 간다 — phase 2~3 에서 덮개 불투명도 0→1
+    function eraseVeil(phase) {
+        if (phase <= 2) {
+            return;
+        }
+        ctx.fillStyle = rgba(PAPER, smooth(phase - 2));
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 04 배송 경로 — 동네 일곱 곳에 모인 배송지 STOP_COUNT 개를 가장 가까운 점부터 한 줄로 잇고,
+    // 프레임마다 TRIES_PER_FRAME 쌍까지만 견줘 엇갈린 두 구간 사이를 뒤집는다. 총 길이는 상태 줄에 숫자로
+    const STOP_COUNT = 420;
+    const TRIES_PER_FRAME = 1200;
+    // 가장 가까운 점부터 이은 첫 줄을 펜이 긋는 시간(초)
+    const GREEDY_TIME = 1.4;
+    const UNTANGLE_START = GREEDY_TIME + 0.15;
+    // 그리기 단계 길이(초) — 첫 줄 긋기와 엇갈림 풀기가 이 안에서 진행된다. 풀리는 데 걸리는 시간은 그때그때 다르므로 넉넉히 잡고, 그 뒤 HOLD_TIME(2초) 동안 머문다
+    const DRAW_TIME = 5.2;
+    const HOLD_TIME = 2;
+    const CYCLE = DRAW_TIME + HOLD_TIME + ERASE_TIME;
+    const START_AT = 0;
+    const FINISH_T = DRAW_TIME + 0.2;
+    const TOWNS = [96, 112, 34, 214, 96, 30, 318, 84, 36, 396, 196, 32, 250, 210, 40, 150, 230, 30, 380, 60, 26];
+    function makeStops(n, seed) {
+        const rng = makeRng(seed);
+        const xs = new Float32Array(n);
+        const ys = new Float32Array(n);
+        // 0 번은 물류 창고 — 왼쪽 가운데
+        xs[0] = 34;
+        ys[0] = 160;
+        for (let i = 1; i < n; i += 1) {
+            const t = i % (TOWNS.length / 3);
+            // 균등 난수 두 개의 합 − 1 = 가운데로 몰리는 삼각 분포
+            xs[i] = clamp(TOWNS[3 * t] + (rng() + rng() - 1) * TOWNS[3 * t + 2] * 1.6, 14, W - 14);
+            ys[i] = clamp(TOWNS[3 * t + 1] + (rng() + rng() - 1) * TOWNS[3 * t + 2] * 1.3, 14, H - 14);
+        }
+        return { xs: xs, ys: ys, n: n };
+    }
+    const stops = makeStops(STOP_COUNT, 4);
+    const greedyBase = greedyOrder(stops.xs, stops.ys, stops.n, 0);
+    const greedyLength = pathLength(stops.xs, stops.ys, greedyBase, stops.n);
+    let route04 = makeUntangle(Int32Array.from(greedyBase));
+    let routeLength = greedyLength;
+    // 번쩍임이 1 에서 0 으로 줄어드는 빠르기(1/초)
+    const FLASH_FADE = 1.2;
+    // 뒤집은 구간의 번쩍임 — 1 에서 0 으로 줄며 그 구간을 파스텔 굵은 띠로 보인다
+    let flash = 0;
+    let flashLo = -1;
+    let flashHi = -1;
+    let greedyDrawn = 0;
+    function reset() {
+        route04 = makeUntangle(Int32Array.from(greedyBase));
+        routeLength = greedyLength;
+        flash = 0;
+        flashLo = -1;
+        flashHi = -1;
+        greedyDrawn = 0;
+    }
+    function update(t, dt) {
+        greedyDrawn = (stops.n - 1) * Math.min(1, t / GREEDY_TIME);
+        flash = Math.max(0, flash - dt * FLASH_FADE);
+        if (t < UNTANGLE_START || route04.done) {
+            return;
+        }
+        if (untangleStep(route04, stops.xs, stops.ys, TRIES_PER_FRAME) > 0) {
+            routeLength = pathLength(stops.xs, stops.ys, route04.order, stops.n);
+            flash = 1;
+            flashLo = route04.lastLo;
+            flashHi = route04.lastHi;
+        }
+    }
+    // 지도 바탕 — 강 한 줄기와 공원 두 곳을 옅은 파스텔로. 계산에는 쓰지 않는 배경
+    function drawMap() {
+        ctx.beginPath();
+        ctx.moveTo(0, 262);
+        ctx.bezierCurveTo(140, 236, 260, 300, 480, 248);
+        ctx.lineTo(480, 300);
+        ctx.lineTo(0, 300);
+        ctx.closePath();
+        ctx.fillStyle = rgba(SKY, 0.45);
+        ctx.fill();
+        ctx.fillStyle = rgba(SAGE, 0.35);
+        ctx.fillRect(176, 120, 52, 40);
+        ctx.fillRect(300, 150, 44, 34);
+    }
+    // 순서대로 잇기 — order 의 from 번째부터 to 번째까지(to 의 소수 부분은 마지막 구간을 그만큼만)
+    function strokeOrder(order, from, to, width, color, alpha) {
+        const end = Math.min(Math.floor(to), order.length - 1);
+        if (end <= from) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(stops.xs[order[from]], stops.ys[order[from]]);
+        for (let k = from + 1; k <= end; k += 1) {
+            ctx.lineTo(stops.xs[order[k]], stops.ys[order[k]]);
+        }
+        const f = to - Math.floor(to);
+        if (f > 0 && end + 1 < order.length) {
+            const a = order[end];
+            const b = order[end + 1];
+            ctx.lineTo(lerp(stops.xs[a], stops.xs[b], f), lerp(stops.ys[a], stops.ys[b], f));
+        }
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(color, alpha);
+        ctx.stroke();
+    }
+    function draw(t) {
+        const phase = cyclePhase(t, DRAW_TIME, HOLD_TIME);
+        clearPaper();
+        drawMap();
+        const o = route04.order;
+        // 방금 뒤집은 구간 — 앞뒤 한 칸씩 더해 새로 이어진 두 변까지 굵기 16 산호색 띠로
+        if (flash > 0 && flashLo > 0) {
+            strokeOrder(o, flashLo - 1, Math.min(flashHi + 1, o.length - 1), 16, CORAL, 0.85 * flash);
+        }
+        const shown = t < GREEDY_TIME ? greedyDrawn : o.length - 1;
+        strokeOrder(o, 0, shown, 2, INK, 1);
+        // 배송지 — 잉크 테 동그라미. 펜이 아직 들르지 않은 곳은 종이색 속, 들른 곳은 버터색 속으로 조금 크게(들른 순서 = 경로 순서)
+        const visited = t < GREEDY_TIME ? Math.floor(greedyDrawn) : o.length - 1;
+        for (let pass = 0; pass < 2; pass += 1) {
+            ctx.beginPath();
+            for (let k = 1; k < o.length; k += 1) {
+                const i = o[k];
+                if (i === 0 || (k <= visited ? 1 : 0) !== pass) {
+                    continue;
+                }
+                const r = pass === 1 ? 3.4 : 2.6;
+                ctx.moveTo(stops.xs[i] + r, stops.ys[i]);
+                ctx.arc(stops.xs[i], stops.ys[i], r, 0, TAU);
+            }
+            ctx.fillStyle = rgba(pass === 1 ? BUTTER : PAPER, 1);
+            ctx.fill();
+            ctx.lineWidth = 1.4;
+            ctx.strokeStyle = rgba(INK, 1);
+            ctx.stroke();
+        }
+        ctx.fillStyle = rgba(INK, 1);
+        ctx.fillRect(stops.xs[0] - 6, stops.ys[0] - 6, 12, 12);
+        if (t < GREEDY_TIME) {
+            const k = Math.min(Math.floor(greedyDrawn), o.length - 2);
+            const f = greedyDrawn - k;
+            drawNib(lerp(stops.xs[o[k]], stops.xs[o[k + 1]], f), lerp(stops.ys[o[k]], stops.ys[o[k + 1]], f), CORAL);
+            setStatus('가장 가까운 점부터 잇는 중');
+        }
+        else {
+            const label = route04.done ? '다 풀림' : '엇갈림 푸는 중';
+            setStatus(label + ' · ' + '총 길이' + ' ' + Math.round(t < UNTANGLE_START ? greedyLength : routeLength) + 'px');
+        }
+        eraseVeil(phase);
+    }
+    // 한 프레임에 넘기는 시간 상한(초) — 탭을 오래 숨겼다 돌아온 첫 프레임에도 50ms 까지만 계산에 넣는다
+    const DT_MAX = 0.05;
+    // 앞당겨 돌리기 걸음(초) — 시작 자리(START_AT)나 완성 판(FINISH_T)까지 1/60초씩 계산만 하고 그리지 않는다
+    const SKIP_STEP = 1 / 60;
+    // 장면 시계(초) — 순환 하나 안에서의 자리. CYCLE 을 넘으면 0 으로 돌아가 처음부터 다시 그린다
+    let cycleT = 0;
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 손대면 시연 표시를 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    // 리스너는 한 묶음으로 달고 정리할 때 한 번에 뗀다
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        const live = root.querySelector('[aria-live]');
+        if (live) {
+            live.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 시계를 to 초까지 계산만 하고 넘긴다
+    function skipTo(to) {
+        while (cycleT + SKIP_STEP <= to) {
+            cycleT += SKIP_STEP;
+            update(cycleT, SKIP_STEP);
+        }
+    }
+    function advance(dt) {
+        cycleT += dt;
+        if (cycleT >= CYCLE) {
+            cycleT = 0;
+            reset();
+        }
+        update(cycleT, dt);
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        draw(cycleT);
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 시계 다시 맞추기 — 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 동작 줄이기 — 루프를 돌리지 않고 다 그려진 한 장(FINISH_T)만 그린다
+    function showFinished() {
+        stopLoop();
+        cycleT = 0;
+        reset();
+        skipTo(FINISH_T);
+        draw(cycleT);
+    }
+    function play() {
+        cycleT = 0;
+        reset();
+        skipTo(START_AT);
+        draw(cycleT);
+        if (!paused) {
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 루프를 멈추고, 돌아오면 시계를 다시 맞춰 이어 그린다 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 페이지를 연 채 바뀌면 — 켜지면 완성 판으로 멈추고, 꺼지면 시연을 처음부터
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showFinished();
+        }
+        else {
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        draw(cycleT);
+    }, { signal: off.signal });
+    fitCanvas();
+    if (still) {
+        showFinished();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
