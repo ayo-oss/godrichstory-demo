@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>波打つ文字バナーでつくるヒーロー — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vj is-demo" id="vj">
+  <div class="vj__pad" data-role="pad" tabindex="0" role="application" aria-label="アスキーアートの舞台 — Enter か Space で一時停止、N で一歩、R でやり直し、C で文字盤をコピー">
+    <canvas class="vj__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="大きな ASCII の文字の行と小さな ascii art の文字の行が逆向きに流れるバナーを文字で打ち、文字の行ごとに位相がずれた正弦波で横にずらして波打たせたヒーローの盤です"></canvas>
+  </div>
+  <p class="vj__status" data-role="status" aria-live="off">アスキーアートのデモ</p>
+  <div class="vj__ctrl">
+    <button class="vj__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+    <button class="vj__step" data-role="step" type="button">一歩進める</button>
+    <button class="vj__copy" data-role="copy" type="button">コピー</button>
+  </div>
+  <p class="vj__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("vj");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function smooth(a, b, v) { const k = clamp((v - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); }
+    // 파스텔 팔레트 — 글자 판은 짙은 남보라 바탕 위에 옅은 라벤더 글자(대비 12 이상), 바깥 무대는 크림 라벤더
+    const PAGE = [246, 243, 252];
+    const BOARD = [34, 30, 56];
+    const BOARD_EDGE = [74, 68, 112];
+    const GLYPH = [226, 219, 250];
+    const MINT = [168, 226, 204];
+    const ROSE = [248, 176, 198];
+    const BUTTER = [250, 226, 150];
+    const SKY = [170, 208, 248];
+    const LAV = [196, 184, 244];
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function grayStr(l, a) {
+        const v = Math.round(clamp(l, 0, 1) * 255);
+        return 'rgba(' + v + ',' + v + ',' + v + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 장면 시계(초) — 한 바퀴 LAP_S 초이고 장면의 모든 움직임은 위상 ph = sceneT / LAP_S 의 정수배라 바퀴 끝에서 이음매가 없다
+    let sceneT = 0;
+    let lap = 0;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 고정폭 글꼴 목록만
+    const MONO = 'ui-monospace, "Cascadia Mono", Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace';
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    // 글자 한 줄 높이 = 글자 크기의 1.2 배. 폭은 글꼴에서 잰 값(advRatio)을 쓴다
+    const LINE_K = 1.2;
+    let advRatio = 0.6;
+    // ── 원본 장면 캔버스 — 화면에 붙이지 않는 두 번째 캔버스. 장면은 여기 그리고 화소를 읽는다 ──
+    const srcCv = document.createElement('canvas');
+    const srcRaw = srcCv.getContext('2d', { willReadFrequently: true });
+    if (!srcRaw) {
+        return;
+    }
+    const sctx = srcRaw;
+    // ss = 원본 화소 / 판 화소. 1 이면 판 크기 그대로, 0.5 면 가로세로 절반 해상도로 계산해 읽는다
+    let srcSs = 1;
+    function setSrc(w, h, ss) {
+        const sw = Math.round(w * ss);
+        const sh = Math.round(h * ss);
+        if (srcCv.width !== sw || srcCv.height !== sh) {
+            srcCv.width = sw;
+            srcCv.height = sh;
+        }
+        srcSs = ss;
+        sctx.setTransform(ss, 0, 0, ss, 0, 0);
+    }
+    // cols×rows 칸을 왼쪽 위부터 읽는다. 칸 하나가 원본에서 덮는 영역은 가로 cw, 세로 sh (판 화소 단위)
+    function readGrid(cols, rows, cw, sh) {
+        const sw = srcCv.width;
+        const shp = srcCv.height;
+        const data = sctx.getImageData(0, 0, sw, shp).data;
+        const grid = { cols: cols, rows: rows, cw: cw, sh: sh, lum: [], r: [], g: [], b: [] };
+        for (let cy = 0; cy < rows; cy += 1) {
+            const y0 = Math.min(shp - 1, Math.floor(cy * sh * srcSs));
+            const y1 = Math.max(y0 + 1, Math.min(shp, Math.floor((cy + 1) * sh * srcSs)));
+            for (let cx = 0; cx < cols; cx += 1) {
+                const x0 = Math.min(sw - 1, Math.floor(cx * cw * srcSs));
+                const x1 = Math.max(x0 + 1, Math.min(sw, Math.floor((cx + 1) * cw * srcSs)));
+                let sr = 0;
+                let sg = 0;
+                let sb = 0;
+                let n = 0;
+                for (let y = y0; y < y1; y += 1) {
+                    let p = (y * sw + x0) * 4;
+                    for (let x = x0; x < x1; x += 1) {
+                        sr += data[p];
+                        sg += data[p + 1];
+                        sb += data[p + 2];
+                        n += 1;
+                        p += 4;
+                    }
+                }
+                const mr = sr / n;
+                const mg = sg / n;
+                const mb = sb / n;
+                grid.r.push(mr);
+                grid.g.push(mg);
+                grid.b.push(mb);
+                grid.lum.push((0.2126 * mr + 0.7152 * mg + 0.0722 * mb) / 255);
+            }
+        }
+        return grid;
+    }
+    // ── 글자 램프 — 성긴 글자에서 짙은 글자 순서 열여섯 개. n 단계 램프는 이 줄에서 고르게 n 개를 뽑는다 ──
+    const RAMP_FULL = ' .,:;-~=+*ox#%&@';
+    function rampOf(n) {
+        let s = '';
+        for (let i = 0; i < n; i += 1) {
+            s += RAMP_FULL.charAt(Math.round(i * (RAMP_FULL.length - 1) / (n - 1)));
+        }
+        return s;
+    }
+    // 밝기 v(0 에서 1)를 램프 번호로 — 단계 폭 1/n 으로 나눠 내림
+    function glyphIndex(v, n) { return Math.min(n - 1, Math.max(0, Math.floor(v * n))); }
+    // 칸 크기 — 글자 크기 fp 를 주면 폭은 글꼴에서 잰 글자 폭, 높이는 줄 높이
+    function cellW(fp) { return advRatio * fp; }
+    function cellH(fp) { return LINE_K * fp; }
+    function measureAdv() {
+        ctx.font = '100px ' + MONO;
+        const m = ctx.measureText('M').width / 100;
+        advRatio = m > 0.3 && m < 0.9 ? m : 0.6;
+    }
+    // ── 그리기 도구 ──
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function text(s, x, y, c, a, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    // 글자 이름표 — 바탕 알약 위에 글자
+    function tag(s, x, y, bg, fg, px, align) {
+        ctx.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctx.measureText(s).width + px * 1.1;
+        const left = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+        box(left, y - px * 0.82, w, px * 1.64, px * 0.82, bg, 0.92);
+        text(s, left + w / 2, y + 0.5, fg, 1, px, 700, 'center');
+    }
+    function paintPage() {
+        ctx.fillStyle = rgba(PAGE, 1);
+        ctx.fillRect(0, 0, W, H);
+    }
+    // 글자 판 바탕 — 짙은 남보라 둥근 사각형
+    function panel(x, y, w, h) {
+        box(x - 1, y - 1, w + 2, h + 2, 11, BOARD_EDGE, 1);
+        box(x, y, w, h, 10, BOARD, 1);
+    }
+    // 글자 판 그리기 — chars 는 칸마다 글자 하나(왼쪽 위부터 줄 순서). colorIdx 가 있으면 칸마다 팔레트 번호, 없으면 모두 pal[0].
+    // 같은 색이 이어지는 칸은 한 번에 찍어 한 판에 fillText 가 줄 수 × 색 조각 수만큼만 불린다
+    function drawGlyphs(x, y, fp, g, chars, colorIdx, pal) {
+        const cw = cellW(fp);
+        const ch = cellH(fp);
+        ctx.font = '600 ' + fp + 'px ' + MONO;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        for (let r = 0; r < g.rows; r += 1) {
+            let c = 0;
+            while (c < g.cols) {
+                const ci = colorIdx ? colorIdx[r * g.cols + c] : 0;
+                let run = '';
+                let e = c;
+                while (e < g.cols && (colorIdx ? colorIdx[r * g.cols + e] : 0) === ci) {
+                    run += chars[r * g.cols + e];
+                    e += 1;
+                }
+                if (run.trim().length > 0) {
+                    ctx.fillStyle = rgba(pal[ci], 1);
+                    ctx.fillText(run, x + c * cw, y + (r + 0.5) * ch + 0.5);
+                }
+                c = e;
+            }
+        }
+    }
+    // 판의 글자를 줄바꿈으로 이은 텍스트 — コピー 단추가 이 글을 클립보드에 넣는다
+    function plainOf(g, chars) {
+        const lines = [];
+        for (let r = 0; r < g.rows; r += 1) {
+            lines.push(chars.slice(r * g.cols, (r + 1) * g.cols).join('').replace(/\s+$/, ''));
+        }
+        return lines.join('\n');
+    }
+    // 쓰인 서로 다른 글자 수(공백 포함)와 글자별 횟수
+    function usage(chars, ramp) {
+        const out = [];
+        for (let i = 0; i < ramp.length; i += 1) {
+            out.push(0);
+        }
+        for (const c of chars) {
+            const k = ramp.indexOf(c);
+            if (k >= 0) {
+                out[k] += 1;
+            }
+        }
+        return out;
+    }
+    function kinds(u) {
+        let n = 0;
+        for (const v of u) {
+            if (v > 0) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    // 글자별 사용 횟수 막대 — 판 아래 띠에 램프 순서대로
+    function usageBars(x, y, w, h, u, c) {
+        let mx = 1;
+        for (const v of u) {
+            if (v > mx) {
+                mx = v;
+            }
+        }
+        const bw = w / u.length;
+        for (let i = 0; i < u.length; i += 1) {
+            const bh = Math.max(u[i] > 0 ? 2 : 0, h * u[i] / mx);
+            box(x + i * bw + 1, y + h - bh, bw - 2, bh, 2, c, 0.95);
+        }
+    }
+    // 두 번째 캔버스에 쓰는 회색 장면 도구 — 중심에서 번지는 둥근 빛
+    function glow(x, y, r, l, a) {
+        const g = sctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, grayStr(l, a));
+        g.addColorStop(1, grayStr(l, 0));
+        sctx.fillStyle = g;
+        sctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    function vgrad(w, h, l0, l1) {
+        const g = sctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, grayStr(l0, 1));
+        g.addColorStop(1, grayStr(l1, 1));
+        sctx.fillStyle = g;
+        sctx.fillRect(0, 0, w, h);
+    }
+    // 판 배치 — 위 46 은 상태 줄·단추 자리. 판 둘이면 가로 228, 하나면 464
+    const PY = 46;
+    const PH = 246;
+    const PW2 = 228;
+    const PW1 = 464;
+    const PX_L = 8;
+    const PX_R = 244;
+    // コピー 단추를 누른 뒤 상태 줄에 잠깐 뜨는 말
+    const COPY_OK = '文字盤をテキストでコピーしました';
+    const COPY_FAIL = 'コピーできませんでした — 文字盤を選んで手でコピーしてください';
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const padEl = root.querySelector('[data-role="pad"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const stepEl = root.querySelector('[data-role="step"]');
+    const copyEl = root.querySelector('[data-role="copy"]');
+    const doneEl = root.querySelector('[data-role="done"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !stepEl || !copyEl || !doneEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const stepBtn = stepEl;
+    const copyBtn = copyEl;
+    const doneP = doneEl;
+    const pad = padEl;
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘지 않게
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        measureAdv();
+    }
+    // 지금 화면에 찍힌 글자 판 — コピー 단추가 이 텍스트를 넣는다
+    let plainText = '';
+    let copyFlash = 0;
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) {
+            statusEl.setAttribute('aria-live', 'polite');
+        }
+    }
+    // 한 판 시연이 끝났음을 스크린리더에 한 번만 알린다 — 판이 되풀이돼도 다시 읽지 않는다
+    let doneSaid = false;
+    function checkDone() {
+        if (!doneSaid && sceneT >= LAP_S - 0.6) {
+            doneSaid = true;
+            doneP.textContent = statusText();
+        }
+    }
+    function advance(dt) {
+        sceneT += dt;
+        if (copyFlash > 0) {
+            copyFlash = Math.max(0, copyFlash - dt);
+        }
+        if (sceneT >= LAP_S) {
+            sceneT -= LAP_S;
+            lap += 1;
+        }
+    }
+    const DT_MAX = 0.05;
+    const STEP_S = 0.4;
+    function showNow() {
+        draw();
+        pushStatus(copyFlash > 0 ? copyNote : statusText());
+        checkDone();
+    }
+    let copyNote = '';
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 장면이 한창인 순간의 정지 장면 한 장
+    function showRest() {
+        stopLoop();
+        sceneT = REST_S;
+        showNow();
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }
+    function restart() {
+        wake();
+        sceneT = START_S;
+        lap = 0;
+        doneSaid = false;
+        showNow();
+    }
+    // 一歩進める — 멈춘 채 장면 시계를 0.4 초 앞으로
+    function stepOnce() {
+        wake();
+        if (!paused) {
+            paused = true;
+            pauseBtn.setAttribute('aria-pressed', 'true');
+            stopLoop();
+        }
+        advance(STEP_S);
+        showNow();
+    }
+    // コピー — 화면에 있는 글자 판을 텍스트로 클립보드에. 임시 입력칸을 만들어 선택하고 コピー 명령을 부른다
+    function copyBoard() {
+        wake();
+        const ta = document.createElement('textarea');
+        ta.value = plainText;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        }
+        catch (err) {
+            ok = false;
+        }
+        document.body.removeChild(ta);
+        copyNote = ok ? COPY_OK : COPY_FAIL;
+        copyFlash = 1.6;
+        pushStatus(copyNote);
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    stepBtn.addEventListener('click', stepOnce, { signal: off.signal });
+    copyBtn.addEventListener('click', copyBoard, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. Enter·Space·P 는 一時停止, N 은 一歩進める, R 은 처음부터, C 는 글자 판 コピー
+    pad.addEventListener('keydown', function (e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) {
+            return;
+        }
+        const k = e.key;
+        if (k === 'Enter' || k === ' ' || k === 'p' || k === 'P') {
+            e.preventDefault();
+            togglePause();
+        }
+        else if (k === 'n' || k === 'N') {
+            e.preventDefault();
+            stepOnce();
+        }
+        else if (k === 'r' || k === 'R') {
+            e.preventDefault();
+            restart();
+        }
+        else if (k === 'c' || k === 'C') {
+            e.preventDefault();
+            copyBoard();
+        }
+    }, { signal: off.signal });
+    // 마우스·터치 — 무대를 누르면 一時停止 토글
+    pad.addEventListener('click', function () { togglePause(); }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 정지 장면 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            sceneT = START_S;
+            showNow();
+            if (!paused) {
+                startLoop();
+            }
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // ── 09 파도치는 글자 배너가 히어로 위로 흘러가는 장면 ─────────────────────────
+    const LAP_S = 10;
+    const START_S = 0.6;
+    const REST_S = 3.0;
+    const FONT_PX = 10;
+    const RAMP = rampOf(12);
+    // 글자 줄마다 이어지는 파도 위상(라디안/줄)과 파도 폭(칸)
+    const ROW_PHASE = 0.5;
+    const WAVE_COLS = 4;
+    // 원본 양쪽에 덧대는 칸 수 — 파도로 줄이 밀려도 읽을 칸이 모자라지 않게
+    const PAD_COLS = WAVE_COLS + 1;
+    const BANNER = 'ASCII  ';
+    const BANNER_SMALL = 'ascii art  ';
+    let loopCols = 0;
+    let driftX = 0;
+    let lastRows = 0;
+    function bannerFont(px) { return '800 ' + px + 'px ' + FONT_STACK; }
+    // 원본 장면 — 옅은 띠가 흐르는 바탕에 큰 글자 줄과 작은 글자 줄이 서로 반대로 흐른다. 한 바퀴에 글자 줄 한 마디만큼 흘러 이음매가 없다
+    function paintScene(w, h, ph) {
+        const a = ph * TAU;
+        vgrad(w, h, 0.08, 0.22);
+        for (let k = 0; k < 5; k += 1) {
+            sctx.fillStyle = grayStr(0.34, 0.5);
+            sctx.fillRect(0, ((k * 56 + ph * 56) % 280) - 20, w, 12);
+        }
+        glow(w * (0.5 + 0.3 * Math.cos(a)), h * 0.5, 120, 0.5, 0.6);
+        sctx.textBaseline = 'middle';
+        sctx.textAlign = 'left';
+        sctx.font = bannerFont(124);
+        const u1 = sctx.measureText(BANNER).width;
+        sctx.fillStyle = grayStr(0.96, 1);
+        for (let i = -1; i < Math.ceil(w / u1) + 1; i += 1) {
+            sctx.fillText(BANNER, i * u1 - ph * u1, h * 0.4);
+        }
+        sctx.font = bannerFont(42);
+        const u2 = sctx.measureText(BANNER_SMALL).width;
+        sctx.fillStyle = grayStr(0.78, 1);
+        for (let i = -1; i < Math.ceil(w / u2) + 2; i += 1) {
+            sctx.fillText(BANNER_SMALL, i * u2 + ph * u2, h * 0.76);
+        }
+        loopCols = Math.round(u1 / cellW(FONT_PX));
+    }
+    function draw() {
+        paintPage();
+        const ph = sceneT / LAP_S;
+        const a = ph * TAU;
+        const cw = cellW(FONT_PX);
+        const ch = cellH(FONT_PX);
+        const cols = Math.floor(PW1 / cw);
+        const rows = Math.floor(PH / ch);
+        const sCols = cols + 2 * PAD_COLS;
+        setSrc(sCols * cw, PH, 1);
+        paintScene(sCols * cw, PH, ph);
+        const g = readGrid(sCols, rows, cw, ch);
+        const cA = [];
+        for (let r = 0; r < rows; r += 1) {
+            // 줄마다 위상이 ROW_PHASE 씩 어긋난 사인으로 가로로 밀린다(칸 단위로 반올림)
+            const off = Math.round(WAVE_COLS * Math.sin(ROW_PHASE * r - a));
+            for (let c = 0; c < cols; c += 1) {
+                cA.push(RAMP.charAt(glyphIndex(g.lum[r * sCols + c + PAD_COLS + off], RAMP.length)));
+            }
+        }
+        lastRows = rows;
+        driftX = loopCols / LAP_S;
+        const gv = { cols: cols, rows: rows, cw: cw, sh: ch, lum: [], r: [], g: [], b: [] };
+        plainText = plainOf(gv, cA);
+        panel(PX_L, PY, PW1, PH);
+        drawGlyphs(PX_L + (PW1 - cols * cw) / 2, PY + (PH - rows * ch) / 2, FONT_PX, gv, cA, null, [GLYPH]);
+    }
+    function statusText() {
+        return '{r}行・一周 {c}セル・毎秒 {d}セル'.replace('{r}', String(lastRows)).replace('{c}', String(loopCols)).replace('{d}', driftX.toFixed(1));
+    }
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        sceneT = START_S;
+        showNow();
+        startLoop();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
