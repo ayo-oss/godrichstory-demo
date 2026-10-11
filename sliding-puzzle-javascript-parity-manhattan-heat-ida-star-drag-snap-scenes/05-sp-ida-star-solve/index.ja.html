@@ -1,0 +1,960 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>上限を引き上げながら最短手を探す反復深化探索 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vj is-demo" id="vj">
+  <div class="vj__pad" data-role="pad" tabindex="0" role="application" aria-label="スライドパズルの舞台 — 矢印キーで空きマスの隣のタイルを動かす、タイルを押しても動く、EnterかSpaceで一時停止、Nで一歩、Rで最初から">
+    <canvas class="vj__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="混ぜた3×3の盤で反復深化探索がマンハッタン距離の上限を一段ずつ上げながら回る。右のパネルに上限ごとの棒とノード数、ノードの合計がNODE_CAPの4000のうちどれだけかを示す目盛りがあり、解を見つけると見つけた手を盤で一手ずつ再生する。最後に4×4の盤で同じ探索がノード4000個に届いて停止したと表示される。下の目盛りは定数名と今の値を示し、動きを減らす設定ではタイルがすぐ入れ替わる盤一枚だけを描きます"></canvas>
+  </div>
+  <p class="vj__status" data-role="status" aria-live="off">スライドパズルの場面</p>
+  <div class="vj__ctrl">
+    <button class="vj__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+  </div>
+  <p class="vj__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("vj");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function easeOut(k) { const u = 1 - clamp(k, 0, 1); return 1 - u * u * u; }
+    // 파스텔 팔레트 — 바탕은 짙은 자두색, 타일은 연한 색 위에 짙은 잉크 숫자
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    const ROSE = [244, 162, 186];
+    const MINT = [148, 212, 182];
+    const SKY = [150, 192, 244];
+    const SUN = [250, 218, 146];
+    const NEU = [236, 230, 250];
+    const BGC = [46, 42, 68];
+    const PANEL = [62, 57, 92];
+    const DIM = [196, 190, 224];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function hsl(h, s, l) {
+        const a = s * Math.min(l, 1 - l);
+        const f = function (n) {
+            const k = (n + h / 30) % 12;
+            return l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+        };
+        return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+    }
+    // 정수 해시 — 같은 (a, b) 에는 늘 같은 0 이상 1 미만 값. 난수 함수는 쓰지 않는다
+    function hash2(a, b) {
+        let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h = h ^ (h >>> 16);
+        return (h >>> 0) / 4294967296;
+    }
+    // 2차원 값 잡음 — 정수 격자점마다 해시 값이 있고 그 사이를 부드럽게 잇는다
+    function noise2(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = x - xi;
+        const fy = y - yi;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uy = fy * fy * (3 - 2 * fy);
+        const s = seed * 131;
+        return lerp(lerp(hash2(xi + s, yi), hash2(xi + 1 + s, yi), ux), lerp(hash2(xi + s, yi + 1), hash2(xi + 1 + s, yi + 1), ux), uy);
+    }
+    // 장면 시계(초)·판 반복 번호·시간표 — 시간표는 (시각, 할 일) 목록이고 시각이 지나면 한 번씩 부른다
+    let sceneT = 0;
+    let lap = 0;
+    let script = [];
+    let evAt = 0;
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, a, b, c) {
+        return s.split('{a}').join(a).split('{b}').join(b === undefined ? '' : b).split('{c}').join(c === undefined ? '' : c);
+    }
+    function r1(v) { return String(Math.round(v * 10) / 10); }
+    function group(v) {
+        // 천 단위 점 — 로케일 함수에 기대지 않는다
+        const s = String(Math.round(v));
+        let o = '';
+        for (let i = 0; i < s.length; i += 1) {
+            if (i > 0 && (s.length - i) % 3 === 0) {
+                o += ',';
+            }
+            o += s.charAt(i);
+        }
+        return o;
+    }
+    // ── 퍼즐 모델 — 판은 번호 배열, 0 은 빈칸, 타일 v 의 제자리는 v-1 번 칸, 빈칸의 제자리는 맨 끝
+    // 빈칸이 움직이는 방향 d: 0 오른쪽 · 1 왼쪽 · 2 아래 · 3 위. 반대 방향은 d ^ 1
+    const DX = [1, -1, 0, 0];
+    const DY = [0, 0, 1, -1];
+    function solvedBoard(n) {
+        const b = [];
+        for (let i = 1; i < n * n; i += 1) {
+            b.push(i);
+        }
+        b.push(0);
+        return b;
+    }
+    function canStep(b, n, d) {
+        const z = b.indexOf(0);
+        const c = (z % n) + DX[d];
+        const r = Math.floor(z / n) + DY[d];
+        return c >= 0 && c < n && r >= 0 && r < n;
+    }
+    function blankStep(b, n, d) {
+        if (!canStep(b, n, d)) {
+            return false;
+        }
+        const z = b.indexOf(0);
+        const t = z + DX[d] + DY[d] * n;
+        b[z] = b[t];
+        b[t] = 0;
+        return true;
+    }
+    // 역전 — 번호를 한 줄로 늘어놓고 앞 번호가 뒤 번호보다 큰 쌍의 수(빈칸은 세지 않는다)
+    function inversions(b) {
+        let c = 0;
+        for (let i = 0; i < b.length; i += 1) {
+            for (let j = i + 1; j < b.length; j += 1) {
+                if (b[i] !== 0 && b[j] !== 0 && b[i] > b[j]) {
+                    c += 1;
+                }
+            }
+        }
+        return c;
+    }
+    // 빈칸이 아래서 몇 번째 줄인지(맨 아래 줄 = 1)
+    function blankRow(b, n) { return n - Math.floor(b.indexOf(0) / n); }
+    // 판정 합 — 짝수 폭은 역전 + 빈칸 줄, 홀수 폭은 역전만
+    function parity(b, n) { return n % 2 === 0 ? inversions(b) + blankRow(b, n) : inversions(b); }
+    function solvable(b, n) {
+        return n % 2 === 0 ? parity(b, n) % 2 === 1 : parity(b, n) % 2 === 0;
+    }
+    function manhattan(b, n, i) {
+        const v = b[i];
+        if (v === 0) {
+            return 0;
+        }
+        const h = v - 1;
+        return Math.abs((i % n) - (h % n)) + Math.abs(Math.floor(i / n) - Math.floor(h / n));
+    }
+    function sumH(b, n) {
+        let s = 0;
+        for (let i = 0; i < b.length; i += 1) {
+            s += manhattan(b, n, i);
+        }
+        return s;
+    }
+    function placedCount(b) {
+        let c = 0;
+        for (let i = 0; i < b.length - 1; i += 1) {
+            if (b[i] === i + 1) {
+                c += 1;
+            }
+        }
+        return c;
+    }
+    function isSolved(b) { return placedCount(b) === b.length - 1 && b[b.length - 1] === 0; }
+    // 歩いて混ぜる — 完成 판에서 시작해 빈칸을 steps 번 이웃 칸으로 옮긴다. 방금 온 칸으로 되돌아가는 수는 건너뛰고
+    // 어느 이웃으로 갈지는 정수 해시로 고른다. 반환은 빈칸이 움직인 방향의 목록
+    function walkMoves(n, steps, seed) {
+        const b = solvedBoard(n);
+        const out = [];
+        let noBacktrack = -1;
+        for (let s = 0; s < steps; s += 1) {
+            const opts = [];
+            for (let d = 0; d < 4; d += 1) {
+                if (d !== noBacktrack && canStep(b, n, d)) {
+                    opts.push(d);
+                }
+            }
+            const d = opts[Math.floor(hash2(s, seed) * opts.length)];
+            blankStep(b, n, d);
+            out.push(d);
+            noBacktrack = d ^ 1;
+        }
+        return out;
+    }
+    function applyMoves(b, n, ms) {
+        for (let i = 0; i < ms.length; i += 1) {
+            blankStep(b, n, ms[i]);
+        }
+    }
+    function reverseMoves(ms) {
+        const o = [];
+        for (let i = ms.length - 1; i >= 0; i -= 1) {
+            o.push(ms[i] ^ 1);
+        }
+        return o;
+    }
+    // 줄째 밀기 — 누른 칸 i 가 빈칸과 같은 줄이면 사이 타일이 모두 한 칸씩 빈칸 쪽으로. 배열 교환으로 먼저 정하고
+    // 옮겨진 타일 번호를 빈칸에 가까운 순서로 돌려준다
+    function rowChain(b, n, i) {
+        const z = b.indexOf(0);
+        if (i === z) {
+            return [];
+        }
+        let step = 0;
+        if (Math.floor(i / n) === Math.floor(z / n)) {
+            step = i > z ? 1 : -1;
+        }
+        else if (i % n === z % n) {
+            step = i > z ? n : -n;
+        }
+        else {
+            return [];
+        }
+        const moved = [];
+        for (let p = z; p !== i; p += step) {
+            b[p] = b[p + step];
+            moved.push(b[p]);
+        }
+        b[i] = 0;
+        return moved;
+    }
+    function idaStar(start, n, cap) {
+        const b = start.slice();
+        const path = [];
+        let nodes = 0;
+        let capHit = false;
+        const INF = 9999;
+        let z = b.indexOf(0);
+        function dfs(g, h, bound, last) {
+            nodes += 1;
+            if (nodes > cap) {
+                capHit = true;
+                return INF;
+            }
+            const f = g + h;
+            if (f > bound) {
+                return f;
+            }
+            if (h === 0) {
+                return -1;
+            }
+            let min = INF;
+            for (let d = 0; d < 4; d += 1) {
+                if (last >= 0 && d === (last ^ 1)) {
+                    continue;
+                }
+                const c = (z % n) + DX[d];
+                const r = Math.floor(z / n) + DY[d];
+                if (c < 0 || c >= n || r < 0 || r >= n) {
+                    continue;
+                }
+                const t = z + DX[d] + DY[d] * n;
+                const v = b[t];
+                const hv = Math.abs((t % n) - ((v - 1) % n)) + Math.abs(Math.floor(t / n) - Math.floor((v - 1) / n));
+                const hn = Math.abs((z % n) - ((v - 1) % n)) + Math.abs(Math.floor(z / n) - Math.floor((v - 1) / n));
+                b[z] = v;
+                b[t] = 0;
+                const oz = z;
+                z = t;
+                path.push(d);
+                const res = dfs(g + 1, h - hv + hn, bound, d);
+                if (res === -1) {
+                    return -1;
+                }
+                path.pop();
+                z = oz;
+                b[t] = v;
+                b[z] = 0;
+                if (capHit) {
+                    return INF;
+                }
+                if (res < min) {
+                    min = res;
+                }
+            }
+            return min;
+        }
+        let bound = sumH(b, n);
+        const bounds = [];
+        const perBound = [];
+        while (bound < INF) {
+            const before = nodes;
+            bounds.push(bound);
+            const res = dfs(0, sumH(b, n), bound, -1);
+            perBound.push(nodes - before);
+            if (res === -1) {
+                return { path: path.slice(), nodes: nodes, bounds: bounds, perBound: perBound, capHit: false };
+            }
+            if (capHit || res >= INF) {
+                break;
+            }
+            bound = res;
+        }
+        return { path: [], nodes: nodes, bounds: bounds, perBound: perBound, capHit: capHit };
+    }
+    // ── 판 화면 — 타일마다 지금 칸 → 목표 칸 보간. 배열은 먼저 바뀌고 화면이 뒤따른다
+    const BX = 24;
+    const BY = 44;
+    const BSZ = 216;
+    let bd = [];
+    let BN = 4;
+    let CS = 54;
+    let tl = [];
+    let dragV = -1;
+    let dragCx = 0;
+    let dragCy = 0;
+    function setBoard(b, n) {
+        bd = b.slice();
+        BN = n;
+        CS = BSZ / n;
+        tl = [];
+        dragV = -1;
+        for (let v = 0; v < n * n; v += 1) {
+            const i = bd.indexOf(v);
+            const c = i % n;
+            const r = Math.floor(i / n);
+            tl.push({ fx: c, fy: r, tx: c, ty: r, t0: 0, du: 0 });
+        }
+    }
+    let still = false;
+    function tilePos(v) {
+        const t = tl[v];
+        if (v === dragV) {
+            return [dragCx, dragCy];
+        }
+        if (still || t.du <= 0) {
+            return [t.tx, t.ty];
+        }
+        const e = easeOut((sceneT - t.t0) / t.du);
+        return [lerp(t.fx, t.tx, e), lerp(t.fy, t.ty, e)];
+    }
+    // 배열이 바뀐 뒤 타일마다 목표 칸을 다시 읽는다 — 옮겨진 타일만 지금 화면 자리에서 출발한다
+    function retarget(delayOf, du) {
+        for (let v = 1; v < BN * BN; v += 1) {
+            const i = bd.indexOf(v);
+            const c = i % BN;
+            const r = Math.floor(i / BN);
+            const t = tl[v];
+            if (c !== t.tx || r !== t.ty) {
+                const p = tilePos(v);
+                t.fx = p[0];
+                t.fy = p[1];
+                t.tx = c;
+                t.ty = r;
+                t.t0 = sceneT + delayOf(v);
+                t.du = du;
+            }
+        }
+    }
+    function stepBlank(d, du) {
+        if (!blankStep(bd, BN, d)) {
+            return false;
+        }
+        retarget(function () { return 0; }, du);
+        return true;
+    }
+    function cellAt(x, y) {
+        const c = Math.floor((x - BX) / CS);
+        const r = Math.floor((y - BY) / CS);
+        if (c < 0 || c >= BN || r < 0 || r >= BN) {
+            return -1;
+        }
+        return r * BN + c;
+    }
+    // ── 그리기 도구
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const padEl = root.querySelector('[data-role="pad"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const doneEl = root.querySelector('[data-role="done"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !doneEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const doneP = doneEl;
+    const pad = padEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const UI_FONT = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 계산은 늘 480×300 이고 화면 배율만 이 값
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x, y, r, c, a) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function seg(x1, y1, x2, y2, c, a, w) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+    function text(s, x, y, c, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + UI_FONT;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillText(s, x, y);
+    }
+    function panel(x, y, w, h) { box(x, y, w, h, 12, PANEL, 1); }
+    // 아래쪽 눈금 — 상수 이름과 지금 값 · 크기 막대
+    function hud(name, val, frac) {
+        const label = name + ' ' + val;
+        ctx.font = '700 11px ' + UI_FONT;
+        const w = ctx.measureText(label).width + 20;
+        const x = 12;
+        const y = H - 30;
+        box(x, y, w, 20, 10, NEU, 0.96);
+        text(label, x + w / 2, y + 10.5, INK, 11, 700, 'center');
+        const mx = x + w + 10;
+        box(mx, y + 6, 140, 8, 4, [78, 72, 104], 1);
+        box(mx, y + 6, 140 * clamp(frac, 0, 1), 8, 4, MINT, 1);
+    }
+    // 판 바탕 — 받침과 빈 칸 홈
+    function drawBoardBase() {
+        const s = CS * BN;
+        box(BX - 5, BY - 5, s + 10, s + 10, 12, PANEL, 1);
+        for (let i = 0; i < BN * BN; i += 1) {
+            box(BX + (i % BN) * CS + 2, BY + Math.floor(i / BN) * CS + 2, CS - 4, CS - 4, 8, [40, 36, 62], 1);
+        }
+    }
+    function tileHue(v, n) {
+        return hsl(190 + 160 * ((v - 1) / (n * n - 2)), 0.55, 0.8);
+    }
+    function paintTile(label, cx, cy, c, cs, ox, oy) {
+        const s = cs - 4;
+        const x = ox + cx * cs + 2;
+        const y = oy + cy * cs + 2;
+        box(x, y + 2, s, s, 8, [26, 23, 42], 0.5);
+        box(x, y, s, s, 8, c, 1);
+        box(x + 3, y + 2, s - 6, 3, 1.5, [255, 255, 255], 0.4);
+        text(label, x + s / 2, y + s / 2 + 1, INK, Math.max(9, Math.round(cs * 0.38)), 800, 'center');
+    }
+    function drawTiles(fillOf) {
+        for (let v = 1; v < BN * BN; v += 1) {
+            const p = tilePos(v);
+            paintTile(String(v), p[0], p[1], fillOf(v), CS, BX, BY);
+        }
+    }
+    // 글자판 없이 배열만 그리는 작은 판 — 비교 장면용
+    function drawMini(b, n, ox, oy, size) {
+        const cs = size / n;
+        box(ox - 3, oy - 3, size + 6, size + 6, 8, PANEL, 1);
+        for (let i = 0; i < n * n; i += 1) {
+            const v = b[i];
+            if (v === 0) {
+                box(ox + (i % n) * cs + 1, oy + Math.floor(i / n) * cs + 1, cs - 2, cs - 2, 3, [40, 36, 62], 1);
+                continue;
+            }
+            const x = ox + (i % n) * cs + 1;
+            const y = oy + Math.floor(i / n) * cs + 1;
+            box(x, y, cs - 2, cs - 2, 3, tileHue(v, n), 1);
+            if (cs >= 20) {
+                text(String(v), x + (cs - 2) / 2, y + (cs - 2) / 2 + 1, INK, Math.round(cs * 0.4), 800, 'center');
+            }
+        }
+    }
+    // ── 상태 줄·낭독 문장
+    const SPK_PLACE = '{a}×{a} の盤、タイル {b} 枚のうち {c} 枚が元の位置にある';
+    const SPK_DONE = '{a}×{a} の盤が完成、タイル {b} 枚すべてが元の位置にある';
+    function speakBoard() {
+        const t = BN * BN - 1;
+        return isSolved(bd) ? fill(SPK_DONE, String(BN), String(t)) : fill(SPK_PLACE, String(BN), String(t), String(placedCount(bd)));
+    }
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고, 그 뒤부터 모드가 바뀔 때만 낭독 문장을 쓴다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    // 사람이 직접 조작하는 중이면 시간표는 멈추고 계산만 흐른다
+    let manual = false;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+    }
+    function takeOver() {
+        if (manual) {
+            return;
+        }
+        manual = true;
+        wake();
+    }
+    // 낭독 모드 — 완성이면 1000, 손으로 하는 중이면 맞은 타일 수, 자동 시연이면 장면이 정한 단계
+    function modeBase(sceneMode) {
+        if (isSolved(bd)) {
+            return 1000;
+        }
+        return manual ? 100 + placedCount(bd) : sceneMode;
+    }
+    // 낭독 문장 — 화면 상태 줄(aria-live off)과 따로, 모드가 바뀔 때와 사람이 조작했을 때만 role=status 에 쓴다
+    let lastMode = -9;
+    function say() {
+        doneP.textContent = speakText();
+        lastMode = still ? -2 : modeId();
+    }
+    function advance(dt) {
+        sceneT += dt;
+        if (!manual) {
+            while (evAt < script.length && script[evAt].t <= sceneT) {
+                const ev = script[evAt];
+                evAt += 1;
+                ev.f();
+            }
+            if (sceneT >= LAP_S) {
+                lap += 1;
+                begin();
+                return;
+            }
+        }
+        update(dt);
+    }
+    function begin() {
+        sceneT = 0;
+        evAt = 0;
+        script = [];
+        build();
+    }
+    // 고정 걸음 + 걸음 수 상한 — 프레임 간격이 흔들려도 같은 계산, 탭이 멈췄다 돌아와도 한 번에 몰리지 않는다
+    const STEP_S = 1 / 60;
+    const DT_MAX = 0.05;
+    let acc = 0;
+    function showNow() {
+        draw();
+        pushStatus(statusText());
+        if (!demo) {
+            const m = still ? -2 : modeId();
+            if (m !== lastMode) {
+                say();
+            }
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        acc += dt;
+        while (acc >= STEP_S) {
+            advance(STEP_S);
+            acc -= STEP_S;
+        }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 시간표의 REST_S 초까지를 한 번에 치른 판 한 장. 타일은 보간 없이 바로 제자리
+    function showRest() {
+        stopLoop();
+        lap = 0;
+        begin();
+        while (evAt < script.length && script[evAt].t <= REST_S) {
+            const ev = script[evAt];
+            evAt += 1;
+            sceneT = ev.t;
+            ev.f();
+        }
+        sceneT = REST_S;
+        update(0);
+        showNow();
+    }
+    function play() {
+        begin();
+        showNow();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    // 사람이 조작한 뒤 — 멈춘 채이거나 움직임 줄이기이면 보간을 건너뛰어 바로 보이게 한다. 조작 직후는 낭독 문장도 쓴다
+    function afterInput(speak) {
+        if (paused || still) {
+            sceneT += 1;
+        }
+        update(0);
+        showNow();
+        if (speak) {
+            say();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+        say();
+    }
+    function restart() {
+        manual = false;
+        lap = 0;
+        begin();
+        update(0);
+        showNow();
+        say();
+    }
+    // N 한 걸음 — 시간표의 다음 일 하나를 지금 치른다. 시간표가 끝났으면 처음부터 다시 짠 뒤 첫 일
+    function stepOnce() {
+        takeOver();
+        if (evAt >= script.length) {
+            lap += 1;
+            begin();
+        }
+        if (evAt < script.length) {
+            const ev = script[evAt];
+            evAt += 1;
+            if (sceneT < ev.t) {
+                sceneT = ev.t;
+            }
+            ev.f();
+        }
+        afterInput(true);
+    }
+    function keyMove(dx, dy) {
+        // 방향키는 타일이 가는 방향 — 그 타일은 빈칸의 반대쪽에 있다. 빈칸이 가는 방향으로 바꿔 부른다
+        let d = 0;
+        for (let k = 0; k < 4; k += 1) {
+            if (DX[k] === -dx && DY[k] === -dy) {
+                d = k;
+            }
+        }
+        takeOver();
+        onDir(d);
+        afterInput(true);
+    }
+    function toCanvas(e) {
+        const r = cv.getBoundingClientRect();
+        return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height];
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. 방향키 = 빈칸 이웃 타일 이동, Enter·Space = 一時停止, N = 한 걸음, R = 처음부터
+    pad.addEventListener('keydown', function (e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) {
+            return;
+        }
+        const k = e.key;
+        if (k === 'Enter' || k === ' ' || k === 'p' || k === 'P') {
+            e.preventDefault();
+            togglePause();
+        }
+        else if (k === 'r' || k === 'R') {
+            restart();
+        }
+        else if (k === 'n' || k === 'N') {
+            e.preventDefault();
+            stepOnce();
+        }
+        else if (k === 'ArrowLeft') {
+            e.preventDefault();
+            keyMove(-1, 0);
+        }
+        else if (k === 'ArrowRight') {
+            e.preventDefault();
+            keyMove(1, 0);
+        }
+        else if (k === 'ArrowUp') {
+            e.preventDefault();
+            keyMove(0, -1);
+        }
+        else if (k === 'ArrowDown') {
+            e.preventDefault();
+            keyMove(0, 1);
+        }
+        else if (keyHook !== null && keyHook(k)) {
+            e.preventDefault();
+            takeOver();
+            afterInput(true);
+        }
+    }, { signal: off.signal });
+    // 포인터 — 마우스·터치·펜을 한 이벤트로. 누르는 순간부터 놓을 때까지 무대가 포인터를 붙잡는다
+    let ptrDown = false;
+    // 장면이 방향키·Enter·N·R 밖의 키를 받고 싶을 때 거는 갈고리 — 먹었으면 true
+    let keyHook = null;
+    pad.addEventListener('pointerdown', function (e) {
+        takeOver();
+        ptrDown = true;
+        try {
+            pad.setPointerCapture(e.pointerId);
+        }
+        catch (err) {
+            ptrDown = true;
+        }
+        const p = toCanvas(e);
+        onPtr(0, p[0], p[1]);
+        afterInput(false);
+    }, { signal: off.signal });
+    pad.addEventListener('pointermove', function (e) {
+        if (!ptrDown) {
+            return;
+        }
+        const p = toCanvas(e);
+        onPtr(1, p[0], p[1]);
+        afterInput(false);
+    }, { signal: off.signal });
+    function ptrEnd(e) {
+        if (!ptrDown) {
+            return;
+        }
+        ptrDown = false;
+        const p = toCanvas(e);
+        onPtr(2, p[0], p[1]);
+        afterInput(true);
+    }
+    pad.addEventListener('pointerup', ptrEnd, { signal: off.signal });
+    pad.addEventListener('pointercancel', ptrEnd, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 판 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            lap = 0;
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // 누른 칸이 빈칸의 이웃이면 그 타일이 들어갈 빈칸의 방향(빈칸 기준), 아니면 -1
+    function dirOfCell(i) {
+        const z = bd.indexOf(0);
+        for (let d = 0; d < 4; d += 1) {
+            if (canStep(bd, BN, d) && z + DX[d] + DY[d] * BN === i) {
+                return d;
+            }
+        }
+        return -1;
+    }
+    // 05 — 맨해튼 거리 합 H 를 길잡이로 깊이 우선 탐색을 하되, 수와 H 의 합이 한도(bound)를 넘으면 가지를 접고 한도를 한 단계씩 올려 다시 돈다(反復深化探索). 노드 수가 NODE_CAP 에 닿으면 멈춘다고 표시하고, 해를 찾으면 찾은 수를 판에서 한 수씩 재생한다
+    const NODE_CAP = 4000;
+    const SEEDS_05 = [24, 2, 17, 5];
+    const SEEDS_4X4 = [5, 1, 8, 6];
+    const SHUFFLE_05 = 30;
+    const SHUFFLE_4X4 = 60;
+    const MOVE_GAP = 0.12;
+    const SEARCH_S = 1.5;
+    const LAP_S = 8.2;
+    const REST_S = 2.6;
+    const PX = 256;
+    const PW = 216;
+    let res = { path: [], nodes: 0, bounds: [], perBound: [], capHit: false };
+    let res4 = { path: [], nodes: 0, bounds: [], perBound: [], capHit: false };
+    let h0 = 0;
+    let h04 = 0;
+    let t0 = 0.3;
+    let replayAt = 0;
+    let fourAt = 0;
+    let doneMoves = 0;
+    const STAT_SEARCH = '上限 {a}、探索したノード {b} 個';
+    const STAT_REPLAY = '見つけた手 {a}/{b} を再生中';
+    const STAT_CAP = '4×4 の盤はノード {a} 個で停止';
+    const SPK_FOUND = '反復深化探索: ノード {a} 個、解の長さ {b} 手';
+    function phaseNow() { return BN === 4 ? 3 : (sceneT < replayAt ? 1 : 2); }
+    function toFour() {
+        const b = solvedBoard(4);
+        applyMoves(b, 4, walkMoves(4, SHUFFLE_4X4, SEEDS_4X4[lap % SEEDS_4X4.length]));
+        res4 = idaStar(b, 4, NODE_CAP);
+        h04 = sumH(b, 4);
+        setBoard(b, 4);
+        t0 = sceneT + 0.2;
+    }
+    function moveAt(d) {
+        return function () {
+            if (stepBlank(d, 0.1)) {
+                doneMoves += 1;
+            }
+        };
+    }
+    function build() {
+        const b = solvedBoard(3);
+        applyMoves(b, 3, walkMoves(3, SHUFFLE_05, SEEDS_05[lap % SEEDS_05.length]));
+        res = idaStar(b, 3, NODE_CAP);
+        h0 = sumH(b, 3);
+        setBoard(b, 3);
+        t0 = 0.3;
+        doneMoves = 0;
+        replayAt = t0 + SEARCH_S + 0.1;
+        for (let k = 0; k < res.path.length; k += 1) {
+            script.push({ t: replayAt + k * MOVE_GAP, f: moveAt(res.path[k]) });
+        }
+        fourAt = replayAt + res.path.length * MOVE_GAP + 0.6;
+        script.push({ t: fourAt, f: toFour });
+    }
+    function update(dt) { if (dt < 0) {
+        return;
+    } }
+    function shownNodes(r) {
+        return clamp((sceneT - t0) / SEARCH_S, 0, 1) * Math.min(r.nodes, NODE_CAP);
+    }
+    function currentBound(r, shown) {
+        let cum = 0;
+        for (let i = 0; i < r.bounds.length; i += 1) {
+            cum += r.perBound[i];
+            if (shown < cum) {
+                return r.bounds[i];
+            }
+        }
+        return r.bounds.length > 0 ? r.bounds[r.bounds.length - 1] : 0;
+    }
+    function draw() {
+        ctx.fillStyle = rgba(BGC, 1);
+        ctx.fillRect(0, 0, W, H);
+        drawBoardBase();
+        drawTiles(function (v) { return tileHue(v, BN); });
+        const ph = phaseNow();
+        const r = ph === 3 ? res4 : res;
+        const shown = shownNodes(r);
+        const s = CS * BN;
+        panel(PX, BY - 5, PW, s + 10);
+        text('反復深化探索', PX + 12, BY + 12, NEU, 15, 800, 'left');
+        text('H ' + (ph === 3 ? h04 : h0), PX + PW - 12, BY + 12, DIM, 11, 700, 'right');
+        // 노드 눈금 — 지금까지 센 노드 수가 NODE_CAP 의 얼마인지
+        text('NODE_CAP ' + NODE_CAP, PX + 12, BY + 36, DIM, 11, 700, 'left');
+        text(String(Math.round(shown)), PX + PW - 12, BY + 36, NEU, 12, 800, 'right');
+        box(PX + 12, BY + 46, PW - 24, 8, 4, [48, 44, 74], 1);
+        box(PX + 12, BY + 46, (PW - 24) * clamp(shown / NODE_CAP, 0, 1), 8, 4, r.capHit && shown >= Math.min(r.nodes, NODE_CAP) - 1 ? ROSE : MINT, 1);
+        // 한도별 줄 — 한도마다 센 노드 수
+        let maxPer = 1;
+        for (let i = 0; i < r.perBound.length; i += 1) {
+            maxPer = Math.max(maxPer, r.perBound[i]);
+        }
+        let cum = 0;
+        for (let i = 0; i < Math.min(r.bounds.length, 7); i += 1) {
+            const y = BY + 70 + i * 17;
+            const got = clamp(shown - cum, 0, r.perBound[i]);
+            cum += r.perBound[i];
+            text('bound ' + r.bounds[i], PX + 12, y + 7, got > 0 ? NEU : DIM, 10, 700, 'left');
+            box(PX + 70, y + 1, 94, 12, 4, [48, 44, 74], 1);
+            box(PX + 70, y + 1, 94 * got / maxPer, 12, 4, i === r.bounds.length - 1 && !r.capHit ? ROSE : SKY, 1);
+            if (got > 0) {
+                text(String(Math.round(got)), PX + PW - 12, y + 7, NEU, 10, 800, 'right');
+            }
+        }
+        // 결과 — 해를 찾았으면 길이와 재생 진행, 못 찾고 멈췄으면 멈춤 표시
+        const done = sceneT - t0 >= SEARCH_S;
+        if (ph === 3) {
+            if (done) {
+                box(PX + 12, BY + 192, PW - 24, 22, 11, ROSE, 1);
+                text('NODE_CAPに到達、停止', PX + PW / 2, BY + 203.5, INK, 11, 800, 'center');
+            }
+        }
+        else if (done) {
+            text(fill('解の長さ {a} 手、ノード {b} 個', String(res.path.length), String(res.nodes)), PX + 12, BY + 192, NEU, 11, 700, 'left');
+            box(PX + 12, BY + 202, PW - 24, 8, 4, [48, 44, 74], 1);
+            box(PX + 12, BY + 202, (PW - 24) * doneMoves / Math.max(1, res.path.length), 8, 4, MINT, 1);
+        }
+        hud('NODE_CAP', String(NODE_CAP), shown / NODE_CAP);
+    }
+    function statusText() {
+        const ph = phaseNow();
+        if (ph === 3) {
+            return fill(STAT_CAP, String(Math.round(Math.min(res4.nodes, NODE_CAP))));
+        }
+        const shown = shownNodes(res);
+        if (sceneT - t0 < SEARCH_S) {
+            return fill(STAT_SEARCH, String(currentBound(res, shown)), String(Math.round(shown)));
+        }
+        return fill(STAT_REPLAY, String(doneMoves), String(res.path.length));
+    }
+    function modeId() { return modeBase(phaseNow()); }
+    function speakText() {
+        const head = phaseNow() === 3 ? fill(STAT_CAP, String(Math.round(Math.min(res4.nodes, NODE_CAP)))) : fill(SPK_FOUND, String(res.nodes), String(res.path.length));
+        return head + '. ' + speakBoard();
+    }
+    function onDir(d) { stepBlank(d, 0.1); }
+    function onPtr(kind, x, y) {
+        if (kind !== 0) {
+            return;
+        }
+        const d = dirOfCell(cellAt(x, y));
+        if (d >= 0) {
+            onDir(d);
+        }
+    }
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
