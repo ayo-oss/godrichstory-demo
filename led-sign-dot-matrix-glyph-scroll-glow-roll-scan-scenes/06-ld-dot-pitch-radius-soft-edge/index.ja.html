@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>点の間隔と半径の比 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vj is-demo" id="vj">
+  <div class="vj__pad" data-role="pad" tabindex="0" role="application" aria-label="電光掲示板デモの舞台 - EnterかSpaceで一時停止、Nで1コマ、Rで最初から">
+    <canvas class="vj__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="LED 5X7 DOT という文句が三つの盤に流れる。上の盤は縁がそのままの細い点、中の盤は半径の外側にうすい輪を一重足して縁をやわらげ、下の盤は点の間隔に対する半径の比が0.18から0.5まで上下して点が散らばってはくっつく。"></canvas>
+  </div>
+  <p class="vj__status" data-role="status" aria-live="off">電光掲示板のデモ</p>
+  <div class="vj__ctrl">
+    <button class="vj__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+    <button class="vj__step" data-role="step" type="button">1コマ</button>
+  </div>
+  <p class="vj__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("vj");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function ease(x) { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 파스텔 바깥 무대 — 판 바깥은 연한 면, 글자는 짙은 잉크
+    const BG_TOP = [248, 244, 252];
+    const BG_BOT = [228, 234, 250];
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    const WHITE = [255, 255, 255];
+    const ROSE = [244, 162, 186];
+    const MINT = [148, 212, 182];
+    const SKY = [172, 208, 246];
+    const BUTTER = [250, 228, 150];
+    // 전광판 판 — 짙은 남보라 바탕, 꺼진 점은 바탕보다 한 단계 밝은 보라, 켜진 점은 호박색(LED 색은 기능색이라 채도를 유지한다)
+    const BOARD = [28, 22, 42];
+    const BOARD_EDGE = [88, 80, 124];
+    const DOT_OFF = [62, 52, 82];
+    const AMBER = [255, 184, 72];
+    const AMBER_HI = [255, 232, 170];
+    function mix(a, b, k) { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 장면 시계(초)·판 반복 번호
+    let sceneT = 0;
+    let lap = 0;
+    // ── 5x7 점 글꼴 — 자체 정의. 글자 하나는 가로 5칸 세로 7칸의 0·1 표이고 1 인 칸이 켜진다 ──
+    const GLYPH_W = 5;
+    const GLYPH_H = 7;
+    // 글자와 글자 사이 빈 列 한 줄
+    const LETTER_GAP = 1;
+    const ADV = GLYPH_W + LETTER_GAP;
+    const GL = {
+        ' ': ['00000', '00000', '00000', '00000', '00000', '00000', '00000'],
+        'A': ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+        'B': ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+        'C': ['01110', '10001', '10000', '10000', '10000', '10001', '01110'],
+        'D': ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+        'E': ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+        'F': ['11111', '10000', '10000', '11110', '10000', '10000', '10000'],
+        'G': ['01110', '10001', '10000', '10111', '10001', '10001', '01111'],
+        'H': ['10001', '10001', '10001', '11111', '10001', '10001', '10001'],
+        'I': ['01110', '00100', '00100', '00100', '00100', '00100', '01110'],
+        'J': ['00111', '00010', '00010', '00010', '00010', '10010', '01100'],
+        'K': ['10001', '10010', '10100', '11000', '10100', '10010', '10001'],
+        'L': ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+        'M': ['10001', '11011', '10101', '10101', '10001', '10001', '10001'],
+        'N': ['10001', '11001', '10101', '10011', '10001', '10001', '10001'],
+        'O': ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+        'P': ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+        'Q': ['01110', '10001', '10001', '10001', '10101', '10010', '01101'],
+        'R': ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+        'S': ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+        'T': ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+        'U': ['10001', '10001', '10001', '10001', '10001', '10001', '01110'],
+        'V': ['10001', '10001', '10001', '10001', '10001', '01010', '00100'],
+        'W': ['10001', '10001', '10001', '10101', '10101', '11011', '10001'],
+        'X': ['10001', '10001', '01010', '00100', '01010', '10001', '10001'],
+        'Y': ['10001', '10001', '01010', '00100', '00100', '00100', '00100'],
+        'Z': ['11111', '00001', '00010', '00100', '01000', '10000', '11111'],
+        '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
+        '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
+        '2': ['01110', '10001', '00001', '00010', '00100', '01000', '11111'],
+        '3': ['11110', '00001', '00001', '01110', '00001', '00001', '11110'],
+        '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
+        '5': ['11111', '10000', '11110', '00001', '00001', '10001', '01110'],
+        '6': ['00110', '01000', '10000', '11110', '10001', '10001', '01110'],
+        '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
+        '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
+        '9': ['01110', '10001', '10001', '01111', '00001', '00010', '01100'],
+        '!': ['00100', '00100', '00100', '00100', '00100', '00000', '00100'],
+        '.': ['00000', '00000', '00000', '00000', '00000', '01100', '01100'],
+        '-': ['00000', '00000', '00000', '11111', '00000', '00000', '00000'],
+        ':': ['00000', '01100', '01100', '00000', '01100', '01100', '00000'],
+        '%': ['11001', '11010', '00010', '00100', '01000', '01011', '10011'],
+        '+': ['00000', '00100', '00100', '11111', '00100', '00100', '00000'],
+        '>': ['10000', '01000', '00100', '00010', '00100', '01000', '10000'],
+        '*': ['00000', '10101', '01110', '11111', '01110', '10101', '00000'],
+    };
+    function glyphRows(ch) { return GL[ch] ? GL[ch] : GL[' ']; }
+    // 문구를 列 목록으로 편다 — 列 하나는 7 비트 정수(0 번 비트가 맨 윗줄). 글자 사이 빈 열도 목록에 들어 있고 맨 끝 빈 열은 뺀다
+    function colsOf(s) {
+        const out = [];
+        for (let i = 0; i < s.length; i += 1) {
+            const rows = glyphRows(s.charAt(i));
+            for (let c = 0; c < GLYPH_W; c += 1) {
+                let v = 0;
+                for (let r = 0; r < GLYPH_H; r += 1) {
+                    if (rows[r].charAt(c) === '1') {
+                        v |= 1 << r;
+                    }
+                }
+                out.push(v);
+            }
+            if (i < s.length - 1) {
+                out.push(0);
+            }
+        }
+        return out;
+    }
+    function bitOf(cols, c, r) {
+        return c < 0 || c >= cols.length ? 0 : (cols[c] >> r) & 1;
+    }
+    // 순환 목록 — 문구 列 뒤에 gap 개의 빈 열을 이어 한 바퀴를 만든다. 번호는 한 바퀴 길이로 나머지를 취한다
+    function loopBit(cols, gap, c, r) {
+        const n = cols.length + gap;
+        const k = ((c % n) + n) % n;
+        return k < cols.length ? (cols[k] >> r) & 1 : 0;
+    }
+    // ── 판 그리기 도구 ──
+    let ctxRef = null;
+    const BOARD_PAD = 6;
+    function boardW(n, pitch) { return n * pitch + 2 * BOARD_PAD; }
+    // 점 하나 — halo 가 0 이면 가장자리가 딱 떨어지는 점, 0 보다 크면 그 배율 반지름의 옅은 테두리가 한 겹 더 번진다
+    function dotOne(cx, cy, rad, round, halo, c, a) {
+        if (a <= 0.01 || !ctxRef) {
+            return;
+        }
+        const ctx = ctxRef;
+        if (round) {
+            if (halo > 0) {
+                ctx.beginPath();
+                ctx.arc(cx, cy, rad * halo, 0, TAU);
+                ctx.fillStyle = rgba(c, a * 0.28);
+                ctx.fill();
+            }
+            ctx.beginPath();
+            ctx.arc(cx, cy, rad, 0, TAU);
+            ctx.fillStyle = rgba(c, a);
+            ctx.fill();
+        }
+        else {
+            const s = rad * 1.75;
+            if (halo > 0) {
+                ctx.fillStyle = rgba(c, a * 0.28);
+                ctx.fillRect(cx - s * halo / 2, cy - s * halo / 2, s * halo, s * halo);
+            }
+            ctx.fillStyle = rgba(c, a);
+            ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+        }
+    }
+    // 판 한 장 — 점 cols×rows. lvAt(c, r) 이 0 에서 1 의 밝기를 돌려주고 colAt 이 있으면 열마다 색을 고른다
+    function board(x, y, cols, rows, pitch, fill, round, halo, lvAt, colAt) {
+        if (!ctxRef) {
+            return;
+        }
+        const ctx = ctxRef;
+        const w = boardW(cols, pitch);
+        const h = boardW(rows, pitch);
+        ctx.beginPath();
+        ctx.roundRect(x - 1, y - 1, w + 2, h + 2, 8);
+        ctx.fillStyle = rgba(BOARD_EDGE, 1);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 7);
+        ctx.fillStyle = rgba(BOARD, 1);
+        ctx.fill();
+        const rad = pitch * fill;
+        for (let c = 0; c < cols; c += 1) {
+            const col = colAt ? colAt(c) : AMBER;
+            const cx = x + BOARD_PAD + (c + 0.5) * pitch;
+            for (let r = 0; r < rows; r += 1) {
+                const cy = y + BOARD_PAD + (r + 0.5) * pitch;
+                dotOne(cx, cy, rad, round, 0, DOT_OFF, 1);
+                const lv = lvAt(c, r);
+                if (lv > 0.03) {
+                    dotOne(cx, cy, rad * 1.6, true, 0, col, 0.1 * lv);
+                    dotOne(cx, cy, rad, round, halo, col, lv);
+                    if (lv > 0.85 && round) {
+                        dotOne(cx - rad * 0.25, cy - rad * 0.25, rad * 0.34, true, 0, mix(col, [255, 255, 255], 0.6), 0.55 * lv);
+                    }
+                }
+            }
+        }
+    }
+    // ── 바깥 무대 도구 ──
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    function box(x, y, w, h, r, c, a) {
+        if (!ctxRef || w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctxRef.beginPath();
+        ctxRef.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctxRef.fillStyle = rgba(c, a);
+        ctxRef.fill();
+    }
+    function text(s, x, y, c, a, px, weight, align) {
+        if (!ctxRef) {
+            return;
+        }
+        ctxRef.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctxRef.textAlign = align;
+        ctxRef.textBaseline = 'middle';
+        ctxRef.fillStyle = rgba(c, a);
+        ctxRef.fillText(s, x, y);
+    }
+    // 글자 이름표 — 바탕 알약 위에 글자
+    function tag(s, x, y, bg, fg, px, align) {
+        if (!ctxRef) {
+            return;
+        }
+        ctxRef.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctxRef.measureText(s).width + px * 1.1;
+        const left = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+        box(left, y - px * 0.82, w, px * 1.64, px * 0.82, bg, 0.92);
+        text(s, left + w / 2, y + 0.5, fg, 1, px, 700, 'center');
+    }
+    function skyFill() {
+        if (!ctxRef) {
+            return;
+        }
+        const g = ctxRef.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(BG_TOP, 1));
+        g.addColorStop(1, rgba(BG_BOT, 1));
+        ctxRef.fillStyle = g;
+        ctxRef.fillRect(0, 0, W, H);
+    }
+    // 판 줄 배치 — 위 46 은 상태 줄·단추 자리. 블록 하나는 이름표 줄 + 판 한 장
+    const VIEW_X = 10;
+    const VIEW_COLS = 64;
+    const PITCH = 7;
+    const BLOCK_Y = [46, 127, 208];
+    // 블록 y0 에서 이름표는 y0+7, 판은 y0+16
+    function blockTag(i, s, bg, fg) { tag(s, VIEW_X + 4, BLOCK_Y[i] + 7, bg, fg, 10, 'left'); }
+    function blockRight(i, s) { text(s, VIEW_X + boardW(VIEW_COLS, PITCH) - 2, BLOCK_Y[i] + 7, INK, 0.9, 10, 700, 'right'); }
+    function boardY(i) { return BLOCK_Y[i] + 16; }
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const padEl = root.querySelector('[data-role="pad"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const stepEl = root.querySelector('[data-role="step"]');
+    const doneEl = root.querySelector('[data-role="done"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !stepEl || !doneEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    ctxRef = ctx;
+    const pauseBtn = pauseEl;
+    const stepBtn = stepEl;
+    const doneP = doneEl;
+    const pad = padEl;
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘지 않게
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    // 화면 낭독기로 가는 문장 — 문구·모드가 바뀔 때만 달라진다. 보이는 상태 줄(statusText)은 따로 두어 계속 바뀌어도 읽히지 않는다
+    let spoken = '';
+    function pushSpeak(s) {
+        if (s === spoken) {
+            return;
+        }
+        spoken = s;
+        doneP.textContent = s;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고 낭독용 문장을 읽히기 시작한다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+        pushSpeak(speakText());
+    }
+    // 한 판 시연이 끝났음을 스크린리더에 한 번만 알린다 — 판이 되풀이돼도 다시 읽지 않는다
+    let doneSaid = false;
+    function checkDone() {
+        if (!doneSaid && sceneT >= LAP_S - 0.6) {
+            doneSaid = true;
+            pushSpeak(speakText());
+        }
+    }
+    function advance(dt) {
+        sceneT += dt;
+        if (sceneT >= LAP_S) {
+            sceneT -= LAP_S;
+            lap += 1;
+            build();
+        }
+        update(dt);
+    }
+    // 첫 판은 START_S 만큼 앞서 시작한다 — 글자가 이미 흐르는 중인 장면에서 보인다
+    function runTo(t) {
+        while (sceneT < t - 1e-6) {
+            advance(Math.min(1 / 30, t - sceneT));
+        }
+    }
+    function begin() {
+        sceneT = 0;
+        build();
+        if (lap === 0 && !still) {
+            runTo(START_S);
+        }
+    }
+    const DT_MAX = 0.05;
+    const STEP_S = 0.4;
+    function showNow() {
+        draw();
+        pushStatus(statusText());
+        if (!demo) {
+            pushSpeak(speakText());
+        }
+        checkDone();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) {
+            advance(dt);
+        }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 글자가 읽히는 정지 장면 한 장
+    function showRest() {
+        stopLoop();
+        lap = 0;
+        sceneT = 0;
+        build();
+        runTo(REST_S);
+        showNow();
+    }
+    function play() {
+        begin();
+        showNow();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }
+    function restart() {
+        wake();
+        doneSaid = false;
+        lap += 1;
+        begin();
+        showNow();
+    }
+    // 1コマ — 멈춘 채 장면 시계를 0.4 초 앞으로
+    function stepOnce() {
+        wake();
+        if (!paused) {
+            paused = true;
+            pauseBtn.setAttribute('aria-pressed', 'true');
+            stopLoop();
+        }
+        runTo(sceneT + STEP_S);
+        showNow();
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    stepBtn.addEventListener('click', stepOnce, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. Enter·Space·P 는 一時停止, N 은 1コマ, R 은 처음부터
+    pad.addEventListener('keydown', function (e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) {
+            return;
+        }
+        const k = e.key;
+        if (k === 'Enter' || k === ' ' || k === 'p' || k === 'P') {
+            e.preventDefault();
+            togglePause();
+        }
+        else if (k === 'n' || k === 'N') {
+            e.preventDefault();
+            stepOnce();
+        }
+        else if (k === 'r' || k === 'R') {
+            e.preventDefault();
+            restart();
+        }
+    }, { signal: off.signal });
+    // 마우스·터치 — 무대를 누르면 一時停止 토글
+    pad.addEventListener('click', function () { togglePause(); }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 정지 장면 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            lap = 0;
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // ── 06 점 간격과 반지름의 비율 — 가는 점 / 부드러운 가장자리 점 / 比が上下する点 ────
+    // 점 간격 PITCH 에 대한 반지름의 비율이 DOT_FILL 이다. 비율이 작으면 점이 흩어져 보이고, 0.5 에 다가가면 이웃 점과 붙어 한 덩어리가 된다. softEdge 는 바깥에 옅은 둘레를 한 겹 더해 가장자리를 풀어 준다
+    const DOT_FILL = 0.4;
+    const DOT_THIN = 0.2;
+    const FILL_LO = 0.18;
+    const FILL_HI = 0.5;
+    const FILL_PERIOD = 6;
+    const SCROLL_SPEED = 13;
+    const GAP_COLS = 13;
+    const LEAD = 4;
+    const LAP_S = 6;
+    const START_S = 1.4;
+    const REST_S = 2.0;
+    const MSG = 'LED 5X7 DOT';
+    const cols = colsOf(MSG);
+    function clock() { return sceneT + lap * LAP_S; }
+    function build() { return; }
+    function update(dt) { if (dt < 0) {
+        return;
+    } }
+    // 가장자리 풀기 — 반지름 비율이 클수록 이웃과 겹치니 둘레 배율을 낮춘다. 0 이면 딱 떨어지는 점
+    function softEdge(fill) { return clamp(0.5 / fill * 0.92, 1.05, 1.9); }
+    // 오르내리는 판의 지금 비율 — 한 주기에 FILL_LO 에서 FILL_HI 로 갔다 온다
+    function fillNow() { return lerp(FILL_LO, FILL_HI, 0.5 - 0.5 * Math.cos(TAU * clock() / FILL_PERIOD)); }
+    function lvAt(c, r) {
+        return loopBit(cols, GAP_COLS, Math.floor(clock() * SCROLL_SPEED) + c - LEAD, r);
+    }
+    function gapPx(fill) { return PITCH - 2 * PITCH * fill; }
+    function draw() {
+        skyFill();
+        const fn = fillNow();
+        blockTag(0, '細い点 - 縁はそのまま', BUTTER, INK);
+        blockTag(1, 'やわらかい縁を一重', MINT, INK);
+        blockTag(2, '比が上下する点', ROSE, INK);
+        blockRight(0, 'DOT_FILL ' + DOT_THIN.toFixed(2));
+        blockRight(1, 'DOT_FILL ' + DOT_FILL.toFixed(2));
+        blockRight(2, 'DOT_FILL ' + fn.toFixed(2));
+        board(VIEW_X, boardY(0), VIEW_COLS, GLYPH_H, PITCH, DOT_THIN, true, 0, lvAt, null);
+        board(VIEW_X, boardY(1), VIEW_COLS, GLYPH_H, PITCH, DOT_FILL, true, softEdge(DOT_FILL), lvAt, null);
+        board(VIEW_X, boardY(2), VIEW_COLS, GLYPH_H, PITCH, fn, true, softEdge(fn), lvAt, null);
+    }
+    // 화면 낭독기로 보내는 문장 — 표시 문구와 판 이름만 담아 장면이 흘러도 달라지지 않는다
+    function speakText() {
+        return '表示文句 {s} - 点間隔と半径の盤'.replace('{s}', MSG);
+    }
+    function statusText() {
+        const fn = fillNow();
+        return '間隔 {p}px · 充填 {f} · 点の間の隙間 {g}px'.replace('{p}', String(PITCH)).replace('{f}', fn.toFixed(2)).replace('{g}', gapPx(fn).toFixed(1));
+    }
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
