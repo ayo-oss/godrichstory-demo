@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Torso and Hips That Turn With Each Step — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="vj is-demo" id="vj">
+  <div class="vj__pad" data-role="pad" tabindex="0" role="application" aria-label="Walking cycle stage: left and right arrow keys change the step rate, Enter or Space pauses, N takes one step, R restarts">
+    <canvas class="vj__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="As a foot reaches forward the hips turn toward it and the shoulders turn away, twisting the body. The small rotation shows on the side silhouette as an offset of ribs and back, going back and forth with each step, and it grows in proportion to the step rate. The right gauge shows the hip and shoulder rotations as their own bars. The gauge below shows the constant name and its current value, and under reduced motion only one standing pose where the walk has come to rest is drawn"></canvas>
+  </div>
+  <p class="vj__status" data-role="status" aria-live="off">Walking cycle scene</p>
+  <div class="vj__ctrl">
+    <button class="vj__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+  </div>
+  <p class="vj__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const root = document.getElementById("vj");
+    if (!root) return;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function easeOut(k) { const u = 1 - clamp(k, 0, 1); return 1 - u * u * u; }
+    // 파스텔 팔레트 — 바탕은 짙은 자두색, 타일은 연한 색 위에 짙은 잉크 숫자
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    const ROSE = [244, 162, 186];
+    const MINT = [148, 212, 182];
+    const SKY = [150, 192, 244];
+    const SUN = [250, 218, 146];
+    const NEU = [236, 230, 250];
+    const BGC = [46, 42, 68];
+    const PANEL = [62, 57, 92];
+    const DIM = [196, 190, 224];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function hsl(h, s, l) {
+        const a = s * Math.min(l, 1 - l);
+        const f = function (n) {
+            const k = (n + h / 30) % 12;
+            return l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+        };
+        return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+    }
+    // 정수 해시 — 같은 (a, b) 에는 늘 같은 0 이상 1 미만 값. 난수 함수는 쓰지 않는다
+    function hash2(a, b) {
+        let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h = h ^ (h >>> 16);
+        return (h >>> 0) / 4294967296;
+    }
+    // 2차원 값 잡음 — 정수 격자점마다 해시 값이 있고 그 사이를 부드럽게 잇는다
+    function noise2(x, y, seed) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const fx = x - xi;
+        const fy = y - yi;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uy = fy * fy * (3 - 2 * fy);
+        const s = seed * 131;
+        return lerp(lerp(hash2(xi + s, yi), hash2(xi + 1 + s, yi), ux), lerp(hash2(xi + s, yi + 1), hash2(xi + 1 + s, yi + 1), ux), uy);
+    }
+    // 장면 시계(s)·판 반복 번호·시간표 — 시간표는 (시각, 할 일) 목록이고 시각이 지나면 한 번씩 부른다
+    let sceneT = 0;
+    let lap = 0;
+    let script = [];
+    let evAt = 0;
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, a, b, c) {
+        return s.split('{a}').join(a).split('{b}').join(b === undefined ? '' : b).split('{c}').join(c === undefined ? '' : c);
+    }
+    function r1(v) { return String(Math.round(v * 10) / 10); }
+    function group(v) {
+        // 천 단위 점 — 로케일 함수에 기대지 않는다
+        const s = String(Math.round(v));
+        let o = '';
+        for (let i = 0; i < s.length; i += 1) {
+            if (i > 0 && (s.length - i) % 3 === 0) {
+                o += ',';
+            }
+            o += s.charAt(i);
+        }
+        return o;
+    }
+    // 기본값 상수 — 변형 3개(STEP_HZ·STRIDE_DEG·LEG_RATIO)가 이 줄의 값을 바꾼다
+    const STEP_HZ = 1.6;
+    const STRIDE_DEG = 28;
+    const LEG_PX = 90;
+    const LEG_RATIO = 0.48;
+    const CONTACT_SHARE = 0.6;
+    const GAIT = { stepHz: STEP_HZ, strideDeg: STRIDE_DEG, legPx: LEG_PX, legRatio: LEG_RATIO, contactShare: CONTACT_SHARE };
+    // walkT 는 걸음 시간으로만 오르는 시계(s). phase 는 One step 위상 0~1, cyclePhase 는 두 걸음 위상 0~2
+    let walkT = 0;
+    function stepPhase() { return (walkT * GAIT.stepHz) % 1; }
+    function cyclePhase() { return (walkT * GAIT.stepHz) % 2; }
+    function stepIndex() { return Math.floor(walkT * GAIT.stepHz); }
+    // 다리별 One step 위상 — 왼다리가 정수 걸음, 오른다리가 반 걸음 어긋난다
+    function legPhase(right) { return ((walkT * GAIT.stepHz) + (right ? 0.5 : 0)) % 1; }
+    // Contact 국면 판정 — ph 가 contactShare 안이면 발이 바닥에 붙어 있다
+    function inStance(ph) { return ph < GAIT.contactShare; }
+    // Five phases — Contact(0~0.12) · Loading(0.12~0.3) · Mid stance(0.3~0.45) · Push off(0.45~contactShare) · Lift(나머지)
+    const PH5 = [
+        { name: 'Contact', a: 0, b: 0.12, col: null },
+        { name: 'Loading', a: 0.12, b: 0.3, col: null },
+        { name: 'Mid stance', a: 0.3, b: 0.45, col: null },
+        { name: 'Push off', a: 0.45, b: 0.6, col: null },
+        { name: 'Lift', a: 0.6, b: 1, col: null },
+    ];
+    function phaseName(ph) {
+        for (let i = 0; i < PH5.length; i += 1) {
+            if (ph >= PH5[i].a && ph < PH5[i].b) {
+                return PH5[i].name;
+            }
+        }
+        return 'Lift';
+    }
+    // 라디안 변환 — 각도 값은 도 단위 상수로 두고 계산 직전에만 바꾼다
+    function rad(deg) { return deg * Math.PI / 180; }
+    function solveFoot(hipX, hipY, ph, plantX, slopeDeg, groundY) {
+        const leg = GAIT.legPx;
+        const L1 = leg / (1 + GAIT.legRatio);
+        const L2 = leg * GAIT.legRatio / (1 + GAIT.legRatio);
+        let ax;
+        let ay;
+        let ankleDeg;
+        const planted = inStance(ph);
+        if (planted) {
+            ax = plantX;
+            ay = groundY;
+            ankleDeg = -slopeDeg;
+        }
+        else {
+            const k = (ph - GAIT.contactShare) / (1 - GAIT.contactShare);
+            const half = rad(GAIT.strideDeg);
+            const ang = lerp(half, -half, k);
+            ax = hipX + Math.sin(ang) * leg;
+            ay = groundY - Math.abs(Math.sin(Math.PI * k)) * leg * 0.22;
+            ankleDeg = 90 - slopeDeg;
+        }
+        const dx = ax - hipX;
+        const dy = ay - hipY;
+        let d = Math.hypot(dx, dy);
+        d = Math.min(d, L1 + L2 - 0.01);
+        const base = Math.atan2(dy, dx);
+        const cosK = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
+        const elbow = Math.acos(clamp(cosK, -1, 1));
+        const kneeAng = base - elbow;
+        return { ax: ax, ay: ay, kneeX: hipX + Math.cos(kneeAng) * L1, kneeY: hipY + Math.sin(kneeAng) * L1, ankleDeg: ankleDeg, planted: planted };
+    }
+    // 몸 높이 — Contact 국면 Mid stance(다리가 곧게 펴는 ph=0.3 부근)이 가장 높고 이중 Contact(두 발 다 지면)에서 살짝 낮아진다
+    function hipHeight(ph) {
+        const bob = Math.sin(ph * Math.PI * 2 - Math.PI / 2);
+        return GAIT.legPx * (0.93 + 0.04 * bob);
+    }
+    // 몸 앞뒤 기울기 — 내리막에서 앞으로 숙여 다리 회복 시간을 번다
+    function leanDeg(slopeDeg) { return slopeDeg < 0 ? slopeDeg * 0.5 : slopeDeg * 0.25; }
+    let plants = [null, null]; // [왼, 오른]
+    // Contact 시작 ph(=0 또는 contactShare 근처)에서 plantX 를 몸 위치로부터 한 번만 풀어 저장한다
+    function lockPlants(hipX) {
+        for (let r = 0; r < 2; r += 1) {
+            const ph = legPhase(r === 1);
+            const otherPh = legPhase(r === 0);
+            if (inStance(ph) && plants[r] === null) {
+                const half = rad(GAIT.strideDeg);
+                const k = ph / GAIT.contactShare;
+                const ang = lerp(half, -half, k);
+                const px = hipX + Math.sin(ang) * GAIT.legPx;
+                plants[r] = { x: px, ph0: ph };
+            }
+            if (!inStance(ph)) {
+                plants[r] = null;
+            }
+        }
+    }
+    function plantXOf(r, hipX) {
+        const p = plants[r];
+        if (p !== null) {
+            return p.x;
+        }
+        return hipX;
+    }
+    // ── 그리기 도구
+    const canvasEl = root.querySelector('[data-role="canvas"]');
+    const padEl = root.querySelector('[data-role="pad"]');
+    const pauseEl = root.querySelector('[data-role="pause"]');
+    const statusEl = root.querySelector('[data-role="status"]');
+    const doneEl = root.querySelector('[data-role="done"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !doneEl) {
+        return;
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pauseBtn = pauseEl;
+    const doneP = doneEl;
+    const pad = padEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const UI_FONT = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 계산은 늘 480×300 이고 화면 배율만 이 값
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x, y, r, c, a) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function seg(x1, y1, x2, y2, c, a, w) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+    function text(s, x, y, c, px, weight, align) {
+        ctx.font = weight + ' ' + px + 'px ' + UI_FONT;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillText(s, x, y);
+    }
+    function panel(x, y, w, h) { box(x, y, w, h, 12, PANEL, 1); }
+    // 아래쪽 눈금 — 상수 이름과 지금 값 · 크기 막대
+    function hud(name, val, frac) {
+        const label = name + ' ' + val;
+        ctx.font = '700 11px ' + UI_FONT;
+        const w = ctx.measureText(label).width + 20;
+        const x = 12;
+        const y = H - 30;
+        box(x, y, w, 20, 10, NEU, 0.96);
+        text(label, x + w / 2, y + 10.5, INK, 11, 700, 'center');
+        const mx = x + w + 10;
+        box(mx, y + 6, 140, 8, 4, [78, 72, 104], 1);
+        box(mx, y + 6, 140 * clamp(frac, 0, 1), 8, 4, MINT, 1);
+    }
+    // ── 상태 줄·낭독 문장
+    const SPK_STEP = '{a} steps taken, cycle phase {b}';
+    function speakBoard() {
+        return fill(SPK_STEP, String(stepIndex()), phaseName(legPhase(false)));
+    }
+    let shownStatus = '';
+    function pushStatus(s) {
+        if (!statusEl || s === shownStatus) {
+            return;
+        }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    let paused = false;
+    // 움직임 줄이기 — 켜지면 루프 대신 정지 한 장
+    let still = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고, 그 뒤부터 모드가 바뀔 때만 낭독 문장을 쓴다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    // 사람이 직접 조작하는 중이면 시간표는 멈추고 계산만 흐른다
+    let manual = false;
+    function wake() {
+        if (!demo) {
+            return;
+        }
+        demo = false;
+        root.classList.remove('is-demo');
+    }
+    function takeOver() {
+        if (manual) {
+            return;
+        }
+        manual = true;
+        wake();
+    }
+    // 낭독 모드 — 완성이면 1000, 손으로 하는 중이면 맞은 타일 수, 자동 시연이면 장면이 정한 단계
+    function modeBase(sceneMode) {
+        return manual ? 100 + Math.floor(hipHeight(legPhase(false))) : sceneMode;
+    }
+    // 낭독 문장 — 화면 상태 줄(aria-live off)과 따로, 모드가 바뀔 때와 사람이 조작했을 때만 role=status 에 쓴다
+    let lastMode = -9;
+    function say() {
+        doneP.textContent = speakText();
+        lastMode = still ? -2 : modeId();
+    }
+    function advance(dt) {
+        sceneT += dt;
+        walkT += dt;
+        if (!manual) {
+            while (evAt < script.length && script[evAt].t <= sceneT) {
+                const ev = script[evAt];
+                evAt += 1;
+                ev.f();
+            }
+            if (sceneT >= LAP_S) {
+                lap += 1;
+                begin();
+                return;
+            }
+        }
+        update(dt);
+    }
+    function begin() {
+        sceneT = 0;
+        walkT = lap * 0; // 걸음 시계는 장면과 함께 0 에서 다시 시작 — 같은 시간표면 같은 걸음
+        evAt = 0;
+        script = [];
+        build();
+    }
+    // 고정 걸음 + Step rate 상한 — 프레임 간격이 흔들려도 같은 계산, 탭이 멈췄다 돌아와도 한 번에 몰리지 않는다
+    const STEP_S = 1 / 60;
+    const DT_MAX = 0.05;
+    let acc = 0;
+    function showNow() {
+        draw();
+        pushStatus(statusText());
+        if (!demo) {
+            const m = still ? -2 : modeId();
+            if (m !== lastMode) {
+                say();
+            }
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        if (still || paused) {
+            rafId = 0;
+            return;
+        }
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        acc += dt;
+        while (acc >= STEP_S) {
+            advance(STEP_S);
+            acc -= STEP_S;
+        }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 루프 없이 시간표의 REST_S 초까지를 한 번에 치른 장면 한 컷. 캐릭터는 걸음 보간 없이 그 시점의 자리에 바로 선다
+    function showRest() {
+        stopLoop();
+        lap = 0;
+        begin();
+        walkT = REST_S;
+        while (evAt < script.length && script[evAt].t <= REST_S) {
+            const ev = script[evAt];
+            evAt += 1;
+            sceneT = ev.t;
+            ev.f();
+        }
+        sceneT = REST_S;
+        update(0);
+        showNow();
+    }
+    function play() {
+        begin();
+        showNow();
+        if (!paused) {
+            startLoop();
+        }
+    }
+    // 사람이 조작한 뒤 — 멈춘 채이거나 움직임 줄이기이면 보간을 건너뛰어 바로 보이게 한다. 조작 직후는 낭독 문장도 쓴다
+    function afterInput(speak) {
+        if (paused || still) {
+            sceneT += 1;
+        }
+        update(0);
+        showNow();
+        if (speak) {
+            say();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+        say();
+    }
+    function restart() {
+        manual = false;
+        lap = 0;
+        begin();
+        update(0);
+        showNow();
+        say();
+    }
+    // N One step — 시간표의 다음 일 하나를 지금 치른다. 시간표가 끝났으면 처음부터 다시 짠 뒤 첫 일
+    function stepOnce() {
+        takeOver();
+        if (evAt >= script.length) {
+            lap += 1;
+            begin();
+        }
+        if (evAt < script.length) {
+            const ev = script[evAt];
+            evAt += 1;
+            if (sceneT < ev.t) {
+                sceneT = ev.t;
+            }
+            ev.f();
+        }
+        afterInput(true);
+    }
+    function keyMove(dx, dy) {
+        // 좌우 방향키 = 걸음 속도 한 단계 조절. 위·아래는 항목이 keyHook 로 따로 받는다
+        if (dx !== 0) {
+            GAIT.stepHz = clamp(Math.round((GAIT.stepHz + dx * 0.4) * 10) / 10, 0.8, 2.8);
+        }
+        else if (keyHook !== null) {
+            keyHook(dy < 0 ? 'ArrowUpHint' : 'ArrowDownHint');
+            return;
+        }
+        takeOver();
+        afterInput(true);
+    }
+    function toCanvas(e) {
+        const r = cv.getBoundingClientRect();
+        return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height];
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. 방향키 = 빈칸 이웃 타일 이동, Enter·Space = Pause, N = One step, R = 처음부터
+    pad.addEventListener('keydown', function (e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) {
+            return;
+        }
+        const k = e.key;
+        if (k === 'Enter' || k === ' ' || k === 'p' || k === 'P') {
+            e.preventDefault();
+            togglePause();
+        }
+        else if (k === 'r' || k === 'R') {
+            restart();
+        }
+        else if (k === 'n' || k === 'N') {
+            e.preventDefault();
+            stepOnce();
+        }
+        else if (k === 'ArrowLeft') {
+            e.preventDefault();
+            keyMove(-1, 0);
+        }
+        else if (k === 'ArrowRight') {
+            e.preventDefault();
+            keyMove(1, 0);
+        }
+        else if (k === 'ArrowUp') {
+            e.preventDefault();
+            keyMove(0, -1);
+        }
+        else if (k === 'ArrowDown') {
+            e.preventDefault();
+            keyMove(0, 1);
+        }
+        else if (keyHook !== null && keyHook(k)) {
+            e.preventDefault();
+            takeOver();
+            afterInput(true);
+        }
+    }, { signal: off.signal });
+    // 포인터 — 마우스·터치·펜을 한 이벤트로. 누르는 순간부터 놓을 때까지 무대가 포인터를 붙잡는다
+    let ptrDown = false;
+    // 장면이 방향키·Enter·N·R 밖의 키를 받고 싶을 때 거는 갈고리 — 먹었으면 true
+    let keyHook = null;
+    pad.addEventListener('pointerdown', function (e) {
+        takeOver();
+        ptrDown = true;
+        try {
+            pad.setPointerCapture(e.pointerId);
+        }
+        catch (err) {
+            ptrDown = true;
+        }
+        const p = toCanvas(e);
+        onPtr(0, p[0], p[1]);
+        afterInput(false);
+    }, { signal: off.signal });
+    pad.addEventListener('pointermove', function (e) {
+        if (!ptrDown) {
+            return;
+        }
+        const p = toCanvas(e);
+        onPtr(1, p[0], p[1]);
+        afterInput(false);
+    }, { signal: off.signal });
+    function ptrEnd(e) {
+        if (!ptrDown) {
+            return;
+        }
+        ptrDown = false;
+        const p = toCanvas(e);
+        onPtr(2, p[0], p[1]);
+        afterInput(true);
+    }
+    pad.addEventListener('pointerup', ptrEnd, { signal: off.signal });
+    pad.addEventListener('pointercancel', ptrEnd, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 판 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            showRest();
+        }
+        else {
+            lap = 0;
+            play();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // ── 캐릭터 그리기 — 자체 도형 캐릭터(머리·몸통·2링크 다리 2·팔 2). 브랜드 캐릭터 아님
+    // limb(x1, y1, x2, y2, 색, 굵기) — 관절 두 점을 잇는 둥근 막대
+    function limb(x1, y1, x2, y2, c, w) {
+        seg(x1, y1, x2, y2, c, 1, w);
+    }
+    // footShape(x, y, ankleDeg, 색) — 발바닥. ankleDeg 는 바닥 기준 도 단위(0 = 바닥에 평평)
+    function footShape(x, y, ankleDeg, c) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(ankleDeg * Math.PI / 180);
+        box(-3, -2, 15, 6, 3, c, 1);
+        ctx.restore();
+    }
+    // drawGround(y, slopeDeg) — 기울어진 바닥면. y 는 화면 가운데서의 기준 높이.
+    // groundV > 0 이면 바닥의 눈금 줄무늬가 그 속도로 왪쪽으로 흘러 간다 — 몸이 앞으로 가는 속도의 시각화
+    let groundV = 0;
+    function drawGround(y, slopeDeg) {
+        // 기울기가 있으면 화면 가운데 x=W/2 에서 높이 y 인 직선 — groundYAt 과 같은식
+        const y0 = groundYAt(0, y, slopeDeg);
+        const y1 = groundYAt(W, y, slopeDeg);
+        // 받침 띠 — 바닥선 아래 옅은 색 띠
+        ctx.beginPath();
+        ctx.moveTo(0, y0);
+        ctx.lineTo(W, y1);
+        ctx.lineTo(W, H);
+        ctx.lineTo(0, H);
+        ctx.closePath();
+        ctx.fillStyle = rgba([58, 52, 84], 1);
+        ctx.fill();
+        seg(0, y0, W, y1, DIM, 0.7, 2);
+        // 눈금 줄무늬 — 걸음이 밀어 내는 속도로 흘러 간다. 간격 40px, 길이 18px
+        if (groundV > 0) {
+            const gap = 40;
+            const off = (walkT * groundV) % gap;
+            for (let x = -gap; x < W + gap; x += gap) {
+                const sx = x - off;
+                seg(sx, groundYAt(sx + 9, y, slopeDeg) + 14, sx + 18, groundYAt(sx + 27, y, slopeDeg) + 14, DIM, 0.5, 3);
+            }
+        }
+    }
+    // drawScenery() — 걷는 세계의 경물 층. 하늘 그라디언트 띠·언덕·구름·가로등이 groundV 에 비례해 뒤로 흐른다.
+    // 배경 톤 전체가 걸음 속도 값의 전파 범위다 — 몸이 앞으로 간다는 감각을 화면 전체가 받친다(BD26: 면적을 장식이 아니라 값의 전파로)
+    function drawScenery() {
+        // 바탕 — 하늘 띠와 언덕 사이 빈 구간이 지워지지 않아 캐릭터 자국이 번졌다. 먼저 한 번 칠한다
+        box(0, 0, W, H, 0, BGC, 1);
+        // 하늘 — 세로 옅은 띠 4개. 걸음 위상에 따라 명도가 살짝 숨쉰다
+        const skyT = Math.sin(walkT * GAIT.stepHz * Math.PI);
+        for (let i = 0; i < 4; i += 1) {
+            const t = i / 3;
+            const c = [lerp(46, 62, t), lerp(42, 56, t), lerp(68, 92, t)];
+            box(0, i * 30, W, 30, 0, c, 1);
+        }
+        // 먼 언덕 — noise2 로 굽이친다. 걸음 속도의 0.35배로 흐른다(원근 감쇠)
+        if (groundV > 0) {
+            const scroll = walkT * groundV * 0.35;
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            for (let x = 0; x <= W; x += 8) {
+                const yy = 168 + noise2((x + scroll) / 90, 3, 11) * 46 - 20;
+                ctx.lineTo(x, yy);
+            }
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            ctx.fillStyle = rgba([52, 48, 82], 1);
+            ctx.fill();
+            // 구름 세 점 — 0.6배 속도
+            const cs = walkT * groundV * 0.6;
+            for (let i = 0; i < 3; i += 1) {
+                const cx = ((i * 190 + 60 - cs) % (W + 120) + W + 120) % (W + 120) - 60;
+                const cy = 34 + i * 22;
+                disc(cx, cy, 16 + i * 3, NEU, 0.16);
+                disc(cx + 14, cy + 3, 12 + i * 2, NEU, 0.13);
+                disc(cx - 13, cy + 4, 10 + i * 2, NEU, 0.12);
+            }
+            // 가까운 풀 다발 — 1.15배 속도(지면보다 살짝 빠른 근경)
+            const gs = walkT * groundV * 1.15;
+            for (let i = 0; i < 14; i += 1) {
+                const gx = ((i * 46 + 20 - gs) % (W + 60) + W + 60) % (W + 60) - 30;
+                const gy = H - 14 - (i % 3) * 6;
+                seg(gx, gy, gx - 4, gy - 12, MINT, 0.35, 2);
+                seg(gx + 2, gy, gx + 6, gy - 10, MINT, 0.3, 2);
+            }
+        }
+    }
+    // groundYAt(x, baseY, slopeDeg) — 경사식: 기울기가 있으면 x 에서의 바닥 높이
+    function groundYAt(x, baseY, slopeDeg) {
+        return baseY + (x - W / 2) * Math.tan(rad(slopeDeg)) * -1;
+    } // 06 — 발이 앞으로 나갈 때 골반은 그쪽으로, 어깨는 반대로 돌아가 몸이 비틀린다.
+    // 옆모습 실루엣에서는 갈비·등의 앞뒤 어긋남으로 나타난다. 회전 각도는 걸음 속도에 비례해 커진다.
+    const LAP_S = 7.2;
+    const REST_S = 2.4;
+    const GROUND_Y = 264;
+    const CHAR_X = 140;
+    const PHX = 270;
+    let hipTwist = 0;
+    let shTwist = 0;
+    let hipHist = [];
+    let shHist = [];
+    function build() {
+        hipHist = [];
+        shHist = [];
+        groundV = Math.sin(rad(GAIT.strideDeg)) * GAIT.legPx * 2 * GAIT.stepHz;
+    }
+    function update(dt) {
+        if (dt <= 0) {
+            return;
+        }
+        // Hip and shoulder rotation — 걸음 위상 사인에 비례, 크기는 걸음 속도에 비례(1.6Hz 에서 ±6도)
+        const ph = legPhase(false);
+        const amp = 6 * (GAIT.stepHz / 1.6);
+        hipTwist = Math.sin(ph * TAU) * amp;
+        shTwist = -Math.sin(ph * TAU) * amp * 1.2;
+        if (Math.floor(sceneT * 30) % 2 === 0) {
+            hipHist.push(hipTwist);
+            shHist.push(shTwist);
+            if (hipHist.length > 90) {
+                hipHist.shift();
+                shHist.shift();
+            }
+        }
+    }
+    function draw() {
+        drawScenery();
+        drawGround(GROUND_Y, 0);
+        const hipY = GROUND_Y - hipHeight(legPhase(false));
+        const hipX = CHAR_X;
+        lockPlants(hipX);
+        // 다리 — 골반 회전만큼 고관절 x 가 앞뒤로 갈라진다
+        for (let r = 0; r < 2; r += 1) {
+            const ph = legPhase(r === 1);
+            const hx = hipX + (r === 0 ? 1 : -1) * hipTwist * 0.5;
+            const fs = solveFoot(hx, hipY, ph, plantXOf(r, hipX), 0, GROUND_Y);
+            limb(hx, hipY, fs.kneeX, fs.kneeY, r === 0 ? MINT : ROSE, 7);
+            limb(fs.kneeX, fs.kneeY, fs.ax, fs.ay, r === 0 ? MINT : ROSE, 6);
+            footShape(fs.ax, fs.ay, fs.planted ? 0 : fs.ankleDeg, r === 0 ? MINT : ROSE);
+        }
+        // 몸통 — 위쪽(어깨대)은 반대로 비틀린다. 옆모습이라 폭 차이로 보임
+        const shX = hipX + shTwist * 0.6;
+        limb(hipX, hipY, shX, hipY - 24, NEU, 15);
+        // 갈비·등 표식 — 몸통 양옆 점이 비틀림만큼 앞뒤로
+        disc(hipX + hipTwist * 0.4, hipY - 10, 2.5, SUN, 0.9);
+        disc(shX - shTwist * 0.3, hipY - 18, 2.5, SKY, 0.9);
+        // 머리 — 어깨 위
+        disc(shX, hipY - 34, 11, PAPER, 1);
+        // 비틀림 표시 — 골반·어깤줄을 위에서 본 것처럼 작은 막대로(옆이 아니라 값 표시용)
+        // 오른쪽 패널 — 골반(민트)·어깨(로즈) 회전 곡선이 서로 반대로
+        panel(PHX, 30, 190, 150);
+        text('Hip and shoulder rotation', PHX + 12, 44, DIM, 11, 700, 'left');
+        const cy = 30 + 150 / 2 + 16;
+        seg(PHX + 12, cy, PHX + 158, cy, DIM, 0.3, 1);
+        for (let k = 0; k < hipHist.length; k += 1) {
+            const px = PHX + 16 + k * (140 / 90);
+            disc(px, cy - hipHist[k] * 2.4, 1.6, MINT, 0.9);
+            disc(px, cy - shHist[k] * 2.4, 1.6, ROSE, 0.9);
+        }
+        disc(PHX + 156, cy - hipTwist * 2.4, 4, MINT, 1);
+        disc(PHX + 156, cy - shTwist * 2.4, 4, ROSE, 1);
+        text(fill('Hips {a} deg, shoulders {b} deg', String(Math.round(hipTwist)), String(Math.round(shTwist))), PHX + 12, 182, NEU, 10, 700, 'left');
+        text('The rotation scales with the step rate', PHX + 12, 200, DIM, 10, 700, 'left');
+        // 위에서 본 골반·어깤줄 미니 표시 — 회전 값을 각도 막대로
+        const gy = 238;
+        seg(PHX + 20, gy, PHX + 150, gy, DIM, 0.3, 1);
+        seg(PHX + 85 - hipTwist * 1.5, gy - 10, PHX + 85 + hipTwist * 1.5, gy - 10, MINT, 0.95, 4);
+        seg(PHX + 85 - shTwist * 1.2, gy + 8, PHX + 85 + shTwist * 1.2, gy + 8, ROSE, 0.95, 4);
+        hud('STEP_HZ', r1(GAIT.stepHz), GAIT.stepHz / 2.8);
+    }
+    function statusText() {
+        return fill('Hips {a} deg, shoulders {b} deg', String(Math.round(hipTwist)), String(Math.round(shTwist)));
+    }
+    function modeId() { return modeBase(Math.min(3, Math.floor(sceneT / 2.5))); }
+    function speakText() { return speakBoard(); }
+    function onDir(d) { keyMove(d === 0 ? 1 : d === 1 ? -1 : 0, 0); }
+    function onPtr(kind, x, y) { if (kind !== 0) {
+        return;
+    } GAIT.stepHz = clamp(GAIT.stepHz + (x > W / 2 ? 0.2 : -0.2), 0.8, 2.8); }
+    fitCanvas();
+    if (still) {
+        showRest();
+    }
+    else {
+        play();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+})();
+</script>
+</body>
+</html>
