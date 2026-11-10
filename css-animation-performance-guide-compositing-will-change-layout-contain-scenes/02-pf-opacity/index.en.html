@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opacity vs height and visibility Transitions — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="pf is-demo" id="pf">
+  <div class="pf__fit" data-role="fit">
+    <div class="pf__pad" data-role="pad" tabindex="0" role="application" aria-label="Demo stage: Space or Enter pauses, R restarts, Arrow keys change the card count">
+      <section class="pf__lane" data-role="laneA">
+        <h3 class="pf__tag"><b>A</b><span data-role="tagA"></span></h3>
+        <div class="pf__arena" data-role="arenaA"></div>
+        <p class="pf__read" data-role="readA">measuring</p>
+        <p class="pf__read pf__read--sub" data-role="extraA"></p>
+        <div class="pf__bars">
+          <div class="pf__bar"><span class="pf__lg">frame</span><span class="pf__trk"><i data-role="barFA"></i></span></div>
+          <div class="pf__bar"><span class="pf__lg">script</span><span class="pf__trk pf__trk--s"><i data-role="barSA"></i></span></div>
+        </div>
+      </section>
+      <section class="pf__lane" data-role="laneB">
+        <h3 class="pf__tag"><b>B</b><span data-role="tagB"></span></h3>
+        <div class="pf__arena" data-role="arenaB"></div>
+        <p class="pf__read" data-role="readB">measuring</p>
+        <p class="pf__read pf__read--sub" data-role="extraB"></p>
+        <div class="pf__bars">
+          <div class="pf__bar"><span class="pf__lg">frame</span><span class="pf__trk"><i data-role="barFB"></i></span></div>
+          <div class="pf__bar"><span class="pf__lg">script</span><span class="pf__trk pf__trk--s"><i data-role="barSB"></i></span></div>
+        </div>
+      </section>
+    </div>
+    <p class="pf__status" data-role="status" aria-live="off">Scene ready</p>
+    <div class="pf__ctrl">
+      <button class="pf__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+    </div>
+    <p class="pf__done" data-role="done" role="status" aria-live="polite"></p>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("pf");
+    if (!rootEl) return;
+    function cx(s) { return s; }
+    main(rootEl);
+function main(root) {
+    const ARENA_W = 220;
+    const ARENA_H = 140;
+    const CAP = 240;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function f1(v) { return Number.isFinite(v) ? (Math.round(v * 10) / 10).toFixed(1) : '-'; }
+    function f2(v) { return Number.isFinite(v) ? (Math.round(v * 100) / 100).toFixed(2) : '-'; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    // 고정 씨앗 난수 — 요소 배치가 렌더마다 같다
+    function seeded(seed) {
+        let a = seed >>> 0;
+        return function () {
+            a = (a + 0x6d2b79f5) >>> 0;
+            let t = a;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 삼각파 — 위상 p 를 0 에서 1 로 갔다 0 으로 돌아오는 값으로. 한 주기가 왕복 한 번
+    function tri(p) {
+        const x = p - Math.floor(p);
+        return x < 0.5 ? x * 2 : 2 - x * 2;
+    }
+    function smooth(s) { return s * s * (3 - 2 * s); }
+    function mk(tag, cls, parent) {
+        const e = document.createElement(tag);
+        e.className = cx(cls);
+        parent.appendChild(e);
+        return e;
+    }
+    const rootEl = root;
+    function q(role) { return rootEl.querySelector('[data-role="' + role + '"]'); }
+    const pad0 = q('pad');
+    const pause0 = q('pause');
+    const status0 = q('status');
+    const done0 = q('done');
+    const fit0 = q('fit');
+    const arena0 = [q('arenaA'), q('arenaB')];
+    const tag0 = [q('tagA'), q('tagB')];
+    const read0 = [q('readA'), q('readB')];
+    const extra0 = [q('extraA'), q('extraB')];
+    const barF0 = [q('barFA'), q('barFB')];
+    const barS0 = [q('barSA'), q('barSB')];
+    const lane0 = [q('laneA'), q('laneB')];
+    if (!pad0 || !pause0 || !status0 || !done0 || !fit0 || !arena0[0] || !arena0[1] || !tag0[0] || !tag0[1] || !read0[0] || !read0[1] || !extra0[0] || !extra0[1] || !barF0[0] || !barF0[1] || !barS0[0] || !barS0[1] || !lane0[0] || !lane0[1]) {
+        return function () { };
+    }
+    const pad = pad0;
+    const pauseBtn = pause0;
+    const statusP = status0;
+    const doneP = done0;
+    const fitEl = fit0;
+    const arenas = [arena0[0], arena0[1]];
+    const tags = [tag0[0], tag0[1]];
+    const reads = [read0[0], read0[1]];
+    const extras = [extra0[0], extra0[1]];
+    const barFs = [barF0[0], barF0[1]];
+    const barSs = [barS0[0], barS0[1]];
+    const lanes = [lane0[0], lane0[1]];
+    // 한 칸의 표본 — 간격(iv)·script 시간(sc)·바퀴 첫 frame(first)
+    const stats = [{ iv: [], sc: [], first: [] }, { iv: [], sc: [], first: [] }];
+    const sums = [null, null];
+    // 장면이 바꾸는 값 — 장면 파일이 sceneInit 에서 채운다
+    let roundFrames = 40;
+    let periodMs = 1200;
+    let mode = 0;
+    let roundIdx = 0;
+    let clockMs = 0;
+    let lastTs = -1;
+    let rafId = 0;
+    let paused = false;
+    let still = false;
+    let lastKey = '';
+    function pushCap(arr, v) {
+        arr.push(v);
+        if (arr.length > CAP) {
+            arr.shift();
+        }
+    }
+    function avgOf(a) {
+        if (a.length === 0) {
+            return NaN;
+        }
+        let t = 0;
+        for (let i = 0; i < a.length; i += 1) {
+            t += a[i];
+        }
+        return t / a.length;
+    }
+    function summarize(s) {
+        const n = s.iv.length;
+        let p95 = NaN;
+        let drops = 0;
+        if (n > 0) {
+            const sorted = s.iv.slice().sort(function (a, b) { return a - b; });
+            p95 = sorted[Math.floor(0.95 * (n - 1))];
+            const med = sorted[Math.floor((n - 1) / 2)];
+            for (let i = 0; i < n; i += 1) {
+                if (s.iv[i] > 1.5 * med) {
+                    drops += 1;
+                }
+            }
+        }
+        return { n: n, mean: avgOf(s.iv), p95: p95, drops: drops, script: avgOf(s.sc), first: avgOf(s.first) };
+    }
+    // 기본 읽기 두 줄 — 장면이 따로 만들지 않을 때
+    function defaultRead(s) {
+        if (!Number.isFinite(s.mean)) {
+            return [
+                'Reduced motion: frame gaps are not measured',
+                fill('script {a} ms · {b} runs', f2(s.script), String(PROBE_N))
+            ];
+        }
+        return [
+            fill('mean {a} ms · p95 {b} ms · dropped {c}', f1(s.mean), f1(s.p95), String(s.drops)),
+            fill('script {a} ms · {b} frames', f2(s.script), String(s.n))
+        ];
+    }
+    const WAIT_T = 'measuring';
+    // B 칸 script 시간이 A 칸의 몇 배인지
+    function ratio() {
+        const a = sums[0];
+        const b = sums[1];
+        if (!a || !b || !(a.script > 0)) {
+            return NaN;
+        }
+        return b.script / a.script;
+    }
+    function paintRead(m) {
+        const s = sums[m];
+        if (!s) {
+            reads[m].textContent = WAIT_T;
+            extras[m].textContent = '';
+            return;
+        }
+        const lines = sceneRead(m, s);
+        reads[m].textContent = lines[0];
+        extras[m].textContent = lines[1];
+        const bars = sceneBars(m, s);
+        barFs[m].style.transform = 'scaleX(' + clamp(bars[0], 0.02, 1).toFixed(3) + ')';
+        barSs[m].style.transform = 'scaleX(' + clamp(bars[1], 0.02, 1).toFixed(3) + ')';
+    }
+    function publish(m) {
+        const s = sums[m];
+        if (!s) {
+            return;
+        }
+        const p = m === 0 ? 'a' : 'b';
+        rootEl.dataset[p + 'N'] = String(s.n);
+        rootEl.dataset[p + 'Mean'] = f2(s.mean);
+        rootEl.dataset[p + 'P95'] = f2(s.p95);
+        rootEl.dataset[p + 'Drops'] = String(s.drops);
+        rootEl.dataset[p + 'Script'] = f2(s.script);
+        rootEl.dataset[p + 'First'] = f2(s.first);
+        rootEl.dataset.knob = String(knobValue());
+    }
+    function paintAll() {
+        paintRead(0);
+        paintRead(1);
+        lanes[0].classList.toggle(cx('is-live'), mode === 0 && !paused && !still);
+        lanes[1].classList.toggle(cx('is-live'), mode === 1 && !paused && !still);
+        statusP.textContent = statusText();
+        const key = String(paused) + String(still) + String(knobValue()) + String(sums[0] !== null && sums[1] !== null);
+        if (key !== lastKey) {
+            lastKey = key;
+            doneP.textContent = speakText();
+        }
+    }
+    // 바퀴 하나가 끝나면 그 칸의 표본을 요약해 화면 숫자를 갱신하고 다음 칸으로 넘긴다
+    function finishRound() {
+        sums[mode] = summarize(stats[mode]);
+        publish(mode);
+        mode = mode === 0 ? 1 : 0;
+        roundIdx = 0;
+        sceneRoundStart(mode);
+        paintAll();
+    }
+    function frame(ts) {
+        rafId = 0;
+        if (still || paused || document.hidden) {
+            return;
+        }
+        const first = lastTs < 0;
+        const dt = first ? 16.7 : Math.min(ts - lastTs, 50);
+        if (!first && roundIdx > 0) {
+            pushCap(stats[mode].iv, ts - lastTs);
+        }
+        else if (!first && roundIdx === 0) {
+            pushCap(stats[mode].first, ts - lastTs);
+        }
+        lastTs = ts;
+        clockMs += dt;
+        const t1 = performance.now();
+        sceneStep(mode, (clockMs / periodMs) % 1);
+        // 레이아웃을 강제로 읽어 쓰기가 만든 계산 비용을 이 script 시간 안으로 끌어온다 — 두 칸 모두 같은 읽기
+        void rootEl.getBoundingClientRect().width;
+        const t2 = performance.now();
+        if (roundIdx > 0) {
+            pushCap(stats[mode].sc, t2 - t1);
+        }
+        roundIdx += 1;
+        if (roundIdx >= roundFrames) {
+            finishRound();
+        }
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop() {
+        if (rafId) {
+            return;
+        }
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 움직임 줄이기 — 화면에 보이는 움직임 없이 같은 쓰기를 동기 반복해 script(레이아웃 읽기 포함) 시간만 잰다
+    function probeSync() {
+        for (let m = 0; m < 2; m += 1) {
+            const st = { iv: [], sc: [], first: [] };
+            sceneRoundStart(m);
+            for (let i = 0; i < PROBE_N; i += 1) {
+                const t1 = performance.now();
+                roundIdx = Math.floor((i / PROBE_N) * roundFrames);
+                sceneStep(m, i / PROBE_N);
+                void rootEl.getBoundingClientRect().width;
+                const t2 = performance.now();
+                st.sc.push(t2 - t1);
+            }
+            sums[m] = summarize(st);
+            publish(m);
+        }
+        roundIdx = 0;
+        sceneStep(0, 0.5);
+        sceneStep(1, 0.5);
+    }
+    function resetStats() {
+        stats[0] = { iv: [], sc: [], first: [] };
+        stats[1] = { iv: [], sc: [], first: [] };
+        sums[0] = null;
+        sums[1] = null;
+        mode = 0;
+        roundIdx = 0;
+        clockMs = 0;
+        lastKey = '';
+    }
+    // 장면을 처음부터 — 칸을 다시 만들고 표본을 비운다
+    function restart() {
+        stopLoop();
+        resetStats();
+        sceneInit();
+        sceneRoundStart(0);
+        if (still) {
+            probeSync();
+        }
+        paintAll();
+        if (!paused && !still) {
+            startLoop();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+        paintAll();
+    }
+    const off = new AbortController();
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    still = reduceQuery.matches;
+    pauseBtn.addEventListener('click', function () { togglePause(); }, { signal: off.signal });
+    pad.addEventListener('keydown', function (e) {
+        if (e.key === ' ' || e.key === 'Enter' || e.key === 'p' || e.key === 'P') {
+            e.preventDefault();
+            togglePause();
+            return;
+        }
+        if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            restart();
+            return;
+        }
+        let d = 0;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+            d = 1;
+        }
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+            d = -1;
+        }
+        if (d !== 0) {
+            e.preventDefault();
+            if (sceneKnob(d)) {
+                restart();
+            }
+        }
+    }, { signal: off.signal });
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 루프를 멈추고 같은 쓰기를 동기로 한 번 재서 표를 채운다, 꺼지면 다시 돈다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        restart();
+    }, { signal: off.signal });
+    // 480×300 고정 좌표를 칸 크기에 맞춰 줄인다
+    function fitScale() {
+        const host = fitEl.parentElement;
+        if (!host) {
+            return;
+        }
+        const k = host.clientWidth / 480;
+        fitEl.style.transform = 'scale(' + k.toFixed(4) + ')';
+    }
+    window.addEventListener('resize', fitScale, { signal: off.signal });
+    // 장면 공통 도우미 — 막대 눈금·상태 줄·낭독 문장
+    // 배수 표기 — 1 보다 작으면 소수 둘째 자리, 10 이상이면 정수
+    function fr(r) {
+        if (!Number.isFinite(r)) {
+            return '-';
+        }
+        if (r >= 10) {
+            return String(Math.round(r));
+        }
+        return r >= 1 ? f1(r) : f2(r);
+    }
+    function fin(v) { return Number.isFinite(v) ? v : 0; }
+    // 막대 둘 — frame 간격(33.4ms 가 가득)과 script 시간(두 칸 중 큰 쪽이 가득)
+    function defaultBars(m, s) {
+        let top = 0.3;
+        for (let i = 0; i < 2; i += 1) {
+            const x = sums[i];
+            if (x && Number.isFinite(x.script) && x.script > top) {
+                top = x.script;
+            }
+        }
+        return [fin(s.mean) / 33.4, fin(s.script) / top];
+    }
+    // 상태 줄 — 지금 조절 값과 두 칸 script 시간의 비
+    function pairStatus(knobText) {
+        const r = ratio();
+        if (!Number.isFinite(r)) {
+            return fill('{a} · measuring', knobText);
+        }
+        return fill('{a} · script B/A x{b}', knobText, fr(r));
+    }
+    // 낭독 문장 — 모드(멈춤·움직임 줄이기·조절 값)가 바뀔 때만 쓴다
+    function pairSpeak(knobText, nameA, nameB) {
+        const a = sums[0];
+        const b = sums[1];
+        if (!a || !b) {
+            return fill('Preparing the scene with {a}', knobText);
+        }
+        if (still) {
+            return fill('Reduced motion: {a}, script time of {b} is {c} ms, of {d} is {e} ms, B is {f} times A', knobText, nameA, f2(a.script), nameB, f2(b.script), fr(ratio()));
+        }
+        return fill('{a}: script of {b} is {c} ms, of {d} is {e} ms, B is {f} times A, mean frame {g} vs {h} ms', knobText, nameA, f2(a.script), nameB, f2(b.script), fr(ratio()), f1(a.mean), f1(b.mean));
+    }
+    function makeMovers(n, seed, size, tx, ty) {
+        const rnd = seeded(seed);
+        const out = [];
+        const spanX = Math.max(1, ARENA_W - size - tx - 8);
+        const spanY = Math.max(1, ARENA_H - size - ty - 8);
+        for (let i = 0; i < n; i += 1) {
+            out.push({ x: 4 + rnd() * spanX, y: 4 + rnd() * spanY, ph: rnd() * 0.5 });
+        }
+        return out;
+    }
+    // 상자를 칸 안에 만든다. 처음 자리는 left·top 으로, 색은 순서대로 네 가지
+    function buildBoxes(arena, ms, size, extraCls) {
+        arena.textContent = '';
+        const out = [];
+        for (let i = 0; i < ms.length; i += 1) {
+            const b = mk('i', 'pf__box pf__c' + String(i % 4) + (extraCls ? ' ' + extraCls : ''), arena);
+            b.style.width = String(size) + 'px';
+            b.style.height = String(size) + 'px';
+            b.style.left = ms[i].x.toFixed(1) + 'px';
+            b.style.top = ms[i].y.toFixed(1) + 'px';
+            out.push(b);
+        }
+        return out;
+    }
+    function dxOf(mv, ph, tx) { return tx * smooth(tri(ph + mv.ph)); }
+    function dyOf(mv, ph, ty) { return ty * smooth(tri(ph + mv.ph + 0.25)); }
+    // 합성 쪽 — transform 으로 옮긴다(left·top 은 그대로)
+    function moveByTransform(els, ms, ph, tx, ty) {
+        for (let i = 0; i < els.length; i += 1) {
+            els[i].style.transform = 'translate(' + dxOf(ms[i], ph, tx).toFixed(2) + 'px,' + dyOf(ms[i], ph, ty).toFixed(2) + 'px)';
+        }
+    }
+    // 레이아웃 쪽 — left·top 값을 바꿔 같은 거리를 옮긴다
+    function moveByLeftTop(els, ms, ph, tx, ty) {
+        for (let i = 0; i < els.length; i += 1) {
+            els[i].style.left = (ms[i].x + dxOf(ms[i], ph, tx)).toFixed(2) + 'px';
+            els[i].style.top = (ms[i].y + dyOf(ms[i], ph, ty)).toFixed(2) + 'px';
+        }
+    }
+    // 02 — 카드 속 펼침 부분을 opacity 로 나타내는 칸(A)과 height 로 펴는 칸(B). 카드 수 CARDS 를 방향키로 바꾼다
+    const PROBE_N = 40;
+    const CARDS_LIST = [8, 24, 48, 96];
+    const DETAIL_H = 16;
+    let cardsIdx = 1;
+    let CARDS = CARDS_LIST[cardsIdx];
+    let details = [[], []];
+    function knobValue() { return CARDS; }
+    function sceneKnob(d) {
+        const next = clamp(cardsIdx + d, 0, CARDS_LIST.length - 1);
+        if (next === cardsIdx) {
+            return false;
+        }
+        cardsIdx = next;
+        CARDS = CARDS_LIST[cardsIdx];
+        return true;
+    }
+    // 카드 격자 — 제목 막대 하나와 펼침 부분 하나
+    function buildCards(arena) {
+        arena.textContent = '';
+        const grid = mk('div', 'pf__grid', arena);
+        const out = [];
+        for (let i = 0; i < CARDS; i += 1) {
+            const cell = mk('div', '', grid);
+            mk('i', 'pf__rt', cell);
+            out.push(mk('i', 'pf__rd', cell));
+        }
+        return out;
+    }
+    function sceneInit() {
+        roundFrames = 40;
+        periodMs = 1200;
+        tags[0].textContent = 'opacity';
+        tags[1].textContent = 'height';
+        details = [buildCards(arenas[0]), buildCards(arenas[1])];
+    }
+    function sceneRoundStart(m) { }
+    // 펼침 정도 e(0 에서 1) — 카드마다 조금씩 어긋나 물결로 열린다
+    function openOf(i, ph) { return smooth(tri(ph + (i % 4) * 0.06)); }
+    function sceneStep(m, ph) {
+        const els = details[m];
+        for (let i = 0; i < els.length; i += 1) {
+            const e = openOf(i, ph);
+            if (m === 0) {
+                els[i].style.opacity = e.toFixed(3);
+            }
+            else {
+                els[i].style.height = (DETAIL_H * e).toFixed(2) + 'px';
+            }
+        }
+    }
+    function sceneRead(m, s) { return defaultRead(s); }
+    function sceneBars(m, s) { return defaultBars(m, s); }
+    function statusText() { return pairStatus(fill('{a} cards', String(CARDS))); }
+    function speakText() { return pairSpeak(fill('{a} cards', String(CARDS)), 'opacity', 'height'); }
+    sceneInit();
+    sceneRoundStart(0);
+    fitScale();
+    if (still) {
+        probeSync();
+    }
+    paintAll();
+    if (!still) {
+        startLoop();
+    }
+    return function () {
+        stopLoop();
+        off.abort();
+    };
+}
+})();
+</script>
+</body>
+</html>
