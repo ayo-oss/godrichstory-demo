@@ -1,0 +1,216 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 변형 3개는 이 셋만 바꾼다
+$duration: $dur-loop;
+$easing: steps(1, end);
+$color: $subject-blue;
+
+// 흰 무대 위 글자는 4.5:1 이 필요하다 — 토큰 $subject-blue 는 4.53 으로 아슬아슬해 한 단 어둡게 쓰고,
+// 성공 초록은 팔레트에 없어 민트를 어둡게 잡았다 (실측 5.63 · 6.08, 279·280 이 CTA 파랑에 쓴 방식)
+$run-ink:  #7c90be;
+$done-ink: #479077;
+$wait-ink: rgba(23, 20, 26, .62);
+$line-ink: rgba(23, 20, 26, .7);
+$wait-edge: rgba(23, 20, 26, .18);
+$wait-band: rgba(23, 20, 26, .28);
+
+// 상태 한 칸의 높이. 칩 네 장을 세로로 쌓고 이 값의 배수만큼 밀어 한 장만 보여 준다
+$cell: 20px;
+
+@include stage($stage-paper);
+
+.ng { width: min(100%, 360px); display: grid; gap: $sp-2; }
+
+// ── 알림 줄: 진짜 aria-live 와 미리보기용 줄을 같은 칸에 겹쳐 둔다.
+// 감출 때 display:none 을 쓰면 칸 폭까지 사라진다 → opacity 로 자리만 지킨다
+.ng__livewrap { display: grid; justify-items: center; margin: 0; }
+.ng__live, .ng__demolive { grid-area: 1 / 1; }
+.ng__live {
+  font-weight: 700; font-size: clamp(10px, 3vw, 11px); line-height: $cell; color: $line-ink;
+  letter-spacing: .01em;
+}
+.ng__demolive { height: $cell; overflow: hidden; opacity: 0; }
+.ng__lstrip { display: grid; }
+.ng__lt {
+  height: $cell; font-weight: 700; font-size: clamp(10px, 3vw, 11px); line-height: $cell; color: $line-ink;
+  letter-spacing: .01em; white-space: nowrap; text-align: center;
+}
+
+// ── 카드
+.ng__list { list-style: none; margin: 0; padding: 0; display: grid; gap: $sp-2; }
+.ng__card {
+  position: relative; overflow: hidden;
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: $sp-2;
+  padding: $sp-2 $sp-3; padding-left: $sp-4;
+  border: 2px solid $wait-edge; border-radius: $r-control; background: $stage-paper;
+}
+.ng__title { font-weight: 700; font-size: clamp(11px, 3.2vw, 13px); line-height: $cell; color: $subject-ink; }
+
+// 왼쪽 띠는 위 변에 **붙어** 아래로 자란다 — 붙는 지점이 있는 요소라 origin 이 중심이 아니다 (blog-demo 규칙 8)
+.ng__band {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: $wait-band; transform: scaleY(0); transform-origin: 50% 0;
+}
+
+// ── 상태 칩: 네 장을 쌓고 $cell 배수만큼 밀어 한 장만 보인다
+.ng__chips { display: block; height: $cell; overflow: hidden; }
+.ng__strip { display: grid; }
+.ng__chip {
+  display: flex; align-items: center; justify-content: flex-end; gap: $sp-1;
+  height: $cell; white-space: nowrap;
+  font-weight: 700; font-size: clamp(10px, 3vw, 11px); line-height: 1;
+}
+.ng__ic { width: 14px; height: 14px; flex: 0 0 auto; }
+.ng__chip--wait { color: $wait-ink; }
+.ng__chip--run { color: $run-ink; }
+.ng__chip--done { color: $done-ink; }
+.ng__chip--fail { color: $error; }
+
+// ── 정적 경로: data-state 가 그대로 화면이다 (미리보기 루프가 없어도 완성 화면)
+.ng__card[data-state="wait"] .ng__strip { transform: translateY(0); }
+.ng__card[data-state="run"] .ng__strip { transform: translateY(-$cell); }
+.ng__card[data-state="done"] .ng__strip { transform: translateY(-$cell * 2); }
+.ng__card[data-state="fail"] .ng__strip { transform: translateY(-$cell * 3); }
+
+.ng__card[data-state="run"] { border-color: $run-ink; }
+.ng__card[data-state="done"] { border-color: $done-ink; }
+.ng__card[data-state="fail"] { border-color: $error; }
+
+.ng__card[data-state="run"] .ng__band {
+  background: $run-ink; transform-origin: 50% 0;
+  animation-name: ngFill; animation-duration: 800ms; animation-timing-function: $ease-out; animation-fill-mode: forwards;
+}
+.ng__card[data-state="done"] .ng__band { background: $done-ink; transform: scaleY(1); }
+.ng__card[data-state="fail"] .ng__band { background: $error; transform: scaleY(1); }
+
+// 실행 중 아이콘은 제 중심에서 계속 돈다 — 컷 전환만으로는 모자란 프레임을 이게 채운다
+.ng__ic--spin {
+  transform-origin: 50% 50%;
+  animation-name: ngSpin; animation-duration: 1s; animation-timing-function: linear; animation-iteration-count: infinite;
+}
+
+// ── 단추
+.ng__run {
+  justify-self: center; font-family: inherit; font-weight: 700; font-size: clamp(10px, 3vw, 11px); line-height: 1.8;
+  color: $subject-cream; background: $run-ink; border: none; border-radius: $r-pill; padding: $sp-1 $sp-5; cursor: pointer;
+}
+.ng__run:focus-visible { outline: 2px solid $subject-ink; outline-offset: 2px; }
+
+// ── 미리보기 루프 (2s): 세 카드가 차례로 실행되고 88% 안에 대기로 돌아온다.
+// 교체는 steps(1, end) 컷 — 크로스페이드 중간 장(반투명 유령)을 만들지 않는다
+.ng.is-demo .ng__live { opacity: 0; }
+.ng.is-demo .ng__demolive { opacity: 1; }
+.ng.is-demo .ng__lstrip {
+  animation-name: ngLine; animation-duration: $duration; animation-timing-function: $easing; animation-iteration-count: infinite;
+}
+.ng.is-demo .ng__card--1 { animation-name: ngEdge1; }
+.ng.is-demo .ng__card--2 { animation-name: ngEdge2; }
+.ng.is-demo .ng__card--3 { animation-name: ngEdge3; }
+.ng.is-demo .ng__card--1 .ng__strip { animation-name: ngStrip1; }
+.ng.is-demo .ng__card--2 .ng__strip { animation-name: ngStrip2; }
+.ng.is-demo .ng__card--3 .ng__strip { animation-name: ngStrip3; }
+.ng.is-demo .ng__card,
+.ng.is-demo .ng__strip {
+  animation-duration: $duration; animation-timing-function: $easing; animation-iteration-count: infinite;
+}
+.ng.is-demo .ng__card--1 .ng__band { animation-name: ngBand1; }
+.ng.is-demo .ng__card--2 .ng__band { animation-name: ngBand2; }
+.ng.is-demo .ng__card--3 .ng__band { animation-name: ngBand3; }
+.ng.is-demo .ng__band {
+  animation-duration: $duration; animation-timing-function: $easing; animation-iteration-count: infinite;
+}
+
+@keyframes ngSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes ngFill {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes ngLine {
+  0%, 11.9% { transform: translateY(0); }
+  12%, 71.9% { transform: translateY(-$cell); }
+  72%, 87.9% { transform: translateY(-$cell * 2); }
+  88%, 100% { transform: translateY(0); }
+}
+
+// 1번: 대기 → 실행 중(12%) → 성공(36%) → 대기(80%)
+@keyframes ngStrip1 {
+  0%, 11.9% { transform: translateY(0); }
+  12%, 35.9% { transform: translateY(-$cell); }
+  36%, 79.9% { transform: translateY(-$cell * 2); }
+  80%, 100% { transform: translateY(0); }
+}
+@keyframes ngEdge1 {
+  0%, 11.9% { border-color: $wait-edge; }
+  12%, 35.9% { border-color: $run-ink; }
+  36%, 79.9% { border-color: $done-ink; }
+  80%, 100% { border-color: $wait-edge; }
+}
+// 띠는 실행 구간만 linear 로 자라고 나머지는 컷이다 (키프레임마다 타이밍을 따로 준다)
+@keyframes ngBand1 {
+  0% { transform: scaleY(0); background-color: $wait-band; animation-timing-function: steps(1, end); }
+  12% { transform: scaleY(0); background-color: $run-ink; animation-timing-function: linear; }
+  35.9% { transform: scaleY(1); background-color: $run-ink; animation-timing-function: steps(1, end); }
+  36%, 79.9% { transform: scaleY(1); background-color: $done-ink; animation-timing-function: steps(1, end); }
+  80%, 100% { transform: scaleY(0); background-color: $wait-band; }
+}
+
+// 2번: 대기 → 실행 중(24%) → 성공(56%) → 대기(84%)
+@keyframes ngStrip2 {
+  0%, 23.9% { transform: translateY(0); }
+  24%, 55.9% { transform: translateY(-$cell); }
+  56%, 83.9% { transform: translateY(-$cell * 2); }
+  84%, 100% { transform: translateY(0); }
+}
+@keyframes ngEdge2 {
+  0%, 23.9% { border-color: $wait-edge; }
+  24%, 55.9% { border-color: $run-ink; }
+  56%, 83.9% { border-color: $done-ink; }
+  84%, 100% { border-color: $wait-edge; }
+}
+@keyframes ngBand2 {
+  0% { transform: scaleY(0); background-color: $wait-band; animation-timing-function: steps(1, end); }
+  24% { transform: scaleY(0); background-color: $run-ink; animation-timing-function: linear; }
+  55.9% { transform: scaleY(1); background-color: $run-ink; animation-timing-function: steps(1, end); }
+  56%, 83.9% { transform: scaleY(1); background-color: $done-ink; animation-timing-function: steps(1, end); }
+  84%, 100% { transform: scaleY(0); background-color: $wait-band; }
+}
+
+// 3번: 대기 → 실행 중(36%) → 실패(72%) → 대기(88%)
+@keyframes ngStrip3 {
+  0%, 35.9% { transform: translateY(0); }
+  36%, 71.9% { transform: translateY(-$cell); }
+  72%, 87.9% { transform: translateY(-$cell * 3); }
+  88%, 100% { transform: translateY(0); }
+}
+@keyframes ngEdge3 {
+  0%, 35.9% { border-color: $wait-edge; }
+  36%, 71.9% { border-color: $run-ink; }
+  72%, 87.9% { border-color: $error; }
+  88%, 100% { border-color: $wait-edge; }
+}
+@keyframes ngBand3 {
+  0% { transform: scaleY(0); background-color: $wait-band; animation-timing-function: steps(1, end); }
+  36% { transform: scaleY(0); background-color: $run-ink; animation-timing-function: linear; }
+  71.9% { transform: scaleY(1); background-color: $run-ink; animation-timing-function: steps(1, end); }
+  72%, 87.9% { transform: scaleY(1); background-color: $error; animation-timing-function: steps(1, end); }
+  88%, 100% { transform: scaleY(0); background-color: $wait-band; }
+}
+
+// ── 320×200 폰 (BD9): 여백만 줄인다. 여기서 값을 올리면 세로 174px 안에 안 들어간다
+@media (max-width: 340px), (max-height: 220px) {
+  .ng { gap: $sp-1; }
+  .ng__list { gap: $sp-1; }
+  .ng__card { padding: $sp-1 $sp-2; padding-left: $sp-3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ng__ic--spin,
+  .ng__band,
+  .ng__card,
+  .ng__strip,
+  .ng__lstrip { animation: none !important; }
+  .ng__card[data-state="run"] .ng__band { transform: scaleY(1) !important; }
+}

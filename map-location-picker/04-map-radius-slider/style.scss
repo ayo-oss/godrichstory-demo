@@ -1,0 +1,206 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+$duration: $dur-quick;
+$easing: $ease-spring;
+$color: $subject-blue;
+
+@include stage($stage-paper);
+
+// 가짜 지도 캔버스 — 외부 타일·이미지 없이 그라디언트만. 9개 데모가 같은 색을 쓴다
+$map-land:  #efe9dc;
+$map-road:  #fffdf7;
+$map-block: #e2dac9;
+$map-park:  #c9e0bd;
+$map-water: #bcd9ea;
+
+.rs {
+  box-sizing: border-box;
+  width: min(320px, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: $sp-2;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  color: $subject-ink;
+}
+
+// ── 지도 ─────────────────────────────────────────────
+// 세로 12 : 가로 5. 이 비율이 고정돼 있어야 핀의 data-dist(거리)와 원의 반경이 같은 자로 잰 값이 된다
+.rs__map {
+  position: relative;
+  overflow: hidden;
+  border-radius: $r-card;
+  width: 100%;
+  aspect-ratio: 12 / 5;
+  background:
+    repeating-linear-gradient(90deg, $map-road 0 7px, transparent 7px 30px),
+    repeating-linear-gradient(0deg, $map-road 0 6px, transparent 6px 26px),
+    radial-gradient(circle at 16% 22%, $map-park 0 30px, transparent 30px),
+    linear-gradient(101deg, transparent 0 78%, $map-water 78% 90%, transparent 90%),
+    $map-land;
+}
+// 블록 두 개 — 지도에 변화를 준다. 배경과 함께 멈춰 있다(움직이는 건 원·핀뿐)
+.rs__map::before,
+.rs__map::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  background: $map-block;
+}
+.rs__map::before { left: 6%; top: 58%; width: 15%; height: 30%; }
+.rs__map::after  { left: 76%; top: 12%; width: 12%; height: 34%; }
+
+// 반경 원 — 지름이 지도 높이와 같을 때가 scale(1)
+.rs__ring {
+  position: absolute;
+  z-index: 1;
+  left: 50%; top: 50%;
+  box-sizing: border-box;
+  height: 100%;
+  aspect-ratio: 1;
+  border: 2px solid rgba(47, 109, 246, .6);
+  border-radius: 50%;
+  background: rgba(47, 109, 246, .12);
+  transform: translate(-50%, -50%) scale(var(--k, .55));
+  transition: transform $duration $easing;
+}
+.rs__me {
+  position: absolute;
+  z-index: 3;
+  left: 50%; top: 50%;
+  width: 8px; height: 8px;
+  border: 2px solid $stage-paper;
+  border-radius: 50%;
+  background: $subject-ink;
+  transform: translate(-50%, -50%);
+}
+.rs__pin {
+  position: absolute;
+  z-index: 2;
+  display: block;
+  color: $color;
+  opacity: .26;
+  transform: translate(-50%, -100%);
+  transition: opacity $duration steps(1, end);
+}
+.rs__pin.is-in { opacity: 1; }
+
+// ── 컨트롤 ────────────────────────────────────────────
+.rs__bar {
+  display: flex;
+  align-items: center;
+  gap: $sp-2;
+}
+.rs__cap {
+  flex: 0 0 auto;
+  font-size: 11px; line-height: 14px; font-weight: 700;
+  letter-spacing: .02em;
+  color: rgba(23, 20, 26, .62);
+}
+.rs__range {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.rs__range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: $r-pill;
+  background: rgba(23, 20, 26, .14);
+}
+.rs__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: $color;
+}
+.rs__range::-moz-range-track { height: 6px; border-radius: $r-pill; background: rgba(23, 20, 26, .14); }
+.rs__range::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: $color; }
+.rs__range:focus-visible { outline: 2px solid $color; outline-offset: 2px; border-radius: $r-pill; }
+
+// 거리 읽기 — 사람이 잡으면 .rs__km 이 실시간, 자동 루프 때는 컷 3장이 번갈아 뜬다
+.rs__read {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 16px;
+  text-align: right;
+}
+.rs__km,
+.rs__cut {
+  position: absolute;
+  right: 0; top: 0;
+  font-size: 12px; line-height: 16px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: $color;
+  white-space: nowrap;
+}
+.rs__cut { opacity: 0; }
+.rs.is-demo .rs__km { opacity: 0; }
+
+.rs__hint {
+  margin: 0;
+  font-size: 10px; line-height: 14px; font-weight: 600;
+  color: rgba($stage-ink, .72);
+}
+
+// ── 자동 루프 (2s) ────────────────────────────────────
+// 반경 값 v 는 0%→50% 에서 30→100 으로, 50%→85% 에서 100→30 으로 선형으로 움직인다.
+// 핀과 거리 컷은 그 v 가 임계를 넘는 시각에 steps(1, end) 로 딱 끊어 바뀐다 — 반투명 교차가 없다.
+.rs.is-demo .rs__ring {
+  transition: none;
+  animation-name: rs-ring;
+  animation-duration: $dur-loop;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.rs.is-demo .rs__pin {
+  transition: none;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.rs.is-demo .rs__pin[data-dist="33"] { animation-name: rs-pin-33; }
+.rs.is-demo .rs__pin[data-dist="47"] { animation-name: rs-pin-47; }
+.rs.is-demo .rs__pin[data-dist="79"] { animation-name: rs-pin-79; }
+.rs.is-demo .rs__pin[data-dist="95"] { animation-name: rs-pin-95; }
+.rs.is-demo .rs__cut {
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.rs.is-demo .rs__cut--a { animation-name: rs-km-a; }
+.rs.is-demo .rs__cut--b { animation-name: rs-km-b; }
+.rs.is-demo .rs__cut--c { animation-name: rs-km-c; }
+
+@keyframes rs-ring {
+  0%   { transform: translate(-50%, -50%) scale(.3); }
+  50%  { transform: translate(-50%, -50%) scale(1); }
+  85%  { transform: translate(-50%, -50%) scale(.3); }
+  100% { transform: translate(-50%, -50%) scale(.3); }
+}
+@keyframes rs-pin-33 { 0% { opacity: .26; } 2.14% { opacity: 1; } 83.5% { opacity: .26; } 100% { opacity: .26; } }
+@keyframes rs-pin-47 { 0% { opacity: .26; } 12.14% { opacity: 1; } 76.5% { opacity: .26; } 100% { opacity: .26; } }
+@keyframes rs-pin-79 { 0% { opacity: .26; } 35% { opacity: 1; } 60.5% { opacity: .26; } 100% { opacity: .26; } }
+@keyframes rs-pin-95 { 0% { opacity: .26; } 46.43% { opacity: 1; } 52.5% { opacity: .26; } 100% { opacity: .26; } }
+@keyframes rs-km-a { 0% { opacity: 1; } 14.29% { opacity: 0; } 75% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes rs-km-b { 0% { opacity: 0; } 14.29% { opacity: 1; } 35.71% { opacity: 0; } 60% { opacity: 1; } 75% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes rs-km-c { 0% { opacity: 0; } 35.71% { opacity: 1; } 60% { opacity: 0; } 100% { opacity: 0; } }
+
+// 320×200 — 무대 여백을 뺀 174px 안에 들어가도록 간격을 내린다(올리지 않는다)
+@media (max-width: 360px) {
+  .rs { gap: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rs.is-demo .rs__ring,
+  .rs.is-demo .rs__pin,
+  .rs.is-demo .rs__cut { animation: none !important; }
+  .rs.is-demo .rs__km { opacity: 1; }   // 컷이 멈추면 실시간 값이 대신 보인다
+  .rs__ring, .rs__pin { transition: none; }
+}

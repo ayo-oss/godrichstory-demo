@@ -1,0 +1,159 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// OptionSheetStep — vanilla 판(run/298/demo/05-kiosk-option-sheet-step/style.scss) 의 React 포트.
+// 옵션 고르는 큰 시트 — 한 화면에 다 늘어놓지 않고 크기·온도 두 걸음으로 나눈다.
+// 걸음 교체는 steps(1, end) 컷이다. 두 판을 opacity 로 겹쳐 교차하면 24장 표본의 중간 프레임이
+// 두 걸음이 반투명하게 겹친 유령이 되고 그 장이 poster 로 뽑힌다 (237·248 계열).
+// 걸음 표시·제목·옵션 줄이 전부 같은 컷 시각표에 올라가야 「굵어진 걸음 표시 + 옛 제목」 같은 어긋난 장면이 안 생긴다.
+// 컷만 있으면 움직인 프레임이 두세 장으로 떨어지므로, 「다음」의 꺾쇠가 오른쪽으로 밀렸다 돌아오는 움직임을 같은 2초 시계에 붙인다.
+// 시트를 아래에서 끌어올리는 연출은 쓰지 않는다 — 루프가 이어붙는 지점에서 시트가 한 번에 다시 내려가 튄다.
+//
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어온다 — 세 변수를 여기서 한 번만 묶어 두면
+// 아래 규칙과 @keyframes 본문은 vanilla 와 **같은 글자**로 둘 수 있다.
+
+$duration: var(--duration, #{$dur-loop});
+$easing: var(--easing, #{$ease-spring});
+$color: var(--color, #{$subject-blue});
+
+@include stage($stage-paper);
+
+.root { display: grid; gap: $sp-2; width: 100%; max-width: 400px; }
+
+.menu {
+  display: flex; align-items: center; gap: $sp-2; margin: 0;
+  padding: $sp-2 $sp-3; border: 2px solid rgba(23, 20, 26, .14); border-radius: $r-control;
+  background: $stage-paper; color: $subject-ink;
+}
+.ico { width: clamp(16px, 4.4vw, 20px); height: clamp(16px, 4.4vw, 20px); flex: 0 0 auto; }
+.name { flex: 1 1 auto; font-weight: 800; font-size: clamp(12px, 3.2vw, 15px); }
+.price { font-weight: 800; font-size: clamp(12px, 3.2vw, 15px); }
+
+.sheet {
+  padding: $sp-2 $sp-3 $sp-3; border-radius: $r-card;
+  background: $subject-cream; box-shadow: $shadow-raised;
+}
+
+.steps { display: grid; grid-template-columns: repeat(2, 1fr); gap: $sp-1; margin-bottom: $sp-2; }
+.seg { display: block; height: 6px; border-radius: $r-pill; background: rgba(23, 20, 26, .16); }
+.seg1 { background: $subject-ink; }
+.root.isStep2 .seg2 { background: $subject-ink; }
+
+// 두 걸음 판을 같은 격자 칸에 겹쳐 둔다 — 높이가 큰 쪽으로 고정돼 걸음이 바뀔 때 시트가 들썩이지 않는다
+.panes { display: grid; }
+.pane { grid-area: 1 / 1; }
+.root:not(.isStep2) .pane2,
+.root.isStep2 .pane1 { visibility: hidden; opacity: 0; }
+
+.title {
+  margin: 0 0 $sp-2; font-weight: 800; font-size: clamp(13px, 3.6vw, 16px); line-height: 1.2;
+  color: $subject-ink;
+}
+.opts { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: $sp-2; }
+// 버튼 격자는 width:100% 를 못 박는다 — 버튼은 fit-content 라 1fr 칸이 내용 폭으로 접힌다
+.opt {
+  width: 100%; padding: $sp-2 $sp-1; cursor: pointer;
+  border: 2px solid rgba(23, 20, 26, .18); border-radius: $r-control;
+  background: $stage-paper; color: $subject-ink;
+  font-family: inherit; font-weight: 700; font-size: clamp(11px, 3vw, 14px);
+}
+// 고른 칸은 흰 바탕에 파란 테두리다. 파랑을 바탕으로 깔고 크림 글자를 얹으면 4.25:1 로 AA 에 못 미친다
+.opt.isOn { border-color: $color; border-width: 3px; font-weight: 800; }
+.opt:focus-visible { outline: 3px solid $color; outline-offset: 2px; }
+
+.nav { display: grid; grid-template-columns: repeat(2, 1fr); gap: $sp-2; margin-top: $sp-3; }
+.back, .next {
+  width: 100%; padding: $sp-2; cursor: pointer; border-radius: $r-control;
+  font-family: inherit; font-weight: 800; font-size: clamp(11px, 3vw, 14px);
+}
+.back { border: 2px solid rgba(23, 20, 26, .24); background: $stage-paper; color: $subject-ink; }
+.next {
+  display: flex; align-items: center; justify-content: center; gap: $sp-1;
+  border: 0; background: $subject-ink; color: $subject-cream;
+}
+.back:disabled, .next:disabled { opacity: .38; cursor: default; }
+.back:focus-visible, .next:focus-visible { outline: 3px solid $color; outline-offset: 2px; }
+.caret { width: clamp(13px, 3.4vw, 16px); height: clamp(13px, 3.4vw, 16px); flex: 0 0 auto; }
+
+// ── 미리보기 루프 ────────────────────────────────────────────────
+// 1걸음 → 2걸음 → 1걸음. 세 컷이 전부 같은 2초 시계를 쓰므로 제목·옵션·걸음 표시가 한 프레임에 함께 간다.
+.root.isDemo .pane1,
+.root.isDemo .pane2 {
+  animation-duration: $duration; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.root.isDemo .pane1 { animation-name: koPane1; }
+.root.isDemo .pane2 { animation-name: koPane2; }
+@keyframes koPane1 {
+  0%, 46% { visibility: visible; opacity: 1; }
+  50%, 82% { visibility: hidden; opacity: 0; }
+  86%, 100% { visibility: visible; opacity: 1; }
+}
+@keyframes koPane2 {
+  0%, 46% { visibility: hidden; opacity: 0; }
+  50%, 82% { visibility: visible; opacity: 1; }
+  86%, 100% { visibility: hidden; opacity: 0; }
+}
+.root.isDemo .seg2 {
+  animation-name: koSeg; animation-duration: $duration;
+  animation-timing-function: steps(1, end); animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+@keyframes koSeg {
+  0%, 46% { background: rgba(23, 20, 26, .16); }
+  50%, 82% { background: $subject-ink; }
+  86%, 100% { background: rgba(23, 20, 26, .16); }
+}
+// 걸음이 바뀌면 쓸 수 있는 버튼도 바뀐다 — 1걸음에서는 「뒤로」가, 2걸음에서는 「다음」이 흐리다.
+// 이것도 같은 컷 시각표에 올려야 「2걸음 판인데 뒤로가 흐린」 어긋난 장면이 대표 이미지로 뽑히지 않는다
+// (`disabled` 속성은 CSS 가 못 바꾸므로 미리보기에서는 흐림만 같은 시각표로 흉내 낸다)
+.root.isDemo .back,
+.root.isDemo .next {
+  animation-duration: $duration; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.root.isDemo .back { animation-name: koBack; }
+.root.isDemo .next { animation-name: koNext; }
+@keyframes koBack {
+  0%, 46% { opacity: .38; }
+  50%, 82% { opacity: 1; }
+  86%, 100% { opacity: .38; }
+}
+@keyframes koNext {
+  0%, 46% { opacity: 1; }
+  50%, 82% { opacity: .38; }
+  86%, 100% { opacity: 1; }
+}
+// 꺾쇠는 자기 중심에서 오른쪽으로 밀렸다 돌아온다 — 컷 사이의 빈 칸을 이 움직임이 채운다
+.root.isDemo .caret {
+  animation-name: koCaret; animation-duration: $duration;
+  animation-timing-function: $easing; animation-iteration-count: infinite;
+}
+@keyframes koCaret {
+  0%, 100% { transform: translateX(0); }
+  22% { transform: translateX(4px); }
+  44% { transform: translateX(0); }
+  66% { transform: translateX(4px); }
+  88% { transform: translateX(0); }
+}
+
+@media (max-width: 340px) {
+  .menu { padding: $sp-1 $sp-2; }
+  .sheet { padding: $sp-2; }
+  .title { margin-bottom: $sp-1; }
+  .nav { margin-top: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .pane1,
+  .root.isDemo .pane2,
+  .root.isDemo .seg2,
+  .root.isDemo .back,
+  .root.isDemo .next,
+  .root.isDemo .caret { animation: none !important; }
+  .root.isDemo .back { opacity: 1 !important; }
+  .root.isDemo .next { opacity: .38 !important; }
+  // 움직임 없이 2걸음이 열린 자리에 세워 둔다
+  .root.isDemo .pane1 { visibility: hidden !important; opacity: 0 !important; }
+  .root.isDemo .pane2 { visibility: visible !important; opacity: 1 !important; }
+  .root.isDemo .seg2 { background: $subject-ink !important; }
+}

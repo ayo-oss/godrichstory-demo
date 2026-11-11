@@ -1,0 +1,227 @@
+// ReactionTimeSignal — vanilla 판(run/301/demo/09-reaction-time-signal/style.scss) 의 React 포트.
+// 토큰 값은 site/static/demo-tokens.scss 를 이 파일 위에 지역 선언했다 — zip 을 받은 독자는
+// 이 폴더만 있어도 sass 컴파일이 돼야 한다 (BD23 단독 컴파일).
+// @keyframes 본문은 vanilla 와 같은 글자다 (값을 다시 타이핑하지 않는다).
+// duration·easing·accentColor 는 props 로 받아 CSS 변수로 들어오고 기본값은 vanilla 와 같다.
+
+$stage-ink: #17141a;
+$tick-panel: #231f28;
+$subject-cream: #fff7e6;
+$subject-ink: #17141a;
+$error: #c2361a;
+$error-soft: #ffe0d8;
+$tick-up: #3ddc97;
+$tick-down: #ff7a5e;
+$subject-blue-deep: #0a4fe8;
+$ease-out: ease-out;
+$ease-pop: cubic-bezier(.2, 1.4, .4, 1);
+$dur-quick: 220ms;
+$r-card: 16px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+
+// 미리보기 카운트업용 등록 정수 — CSS 만으로 ms 숫자를 센다(286 선례)
+@property --dms {
+  syntax: "<integer>";
+  inherits: false;
+  initial-value: 0;
+}
+
+// 무대 공통 — vanilla 의 @include stage($stage-ink) 와 같은 규칙
+html, body { margin: 0; overflow: hidden; }
+.stage {
+  box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; margin: 0;
+  background: $stage-ink;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  padding: clamp(8px, 4vw, 24px);
+}
+
+// 먹 무대 위 글자는 크림
+.root { display: flex; flex-direction: column; gap: $sp-2; width: 100%; max-width: 440px; }
+
+.hud { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; }
+.hud > p { display: flex; align-items: center; gap: $sp-1; margin: 0; }
+.ico { width: 15px; height: 15px; flex: 0 0 auto; color: $subject-cream; }
+.label { font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4; color: rgba($subject-cream, .72); }
+.num {
+  font-weight: 800; font-size: clamp(13px, 3.6vw, 17px); line-height: 1;
+  color: $subject-cream; font-variant-numeric: tabular-nums;
+}
+
+// ── 신호 패널 ─────────────────────────────────────────────
+.panel {
+  position: relative; overflow: hidden;
+  height: clamp(104px, 52vh, 180px);
+  border: 2px solid rgba($subject-cream, .16);
+  border-radius: $r-card;
+  background: $tick-panel;
+  // 상태별 배경 전환 — 대비가 큰 색끼리 transition 하나로 잇는다(신호만이 연출이다)
+  transition: background-color $dur-quick var(--easing, ease-out);
+  touch-action: manipulation;
+  cursor: pointer;
+}
+.panel:focus-visible { outline: 2px solid var(--accent, #{$subject-cream}); outline-offset: 2px; }
+.isSignal .panel { background: var(--accent, #{$subject-cream}); }
+.isPenalty .panel { background: $error-soft; }
+
+// 네 얼굴(대기·신호·결과·벌점)은 같은 자리에 겹쳐 두고 상태 클래스로 보인다
+.face {
+  position: absolute; inset: 0;
+  display: grid; place-content: center; justify-items: center; gap: $sp-1;
+  padding: $sp-2;
+  text-align: center;
+  opacity: 0; pointer-events: none;
+}
+.isIdle .faceWait,
+.isArmed .faceWait,
+.isSignal .faceGo,
+.isResult .faceResult,
+.isPenalty .facePenalty { opacity: 1; }
+
+.waitTitle, .goTitle, .penTitle {
+  margin: 0; font-weight: 800; line-height: 1.2;
+  font-size: clamp(15px, 4.4vw, 21px);
+}
+.waitSub, .penSub {
+  margin: 0; font-weight: 700; line-height: 1.4;
+  font-size: clamp(10px, 2.6vw, 12px); color: rgba($subject-cream, .72);
+}
+.faceWait, .faceResult { color: $subject-cream; }   // 어두운 패널 위 크림 (15.2:1)
+.faceGo { color: $subject-ink; }                    // 크림 면 위 잉크 (17.1:1)
+.facePenalty { color: $subject-ink; }               // 연살구 면 위 잉크 (14.7:1)
+.goIco { width: 22px; height: 22px; color: $subject-ink; }
+.penIco { width: 22px; height: 22px; color: $error; } // 아이콘(비문자) — 3:1 UI 기준 통과
+
+// 결과 얼굴 — '{n}ms' 큰 숫자 + 평가 라벨
+.ms {
+  margin: 0; font-weight: 800; line-height: 1;
+  font-size: clamp(30px, 9vw, 44px);
+  font-variant-numeric: tabular-nums;
+}
+// 다시 시작 버튼 — 결과·벌점 얼굴에 하나씩. 얼굴은 pointer-events:none 이라 버튼만 되살린다
+.restart {
+  display: inline-flex; align-items: center; gap: $sp-1;
+  border: 0; border-radius: $r-pill;
+  padding: $sp-1 $sp-3;
+  background: $subject-blue-deep; color: $subject-cream;
+  cursor: pointer; pointer-events: auto;
+  font-family: inherit; font-weight: 800; font-size: clamp(10px, 2.6vw, 12px); line-height: 1.6;
+  transition: transform $dur-quick $ease-pop;
+}
+.restart .ico { color: $subject-cream; }
+.restart:hover { transform: translateY(-2px) scale(1.04); }
+.restart:active { transform: translateY(0) scale(.97); }
+.restart:focus-visible { outline: 2px solid $subject-cream; outline-offset: 2px; }
+// 보이지 않는 얼굴의 버튼은 탭 순서에서도 빠진다
+.face { visibility: hidden; }
+.isIdle .faceWait,
+.isArmed .faceWait,
+.isSignal .faceGo,
+.isResult .faceResult,
+.isPenalty .facePenalty { visibility: visible; }
+.isDemo .face { visibility: visible; }
+
+.grade { margin: 0; font-weight: 800; font-size: clamp(11px, 3vw, 14px); line-height: 1.4; }
+.gradeS1 { color: $tick-up; }        // 매우 빠름 — 패널 위 9.15:1
+.gradeS2 { color: $tick-up; }        // 빠름
+.gradeS3 { color: $subject-cream; }  // 보통 — 15.2:1
+.gradeS4 { color: $tick-down; }      // 느림 — 패널 위 6.31:1
+
+.hint {
+  margin: 0; text-align: center;
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4;
+  color: rgba($subject-cream, .72);
+}
+
+// ── 미리보기(.isDemo): 대기 → 신호 컷 → 가짜 ms 카운트업 한 바퀴 ───────
+// 배경·얼굴 교체는 steps(1, end) 컷 — 반투명 유령 프레임을 만들지 않는다. 복귀 컷은 90% 안(86%).
+.isDemo .panel {
+  animation-name: rtsPanelCut;
+  animation-duration: var(--duration, 2s);
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes rtsPanelCut {
+  0% { background-color: $tick-panel; }
+  32% { background-color: var(--accent, #{$subject-cream}); }   // 신호 컷 (vanilla 의 $color 자리)
+  86% { background-color: $tick-panel; }      // 복귀 컷 (90% 안)
+  100% { background-color: $tick-panel; }
+}
+.isDemo .face { animation-name: rtsFaceCut; animation-duration: var(--duration, 2s); animation-timing-function: steps(1, end); animation-iteration-count: infinite; }
+.isDemo .faceGo { animation-name: rtsFaceGoCut; }
+.isDemo .faceResult,
+.isDemo .facePenalty { animation-name: none; opacity: 0; }
+@keyframes rtsFaceCut {
+  0% { opacity: 1; }
+  32% { opacity: 0; }
+  86% { opacity: 1; }
+  100% { opacity: 1; }
+}
+@keyframes rtsFaceGoCut {
+  0% { opacity: 0; }
+  32% { opacity: 1; }
+  86% { opacity: 0; }
+  100% { opacity: 0; }
+}
+// 카운트업 숫자 — 미리보기에서만 보이는 가짜 ms. 신호 컷(32%)과 함께 올라 84% 에서 멈춘 뒤 복귀 컷에서 사라진다.
+.demoMs {
+  position: absolute; inset: 0;
+  display: grid; place-content: center; justify-items: center;
+  color: $subject-ink;                                       // 크림 면 위 잉크
+  font-weight: 800; line-height: 1;
+  font-size: clamp(30px, 9vw, 44px);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  counter-reset: dms var(--dms);
+}
+.demoMs::after { content: counter(dms) "ms"; }
+.isDemo .demoMs {
+  animation-name: rtsFaceGoCut, rtsCount;
+  animation-duration: var(--duration, 2s), var(--duration, 2s);
+  animation-timing-function: steps(1, end), linear;
+  animation-iteration-count: infinite, infinite;
+}
+@keyframes rtsCount {
+  0%, 32% { --dms: 0; }
+  84%, 100% { --dms: 300; }
+}
+
+// ── 인계 정비(2026-09-13, vanilla 와 같은 내용) ──────────────────────
+// 1) 벌점 얼굴의 보조 글자가 공용 규칙의 크림(.72)을 물려받아 연살구 면 위에서 약 1.1:1 로
+//    사실상 안 보였다 — 잉크 계열로 갈아 연살구(#ffe0d8) 위 6.5:1 (알파 하한 .72 준수).
+.penSub { color: rgba($subject-ink, .72); }
+
+// 2) 미리보기에서 신호 얼굴(문구)과 카운트업 숫자가 같은 자리에 겹쳐 보였다 —
+//    문구(32~52%) → 숫자 카운트업(52~84%) 순으로 이어지게 갈라 잡는다.
+.isDemo .faceGo { animation-name: rtsGoTitleCut; }
+@keyframes rtsGoTitleCut {
+  0%, 32% { opacity: 0; }
+  35%, 49% { opacity: 1; }
+  52%, 100% { opacity: 0; }
+}
+.isDemo .demoMs { animation-name: rtsDemoMsShow, rtsCount; }
+@keyframes rtsDemoMsShow {
+  0%, 51% { opacity: 0; }
+  54%, 84% { opacity: 1; }
+  87%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .root { gap: $sp-1; }
+  .panel { height: clamp(96px, 46vh, 140px); }
+  .ms { font-size: clamp(26px, 8vw, 34px); }
+  .demoMs { font-size: clamp(26px, 8vw, 34px); }
+}
+
+// reduce 에서는 색 전환 transition 과 미리보기 연출을 끈다. 게임 자체는 즉시 전환으로 그대로
+// 동작한다(ReactionTimeSignal.tsx 참조 — 재는 건 performance.now() 라 연출과 무관하다).
+@media (prefers-reduced-motion: reduce) {
+  .panel, .restart { transition: none !important; }
+  .isDemo .panel,
+  .isDemo .face,
+  .isDemo .demoMs { animation: none !important; }
+  .isDemo .demoMs { opacity: 0 !important; }
+}

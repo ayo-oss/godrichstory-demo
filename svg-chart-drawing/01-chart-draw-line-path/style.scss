@@ -1,0 +1,125 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 펜처럼 그려지는 선 그래프 — 실제 사용에선 JS 가 buildPath() 로 d 를 채워 완성된 그래프가 곧 뜨고
+// pointermove 로 점·툴팁이 따라온다. 격자 미리보기(.is-demo)는 같은 path 에
+// stroke-dashoffset 키프레임을 얹어 좌에서 우로 긋는 펜 모양을 2초 루프로 보여 준다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $chart-1;
+
+@include stage($stage-paper);
+
+.cd { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.cd__card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.cd__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.cd__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.cd__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.cd__plot { position: relative; }
+.cd__svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.cd__grid line { stroke: rgba(23, 20, 26, .12); stroke-width: 1; }
+.cd__ticks text, .cd__labels text {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  text-anchor: end; dominant-baseline: middle;
+}
+.cd__labels text { text-anchor: middle; font-size: 9.5px; }
+.cd__axis { stroke: rgba(23, 20, 26, .32); stroke-width: 1.5; }
+.cd__area { fill: rgba(47, 109, 246, .08); }
+.cd__line {
+  fill: none; stroke: $color; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round;
+}
+// 최고점 마커 — 실사용(정적)에선 항상 보이고, 미리보기 루프에서만 애니메이션이 0~62% 를 지배한다
+.cd__peak { fill: $stage-paper; stroke: $color; stroke-width: 2.5; opacity: 1; }
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.cd__tip {
+  position: absolute; bottom: calc(100% - 4px); left: 50%; transform: translate(-50%, 4px);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.cd__tip.is-on { opacity: 1; transform: translate(-50%, 0); transition: opacity $dur-quick $ease-out, transform $dur-quick $ease-out; }
+.cd__tipMon { opacity: .72; }
+.cd__tipVal { font-size: 12px; }
+// 스크린리더용 표 — absolute+clip 은 레이아웃 크기가 그대로 scrollHeight 에 잡혀 넘침(BD8)이 뜨므로
+// fixed 로 캔버스 밖에 둔다. 스크린리더는 그대로 읽는다
+.cd__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 0~4% 빈 칸 → 6~58% 라인이 좌에서 끝까지 그어진다 →
+//    64% 에 최고점 점과 툴팁이 컷으로 뜬다 → 86% 까지 머문 뒤 86~96% 펜을 되감아 빈 칸으로 돌아온다.
+//    되감기(지우개)는 퇴장이 아니라 다음 등장을 위한 리셋 — 96% 이후는 빈 대 빈이라 이어붙는 지점이 안 튄다.
+.cd.is-demo .cd__line { stroke-dasharray: 100; }
+.cd.is-demo .cd__line {
+  animation-name: cdDraw;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes cdDraw {
+  0%, 4% { stroke-dashoffset: 100; }
+  58%, 86% { stroke-dashoffset: 0; }
+  96%, 100% { stroke-dashoffset: 100; }
+}
+// 라인 아래 면적은 처음부터 다 보이면 그리는 중인 라인과 어긋난다 —
+// 같은 타이밍에 clip-path inset 으로 좌에서 우로 채운다 (clip 위프는 이징 짝으로. steps 와 함께 쓰면 컷으로 죽는다)
+.cd.is-demo .cd__area {
+  animation-name: cdArea;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes cdArea {
+  0%, 4% { clip-path: inset(0 100% 0 0); }
+  58%, 86% { clip-path: inset(0 0 0 0); }
+  96%, 100% { clip-path: inset(0 100% 0 0); }
+}
+// 최고점 점은 64% 에 컷으로 등장 (요소 중심에서 커지는 게 아니라 그냥 나타나는 게 마커답다)
+.cd.is-demo .cd__peak {
+  animation-name: cdPeak;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cdPeak {
+  0%, 62% { opacity: 0; }
+  64%, 90% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+// 미리보기 툴팁은 최고점에 미리 놓아 둔다 (JS 가 11월로 세팅) — 점과 같은 타이밍에 컷
+.cd.is-demo .cd__tip { left: 87.3%; }
+.cd.is-demo .cd__tip {
+  animation-name: cdTip;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cdTip {
+  0%, 62% { opacity: 0; }
+  64%, 90% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 320px 에서 12개 라벨이 겹친다 — 홀수 달만 남긴다 (10월 라벨이 사라져도 표·툴팁이 값을 갖고 있다)
+  .cd__labels text:nth-child(even) { display: none; }
+  .cd__labels text { font-size: 9px; }
+  .cd__card { padding: $sp-2 $sp-3 $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cd.is-demo .cd__line,
+  .cd.is-demo .cd__peak,
+  .cd.is-demo .cd__tip { animation: none !important; }
+  // 움직임 없이 다 그어진 최종 상태로 점프한다
+  .cd.is-demo .cd__line { stroke-dashoffset: 0 !important; }
+  .cd.is-demo .cd__peak { opacity: 1 !important; }
+}

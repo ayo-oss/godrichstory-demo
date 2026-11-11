@@ -1,0 +1,137 @@
+// ChartDonutArc — vanilla 판(run/289/demo/03-chart-draw-donut-arc/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고(BEM → 캐멀), 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$stage-ink: #17141a;
+$subject-ink: #17141a;
+$subject-cream: #fff7e6;
+$chart-1: #2f6df6;
+$chart-2: #c2361a;
+$chart-3: #2b9d74;
+$chart-4: #8a5cd6;
+$ease-out: ease-out;
+$dur-loop: 2s;
+$dur-quick: 220ms;
+$r-card: 16px;
+$r-xs: 4px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+$sp-4: 16px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+@mixin stage($bg) {
+  html, body { margin: 0; overflow: hidden; }
+  .stage { box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; margin: 0; background: $bg;
+           font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; padding: clamp(8px, 4vw, 24px); }
+}
+
+@include stage($stage-ink);
+
+.root { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.card {
+  width: min(100%, 400px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4;
+}
+.head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+.body { display: flex; align-items: center; gap: $sp-4; }
+.plot { position: relative; flex: none; }
+.svg { display: block; width: 168px; height: auto; touch-action: none; }
+// 조각 — 실제 원호 path 를 굵은 stroke 로 그린다. 계열색은 고정 순서대로만 (dataviz 검증 팔레트)
+.slice { fill: none; stroke-width: 26; }
+.slice:nth-child(1) { stroke: $chart-1; }
+.slice:nth-child(2) { stroke: $chart-2; }
+.slice:nth-child(3) { stroke: $chart-3; }
+.slice:nth-child(4) { stroke: $chart-4; }
+// 중앙 합계 라벨 — 텍스트는 잉크 토큰
+.sumLabel { fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px; text-anchor: middle; }
+.sumVal { fill: $subject-ink; font-weight: 800; font-size: 21px; text-anchor: middle; }
+// 범례 — 색점과 채널명과 비율을 한 줄에. 색만으로 구분하지 않는다
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: $sp-2; flex: 1; min-width: 0; }
+.item { display: flex; align-items: center; gap: $sp-2; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.item1 .dot { background: $chart-1; }
+.item2 .dot { background: $chart-2; }
+.item3 .dot { background: $chart-3; }
+.item4 .dot { background: $chart-4; }
+.name { font-weight: 700; font-size: clamp(11px, 3vw, 12.5px); color: $subject-ink; }
+.pct {
+  margin-left: auto; font-weight: 800; font-size: clamp(11px, 3vw, 12.5px);
+  color: rgba(23, 20, 26, .66); font-variant-numeric: tabular-nums;
+}
+.tip {
+  position: absolute; transform: translate(-50%, -130%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $subject-cream; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.tip.tipIsOn { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.tipCh { opacity: .72; }
+.tipVal { font-size: 12px; }
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다 (absolute+clip 은 scrollHeight 넘침 함정)
+.sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 조각이 --d(0.24s) 간격으로 하나씩 그려진다 — 이전 조각이 끝나는 순간
+//    다음 조각의 붓질이 시작된다 (드로잉 0.24s = 간격 0.24s). 마지막 조각은 52% 에 완성.
+//    pathLength=100 이라 dashoffset 이 원호 길이와 무관하게 0~100 으로 돈다.
+//    animation-delay 는 낱개 속성으로 — 단축을 쓰면 delay 가 리셋된다. backwards 로 대기 구간 채움.
+//    되돌림은 98% — 24프레임의 마지막 장이 95.8% 지점이라 그 뒤는 샘플이 없다. 루프 안에서
+//    지우면 다 지워지는 장이 최대 변화가 돼 poster 로 뽑힌다 (255-03 과 같은 계열).
+.isDemo .slice { stroke-dasharray: 100; }
+.isDemo .slice {
+  animation-name: cnDraw;
+  animation-duration: $dur-loop;
+  animation-timing-function: linear;   // 붓은 등속으로 긋는다 — 드로잉에 ease-out 을 주면 끝에서 늘어진다
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cnDraw {
+  0%, 4% { stroke-dashoffset: 100; }
+  16%, 96% { stroke-dashoffset: 0; }
+  98%, 100% { stroke-dashoffset: 100; }
+}
+// 범례 넷과 중앙 합계는 도넛이 다 그려진 54% 에 **한 번에** 컷으로 붙는다 — 조각마다 따로
+// 붙이면 최대 변화 프레임이 첫 조각의 붓질에 잡혀 poster 가 "파란 조각 하나" 가 된다 (실측 2026-09-12)
+.isDemo .item,
+.isDemo .sumLabel,
+.isDemo .sumVal {
+  animation-name: cnReveal;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cnReveal {
+  0%, 52% { opacity: 0; }
+  54%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 320px 에서 도넛을 줄여 카드 전체가 세로 200px 안에 들어온다
+  .svg { width: 122px; }
+  .card { padding: $sp-2 $sp-3; }
+  .body { gap: $sp-3; }
+  .legend { gap: $sp-1; }
+  .head { margin-bottom: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .slice, .isDemo .item, .isDemo .sumLabel, .isDemo .sumVal {
+    animation: none !important;
+  }
+  // 움직임 없이 다 그려진 최종 상태로 점프한다
+  .isDemo .slice { stroke-dashoffset: 0 !important; }
+  .isDemo .item, .isDemo .sumLabel, .isDemo .sumVal { opacity: 1 !important; }
+}

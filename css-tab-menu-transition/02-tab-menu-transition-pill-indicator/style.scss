@@ -1,0 +1,124 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// ── 변수 3개 ──────────────────────────────────────────
+$duration: $dur-quick;                            // 필이 옮겨가는 시간
+$easing: $ease-pop;                               // 필 전환 이징 (실제 클릭)
+$color: $subject-blue-deep;                       // 필 배경 색 — 잉크 글자가 4.03 으로 미달이라 짙은 파랑으로 (크림 글자 5.98:1)
+
+@include stage($stage-yellow);
+
+// 라벨 글자 수가 다르므로 폭·이동 거리를 항목마다 고정값으로 둔다
+// (함정: 라벨을 바꾸면 이 값도 같이 바꿔야 한다 — 자동으로 안 맞다)
+// 값은 짐작이 아니라 실측이다 (Playwright getBoundingClientRect, 480×300) — 짐작값(56/76/56)은
+// .pi__tab 이 flex:1 1 0(균등분배)일 때만 우연히 비슷했고, flex:0 0 auto(내용 폭)로 고치니 실제 폭은
+// 37/52/37 이었다 (사용자 2026-09-10 스크린샷 "필이 딴 데 걸림" 지적, BD19)
+$w1: 37px; $w2: 52px; $w3: 37px;
+
+.pi { width: min(280px, 84vw); }
+.pi__radio { position: absolute; opacity: 0; pointer-events: none; }
+
+.pi__nav {
+  position: relative;
+  isolation: isolate;             // ::after 트레일(z -1)이 필 뒤에만 그려지게 (2026-09-15 한 겹)
+  display: flex;
+  gap: $sp-2;
+  padding: $sp-1;
+  background: rgba(23, 20, 26, .08);
+  border-radius: $r-pill;
+}
+// 글자색의 기본은 잉크다 — 무대(노랑) 위에서 10.8:1. 필 위에 온(:checked) 글자만 크림(5.98:1)으로 바뀐다.
+// 데모 루프에서는 아래 pi-ink-* 키프레임이 필과 같은 박자로 글자색을 옮긴다 — 필이 떠난 자리의 크림 글자가 노란 무대 위에서 사라지는 일이 없다
+.pi__tab {
+  position: relative; z-index: 1;
+  flex: 0 0 auto;                                   // 내용 폭 — 균등분배(1 1 0)면 아래 필 지오메트리 상수와 어긋난다 (BD19)
+  text-align: center;
+  padding: $sp-2 $sp-1;
+  font-weight: 600;
+  font-size: clamp(12px, 3.4vw, 14px);
+  line-height: 1;
+  font-family: inherit;
+  color: $subject-ink;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.pi__pill {
+  position: absolute; top: $sp-1; left: $sp-1; bottom: $sp-1;
+  width: $w1;
+  border-radius: $r-pill;
+  background: $color;
+  transform: translateX(0) scaleX(1);
+  transform-origin: left center; // 규칙8: 좌변 기준 좌표·배율 계산
+  transition: transform $duration $easing;
+}
+// 한 겹(관성+트레일)은 ::after 만 추가 — index.html·레이아웃 불변. 트레일은 필 자신이 아니라
+// .pi__nav(고정 컨테이너)의 ::after 로 둔다 — 필 자신의 ::after 로 두면 부모의 진행 중인
+// transform 위에 트레일 자신의 transform 이 겹쳐 더해져(중첩 transform 합성) 이동거리·스케일이
+// 배로 튄다. nav 는 움직이지 않으므로 트레일만의 절대 좌표 keyframes 가 그대로 유효하다.
+// 정적(:checked) 전환에선 .is-demo 스코프 밖이라 animation 이 안 걸려 opacity 0 그대로 안 보인다.
+.pi__nav::after {
+  content: "";
+  position: absolute; top: $sp-1; left: $sp-1; bottom: $sp-1;
+  z-index: -1;
+  width: $w1;
+  border-radius: $r-pill;
+  background: rgba($color, .3);
+  filter: blur(2px);
+  transform: translateX(0) scaleX(1);
+  transform-origin: left center;
+  opacity: 0;
+}
+
+// scaleX 비율은 컴파일 시점 상수로 미리 계산한다 (calc() 안에서 길이÷길이는 CSS 스펙상 무효라 런타임 계산 불가)
+$scale2: 1.405; // #{$w2} / #{$w1}
+$scale3: 1;      // #{$w3} / #{$w1}
+
+// ── 실제 동작: :checked 만으로 필이 이동·변형된다 ──────────────
+#pi-1:checked ~ .pi__nav .pi__pill { transform: translateX(0) scaleX(1); }
+#pi-2:checked ~ .pi__nav .pi__pill { transform: translateX(calc(#{$w1} + #{$sp-2})) scaleX(#{$scale2}); }
+#pi-3:checked ~ .pi__nav .pi__pill { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2)) scaleX(#{$scale3}); }
+// 필 위에 온 글자만 크림 — 잉크를 그대로 두면 짙은 파랑 위 2.87:1 이다
+#pi-1:checked ~ .pi__nav label[for="pi-1"],
+#pi-2:checked ~ .pi__nav label[for="pi-2"],
+#pi-3:checked ~ .pi__nav label[for="pi-3"] { color: $subject-cream; }
+
+// ── 데모 루프: 클릭 전까지 세 필터를 스스로 오간다 ──────────────
+.pi.is-demo .pi__pill { animation: pi-loop $dur-loop $easing infinite; }
+.pi.is-demo .pi__nav::after { animation: pi-trail-loop $dur-loop $easing infinite; animation-delay: 120ms; }
+// 글자색도 필과 같은 박자(0·15/33·48/66·81/100%)로 — 크림 글자가 필 없는 자리에 남지 않게
+.pi.is-demo .pi__nav label[for="pi-1"] { animation: pi-ink-1 $dur-loop linear infinite; }
+.pi.is-demo .pi__nav label[for="pi-2"] { animation: pi-ink-2 $dur-loop linear infinite; }
+.pi.is-demo .pi__nav label[for="pi-3"] { animation: pi-ink-3 $dur-loop linear infinite; }
+@keyframes pi-ink-1 { 0%, 15% { color: $subject-cream; } 23%, 87% { color: $subject-ink; } 95%, 100% { color: $subject-cream; } }
+@keyframes pi-ink-2 { 0%, 25% { color: $subject-ink; } 33%, 48% { color: $subject-cream; } 56%, 100% { color: $subject-ink; } }
+@keyframes pi-ink-3 { 0%, 58% { color: $subject-ink; } 66%, 81% { color: $subject-cream; } 89%, 100% { color: $subject-ink; } }
+// pi-loop 오버슛 보강 — 각 도착 전 지점에서 scaleX 는 목표값을 미리 유지한 채 translateX 만
+// 5px 살짝 지나쳤다가(관성) 정착한다.
+@keyframes pi-loop {
+  0%, 15%  { transform: translateX(0) scaleX(1); }
+  30%      { transform: translateX(calc(#{$w1} + #{$sp-2} + 5px)) scaleX(#{$scale2}); }
+  33%, 48% { transform: translateX(calc(#{$w1} + #{$sp-2})) scaleX(#{$scale2}); }
+  63%      { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2 + 5px)) scaleX(#{$scale3}); }
+  66%, 81% { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2)) scaleX(#{$scale3}); }
+  96%      { transform: translateX(-5px) scaleX(1); }
+  100%     { transform: translateX(0) scaleX(1); }
+}
+// 트레일 전용 — 같은 모양(같은 scaleX)을 120ms 늦게 쫓아가며 옅어진다
+@keyframes pi-trail-loop {
+  0%, 15%  { transform: translateX(0) scaleX(1); opacity: 0; }
+  24%      { opacity: .3; }
+  30%      { transform: translateX(calc(#{$w1} + #{$sp-2} + 5px)) scaleX(#{$scale2}); opacity: .3; }
+  33%, 40% { transform: translateX(calc(#{$w1} + #{$sp-2})) scaleX(#{$scale2}); opacity: .3; }
+  48%      { transform: translateX(calc(#{$w1} + #{$sp-2})) scaleX(#{$scale2}); opacity: 0; }
+  63%      { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2 + 5px)) scaleX(#{$scale3}); opacity: .3; }
+  66%, 73% { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2)) scaleX(#{$scale3}); opacity: .3; }
+  81%      { transform: translateX(calc(#{$w1} + #{$w2} + #{$sp-2} * 2)) scaleX(#{$scale3}); opacity: 0; }
+  100%     { transform: translateX(0) scaleX(1); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pi__pill { transition: none; }
+  .pi.is-demo .pi__pill,
+  .pi.is-demo .pi__nav::after { animation: none !important; }
+  .pi.is-demo .pi__nav label { animation: none !important; } // 색 애니메이션도 끈다 — 글자색은 :checked(크림)·기본(잉크) 로만
+  .pi__nav::after { opacity: 0; } // 관성·트레일 한 겹은 reduced-motion 에서 완전히 꺼진다
+}

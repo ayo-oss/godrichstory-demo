@@ -1,0 +1,170 @@
+// ChartHeatmapGrid — vanilla 판(run/289/demo/05-chart-draw-heatmap-grid/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고(BEM → 캐멀), 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$stage-ink: #17141a;
+$stage-paper: #ffffff;
+$subject-ink: #17141a;
+$subject-cream: #fff7e6;
+$chart-1: #2f6df6;
+$ease-out: ease-out;
+$dur-loop: 2s;
+$dur-quick: 220ms;
+$r-card: 16px;
+$r-xs: 4px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+$sp-4: 16px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+@mixin stage($bg) {
+  html, body { margin: 0; overflow: hidden; }
+  .stage { box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; margin: 0; background: $bg;
+           font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; padding: clamp(8px, 4vw, 24px); }
+}
+
+@include stage($stage-ink);
+
+.root { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-1; }
+.title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.plot { position: relative; }
+.svg { display: block; width: 100%; height: auto; touch-action: none; }
+.cell { fill: $chart-1; cursor: pointer; }   // 농도는 fill-opacity(JS) — 색은 이 한 가지로 고정이다
+.band, .day {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  dominant-baseline: middle;
+}
+.day { text-anchor: end; font-size: 9.5px; }
+// 가장 짙은 칸의 값 알약 — 칸 농도가 .86~.93 까지 올라가면 크림 글자도(3.4:1) 잉크 글자도(4.44:1)
+// AA 를 못 넘는다. 그래서 숫자 밑에 얕은 페이퍼 면을 깔고 그 위에 잉크로 쓴다 — 18.24:1
+.numBg {
+  fill: $stage-paper;
+  transform-box: fill-box; transform-origin: center;
+}
+.num {
+  fill: $subject-ink;
+  font-weight: 800; font-size: 10px; dominant-baseline: middle;
+  // SVG 요소의 CSS transform 기본 기준점은 viewBox 원점이라 중심 확대가 아니다 — fill-box + center 로
+  // 숫자 각자의 중심에서 팝한다
+  transform-box: fill-box; transform-origin: center;
+}
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.tip {
+  position: absolute; transform: translate(-50%, -118%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.tip.tipBelow { transform: translate(-50%, 18%); }
+.tip.tipIsOn { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.tipDay { opacity: .72; }
+.tipVal { font-size: 12px; }
+// 범례 — 같은 농도 함수를 그라디언트로 한 줄에 보여 준다
+.legend { display: flex; align-items: center; gap: $sp-2; margin-top: $sp-2; }
+.lgWord { font-weight: 700; font-size: 9px; color: rgba(23, 20, 26, .6); }
+.lgBar {
+  width: 72px; height: 8px; border-radius: $r-xs;
+  background: linear-gradient(90deg, rgba($chart-1, .12), rgba($chart-1, 1));
+}
+.lgExp {
+  margin-left: auto; font-weight: 700; font-size: 9px; color: rgba(23, 20, 26, .72);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다
+.sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 칸마다 --d 지연으로 좌에서 우로, 한 줄이 끝나면 다음 줄로 순서대로 나타난다(42칸 × 28ms).
+//    낱개 속성 + animation-fill-mode: backwards — animation 단축은 delay 를 0 으로 리셋하고,
+//    fill-mode 가 없으면 지연 구간에 완성 상태가 첫 프레임에 번쩍 지나간다.
+.isDemo .cell {
+  animation-name: chCell;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-out;
+  animation-iteration-count: infinite;
+  animation-delay: var(--d);
+  animation-fill-mode: backwards;
+}
+@keyframes chCell {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  100% { opacity: 1; }
+}
+// 가장 짙은 칸의 숫자 — 칸이 물든 뒤 살짝 늦게 팝한다. 값 알약(면)도 같은 지연으로 같이 팝한다
+.isDemo .num,
+.isDemo .numBg {
+  animation-name: chNum;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-out;
+  animation-iteration-count: infinite;
+  animation-delay: var(--dn);
+  animation-fill-mode: backwards;
+}
+@keyframes chNum {
+  0% { transform: scale(0); }
+  16% { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+// 칸 지연의 폭이 1.15s 라 개별 칸 키프레임만으로는 루프 끝을 비울 수 없다 —
+// 그룹 전체를 아래에서 위로 와이프해 94% 안에 전부 지운다(칸 지연은 그 아래에서 그대로 돈다).
+// clip-path 와이프는 이징 짝으로만 — steps 와 함께 쓰면 컷으로 죽는다
+.isDemo .grid {
+  animation-name: chGrid;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-out;
+  animation-iteration-count: infinite;
+}
+@keyframes chGrid {
+  0%, 86% { clip-path: inset(0 0 0 0); }
+  94%, 100% { clip-path: inset(0 0 100% 0); }
+}
+// 미리보기 툴팁은 가장 짙은 칸에 미리 놓아 둔다 — 그룹 와이프와 함께 컷으로 사라진다
+.isDemo .tip {
+  animation-name: chTip;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes chTip {
+  0%, 70% { opacity: 0; }
+  72%, 84% { opacity: 1; }
+  86%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .card { padding: $sp-2 $sp-3 $sp-1; }
+  .band { font-size: 8px; }
+  .day { font-size: 8.5px; }
+  .num { font-size: 9px; }
+  .legend { margin-top: $sp-1; }
+  // 좁은 폼에선 식을 감추고 범례 막대만 남긴다
+  .lgExp { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .cell,
+  .isDemo .num,
+  .isDemo .numBg,
+  .isDemo .grid,
+  .isDemo .tip { animation: none !important; }
+  // 42칸이 전부 채워진 최종 상태로 점프한다 — 지연과 backwards 가 무효가 되어도 칸이 사라지지 않는다
+  .isDemo .num,
+  .isDemo .numBg { transform: none !important; }
+  .isDemo .grid { clip-path: none !important; }
+}

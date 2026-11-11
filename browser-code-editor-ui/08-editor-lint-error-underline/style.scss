@@ -1,0 +1,232 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 오류 물결 밑줄과 툴팁 — 글자를 투명하게 만든 textarea 를 같은 자리·같은 서체의 pre 위에 얹는
+// 기법(01 실시간 구문 강조와 같은 뼈대)에 간이 린트를 얹는다. 린트 규칙은 둘: 괄호 짝(스택)과
+// 색 코드 자릿수(3·4·6·8 자리의 16진수만 유효 — 4자리 #ff41 은 알파 1바이트를 포함하는 유효한
+// 표기고 5자리 #ff412 가 오류다).
+// 오류 조각에는 text-decoration-style: wavy 물결을 깔고 text-decoration-skip-ink: none 으로
+// 내려꽂이는 글자에서도 물결이 끊기지 않게 한다. wavy 밑줄 계열 지원률 — caniuse text-decoration
+// 페이지 실측 2026-09-13: 전역 96.65%(부분지원 표기, wavy·style 값은 주요 브라우저 전부 사용 가능).
+// 툴팁은 절대배치다 — 절대배치는 부모 높이에서 빠지지만 scrollHeight 에는 잡혀 320px 에서 BD9 가
+// 깨지므로 오류 줄 "위"쪽에 띄워 래핑 상자 안에 두고, 가로는 JS 가 오른쪽 끝으로 묶는다.
+// 접근성 경로는 툴팁(마우스·키보드 커서용)이 아니라 상태 줄이다 — textarea 의 aria-describedby 가
+// 상태 줄을 가리켜 포커스할 때 오류 수를 읽어 준다.
+// 격자 미리보기(.is-demo)는 스캔 줄이 내려가며 지나친 줄의 물결을 steps(1, end) 컷으로 켜고
+// 툴팁 두 개가 차례로 뜬다. 정적 규칙을 먼저 쓰고 그 위에 루프를 덧씌웠다(254-06 함정 대비).
+
+$duration: $dur-loop;
+$easing: $ease-spring;
+$color: $stage-yellow;   // 스캔 줄·아이콘·캐럿 — 어두운 패널 위
+$err: $error;            // 물결 색 — 코드 면 위 굵은 장식선 기준으로 쓴다
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$dim: #beb7ad;
+$fs: clamp(11px, 3vw, 13px);
+$lh: 20px;
+
+@include stage($stage-orange);
+
+// 에디터 패널은 어두운 면으로 깐다 — 오렌지 무대 위에 크림 작은 글자를 직접 얹으면 3.11:1 로
+// AA 에 미달한다(blog-design 글자 대비 표). 글자는 전부 이 패널 위에 있다.
+.lint {
+  --scan-y: #{6 * $lh};
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid rgba(255, 255, 255, .16); border-radius: $r-card;
+  background: $stage-ink; box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄
+.lint__bar { display: flex; align-items: center; gap: $sp-2; }
+.lint__ico { display: grid; place-items: center; color: $color; font-size: 15px; }
+.lint__name {
+  flex: 1 1 auto; color: $subject-cream;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+
+// ── 두 겹이 겹치는 자리. 한 격자 칸에 pre 와 textarea 를 포갠다
+.lint__wrap { position: relative; display: grid; height: $lh * 7 + $sp-4; }
+.lint__wrap > pre, .lint__wrap > textarea { grid-area: 1 / 1; }
+
+%layer {
+  box-sizing: border-box; margin: 0; padding: $sp-2;
+  border: 0; border-radius: $r-sm;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2;
+  white-space: pre; overflow: auto; overscroll-behavior: contain;
+}
+
+.lint__hl {
+  @extend %layer;
+  position: relative; z-index: 1;
+  background: rgba(0, 0, 0, .28); color: $subject-cream;
+  pointer-events: none;
+}
+.lint__ln { display: block; }
+.lint__ln--com { color: $dim; }
+.lint__err {
+  // 물결 밑줄 — 글자색은 그대로 두고 장식만 덧입힌다
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: $err;
+  text-decoration-thickness: 2px;
+  text-decoration-skip-ink: none;
+}
+
+// 글자는 투명하고 커서만 남긴다 — 색과 물결은 아래 pre 가 그린다
+.lint__ta {
+  @extend %layer;
+  position: relative; z-index: 2;
+  background: transparent; color: transparent; caret-color: $color;
+  resize: none;
+  -webkit-text-fill-color: transparent;
+}
+.lint__ta::selection { background: rgba(255, 210, 63, .32); }
+.lint__ta:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+
+// 한 글자 폭 재는 실험칸 — 렌더 트리에 있어야 폭이 나오므로 visibility 로 감춘다
+.lint__probe { position: absolute; visibility: hidden; white-space: pre; }
+
+// 스캔 줄 — 미리보기에서만 쓴다(정적 경로 opacity 0). 코드 줄 뒤에 깔리게 z-index 를 낮춘다
+.lint__scan {
+  position: absolute; z-index: 0; left: $sp-2; right: $sp-2; top: $sp-2; height: $lh;
+  border-radius: $r-xs; background: rgba(255, 210, 63, .14);
+  opacity: 0; pointer-events: none;
+}
+
+// 툴팁 — 절대배치. 오류 줄 위쪽에 띄워 래핑 상자 안에 머문다(스크롤 넘침 방지)
+.lint__tip {
+  position: absolute; z-index: 3; max-width: 240px;
+  box-sizing: border-box; padding: $sp-1 $sp-2;
+  border: 1px solid $err; border-radius: $r-control;
+  background: $error-soft; color: $subject-ink;
+  font-weight: 500; font-size: 11px; line-height: 1.4;
+  opacity: 0; pointer-events: none;
+}
+.lint__tip b { display: block; font-weight: 700; }
+.lint__tip.is-open { opacity: 1; }
+
+// ── 상태 줄. aria-describedby 가 여기를 가리킨다
+.lint__status { display: flex; align-items: center; gap: $sp-2; margin: 0; }
+.lint__chip {
+  position: relative; box-sizing: border-box; padding: $sp-1 $sp-2; border-radius: $r-pill;
+  background: $err; color: $subject-cream;
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+}
+.lint__chip[data-n="0"] { background: rgba(255, 247, 230, .12); }
+.lint__hint { flex: 1 1 auto; color: $dim; font-weight: 500; font-size: 11px; line-height: 1.4; }
+// 미리보기 전용 칩 세 개 — 실제 칩 글자와 같은 자리에 포개고 opacity 컷으로 갈아 낸다.
+// 정적 경로에서는 display:none 이라 실제 편집을 가리지 않는다
+.lint__countd { position: absolute; inset: 0; display: none; }
+.lint__countd b {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-weight: 700;
+}
+
+// ── 격자 미리보기 루프(2초). 스캔 줄이 3~62% 에 내려가고, 지나친 오류의 물결이
+// 48%·62% 에 컷으로 켜지며, 툴팁이 69%·90% 부터 차례로 뜬다.
+// steps(1, end) 는 구간 끝에서만 값을 바꾼다 — 컷 지점을 별도 키프레임으로 둔다.
+.lint.is-demo .lint__scan {
+  animation-name: lintScanFade, lintScanMove;
+  animation-duration: $duration, $duration;
+  animation-timing-function: steps(1, end), $ease-out;
+  animation-iteration-count: infinite, infinite;
+}
+.lint.is-demo .lint__err {
+  animation-name: lintErrOn;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+.lint.is-demo .lint__err[data-e="0"] { animation-delay: .88s; }
+.lint.is-demo .lint__err[data-e="1"] { animation-delay: 1.16s; }
+.lint.is-demo .lint__count { visibility: hidden; }
+.lint.is-demo .lint__countd { display: block; }
+.lint.is-demo .lint__countd b {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.lint.is-demo .lint__countd b:nth-child(1) { animation-name: lintChip0; }
+.lint.is-demo .lint__countd b:nth-child(2) { animation-name: lintChip1; }
+.lint.is-demo .lint__countd b:nth-child(3) { animation-name: lintChip2; }
+.lint.is-demo .lint__tip {
+  animation-name: lintTipFadeA, lintTipRise;
+  animation-duration: $duration, $duration;
+  animation-timing-function: steps(1, end), $easing;
+  animation-iteration-count: infinite, infinite;
+  animation-fill-mode: backwards, backwards;
+}
+.lint.is-demo #tip0 { animation-delay: 1.12s, 1.12s; }
+.lint.is-demo #tip1 { animation-name: lintTipFadeB, lintTipRise; animation-delay: 1.5s, 1.5s; }
+
+@keyframes lintScanFade {
+  0%, 2% { opacity: 0; }
+  3%, 64% { opacity: 1; }
+  65%, 100% { opacity: 0; }
+}
+// 이동 거리는 변수로 둔다 — 좁은 화면에서 줄 높이가 줄면 같이 줄인다
+@keyframes lintScanMove {
+  0%, 3% { transform: translateY(0); }
+  62%, 100% { transform: translateY(var(--scan-y)); }
+}
+@keyframes lintErrOn {
+  0% { text-decoration-color: transparent; }
+  4%, 100% { text-decoration-color: $err; }
+}
+@keyframes lintChip0 {
+  0%, 47% { opacity: 1; }
+  48%, 100% { opacity: 0; }
+}
+@keyframes lintChip1 {
+  0%, 47% { opacity: 0; }
+  48%, 61% { opacity: 1; }
+  62%, 100% { opacity: 0; }
+}
+@keyframes lintChip2 {
+  0%, 61% { opacity: 0; }
+  62%, 100% { opacity: 1; }
+}
+// 툴팁 A(괄호)는 33% 키프레임에서 다시 꺼진다 — 지연 1.12s 를 더하면 벽시계 1.78s,
+// 툴팁 B(색 코드)가 1.80s 부터 떠 두 개가 겹치지 않는다
+@keyframes lintTipFadeA {
+  0%, 14% { opacity: 0; }
+  15%, 32% { opacity: 1; }
+  33%, 100% { opacity: 0; }
+}
+@keyframes lintTipFadeB {
+  0%, 14% { opacity: 0; }
+  15%, 100% { opacity: 1; }
+}
+@keyframes lintTipRise {
+  0%, 15% { transform: translateY(8px); }
+  28%, 100% { transform: translateY(0); }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어온다 (2·3px 을 4px 로 올리지 않는다).
+// 코드의 일곱째 줄은 빈 줄이라 여섯 줄만 보여도 내용이 사라지지 않는다 — 상자를 한 줄 줄여
+// 세로 넘침(174px 한도)을 막는다. 스캔 이동거리도 여섯 줄에 맞춘다
+@media (max-width: 340px) {
+  .lint { --scan-y: 80px; gap: $sp-1; padding: $sp-2; }
+  .lint__wrap { height: 16px * 6 + $sp-2; }
+  .lint__hl, .lint__ta { font-size: 11px; line-height: 16px; padding: $sp-1; }
+  .lint__scan { left: $sp-1; right: $sp-1; top: $sp-1; height: 16px; }
+  .lint__name { font-size: 11px; }
+  .lint__chip, .lint__hint { font-size: 10px; }
+  .lint__tip { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 애니메이션을 끊면 정적 규칙이 그대로 드러난다 — 물결은 켜져 있고 스캔·툴팁은 꺼져 있다
+  .lint.is-demo .lint__scan,
+  .lint.is-demo .lint__err,
+  .lint.is-demo .lint__tip,
+  .lint.is-demo .lint__countd b {
+    animation: none !important;
+  }
+  .lint.is-demo .lint__scan,
+  .lint.is-demo .lint__tip { opacity: 0 !important; }
+  .lint.is-demo .lint__err { text-decoration-color: $err !important; }
+  .lint.is-demo .lint__count { visibility: visible !important; }
+  .lint.is-demo .lint__countd { display: none !important; }
+}

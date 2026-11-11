@@ -1,0 +1,218 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 찾기·바꾸기 바 — Ctrl+F 로 바가 내려오고, 맞는 자리마다 오버레이 pre 안의 mark 로 노란 표시가 깔린다.
+// 몇 번째 중 몇 개인지 세어 주고(n/개수) Enter 로 다음 자리로 넘어가며, 바꾸기는 지금 자리만 바꾼다.
+// 표시는 늘 오버레이 쪽이다 — textarea 의 글자는 투명하고(01 실시간 구문 강조와 같은 두 겹 기법)
+// matchAll 로 뽑은 구간을 mark 로 감싸 다시 칠한다. 현재 자리만 주황으로 갈라 본다.
+// 노란 면·주황 면 위 글자는 잉크다 — 크림을 얹으면 대비 미달이다.
+// 격자 미리보기(.is-demo)는 바를 steps(1, end) 컷 + translateY 팝으로 내리고,
+// 보이는 줄의 마크 3개를 한 개씩 깐 뒤 현재 자리(주황)가 3번 에서 5번 으로 옮겨 간다.
+
+$duration: $dur-quick;
+$easing: $ease-spring;
+$color: $stage-yellow;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$line: rgba(255, 255, 255, .16);
+$dim: #beb7ad;
+$fs: clamp(11px, 3vw, 13px);
+$lh: 20px;
+
+@include stage($stage-ink);
+
+// 격자 미리보기 루프 공통 — 낱개 속성만 쓴다(단축은 delay 를 지운다), 시작 전은 0% 상태로 채운다
+@mixin loop($name, $timing) {
+  animation-name: $name;
+  animation-duration: $dur-loop;
+  animation-timing-function: $timing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+
+.fr {
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid $line; border-radius: $r-card;
+  background: rgba(255, 255, 255, .05);
+}
+
+// ── 파일 이름 줄
+.fr__bar { display: flex; align-items: center; gap: $sp-2; }
+.fr__ico { display: grid; place-items: center; color: $color; font-size: 15px; }
+.fr__name {
+  flex: 1 1 auto; color: $subject-cream;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+.fr__hint {
+  flex: 0 0 auto; padding: $sp-1 $sp-2; border: 1px solid $line; border-radius: $r-pill;
+  color: $dim; font-family: $mono; font-weight: 700; font-size: 10px; line-height: 1.4;
+}
+
+// ── 두 겹이 겹치는 자리 + 내려오는 찾기 바
+// 트랙을 minmax(0, 1fr) 로 못박는다 — auto 트랙은 textarea 내용 줄 수만큼 커져 무대를 넘긴다
+.fr__wrap { position: relative; display: grid; grid-template-rows: minmax(0, 1fr); height: $lh * 7 + $sp-4; }
+.fr__hl, .fr__ta { grid-area: 1 / 1; }
+
+%layer {
+  box-sizing: border-box; margin: 0; padding: $sp-2;
+  border: 0; border-radius: $r-sm;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2;
+  white-space: pre; overflow: auto; overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.fr__hl::-webkit-scrollbar, .fr__ta::-webkit-scrollbar { display: none; }
+
+.fr__hl {
+  @extend %layer;
+  background: rgba(0, 0, 0, .28); color: $subject-cream;
+  pointer-events: none;
+}
+// 글자는 투명하고 캐럿만 남긴다 — 색과 표시는 위 pre 가 그린다
+.fr__ta {
+  @extend %layer;
+  background: transparent; color: transparent; caret-color: $color;
+  resize: none;
+  -webkit-text-fill-color: transparent;
+}
+.fr__ta::selection { background: rgba(255, 210, 63, .32); }
+.fr__ta:focus-visible { outline: 2px solid $subject-blue; outline-offset: 2px; }
+
+// ── 매치 표시. 닫힌 상태에서는 투명 — 바가 열려야(is-find) 노란다
+.fr__m { background: transparent; color: inherit; border-radius: $r-xs; }
+.fr.is-find .fr__m { background: $color; color: $subject-ink; }
+.fr.is-find .fr__m--cur { background: $stage-orange; color: $subject-ink; }
+
+// ── 찾기 바. 절대배치로 코드 위에 떠서 줄을 밀어내지 않는다 (VS Code 의 창 위젯과 같은 결)
+.fr__find {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+  display: flex; flex-direction: column; gap: $sp-1;
+  padding: $sp-2; border: 1px solid $line; border-radius: $r-control;
+  background: $tick-panel; box-shadow: $shadow-raised;
+  opacity: 0; visibility: hidden; transform: translateY(-12px); pointer-events: none;
+  transition: opacity $duration $ease-out, transform $duration $easing, visibility $duration;
+}
+.fr.is-find .fr__find { opacity: 1; visibility: visible; transform: translateY(0); pointer-events: auto; }
+.fr__row { display: flex; align-items: center; gap: $sp-1; }
+.fr__fico { display: grid; place-items: center; flex: 0 0 auto; color: $color; font-size: 14px; }
+.fr__q, .fr__r {
+  flex: 1 1 auto; min-width: 0; box-sizing: border-box; height: 26px;
+  padding: 0 $sp-2; border: 1px solid $line; border-radius: $r-sm;
+  background: rgba(0, 0, 0, .35); color: $subject-cream;
+  font-family: $mono; font-weight: 500; font-size: 12px; line-height: 24px;
+}
+.fr__q::placeholder, .fr__r::placeholder { color: $dim; opacity: 1; }
+.fr__q:focus-visible, .fr__r:focus-visible { outline: 2px solid $subject-blue; outline-offset: 1px; }
+
+// 몇 번째 중 몇 개 — 두 숫자 겹을 그리드 한 칸에 포갠다(미리보기에서 상태를 컷으로 갈아 낀다)
+.fr__count {
+  position: relative; flex: 0 0 auto; min-width: 40px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: $r-pill; background: rgba(0, 0, 0, .35); color: $color;
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+}
+.fr__cnum { grid-area: 1 / 1; opacity: 0; }
+
+.fr__nav {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 26px; height: 26px; box-sizing: border-box;
+  padding: 0; border: 1px solid $line; border-radius: $r-sm;
+  background: transparent; color: $subject-cream; font-size: 14px; cursor: pointer;
+}
+.fr__nav:hover, .fr__nav:focus-visible { background: rgba(255, 255, 255, .12); }
+.fr__go {
+  flex: 0 0 auto; height: 26px; padding: 0 $sp-3;
+  border: 0; border-radius: $r-sm;
+  background: $subject-blue-deep; color: $subject-cream;  // 깊은 파랑 면 위 크림
+  font-weight: 700; font-size: 11px; line-height: 1.4; cursor: pointer;
+}
+.fr__go:hover, .fr__go:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+
+.fr__note {
+  margin: 0; color: $dim;
+  font-weight: 500; font-size: 11px; line-height: 1.4;
+}
+
+// ── 격자 미리보기 루프 (2초)
+// 매치 표시 3개(padding·gap·border-radius 줄)는 처음부터 깔려 있고 첫 표시가 곧 현재 자리(주황),
+// 카운터는 3/6 이다 — 첫 샘플 프레임이 완성 상태라 poster 가 빈 장면이 되지 않는다. 3% 에 바가 컷으로 내려온다(팝은 14% 까지).
+// 58% 에 현재 자리가 3번 에서 5번 으로 옮겨가고(Enter) 카운터가 5/6 이 되며, 70~84% 바꾸기 단추가 한 번 부풀고 유지.
+// 퇴장은 찍지 않는다 — 루프 경계에서만 되돌아간다.
+.fr.is-demo .fr__find {
+  animation-name: frBarVis, frBarPop;
+  animation-duration: $dur-loop, $dur-loop;
+  animation-timing-function: steps(1, end), $easing;
+  animation-iteration-count: infinite, infinite;
+  animation-fill-mode: backwards, backwards;
+}
+// 막대 아래(1·2번 줄)와 접힌 줄(9번 줄)의 마크는 보이지 않으니 굳이 움직이지 않는다
+.fr.is-demo .fr__m { background: $color; color: $subject-ink; }
+.fr.is-demo .fr__hl mark:nth-of-type(3) { @include loop(frM3, steps(1, end)); }
+.fr.is-demo .fr__hl mark:nth-of-type(4) { @include loop(frM4, steps(1, end)); }
+.fr.is-demo .fr__hl mark:nth-of-type(5) { @include loop(frM5, steps(1, end)); }
+.fr.is-demo .fr__cnum--a { @include loop(frCntA, steps(1, end)); }
+.fr.is-demo .fr__cnum--b { @include loop(frCntB, steps(1, end)); }
+.fr.is-demo .fr__go { @include loop(frGoPulse, $easing); }
+
+@keyframes frBarVis {
+  0% { opacity: 0; visibility: hidden; }
+  3%, 100% { opacity: 1; visibility: visible; }
+}
+@keyframes frBarPop {
+  0%, 3% { transform: translateY(-12px); }
+  14%, 100% { transform: translateY(0); }
+}
+// steps(1, end) 컷 — 반투명 유령 프레임 없이 한 프레임에 상태가 바뀐다
+// 매치 표시는 **첫 프레임부터 켜 둔다**. 켜지는 순간을 루프 안에 두면 24장 샘플(4.1667% 간격)이
+// 그 구간을 못 잡아 대표 이미지가 「바만 있고 표시가 없는」 장면이 된다 (실측 2026-09-13:
+// 3.5% 컷을 줬는데 프레임 0·1 의 mark 배경이 둘 다 투명이었다). 움직임은 현재 자리 이동으로 만든다.
+@keyframes frM3 {
+  0%, 57% { background: $stage-orange; color: $subject-ink; }
+  58%, 100% { background: $color; color: $subject-ink; }
+}
+@keyframes frM4 {
+  0%, 100% { background: $color; color: $subject-ink; }
+}
+@keyframes frM5 {
+  0%, 57% { background: $color; color: $subject-ink; }
+  58%, 100% { background: $stage-orange; color: $subject-ink; }
+}
+@keyframes frCntA {
+  0%, 57% { opacity: 1; }
+  58%, 100% { opacity: 0; }
+}
+@keyframes frCntB {
+  0%, 57% { opacity: 0; }
+  58%, 100% { opacity: 1; }
+}
+@keyframes frGoPulse {
+  0%, 70% { transform: scale(1); }
+  76% { transform: scale(1.14); }
+  84%, 100% { transform: scale(1); }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어오게 한다
+@media (max-width: 340px) {
+  .fr { gap: $sp-1; padding: $sp-2; }
+  .fr__wrap { height: 16px * 6 + $sp-2; }
+  .fr__hl, .fr__ta { font-size: 11px; line-height: 16px; padding: $sp-1; }
+  .fr__note { font-size: 10px; }
+  .fr__find { gap: $sp-1; padding: $sp-1; }
+  .fr__q, .fr__r { height: 24px; font-size: 11px; line-height: 22px; }
+  .fr__count { height: 24px; min-width: 36px; font-size: 10px; }
+  .fr__nav { width: 24px; height: 24px; font-size: 12px; }
+  .fr__go { height: 24px; padding: 0 $sp-2; font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fr.is-demo .fr__find,
+  .fr.is-demo .fr__hl mark,
+  .fr.is-demo .fr__cnum,
+  .fr.is-demo .fr__go {
+    animation: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+  }
+  // 카운터 두 겹이 겹치지 않게 앞 숫자만 보이게 한다
+  .fr.is-demo .fr__cnum--b { opacity: 0 !important; }
+}

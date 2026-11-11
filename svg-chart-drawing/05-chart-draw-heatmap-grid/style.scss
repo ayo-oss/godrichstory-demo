@@ -1,0 +1,151 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 칸이 순서대로 물드는 히트맵 — 실제 사용에선 JS 가 fillOpacity() 로 42칸의 농도를 정해 완성 형태가 곧 뜨고,
+// 칸에 올리면 요일·시간대·밀도 툴팁이 따라온다. 격자 미리보기(.is-demo)는 같은 칸들에 animation-delay 지연을
+// 얹어 좌에서 우로, 위에서 아래로 순서대로 물드는 모양을 2초 루프로 보여 준다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $chart-1;
+
+@include stage($stage-ink);
+
+.ch { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.ch__card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.ch__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-1; }
+.ch__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.ch__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.ch__plot { position: relative; }
+.ch__svg { display: block; width: 100%; height: auto; touch-action: none; }
+.ch__cell { fill: $color; cursor: pointer; }   // 농도는 fill-opacity(JS) — 색은 이 한 가지로 고정이다
+.ch__band, .ch__day {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  dominant-baseline: middle;
+}
+.ch__day { text-anchor: end; font-size: 9.5px; }
+// 가장 짙은 칸의 값 알약 — 칸 농도가 .86~.93 까지 올라가면 크림 글자도(3.4:1) 잉크 글자도(4.44:1)
+// AA 를 못 넘는다. 그래서 숫자 밑에 얕은 페이퍼 면을 깔고 그 위에 잉크로 쓴다 — 칸 농도와 무관하게 18.24:1
+.ch__numBg {
+  fill: $stage-paper;
+  transform-box: fill-box; transform-origin: center;
+}
+.ch__num {
+  fill: $subject-ink;
+  font-weight: 800; font-size: 10px; dominant-baseline: middle;
+  // SVG 요소의 CSS transform 기본 기준점은 viewBox 원점이라 중심 확대가 아니다 — fill-box + center 로
+  // 숫자 각자의 중심에서 팝한다
+  transform-box: fill-box; transform-origin: center;
+}
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.ch__tip {
+  position: absolute; transform: translate(-50%, -118%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.ch__tip.is-below { transform: translate(-50%, 18%); }
+.ch__tip.is-on { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.ch__tipDay { opacity: .72; }
+.ch__tipVal { font-size: 12px; }
+// 범례 — 같은 농도 함수를 그라디언트로 한 줄에 보여 준다
+.ch__legend { display: flex; align-items: center; gap: $sp-2; margin-top: $sp-2; }
+.ch__lgWord { font-weight: 700; font-size: 9px; color: rgba(23, 20, 26, .6); }
+.ch__lgBar {
+  width: 72px; height: 8px; border-radius: $r-xs;
+  background: linear-gradient(90deg, rgba($color, .12), rgba($color, 1));
+}
+.ch__lgExp {
+  margin-left: auto; font-weight: 700; font-size: 9px; color: rgba(23, 20, 26, .72);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다
+.ch__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 칸마다 --d 지연으로 좌에서 우로, 한 줄이 끝나면 다음 줄로 순서대로 나타난다(42칸 × 28ms).
+//    낱개 속성 + animation-fill-mode: backwards — animation 단축은 delay 를 0 으로 리셋하고,
+//    fill-mode 가 없으면 지연 구간에 완성 상태가 첫 프레임에 번쩍 지나간다.
+.ch.is-demo .ch__cell {
+  animation-name: chCell;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-delay: var(--d);
+  animation-fill-mode: backwards;
+}
+@keyframes chCell {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  100% { opacity: 1; }
+}
+// 가장 짙은 칸의 숫자 — 칸이 물든 뒤 살짝 늦게 팝한다. 값 알약(면)도 같은 지연으로 같이 팝한다
+.ch.is-demo .ch__num,
+.ch.is-demo .ch__numBg {
+  animation-name: chNum;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-delay: var(--dn);
+  animation-fill-mode: backwards;
+}
+@keyframes chNum {
+  0% { transform: scale(0); }
+  16% { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+// 칸 지연의 폭이 1.15s 라 개별 칸 키프레임만으로는 루프 끝을 비울 수 없다 —
+// 그룹 전체를 아래에서 위로 와이프해 94% 안에 전부 지운다(칸 지연은 그 아래에서 그대로 돈다).
+// clip-path 와이프는 이징 짝으로만 — steps 와 함께 쓰면 컷으로 죽는다
+.ch.is-demo .ch__grid {
+  animation-name: chGrid;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes chGrid {
+  0%, 86% { clip-path: inset(0 0 0 0); }
+  94%, 100% { clip-path: inset(0 0 100% 0); }
+}
+// 미리보기 툴팁은 가장 짙은 칸에 미리 놓아 둔다 (JS 가 일요일 14-18시로 세팅) — 그룹 와이프와 함께 컷으로 사라진다
+.ch.is-demo .ch__tip {
+  animation-name: chTip;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes chTip {
+  0%, 70% { opacity: 0; }
+  72%, 84% { opacity: 1; }
+  86%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .ch__card { padding: $sp-2 $sp-3 $sp-1; }
+  .ch__band { font-size: 8px; }
+  .ch__day { font-size: 8.5px; }
+  .ch__num { font-size: 9px; }
+  .ch__legend { margin-top: $sp-1; }
+  // 좁은 폼에선 식을 감추고 범례 막대만 남긴다
+  .ch__lgExp { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ch.is-demo .ch__cell,
+  .ch.is-demo .ch__num,
+  .ch.is-demo .ch__numBg,
+  .ch.is-demo .ch__grid,
+  .ch.is-demo .ch__tip { animation: none !important; }
+  // 42칸이 전부 채워진 최종 상태로 점프한다 — 지연과 backwards 가 무효가 되어도 칸이 사라지지 않는다
+  .ch.is-demo .ch__num,
+  .ch.is-demo .ch__numBg { transform: none !important; }
+  .ch.is-demo .ch__grid { clip-path: none !important; }
+}

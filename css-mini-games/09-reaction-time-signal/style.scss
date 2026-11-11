@@ -1,0 +1,211 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 반응속도 재기 — 패널 하나가 대기(무작위 1.5~4초) → 신호(크림 면 전환, transition) → 결과(ms) 를 돈다.
+// 신호가 켜진 순간부터 첫 클릭·Space 까지 performance.now() 로 잰다. 신호 전 입력은 성급 클릭 벌점.
+// 상태 전환은 classList 로 상태 클래스를 갈아 끼우고, 패널 배경색만 transition 이 부드럽게 잇는다.
+// .is-demo 미리보기는 대기 → 신호 컷(steps) → 가짜 ms 카운트업(@property 정수 + counter) 한 바퀴를
+// 2초 주기로 돈다. 상태 교체에 반투명 크로스페이드는 쓰지 않는다(237·252 함정).
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $subject-cream;
+
+// 미리보기 카운트업용 등록 정수 — CSS 만으로 ms 숫자를 센다(286 선례)
+@property --dms {
+  syntax: "<integer>";
+  inherits: false;
+  initial-value: 0;
+}
+
+@include stage($stage-ink);
+
+// 먹 무대 위 글자는 크림 (blog-design 대비 표)
+.rt { display: flex; flex-direction: column; gap: $sp-2; width: 100%; max-width: 440px; }
+
+.rt__hud { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; }
+.rt__hud > p { display: flex; align-items: center; gap: $sp-1; margin: 0; }
+.rt__ico { width: 15px; height: 15px; flex: 0 0 auto; color: $subject-cream; }
+.rt__label { font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4; color: rgba($subject-cream, .72); }
+.rt__num {
+  font-weight: 800; font-size: clamp(13px, 3.6vw, 17px); line-height: 1;
+  color: $subject-cream; font-variant-numeric: tabular-nums;
+}
+
+// ── 신호 패널 ─────────────────────────────────────────────
+.rt__panel {
+  position: relative; overflow: hidden;
+  height: clamp(104px, 52vh, 180px);
+  border: 2px solid rgba($subject-cream, .16);
+  border-radius: $r-card;
+  background: $tick-panel;
+  // 상태별 배경 전환 — 대비가 큰 색끼리 transition 하나로 잇는다(신호만이 연출이다)
+  transition: background-color $dur-quick $easing;
+  touch-action: manipulation;
+  cursor: pointer;
+}
+.rt__panel:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+.rt.is-signal .rt__panel { background: $color; }
+.rt.is-penalty .rt__panel { background: $error-soft; }
+
+// 네 얼굴(대기·신호·결과·벌점)은 같은 자리에 겹쳐 두고 상태 클래스로 보인다
+.rt__face {
+  position: absolute; inset: 0;
+  display: grid; place-content: center; justify-items: center; gap: $sp-1;
+  padding: $sp-2;
+  text-align: center;
+  opacity: 0; pointer-events: none;
+}
+.rt.is-idle .rt__face--wait,
+.rt.is-armed .rt__face--wait,
+.rt.is-signal .rt__face--go,
+.rt.is-result .rt__face--result,
+.rt.is-penalty .rt__face--penalty { opacity: 1; }
+
+.rt__waitTitle, .rt__goTitle, .rt__penTitle {
+  margin: 0; font-weight: 800; line-height: 1.2;
+  font-size: clamp(15px, 4.4vw, 21px);
+}
+.rt__waitSub, .rt__penSub {
+  margin: 0; font-weight: 700; line-height: 1.4;
+  font-size: clamp(10px, 2.6vw, 12px); color: rgba($subject-cream, .72);
+}
+.rt__face--wait, .rt__face--result { color: $subject-cream; }   // 어두운 패널 위 크림 (15.2:1)
+.rt__face--go { color: $subject-ink; }                          // 크림 면 위 잉크 (17.1:1)
+.rt__face--penalty { color: $subject-ink; }                     // 연살구 면 위 잉크 (14.7:1)
+.rt__goIco { width: 22px; height: 22px; color: $subject-ink; }
+.rt__penIco { width: 22px; height: 22px; color: $error; }       // 아이콘(비문자) — 3:1 UI 기준 통과
+
+// 결과 얼굴 — '{n}ms' 큰 숫자 + 평가 라벨
+.rt__ms {
+  margin: 0; font-weight: 800; line-height: 1;
+  font-size: clamp(30px, 9vw, 44px);
+  font-variant-numeric: tabular-nums;
+}
+// 다시 시작 버튼 — 결과·벌점 얼굴에 하나씩. 얼굴은 pointer-events:none 이라 버튼만 되살린다
+.rt__restart {
+  display: inline-flex; align-items: center; gap: $sp-1;
+  border: 0; border-radius: $r-pill;
+  padding: $sp-1 $sp-3;
+  background: $subject-blue-deep; color: $subject-cream;
+  cursor: pointer; pointer-events: auto;
+  font-family: inherit; font-weight: 800; font-size: clamp(10px, 2.6vw, 12px); line-height: 1.6;
+  transition: transform $dur-quick $ease-pop;
+}
+.rt__restart .rt__ico { color: $subject-cream; }
+.rt__restart:hover { transform: translateY(-2px) scale(1.04); }
+.rt__restart:active { transform: translateY(0) scale(.97); }
+.rt__restart:focus-visible { outline: 2px solid $subject-cream; outline-offset: 2px; }
+// 보이지 않는 얼굴의 버튼은 탭 순서에서도 빠진다
+.rt__face { visibility: hidden; }
+.rt.is-idle .rt__face--wait,
+.rt.is-armed .rt__face--wait,
+.rt.is-signal .rt__face--go,
+.rt.is-result .rt__face--result,
+.rt.is-penalty .rt__face--penalty { visibility: visible; }
+.rt.is-demo .rt__face { visibility: visible; }
+
+.rt__grade {
+  margin: 0; font-weight: 800; font-size: clamp(11px, 3vw, 14px); line-height: 1.4;
+}
+.rt__grade--s1 { color: $tick-up; }        // 매우 빠름 — 패널 위 9.15:1
+.rt__grade--s2 { color: $tick-up; }        // 빠름
+.rt__grade--s3 { color: $subject-cream; }  // 보통 — 15.2:1
+.rt__grade--s4 { color: $tick-down; }      // 느림 — 패널 위 6.31:1
+
+.rt__hint {
+  margin: 0; text-align: center;
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4;
+  color: rgba($subject-cream, .72);
+}
+
+// ── 미리보기(.is-demo): 대기 → 신호 컷 → 가짜 ms 카운트업 한 바퀴 ───────
+// 배경·얼굴 교체는 steps(1, end) 컷 — 반투명 유령 프레임을 만들지 않는다. 카운트업은
+// 등록 정수 --dms 를 0 에서 300 까지 세고 counter 로 화면에 찍는다. 복귀 컷은 90% 안(86%).
+.rt.is-demo .rt__panel {
+  animation-name: rtPanelCut;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes rtPanelCut {
+  0% { background-color: $tick-panel; }
+  32% { background-color: $color; }        // 신호 컷
+  86% { background-color: $tick-panel; }   // 복귀 컷 (90% 안)
+  100% { background-color: $tick-panel; }
+}
+.rt.is-demo .rt__face { animation-name: rtFaceCut; animation-duration: $duration; animation-timing-function: steps(1, end); animation-iteration-count: infinite; }
+.rt.is-demo .rt__face--go { animation-name: rtFaceGoCut; }
+.rt.is-demo .rt__face--result,
+.rt.is-demo .rt__face--penalty { animation-name: none; opacity: 0; }
+@keyframes rtFaceCut {
+  0% { opacity: 1; }
+  32% { opacity: 0; }
+  86% { opacity: 1; }
+  100% { opacity: 1; }
+}
+@keyframes rtFaceGoCut {
+  0% { opacity: 0; }
+  32% { opacity: 1; }
+  86% { opacity: 0; }
+  100% { opacity: 0; }
+}
+// 카운트업 숫자 — 미리보기에서만 보이는 가짜 ms. 신호 컷(32%)과 함께 올라 84% 에서 멈춘 뒤 복귀 컷에서 사라진다.
+.rt__demoMs {
+  position: absolute; inset: 0;
+  display: grid; place-content: center; justify-items: center;
+  color: $subject-ink;                                       // 크림 면 위 잉크
+  font-weight: 800; line-height: 1;
+  font-size: clamp(30px, 9vw, 44px);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  counter-reset: dms var(--dms);
+}
+.rt__demoMs::after { content: counter(dms) "ms"; }
+.rt.is-demo .rt__demoMs {
+  animation-name: rtFaceGoCut, rtCount;
+  animation-duration: $duration, $duration;
+  animation-timing-function: steps(1, end), linear;
+  animation-iteration-count: infinite, infinite;
+}
+@keyframes rtCount {
+  0%, 32% { --dms: 0; }
+  84%, 100% { --dms: 300; }
+}
+
+// ── 인계 정비(2026-09-13) ───────────────────────────────────────────
+// 1) 벌점 얼굴의 보조 글자가 공용 규칙의 크림(.72)을 물려받아 연살구 면 위에서 약 1.1:1 로
+//    사실상 안 보였다 — 잉크 계열로 갈아 연살구(#ffe0d8) 위 6.5:1 (알파 하한 .72 준수).
+.rt__penSub { color: rgba($subject-ink, .72); }
+
+// 2) 미리보기에서 신호 얼굴(문구)과 카운트업 숫자가 같은 자리에 겹쳐 보였다 —
+//    문구(32~52%) → 숫자 카운트업(52~84%) 순으로 이어지게 갈라 잡는다.
+.rt.is-demo .rt__face--go { animation-name: rtGoTitleCut; }
+@keyframes rtGoTitleCut {
+  0%, 32% { opacity: 0; }
+  35%, 49% { opacity: 1; }
+  52%, 100% { opacity: 0; }
+}
+.rt.is-demo .rt__demoMs { animation-name: rtDemoMsShow, rtCount; }
+@keyframes rtDemoMsShow {
+  0%, 51% { opacity: 0; }
+  54%, 84% { opacity: 1; }
+  87%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .rt { gap: $sp-1; }
+  .rt__panel { height: clamp(96px, 46vh, 140px); }
+  .rt__ms { font-size: clamp(26px, 8vw, 34px); }
+  .rt__demoMs { font-size: clamp(26px, 8vw, 34px); }
+}
+
+// reduce 에서는 색 전환 transition 과 미리보기 연출을 끈다. 게임 자체는 즉시 전환으로 그대로
+// 동작한다(index.html 참조 — 재는 건 performance.now() 라 연출과 무관하다).
+@media (prefers-reduced-motion: reduce) {
+  .rt__panel, .rt__restart { transition: none !important; }
+  .rt.is-demo .rt__panel,
+  .rt.is-demo .rt__face,
+  .rt.is-demo .rt__demoMs { animation: none !important; }
+  .rt.is-demo .rt__demoMs { opacity: 0 !important; }
+}

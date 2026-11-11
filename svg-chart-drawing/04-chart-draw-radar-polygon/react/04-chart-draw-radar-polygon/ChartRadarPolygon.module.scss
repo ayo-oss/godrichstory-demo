@@ -1,0 +1,140 @@
+// ChartRadarPolygon — vanilla 판(run/289/demo/04-chart-draw-radar-polygon/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고(BEM → 캐멀), 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$stage-paper: #ffffff;
+$subject-ink: #17141a;
+$subject-cream: #fff7e6;
+$chart-1: #2f6df6;
+$ease-spring: cubic-bezier(.2, .8, .2, 1);
+$ease-pop: cubic-bezier(.2, 1.4, .4, 1);
+$ease-out: ease-out;
+$dur-loop: 2s;
+$dur-quick: 220ms;
+$r-card: 16px;
+$r-xs: 4px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+$sp-4: 16px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+@mixin stage($bg) {
+  html, body { margin: 0; overflow: hidden; }
+  .stage { box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; margin: 0; background: $bg;
+           font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; padding: clamp(8px, 4vw, 24px); }
+}
+
+@include stage($stage-paper);
+
+.root { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-1; }
+.title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.plot { position: relative; }
+.svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.ring { fill: none; stroke: rgba(23, 20, 26, .14); stroke-width: 1; }
+.spoke { stroke: rgba(23, 20, 26, .08); stroke-width: 1; }
+.lab { fill: rgba(23, 20, 26, .72); font-weight: 800; font-size: 10px; dominant-baseline: middle; }
+.poly {
+  fill: rgba($chart-1, .22); stroke: $chart-1; stroke-width: 2.5; stroke-linejoin: round;
+  // SVG 요소의 CSS transform 기본 기준점은 viewBox 원점(0, 0)이라 '중심에서 확대'가 아니다 —
+  // fill-box(요소 자신의 칠 범위)와 center 원점을 명시해 폴리곤 한가운데서 커지게 한다
+  transform-box: fill-box; transform-origin: center;
+}
+.dot {
+  fill: $stage-paper; stroke: $chart-1; stroke-width: 2;
+  // 점도 같은 이유로 fill-box + center — 각자 자기 중심에서 팝한다
+  transform-box: fill-box; transform-origin: center;
+}
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.tip {
+  position: absolute; transform: translate(-50%, -128%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.tip.tipBelow { transform: translate(-50%, 18%); }
+.tip.tipIsOn { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.tipName { opacity: .72; }
+.tipVal { font-size: 12px; }
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다. 스크린리더는 그대로 읽는다
+.sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 0~4% 빈 칸 → 6~34% 폴리곤이 중심에서 확대된다 → 36~62% 꼭짓점 점이 순서대로 팝 →
+//    66% 에 최고 축 툴팁이 컷으로 뜬다 → 84% 까지 머문 뒤 86~94% 폴리곤이 다시 중심으로 접힌다.
+//    94% 뒤는 빈 대 빈이라 이어붙는 지점이 안 튄다.
+.isDemo .poly {
+  animation-name: crGrow;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-spring;
+  animation-iteration-count: infinite;
+}
+@keyframes crGrow {
+  0%, 4% { transform: scale(0); }
+  34%, 86% { transform: scale(1); }
+  94%, 100% { transform: scale(0); }
+}
+// 꼭짓점 점 — 팝(transform)과 퇴장(opacity 컷) 두 애니메이션을 겹친다.
+// 컷을 steps 로 떼는 건 루프 끝에 점이 폴리곤보다 늦게 남아 떠 있는 것을 막기 위해서다
+.isDemo .dot {
+  animation-duration: $dur-loop, $dur-loop;
+  animation-timing-function: $ease-pop, steps(1, end);
+  animation-iteration-count: infinite, infinite;
+}
+.isDemo .dot:nth-child(1) { animation-name: crD1, crCut; }
+.isDemo .dot:nth-child(2) { animation-name: crD2, crCut; }
+.isDemo .dot:nth-child(3) { animation-name: crD3, crCut; }
+.isDemo .dot:nth-child(4) { animation-name: crD4, crCut; }
+.isDemo .dot:nth-child(5) { animation-name: crD5, crCut; }
+.isDemo .dot:nth-child(6) { animation-name: crD6, crCut; }
+@keyframes crD1 { 0%, 36% { transform: scale(0); } 42%, 100% { transform: scale(1); } }
+@keyframes crD2 { 0%, 40% { transform: scale(0); } 46%, 100% { transform: scale(1); } }
+@keyframes crD3 { 0%, 44% { transform: scale(0); } 50%, 100% { transform: scale(1); } }
+@keyframes crD4 { 0%, 48% { transform: scale(0); } 54%, 100% { transform: scale(1); } }
+@keyframes crD5 { 0%, 52% { transform: scale(0); } 58%, 100% { transform: scale(1); } }
+@keyframes crD6 { 0%, 56% { transform: scale(0); } 62%, 100% { transform: scale(1); } }
+@keyframes crCut {
+  0%, 86% { opacity: 1; }
+  88%, 100% { opacity: 0; }
+}
+// 미리보기 툴팁은 최고 축(안정성)에 미리 놓아 둔다 — 폴리곤 접힘 직전에 컷으로 사라진다
+.isDemo .tip {
+  animation-name: crTip;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes crTip {
+  0%, 64% { opacity: 0; }
+  66%, 84% { opacity: 1; }
+  86%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .card { padding: $sp-2 $sp-3 $sp-1; }
+  .lab { font-size: 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .poly,
+  .isDemo .dot,
+  .isDemo .tip { animation: none !important; }
+  // 움직임 없이 다 펼쳐진 최종 상태로 점프한다
+  .isDemo .poly { transform: none !important; }
+  .isDemo .dot { transform: none !important; opacity: 1 !important; }
+}

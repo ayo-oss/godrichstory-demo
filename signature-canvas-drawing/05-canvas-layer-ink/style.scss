@@ -1,0 +1,159 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 밑그림·잉크 2레이어 — 실제 동작은 canvas 두 장이다. 밑그림 판은 globalAlpha 를 낮춘 안내선을 미리 깔고,
+// 슬라이더는 그 판의 CSS opacity 만 바꾸며, 「두 장 합치기」는 drawImage 로 밑그림을 잉크 판에 눌러 담는다.
+// 격자 미리보기(.is-demo)는 두 판을 감추고 같은 그림을 SVG 두 겹(연한 안내선 · 잉크 획)으로 재현한다 —
+// demo.py 는 CSS 애니메이션 시계로 프레임을 뽑으므로 canvas 로 그린 그림은 24장이 전부 같다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $subject-ink;
+
+@include stage($stage-ink);
+
+.li { display: flex; justify-content: center; width: 100%; }
+.li__card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; overflow: hidden;
+}
+.li__layers {
+  display: flex; flex-direction: column; gap: $sp-1;
+  background: $subject-ink; padding: $sp-2 $sp-3;
+}
+.li__row { display: flex; align-items: center; gap: $sp-2; }
+.li__layer, .li__merge {
+  display: flex; align-items: center; gap: $sp-1; cursor: pointer; flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, .34); background: transparent; color: $stage-paper;
+  border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); padding: $sp-1 $sp-2; line-height: 1.3;
+}
+.li__layer[aria-pressed="true"] { background: $subject-blue; border-color: $subject-blue; }
+.li__layer:focus-visible, .li__merge:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+.li__ico { width: 14px; height: 14px; flex: 0 0 auto; }
+
+.li__slot { position: relative; display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+.li__range { width: 100%; height: 12px; margin: 0; cursor: pointer; accent-color: $subject-blue; }
+.li__range:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+// 미리보기용 가짜 슬라이더 — 진짜 range 는 JS 없이 못 움직이므로 .is-demo 동안만 자리를 바꿔 보여 준다
+.li__fake {
+  display: none; position: absolute; left: 0; right: 0; top: 50%; height: 4px;
+  transform: translateY(-50%); border-radius: $r-pill; background: rgba(255, 255, 255, .28);
+}
+.li__fakeFill {
+  position: absolute; inset: 0; border-radius: $r-pill; background: $subject-blue;
+  // 채움 막대는 시작 변에서 자란다 — 규칙 8 이 허용하는 비중심 origin
+  transform-origin: left center; transform: scaleX(.34);
+}
+.li__fakeKnob {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 100%;
+  // translateX 의 %는 자기 폭 기준이라, 손잡이를 트랙 폭의 %로 옮기려면 감싼 요소가 트랙과 같은 폭이어야 한다
+  transform: translateX(34%);
+}
+.li__fakeKnob::after {
+  content: ""; position: absolute; left: -4px; top: -2px; width: 8px; height: 8px;
+  border-radius: 50%; background: $stage-paper;
+}
+
+.li__board { position: relative; background: $subject-cream; aspect-ratio: 300 / 88; touch-action: none; }
+.li__sketch, .li__ink, .li__ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.li__sketch { opacity: .34; }        // 슬라이더가 바꾸는 값 — 밑그림 판만 옅어진다
+.li__ghost { display: none; fill: none; }
+.li__guide { opacity: .34; }         // 미리보기의 밑그림 겹 — 진짜 판의 opacity 와 같은 값에서 시작한다
+.li__guideCurve { stroke: rgba(23, 20, 26, .55); stroke-width: 5; stroke-linecap: round; }
+.li__guideRing { stroke: rgba(23, 20, 26, .55); stroke-width: 3; stroke-dasharray: 6 5; }
+.li__guideBase { stroke: rgba(23, 20, 26, .55); stroke-width: 3; stroke-dasharray: 6 5; }
+.li__trace {
+  stroke: $color; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100.5;   // 100 이면 round 뚜껑이 길이 0에서도 점으로 찍힌다 — 반 밖으로 밀어 둔다
+}
+.li__finish {
+  stroke: $color; stroke-width: 9; stroke-linecap: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100.5;
+}
+
+// ── 미리보기 루프 (2s)
+//    0~8% 밑그림이 연하게 깔려 있고 · 8~44% 잉크가 그 위를 따라 그어진다
+//    46~50% 마지막 굵은 마무리 획을 빠르게 그어 poster 가 이 장이 되게 한다
+//    54~68% 밑그림 겹의 opacity 가 여러 프레임에 걸쳐 0.34 → 0 으로 내려가고 슬라이더 손잡이도 왼쪽으로 간다
+//    66~88% 마무리 획 → 잉크 획 순으로 되감기고 밑그림이 돌아와 0% 와 같은 상태가 된다
+.li.is-demo .li__sketch, .li.is-demo .li__ink { visibility: hidden; }
+.li.is-demo .li__ghost { display: block; }
+.li.is-demo .li__range { visibility: hidden; }   // display:none 은 자리까지 없앤다 — 칸은 그대로 두고 감춘다
+.li.is-demo .li__fake { display: block; }
+
+.li.is-demo .li__trace {
+  animation-name: liTrace;
+  animation-duration: $duration;
+  animation-timing-function: linear;   // 펜이 일정한 속도로 밑그림을 따라간다
+  animation-iteration-count: infinite;
+}
+@keyframes liTrace {
+  0%, 8% { stroke-dashoffset: 100.5; }
+  44%, 72% { stroke-dashoffset: 0; }
+  88%, 100% { stroke-dashoffset: 100.5; }
+}
+.li.is-demo .li__finish {
+  animation-name: liFinish;
+  animation-duration: $duration;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+@keyframes liFinish {
+  0%, 46% { stroke-dashoffset: 100.5; }
+  50%, 66% { stroke-dashoffset: 0; }
+  80%, 100% { stroke-dashoffset: 100.5; }
+}
+
+// 밑그림 겹은 여러 프레임에 걸쳐 옅어진다 — 한 프레임에 사라지면 그 장이 poster 로 뽑힌다
+.li.is-demo .li__guide {
+  animation-name: liFade;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes liFade {
+  0%, 54% { opacity: .34; }
+  68%, 74% { opacity: 0; }
+  88%, 100% { opacity: .34; }
+}
+.li.is-demo .li__fakeKnob {
+  animation-name: liKnob;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes liKnob {
+  0%, 54% { transform: translateX(34%); }
+  68%, 74% { transform: translateX(0); }
+  88%, 100% { transform: translateX(34%); }
+}
+.li.is-demo .li__fakeFill {
+  animation-name: liFill;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes liFill {
+  0%, 54% { transform: scaleX(.34); }
+  68%, 74% { transform: scaleX(0); }
+  88%, 100% { transform: scaleX(.34); }
+}
+
+@media (max-width: 340px) {
+  .li__layers { padding: $sp-1 $sp-2; }
+  .li__row { gap: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .li.is-demo .li__trace,
+  .li.is-demo .li__finish,
+  .li.is-demo .li__guide,
+  .li.is-demo .li__fakeKnob,
+  .li.is-demo .li__fakeFill { animation: none !important; }
+  // 움직임 없이 잉크만 남은 최종 상태로 세운다
+  .li.is-demo .li__trace,
+  .li.is-demo .li__finish { stroke-dashoffset: 0 !important; }
+  .li.is-demo .li__guide { opacity: 0 !important; }
+  .li.is-demo .li__fakeKnob { transform: translateX(0) !important; }
+  .li.is-demo .li__fakeFill { transform: scaleX(0) !important; }
+}

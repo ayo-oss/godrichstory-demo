@@ -1,0 +1,176 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 브러시의 상태는 등록된 정수 네 개다. 등록해야 (1) 값이 교체돼도 transition 대상이 되고
+// (2) 자동 루프의 keyframes 가 값을 컷으로 갈아끼울 수 있다.
+@property --s { syntax: "<integer>"; initial-value: 4; inherits: true; }   // 구간 시작칸
+@property --e { syntax: "<integer>"; initial-value: 8; inherits: true; }   // 구간 끝칸
+@property --n { syntax: "<integer>"; initial-value: 67; inherits: true; }  // 구간 합계(만원)
+@property --d { syntax: "<integer>"; initial-value: 5; inherits: true; }   // 구간 일수
+
+$duration: $dur-quick;
+$easing: $ease-out;
+$color: $subject-blue;
+$cell: 14;                // 막대(칸) 수 — 띠 계산의 분모
+
+@include stage($stage-orange);
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.br {
+  --s: 4;
+  --e: 8;
+  box-sizing: border-box;
+  width: min(392px, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: $sp-2;
+  margin: 0;
+  padding: $sp-3;
+  border-radius: $r-card;
+  background: $stage-paper;
+  box-shadow: $shadow-raised;
+  color: $subject-ink;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+}
+.br__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: $sp-2;
+  padding: 0 $sp-1;
+}
+.br__title { font-size: 13px; line-height: 18px; font-weight: 800; letter-spacing: .02em; }
+.br__lab { font-size: 12px; line-height: 18px; color: rgba(23, 20, 26, .62); }
+.br__val { font-size: 13px; line-height: 18px; font-weight: 800; color: $color; font-variant-numeric: tabular-nums; }
+// 숫자는 텍스트가 아니라 카운터 — 루프에서도 --n 이 컷으로 갈아끼워지면 글자가 따라 바뀐다.
+// 화면용 숫자라 aria-hidden 하고, 실제 알림은 아래 sr 낱말(aria-live)이 맡는다
+.br__n { font-style: normal; counter-reset: n var(--n); }
+.br__n::after { content: counter(n); }
+.br__d { font-style: normal; counter-reset: d var(--d); }
+.br__d::after { content: counter(d); }
+.br__u { font-style: normal; }
+
+// plot 은 1×1 격자 — 막대 트랙·밝은 띠·글기 버튼 세 겹을 같은 칸에 explicit 으로 겹친다.
+// auto 배치로 두면 띠·버튼이 한 칸을 차지해 막대가 안 보이는 암시적 줄로 밀려난다 (실측)
+.br__plot {
+  display: grid;
+  height: 116px;
+}
+.br__track,
+.br__band,
+.br__hot { grid-area: 1 / 1; }
+
+// 칸 배분은 grid 균등 분할(flex 아님) — 칸 폭이 정확히 1/14 이어야 띠 계산이 맞는다
+.br__track {
+  display: grid;
+  grid-template-columns: repeat($cell, 1fr);
+  grid-template-rows: 1fr;
+}
+.br__bar {
+  align-self: end;
+  justify-self: center;
+  width: 62%;
+  height: var(--b);
+  border-radius: $r-xs $r-xs 0 0;
+  background: $color;
+}
+// 구간 밖 막대는 가라앉는다 — 상태는 data-in 속성에만 있다
+.br__bar[data-in="0"] { opacity: .3; }
+
+// 밝은 띠: 절대배치가 아니라 그리드 칸 위의 겹침 요소. 폭 = 칸 하나 × scaleX(칸 수),
+// 위치 = translateX(시작칸 × 칸 폭) — 둘 다 % 라 칸 폭이 몇 px 든 수식이 그대로 맞는다
+.br__band {
+  display: block;
+  height: 100%;
+  width: calc(100% / $cell);
+  border-radius: $r-xs;
+  background: rgba(47, 109, 246, .16);
+  transform-origin: left center; // 규칙8: 칸수 scaleX 수식 계산
+  transform: translateX(calc(var(--s) * 100%)) scaleX(calc(var(--e) - var(--s) + 1));
+}
+
+.br__hot {
+  border: 0;
+  border-radius: $r-sm;
+  background: transparent;
+  cursor: col-resize;
+}
+.br__hot:focus-visible { outline: 2px solid $color; outline-offset: -2px; }
+
+.br__hint { margin: 0; padding: 0 $sp-1; font-size: 11px; line-height: 16px; color: rgba(23, 20, 26, .62); }
+
+// ── 사람이 만진 뒤(정적 경로): 띠는 짧게 쫓아가고 막대는 살짝 가라앉는다 ──
+.br:not(.is-demo) .br__band {
+  transition-property: transform;
+  transition-duration: $duration;
+  transition-timing-function: $easing;
+}
+.br:not(.is-demo) .br__bar {
+  transition-property: opacity;
+  transition-duration: $dur-instant;
+  transition-timing-function: $easing;
+}
+
+// ── 자동 루프(2초): 좁은 구간[5~9일째] ↔ 전체 14일. 복귀는 88% 에 끝난다 ──
+// 띠의 폭만 scaleX 로 부드럽게 늘어나고, 바깥 막대의 밝아짐과 합계 숫자는
+// 띠가 **다 도착한 시각(40%)** 에 함께 컷 한다 — 세 가지 중 하나라도 시각이 어긋나면
+// 「띠는 5칸인데 합계는 14일」 같은 프레임이 그대로 대표 이미지가 된다 (첫 판 실측)
+.br.is-demo .br__band {
+  animation-name: br-band;
+  animation-duration: $dur-loop;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes br-band {
+  0%, 15% { transform: translateX(calc(4 * 100%)) scaleX(5); }
+  40%, 70% { transform: translateX(0) scaleX(#{$cell}); }
+  88%, 100% { transform: translateX(calc(4 * 100%)) scaleX(5); }
+}
+// data-far 은 루프 연출용으로 미리 적어둔 표시(초기 구간[4,8] 밖의 막대) —
+// 사람이 조작하면 data-in 이 진짜 상태고 이 애니메이션은 .is-demo 를 떼며 사라진다
+.br.is-demo .br__bar[data-far="1"] {
+  animation-name: br-far;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes br-far {
+  0%, 39.99% { opacity: .3; }
+  40%, 87.99% { opacity: 1; }
+  88%, 100% { opacity: .3; }
+}
+// 합계·일수 카운터도 같은 박자의 컷 — 루프의 어느 장면이든 숫자는 그 장면과 맞는 값
+.br.is-demo {
+  animation-name: br-nums;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes br-nums {
+  0%, 39.99% { --n: 67; --d: 5; }
+  40%, 87.99% { --n: 165; --d: #{$cell}; }
+  88%, 100% { --n: 67; --d: 5; }
+}
+
+@media (max-width: 340px) {
+  .br { padding: $sp-2; gap: $sp-1; }
+  .br__plot { height: 88px; }
+  .br__title, .br__val { font-size: 12px; line-height: 16px; }
+  .br__lab { font-size: 11px; line-height: 16px; }
+  .br__hint { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .br.is-demo,
+  .br.is-demo .br__band,
+  .br.is-demo .br__bar[data-far="1"] { animation: none !important; }
+  .br:not(.is-demo) .br__band,
+  .br:not(.is-demo) .br__bar { transition: none !important; }
+}

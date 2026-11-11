@@ -1,0 +1,141 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 자라나는 세로 막대 그래프 — 실제 사용에선 JS 가 scaleY() 로 막대 일곱 개를 심어
+// 완성된 그래프가 곧 뜨고 pointermove 로 툴팁이 막대를 따라온다. 미리보기(.is-demo)는
+// 같은 rect 에 scaleY 키프레임을 얹어 막대가 밑변에서부터 순서대로 자라는 모양을
+// 2초 루프로 보여 준다. 값 라벨은 막대가 자라는 동안 반값을 보이다 최종값으로 컷 교체된다.
+
+$duration: $dur-loop;
+$easing: $ease-spring;
+
+@include stage($stage-yellow);
+
+.cb { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.cb__card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.cb__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.cb__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.cb__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.cb__plot { position: relative; }
+.cb__svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.cb__grid line { stroke: rgba(23, 20, 26, .12); stroke-width: 1; }
+.cb__ticks text {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  text-anchor: end; dominant-baseline: middle;
+}
+.cb__day { fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px; text-anchor: middle; }
+.cb__axis { stroke: rgba(23, 20, 26, .32); stroke-width: 1.5; }
+// 막대 — 잉크. 최고 막대(토)만 계열색 블루로 강조해 "어디가 정점인가"가 먼저 읽힌다
+.cb__bar { fill: $subject-ink; }
+.cb__bar--peak { fill: $chart-1; }
+// 원래 transform-origin 은 요소 중심이 맞지만, 막대의 scaleY 는 밑변 축에 붙은 채
+// 위로 자라야 막대 그래프답다 — baseline 에 닿는 아래쪽이 원점이므로 bottom 이 정당하다.
+// transform-box: fill-box 로 SVG rect 자체를 기준 박스로 지정한다
+.cb__bar { transform-box: fill-box; transform-origin: 50% 100%; }
+// 값 라벨 — 텍스트는 텍스트 토큰(잉크)을 쓰고 막대 색을 물려받지 않는다
+.cb__val {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px;
+  text-anchor: middle; dominant-baseline: auto;
+}
+// 최고 막대 위 라벨만 계열색으로 더 굵게 — 정점의 값이 먼저 읽힌다
+.cb__vPeak { fill: $subject-blue-deep; font-weight: 800; font-size: 11px; }   // 크림 면 위 $chart-1 은 4.25:1 — deep 5.98:1 (막대 면색은 그대로)
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.cb__tip {
+  position: absolute; transform: translate(-50%, 4px);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-yellow; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.cb__tip.is-on { opacity: 1; transform: translate(-50%, 0); transition: opacity $dur-quick $ease-out, transform $dur-quick $ease-out; }
+.cb__tipDay { opacity: .72; }
+.cb__tipVal { font-size: 12px; }
+// 스크린리더용 표 — absolute+clip 은 레이아웃 크기가 그대로 scrollHeight 에 잡혀 넘침(BD8)이 뜨므로
+// fixed 로 캔버스 밖에 둔다. 스크린리더는 그대로 읽는다
+.cb__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// 실사용(정적)에서는 최종값 라벨만 — 카운트업 없이 곧바로 완성 상태
+.cb:not(.is-demo) .cb__vHalf { display: none; }
+
+// ── 미리보기 루프: 막대가 --d 간격으로 밑변에서 위로 자란다 (0.08s 씩, 마지막 막대는
+//    24% 지점에 시작해 54% 에 완성). animation-delay 는 낱개 속성으로 적는다 —
+//    animation: 단축을 쓰면 delay 가 0s 로 리셋된다. backwards 로 대기 구간에도 0% 프레임을 채운다.
+//    완성 유지 뒤 86~96% 에 걸쳐 되감아 빈 상태로 돌아가고 96~100% 는 빈 대 빈이라
+//    루프 이어붙음 지점이 튀지 않는다 (되감기를 한 프레임에 몰면 poster 가 소멸 순간을 잡는다).
+.cb.is-demo .cb__bar {
+  animation-name: cbGrow;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbGrow {
+  0% { transform: scaleY(0); }
+  30%, 86% { transform: scaleY(1); }
+  96%, 100% { transform: scaleY(0); }
+}
+// 반값 라벨 — 자기 막대가 자라는 동안만 보이고 26→28% 사이에 최종 라벨과 컷 교체
+.cb.is-demo .cb__vHalf {
+  animation-name: cbHalf;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbHalf {
+  0%, 26% { opacity: 1; }
+  28%, 100% { opacity: 0; }
+}
+.cb.is-demo .cb__vFull {
+  animation-name: cbFull;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbFull {
+  0%, 26% { opacity: 0; }
+  28%, 94% { opacity: 1; }
+  96%, 100% { opacity: 0; }
+}
+// 미리보기 툴팁은 최고 막대(토) 위에 미리 놓아 둔다 (JS 가 세팅) — 전 막대 완성 뒤 컷 등장
+.cb.is-demo .cb__tip {
+  animation-name: cbTip;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cbTip {
+  0%, 62% { opacity: 0; }
+  64%, 90% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 요일 라벨은 한 글자라 320px 에서도 겹치지 않는다 — 카드 여백만 줄인다
+  .cb__card { padding: $sp-2 $sp-3 $sp-1; }
+  .cb__val { font-size: 9px; }
+  .cb__vPeak { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cb.is-demo .cb__bar,
+  .cb.is-demo .cb__vHalf,
+  .cb.is-demo .cb__vFull,
+  .cb.is-demo .cb__tip { animation: none !important; }
+  // 움직임 없이 다 자란 최종 상태로 점프한다
+  .cb.is-demo .cb__bar { transform: scaleY(1) !important; }
+  .cb.is-demo .cb__vHalf { opacity: 0 !important; }
+  .cb.is-demo .cb__vFull, .cb.is-demo .cb__tip { opacity: 1 !important; }
+}

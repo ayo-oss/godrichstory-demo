@@ -1,0 +1,163 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 포커스 미로 탈출 — 7×5 칸을 grid-template-areas 로 배치한다. 통로는 button, 벽은 div 라
+// 벽이 포커스를 못 받는 것이 곧 "막힌다" 는 규칙이다(막는 코드를 따로 쓰지 않는다).
+// keydown 이 인접 통로 칸으로 focus({preventScroll:true}) 를 옮기고, 캐릭터는 :focus 인 칸에 나타난다.
+// 미리보기(.is-demo)는 타이머가 정답 경로로 포커스를 옮겨 캐릭터가 미로를 걷는 연출이다.
+
+$duration: $dur-quick;
+$easing: $ease-pop;
+$color: $subject-blue-deep;
+
+@include stage($stage-yellow);
+
+.fme {
+  display: flex; flex-direction: column; gap: $sp-2;
+  width: 100%; max-width: 440px;
+}
+
+// ── 스코어보드 ──────────────────────────────────────────────
+.fme__bar { display: flex; align-items: center; gap: $sp-1; flex-wrap: nowrap; }
+.fme__title {
+  display: flex; align-items: center; gap: $sp-1; margin: 0; margin-right: auto;
+  font-weight: 800; font-size: clamp(11px, 2.8vw, 13px); line-height: 1.2; color: $subject-ink;
+}
+.fme__ico { width: 16px; height: 16px; flex: 0 0 auto; color: $subject-ink; }
+.fme__ico--sm { width: 12px; height: 12px; }
+.fme__pill {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  border-radius: $r-pill; padding: $sp-1 $sp-2; background: rgba($subject-ink, .14);
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.2; color: $subject-ink;
+  white-space: nowrap;
+}
+.fme__label { font-weight: 600; color: rgba($subject-ink, .78); }
+.fme__num { font-weight: 800; }
+.fme__btn {
+  display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 auto;
+  border: 0; border-radius: $r-xs; padding: 0; background: rgba($subject-ink, .14); cursor: pointer;
+  color: $subject-ink;
+}
+.fme__btn:hover { background: rgba($subject-ink, .24); }
+.fme__btn:focus-visible { outline: 2px solid $subject-ink; outline-offset: 0; }
+
+// ── 미로 ────────────────────────────────────────────────────
+.fme__mazeWrap { position: relative; }
+// 7열 5행 — 칸 이름은 index.html 의 MAZE 표와 같은 좌표계다(c<열>r<행>)
+// 칸은 고정 폭 격자다 — 1fr 로 늘리면 5행 높이가 무대(300px)를 넘는다
+.fme__maze {
+  display: grid; gap: $sp-1; justify-content: center;
+  grid-template-columns: repeat(7, clamp(22px, 6.4vw, 32px));
+  grid-template-areas:
+    "c0r0 c1r0 c2r0 c3r0 c4r0 c5r0 c6r0"
+    "c0r1 c1r1 c2r1 c3r1 c4r1 c5r1 c6r1"
+    "c0r2 c1r2 c2r2 c3r2 c4r2 c5r2 c6r2"
+    "c0r3 c1r3 c2r3 c3r3 c4r3 c5r3 c6r3"
+    "c0r4 c1r4 c2r4 c3r4 c4r4 c5r4 c6r4";
+  border-radius: $r-card; padding: $sp-1; background: rgba($subject-ink, .12);
+  justify-self: center;
+}
+.fme__cell, .fme__wall {
+  aspect-ratio: 1 / 1; min-width: 0; border-radius: $r-xs;
+}
+.fme__wall { background: $subject-ink; }
+.fme__cell {
+  display: grid; place-items: center; width: 100%;
+  border: 0; padding: 0; background: $subject-cream; cursor: pointer; color: $color;
+}
+.fme__cell.is-start { background: rgba($subject-cream, .6); }
+// 출구는 깃발 자리 — 잉크 글자를 얹지 않으니 파란 면을 그대로 쓴다
+.fme__cell.is-goal { background: $color; }
+// 키보드로 짚은 칸만 테두리가 선다 — 마우스 클릭으로는 뜨지 않는다
+.fme__cell:focus-visible { outline: 2px solid $subject-ink; outline-offset: -2px; }
+
+// 캐릭터 — 포커스를 받은 칸에서만 보인다. 벽은 button 이 아니라 포커스를 못 받으므로 갈 수 없다
+.fme__char { width: 68%; height: 68%; opacity: 0; transform: scale(.6); color: $color; }
+.fme__cell:focus .fme__char {
+  opacity: 1; transform: scale(1);
+  transition: opacity $duration $easing, transform $duration $easing;
+}
+.fme__cell.is-goal:focus .fme__char { color: $subject-cream; }
+// 발자국 자국 — 포커스 칸 뒤로 은은한 원이 남아 지금 어디에 서 있는지 한눈에 보인다
+.fme__cell::after {
+  content: ""; position: absolute; width: 100%; height: 100%; border-radius: $r-xs;
+  box-shadow: inset 0 0 0 2px rgba($color, .5); opacity: 0;
+}
+.fme__cell { position: relative; }
+.fme__cell:focus::after { opacity: 1; }
+
+// ── 완료 덮개 ───────────────────────────────────────────────
+// display 를 직접 주는 규칙은 hidden 속성(UA display:none)을 이겨버린다 — 덮개가 사라지지 않는다
+.fme [hidden] { display: none !important; }
+.fme__done { position: absolute; inset: 0; display: grid; place-items: center; background: rgba($subject-ink, .55); }
+.fme__donePanel {
+  display: flex; flex-direction: column; align-items: center; gap: $sp-2;
+  border-radius: $r-card; padding: $sp-4; background: $stage-paper; box-shadow: $shadow-raised;
+}
+.fme__doneTitle {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  font-weight: 800; font-size: clamp(13px, 3.4vw, 16px); line-height: 1.2; color: $subject-ink;
+}
+.fme__doneLine { margin: 0; font-weight: 600; font-size: clamp(10px, 2.6vw, 12px); line-height: 1.4; color: rgba($subject-ink, .78); }
+.fme__again {
+  display: inline-flex; align-items: center; gap: $sp-1;
+  border: 0; border-radius: $r-control; padding: $sp-1 $sp-3; background: $color;
+  color: $subject-cream; font-family: inherit; font-weight: 700; font-size: clamp(10px, 2.6vw, 12px);
+  line-height: 1.4; cursor: pointer;
+}
+.fme__again:hover { background: $subject-blue; }
+.fme__again:focus-visible { outline: 2px solid $subject-ink; outline-offset: 2px; }
+
+.fme__hint {
+  margin: 0; font-weight: 500; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4;
+  color: rgba($subject-ink, .78);
+}
+
+// ── 격자 미리보기 ───────────────────────────────────────────
+// 걷는 연출은 JS 타이머가 포커스를 옮겨 만든다(스크롤 없이 — preventScroll).
+// CSS 는 그 위에 걸음 박자를 얹는다: 포커스 칸의 캐릭터가 발을 구른다.
+.fme.is-demo .fme__cell:focus .fme__char {
+  animation-name: fmeStep; animation-duration: $dur-base; animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes fmeStep {
+  0%, 100% { transform: scale(1) translateY(0); }
+  40%      { transform: scale(1.08) translateY(-2px); }
+}
+// 정답 길이 출발에서 출구까지 차례로 밝아진다 — 걷는 캐릭터가 어디로 가는지가 한눈에 읽힌다.
+// 지연이 걸린 루프라 fill-mode: backwards 가 필수다 (없으면 첫 프레임에 전부 켜진 상태로 번쩍한다).
+.fme.is-demo .fme__cell.is-path {
+  animation-name: fmePath; animation-duration: $dur-loop; animation-timing-function: $ease-out;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+  animation-delay: calc(var(--i) * 120ms);
+}
+@keyframes fmePath {
+  0%   { background-color: $subject-cream; }
+  10%  { background-color: rgba($color, .34); }
+  55%  { background-color: rgba($color, .34); }
+  75%  { background-color: $subject-cream; }
+  100% { background-color: $subject-cream; }
+}
+// 출구 깃발 칸은 미리보기 동안 숨을 쉬어 "여기가 목적지" 를 알린다
+.fme.is-demo .fme__cell.is-goal {
+  animation-name: fmeGoal; animation-duration: $dur-loop; animation-timing-function: $ease-out;
+  animation-iteration-count: infinite;
+}
+@keyframes fmeGoal {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .82; transform: scale(1.06); }
+}
+
+// 폰 폭에서는 칸을 16px 로 줄여 5행 + 스코어보드 + 안내가 200px 안에 들어오게 한다
+@media (max-width: 340px) {
+  .fme { gap: $sp-1; }
+  .fme__maze { grid-template-columns: repeat(7, 16px); }
+  .fme__donePanel { padding: $sp-2; }
+}
+
+// reduce — 걸음 박자와 깃발 숨쉬기를 끄고 캐릭터를 상시(전환 없이) 보이게 둔다
+@media (prefers-reduced-motion: reduce) {
+  .fme.is-demo .fme__cell:focus .fme__char,
+  .fme.is-demo .fme__cell.is-path,
+  .fme.is-demo .fme__cell.is-goal { animation: none !important; }
+  .fme__cell:focus .fme__char { transition: none !important; opacity: 1 !important; transform: none !important; }
+}

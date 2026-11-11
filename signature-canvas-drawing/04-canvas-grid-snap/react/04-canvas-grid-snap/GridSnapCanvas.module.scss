@@ -1,0 +1,244 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// GridSnapCanvas — vanilla 판(run/287/demo/04-canvas-grid-snap/style.scss) 의 React 포트.
+// 실제 배치도는 canvas 2D 가 그리고, 미리보기(.isDemo)는 같은 교차점을 지나는 SVG 폴리라인을
+// stroke-dashoffset 으로 긋는다. duration·easing·color 는 props 로 받아 CSS 변수로 들어온다.
+// @keyframes 본문은 vanilla 와 같은 글자.
+
+@include stage($stage-ink);
+
+.root { display: flex; justify-content: center; width: 100%; }
+.card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; overflow: hidden;
+}
+.bar {
+  display: flex; align-items: center; justify-content: space-between; gap: $sp-2;
+  background: $subject-ink; padding: $sp-2 $sp-3;
+}
+.snap, .btn {
+  display: flex; align-items: center; gap: $sp-1; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, .34); background: transparent; color: $stage-paper;
+  border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); padding: $sp-1 $sp-2; line-height: 1.3;
+}
+.snap:focus-visible, .btn:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+.ico { width: 14px; height: 14px; flex: 0 0 auto; }
+
+// 켬·끔 표시 — 버튼 전체 색을 바꾸면 poster 가 그 한 장을 고른다(면적이 크다). 작은 알약만 바뀐다
+.pill {
+  position: relative; width: 18px; height: 10px; flex: 0 0 auto;
+  border-radius: $r-pill; background: rgba(255, 255, 255, .3);
+}
+.knob {
+  position: absolute; top: 2px; left: 2px; width: 6px; height: 6px;
+  border-radius: 50%; background: $stage-paper;
+}
+.snap[aria-pressed="true"] .pill { background: $subject-blue; }
+.snap[aria-pressed="true"] .knob { transform: translateX(8px); }
+
+.board {
+  position: relative; background: $subject-cream; aspect-ratio: 300 / 104; touch-action: none;
+  // 눈금 — 가로 12칸 · 세로 4칸. 칸을 %로 잡아야 판 폭이 변해도 JS 의 Math.round 격자와 어긋나지 않는다
+  background-image:
+    repeating-linear-gradient(to right, rgba(23, 20, 26, .16) 0 1px, transparent 1px calc(100% / 12)),
+    repeating-linear-gradient(to bottom, rgba(23, 20, 26, .16) 0 1px, transparent 1px calc(100% / 4));
+}
+.ink, .ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ghost { display: none; fill: none; }
+.line {
+  stroke: var(--color, #{$subject-ink}); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100;
+}
+.diag {
+  stroke: $subject-blue; stroke-width: 8; stroke-linecap: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100;
+}
+.ring {
+  stroke: $subject-blue; stroke-width: 2; fill: $stage-paper;
+  // SVG 요소의 transform-origin 은 viewBox 기준이라 fill-box 로 바꿔야 링이 자기 중심에서 커진다 (규칙 8)
+  transform-box: fill-box; transform-origin: 50% 50%;
+}
+.live {
+  position: relative; margin: 0; padding: $sp-1 $sp-3 $sp-2; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 11px); color: rgba(23, 20, 26, .72);
+}
+.liveDemo { display: none; position: absolute; left: $sp-3; top: $sp-1; }
+
+// ── 미리보기 루프 (2s)
+//    10% 스냅이 켜짐으로 컷 · 14~54% 폴리라인이 교차점을 따라 그어지고 꺾이는 점마다 스냅 링이 톡 튄다
+//    56~60% 굵은 대각선 한 획을 빠르게 그어 poster 가 이 장이 되게 한다
+//    64~88% 대각선 → 폴리라인 순으로 되감겨 빈 판으로 돌아오고, 92% 에 스냅이 다시 꺼져 0% 와 같은 상태가 된다
+.root.isDemo .ink { visibility: hidden; }
+.root.isDemo .ghost { display: block; }
+.root.isDemo .line {
+  animation-name: gsDraw;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: linear;   // 펜이 일정한 속도로 가야 꺾인 점의 스냅 링이 제때 튄다
+  animation-iteration-count: infinite;
+}
+@keyframes gsDraw {
+  0%, 14% { stroke-dashoffset: 100; }
+  54%, 68% { stroke-dashoffset: 0; }
+  88%, 100% { stroke-dashoffset: 100; }
+}
+.root.isDemo .diag {
+  animation-name: gsDiag;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+@keyframes gsDiag {
+  0%, 56% { stroke-dashoffset: 100; }
+  60%, 64% { stroke-dashoffset: 0; }
+  82%, 100% { stroke-dashoffset: 100; }
+}
+
+// 스냅 링 — 펜이 꺾인 점에 닿는 순간 자기 중심에서 튀어오르고, 되감기가 그 점을 지날 때 줄어든다
+.root.isDemo .ring {
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+.root.isDemo .ring1 { animation-name: gsRing1; }
+.root.isDemo .ring2 { animation-name: gsRing2; }
+.root.isDemo .ring3 { animation-name: gsRing3; }
+.root.isDemo .ring4 { animation-name: gsRing4; }
+.root.isDemo .ring5 { animation-name: gsRing5; }
+.root.isDemo .ring6 { animation-name: gsRing6; }
+.root.isDemo .ring7 { animation-name: gsRing7; }
+@keyframes gsRing1 {
+  0%, 14% { transform: scale(0); }
+  19% { transform: scale(1.6); }
+  22%, 86% { transform: scale(1); }
+  89%, 100% { transform: scale(0); }
+}
+@keyframes gsRing2 {
+  0%, 21% { transform: scale(0); }
+  26% { transform: scale(1.6); }
+  29%, 84% { transform: scale(1); }
+  87%, 100% { transform: scale(0); }
+}
+@keyframes gsRing3 {
+  0%, 31% { transform: scale(0); }
+  36% { transform: scale(1.6); }
+  39%, 80% { transform: scale(1); }
+  83%, 100% { transform: scale(0); }
+}
+@keyframes gsRing4 {
+  0%, 34% { transform: scale(0); }
+  39% { transform: scale(1.6); }
+  42%, 78% { transform: scale(1); }
+  81%, 100% { transform: scale(0); }
+}
+@keyframes gsRing5 {
+  0%, 44% { transform: scale(0); }
+  49% { transform: scale(1.6); }
+  52%, 73% { transform: scale(1); }
+  76%, 100% { transform: scale(0); }
+}
+@keyframes gsRing6 {
+  0%, 47% { transform: scale(0); }
+  52% { transform: scale(1.6); }
+  55%, 71% { transform: scale(1); }
+  74%, 100% { transform: scale(0); }
+}
+@keyframes gsRing7 {
+  0%, 54% { transform: scale(0); }
+  59% { transform: scale(1.6); }
+  62%, 68% { transform: scale(1); }
+  71%, 100% { transform: scale(0); }
+}
+
+// 켬·끔은 steps(1, end) 로 한 프레임에 갈아 끼운다 — 반투명 겹침이 없다. 알약 옆 손잡이는 미끄러진다
+.root.isDemo .pill {
+  animation-name: gsPillOn;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes gsPillOn {
+  0%, 9% { background-color: rgba(255, 255, 255, .3); }
+  10%, 91% { background-color: $subject-blue; }
+  92%, 100% { background-color: rgba(255, 255, 255, .3); }
+}
+.root.isDemo .knob {
+  animation-name: gsKnob;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes gsKnob {
+  0%, 9% { transform: translateX(0); }
+  14%, 89% { transform: translateX(8px); }
+  94%, 100% { transform: translateX(0); }
+}
+.root.isDemo .snap .ico {
+  animation-name: gsPop;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes gsPop {
+  0%, 9% { transform: scale(1); }
+  13% { transform: scale(1.3); }
+  18%, 100% { transform: scale(1); }
+}
+
+.root.isDemo .liveReal { color: transparent; }
+.root.isDemo .liveDemo {
+  display: block;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.root.isDemo .liveOff { animation-name: gsLabelOff; }
+.root.isDemo .liveOn { animation-name: gsLabelOn; }
+@keyframes gsLabelOff {
+  0%, 9% { opacity: 1; }
+  10%, 91% { opacity: 0; }
+  92%, 100% { opacity: 1; }
+}
+@keyframes gsLabelOn {
+  0%, 9% { opacity: 0; }
+  10%, 91% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+
+// 되감기가 끝나는 88% 뒤에 「판 비우기」가 자기 중심에서 눌린다 (transform-origin 기본값 50% 50%)
+.root.isDemo .btn {
+  animation-name: gsPress;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+@keyframes gsPress {
+  0%, 64% { transform: scale(1); }
+  68% { transform: scale(.9); }
+  74%, 100% { transform: scale(1); }
+}
+
+@media (max-width: 340px) {
+  .bar { padding: $sp-1 $sp-2; }
+  .live { padding: $sp-1 $sp-2; }
+  .liveDemo { left: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .line,
+  .root.isDemo .diag,
+  .root.isDemo .ring,
+  .root.isDemo .pill,
+  .root.isDemo .knob,
+  .root.isDemo .snap .ico,
+  .root.isDemo .btn,
+  .root.isDemo .liveDemo { animation: none !important; }
+  // 움직임 없이 배치도가 다 그어진 최종 상태로 세운다
+  .root.isDemo .line,
+  .root.isDemo .diag { stroke-dashoffset: 0 !important; }
+  .root.isDemo .ring { transform: scale(1) !important; }
+  .root.isDemo .pill { background-color: $subject-blue !important; }
+  .root.isDemo .knob { transform: translateX(8px) !important; }
+  .root.isDemo .liveOff { opacity: 0 !important; }
+  .root.isDemo .liveOn { opacity: 1 !important; }
+}

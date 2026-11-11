@@ -1,0 +1,154 @@
+// ChartBarColumn — vanilla 판(run/289/demo/02-chart-draw-bar-column/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고(BEM → 캐멀), 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$stage-yellow: #ffd23f;
+$subject-ink: #17141a;
+$subject-cream: #fff7e6;
+$subject-blue-deep: #0a4fe8;   // 밝은 면 위 파란 글자 전용 (면색으로는 쓰지 않는다)
+$chart-1: #2f6df6;
+$ease-spring: cubic-bezier(.2, .8, .2, 1);
+$ease-out: ease-out;
+$dur-loop: 2s;
+$dur-quick: 220ms;
+$r-card: 16px;
+$r-xs: 4px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+$sp-4: 16px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+@mixin stage($bg) {
+  html, body { margin: 0; overflow: hidden; }
+  .stage { box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; margin: 0; background: $bg;
+           font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; padding: clamp(8px, 4vw, 24px); }
+}
+
+@include stage($stage-yellow);
+
+.root { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.plot { position: relative; }
+// 막대·값 라벨을 묶는 셀 — 애니메이션은 없지만 --d 가 자식으로 상속된다
+.cell { }
+.svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.grid line { stroke: rgba(23, 20, 26, .12); stroke-width: 1; }
+.ticks text {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  text-anchor: end; dominant-baseline: middle;
+}
+.day { fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px; text-anchor: middle; }
+.axis { stroke: rgba(23, 20, 26, .32); stroke-width: 1.5; }
+// 막대 — 잉크. 최고 막대(토)만 계열색 블루로 강조
+.bar { fill: $subject-ink; }
+.barPeak { fill: $chart-1; }
+// 막대의 scaleY 는 밑변 축에 붙은 채 위로 자란다 — baseline 에 닿는 아래쪽이 원점이므로
+// transform-origin bottom 이 정당하다. transform-box: fill-box 로 rect 자체를 기준 박스로
+.bar, .barPeak { transform-box: fill-box; transform-origin: 50% 100%; }
+.val {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px;
+  text-anchor: middle; dominant-baseline: auto;
+}
+.vPeak { fill: $subject-blue-deep; font-weight: 800; font-size: 11px; }
+.tip {
+  position: absolute; transform: translate(-50%, 4px);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-yellow; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.tip.tipIsOn { opacity: 1; transform: translate(-50%, 0); transition: opacity $dur-quick $ease-out, transform $dur-quick $ease-out; }
+.tipDay { opacity: .72; }
+.tipVal { font-size: 12px; }
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다 (absolute+clip 은 scrollHeight 넘침 함정)
+.sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// 실사용(정적)에서는 최종값 라벨만 — 카운트업 없이 곧바로 완성 상태
+.root:not(.isDemo) .vHalf { display: none; }
+
+// ── 미리보기 루프: 막대가 --d 간격으로 밑변에서 위로 자란다. animation-delay 는 낱개 속성으로 —
+//    animation 단축을 쓰면 delay 가 0s 로 리셋된다. backwards 로 대기 구간에도 0% 프레임을 채운다.
+//    완성 유지 뒤 86~96% 에 걸쳐 되감아 빈 상태로 돌아가고 96~100% 는 빈 대 빈이라
+//    루프 이어붙음 지점이 튀지 않는다.
+.isDemo .bar, .isDemo .barPeak {
+  animation-name: cbGrow;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-spring;
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbGrow {
+  0% { transform: scaleY(0); }
+  30%, 86% { transform: scaleY(1); }
+  96%, 100% { transform: scaleY(0); }
+}
+.isDemo .vHalf {
+  animation-name: cbHalf;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbHalf {
+  0%, 26% { opacity: 1; }
+  28%, 100% { opacity: 0; }
+}
+.isDemo .vFull {
+  animation-name: cbFull;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cbFull {
+  0%, 26% { opacity: 0; }
+  28%, 94% { opacity: 1; }
+  96%, 100% { opacity: 0; }
+}
+// 미리보기 툴팁은 최고 막대(토) 위에 떠 있다가 전 막대 완성 뒤 컷 등장
+.isDemo .tip {
+  animation-name: cbTip;
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cbTip {
+  0%, 62% { opacity: 0; }
+  64%, 90% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .card { padding: $sp-2 $sp-3 $sp-1; }
+  .val { font-size: 9px; }
+  .vPeak { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .bar, .isDemo .barPeak, .isDemo .vHalf, .isDemo .vFull, .isDemo .tip {
+    animation: none !important;
+  }
+  // 움직임 없이 다 자란 최종 상태로 점프한다
+  .isDemo .bar, .isDemo .barPeak { transform: scaleY(1) !important; }
+  .isDemo .vHalf { opacity: 0 !important; }
+  .isDemo .vFull, .isDemo .tip { opacity: 1 !important; }
+}

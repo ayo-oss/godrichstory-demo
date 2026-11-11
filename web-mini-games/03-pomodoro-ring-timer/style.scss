@@ -1,0 +1,119 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 포모도로 링 타이머 — 원판은 conic-gradient 한 장이고 각도만 커스텀 속성 --pt-angle 로 깎는다.
+// @property 로 <angle> 등록을 해야 키프레임 사이가 보간된다(등록이 없으면 컷으로 튄다).
+// --pt-angle 은 inherits: false 라 **원판 자신**에게 걸어야 한다 (262-08 교훈).
+// 정지·재생은 animation-play-state 하나로 한다 — JS 는 시각을 다시 계산하지 않고 남은 초와 글자만 맡는다.
+// 정적 상태(사람이 안 만진 첫 화면)는 원판이 가득 찬 25:00 이고, 격자 미리보기(.is-demo)는
+// 그 위에 차고 비우는 루프 · 시간 컷 교체 · 페이즈 라벨 교체만 덧씌운다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $subject-ink;
+
+@include stage($stage-orange);
+
+@property --pt-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 360deg;
+}
+
+.pt { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: $sp-3; width: 100%; height: 100%; }
+
+.pt__ring { position: relative; width: clamp(120px, 34vw, 158px); height: clamp(120px, 34vw, 158px); }
+
+.pt__disc {
+  position: absolute; inset: 0; border-radius: 50%;
+  --pt-angle: 360deg;
+  --pt-fill: #{$color};
+  background-image: conic-gradient(var(--pt-fill) 0deg var(--pt-angle), rgba($subject-ink, .18) var(--pt-angle) 360deg);
+  animation-name: ptDrain;
+  animation-duration: 25s;                // JS 가 페이즈 길이 ÷ SPEED 로 다시 넣는다
+  animation-timing-function: linear;      // 진짜 타이머는 등속이어야 한다
+  animation-iteration-count: 1;
+  animation-fill-mode: both;
+  animation-play-state: paused;
+}
+.pt.is-running .pt__disc { animation-play-state: running; }
+.pt.is-break .pt__disc { --pt-fill: #{$subject-blue-deep}; }
+@keyframes ptDrain {
+  from { --pt-angle: 360deg; }
+  to { --pt-angle: 0deg; }
+}
+
+.pt__hole {
+  position: absolute; inset: 13%; border-radius: 50%;
+  background-color: $subject-cream;
+  display: grid; place-items: center; align-content: center;
+}
+.pt__timeWrap, .pt__phaseWrap { position: relative; display: grid; place-items: center; }
+.pt__time {
+  font-weight: 800; font-size: clamp(24px, 7.2vw, 32px); line-height: 1.1; color: $subject-ink;
+  font-variant-numeric: tabular-nums;
+}
+.pt__phase { font-weight: 700; font-size: clamp(9px, 2.6vw, 12px); color: rgba($subject-ink, .72); }   // 크림 면 위 흐린 잉크
+
+.pt__ctrls { display: flex; gap: $sp-2; }
+.pt__btn {
+  padding: $sp-2 $sp-4; border: 0; border-radius: $r-pill; cursor: pointer;
+  background-color: $subject-cream; color: $subject-ink;                 // 크림 면 위 잉크 글자
+  font-weight: 700; font-size: clamp(10px, 2.6vw, 12px); line-height: 1;
+}
+.pt__btn--go { background-color: $subject-ink; color: $subject-cream; }  // 잉크 면 위 크림 글자
+.pt__btn:focus-visible { outline: 2px solid $subject-ink; outline-offset: 2px; }
+
+// ── 격자 미리보기 ────────────────────────────────────────────
+// 시간·페이즈는 겹쳐 둔 장을 steps(1, end) 로 컷 교체한다 — 크로스페이드는 유령 프레임이 된다(237 교훈).
+.pt__time--cut2, .pt__time--cut3, .pt__phase--cut2 { display: none; position: absolute; inset: 0; place-items: center; }
+.pt.is-demo .pt__time--cut2,
+.pt.is-demo .pt__time--cut3,
+.pt.is-demo .pt__phase--cut2 { display: grid; }
+.pt.is-demo .pt__time--cut1 { animation-name: ptCut1; }
+.pt.is-demo .pt__time--cut2 { animation-name: ptCut2; }
+.pt.is-demo .pt__time--cut3 { animation-name: ptCut3; }
+.pt.is-demo .pt__phase--cut1 { animation-name: ptPhase1; }
+.pt.is-demo .pt__phase--cut2 { animation-name: ptPhase2; }
+.pt.is-demo .pt__time,
+.pt.is-demo .pt__phase {
+  animation-duration: $duration; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes ptCut1 { 0% { opacity: 1; } 18% { opacity: 0; } 88% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes ptCut2 { 0% { opacity: 0; } 18% { opacity: 1; } 34% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes ptCut3 { 0% { opacity: 0; } 34% { opacity: 1; } 88% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes ptPhase1 { 0% { opacity: 1; } 50% { opacity: 0; } 88% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes ptPhase2 { 0% { opacity: 0; } 50% { opacity: 1; } 88% { opacity: 0; } 100% { opacity: 0; } }
+
+// 원판 루프 — 집중 구간에 비고 쉼 구간에 다시 찬다. 복귀는 88% 안에 끝난다(뒤 프레임이 안 찍힌다)
+.pt.is-demo .pt__disc {
+  animation-name: ptLoop;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: none;
+  animation-delay: 0s;
+  animation-play-state: running;
+}
+@keyframes ptLoop {
+  0% { --pt-angle: 360deg; animation-timing-function: linear; }   // 줄어드는 구간은 진짜 타이머처럼 등속
+  44% { --pt-angle: 0deg; animation-timing-function: linear; }
+  50% { --pt-angle: 0deg; animation-timing-function: $easing; }   // 다시 차는 구간만 이징
+  88%, 100% { --pt-angle: 360deg; }
+}
+
+@media (max-width: 340px) {
+  .pt { gap: $sp-2; }
+  .pt__btn { padding: $sp-1 $sp-3; }
+  .pt__ctrls { gap: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pt__disc { animation: none !important; }
+  .pt.is-demo .pt__disc,
+  .pt.is-demo .pt__time,
+  .pt.is-demo .pt__phase { animation: none !important; }
+  .pt.is-demo .pt__time--cut2,
+  .pt.is-demo .pt__time--cut3,
+  .pt.is-demo .pt__phase--cut2 { display: none !important; }
+}

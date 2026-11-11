@@ -1,0 +1,157 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 반원 게이지 — 실제 사용에선 입력칸의 숫자가 호 채움·바늘 각도·라벨을 즉시 바꾼다.
+// 격자 미리보기(.is-demo)는 0 에서 68 로 바늘이 돌고 호가 차는 2초 루프.
+// 바늘 회전은 CSS transform: rotate() — SVG 요소의 CSS transform-origin 은 view-box 좌표계를 기준하므로
+// 게이지 중심(220px 126px)을 직접 지정한다 (transform-box 를 쓰지 않는 이유가 이것이다).
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $chart-1;
+
+@include stage($stage-orange);
+
+.cg { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.cg__card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-2 $sp-4 $sp-1;
+}
+.cg__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.cg__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.cg__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+.cg__plot { position: relative; }
+.cg__svg { display: block; width: 100%; height: auto; }
+
+.cg__scale text { fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px; text-anchor: middle; }
+.cg__track { fill: none; stroke: rgba(23, 20, 26, .14); stroke-width: 20; stroke-linecap: round; }
+.cg__arc {
+  fill: none; stroke: $color; stroke-width: 20; stroke-linecap: round;
+  stroke-dasharray: 100; stroke-dashoffset: 32;   // 68% 채움 (100 - 68)
+}
+.cg__hit { fill: none; stroke: transparent; stroke-width: 34; pointer-events: stroke; cursor: pointer; }
+.cg__needle { transform-origin: 220px 126px; }
+.cg__pin { stroke: $subject-ink; stroke-width: 4; stroke-linecap: round; }
+.cg__hub { fill: $subject-ink; }
+.cg__val, .cg__liveVal { fill: $subject-ink; font-weight: 800; font-size: 24px; }
+.cg__val { display: none; }
+.cg__liveVal { display: block; }
+
+// 실사용 전환 — transition 으로 부드럽게 (미리보기 애니메이션이 있을 땐 애니메이션이 이긴다)
+.cg:not(.is-demo) .cg__arc { transition: stroke-dashoffset $dur-base $ease-out; }
+.cg:not(.is-demo) .cg__needle { transition: transform $dur-base $ease-out; }
+
+// 툴팁 — 구간 호 위에 뜬다. 두 줄로 쌓아 폭을 좁힌다 — 한 줄이면 폭이 눈금 라벨 50·75 와
+// 호 꼭대기를 덮는다. transform-origin 은 아래 변(50% 100%) — 툴팁은 참조하는 호에
+// 붙는 요소라 중심이 아닌 당김점을 쓴다 (스스로 완결한 요소였다면 중심이어야 한다)
+.cg__tip {
+  position: absolute; transform: translate(-50%, -130%); transform-origin: 50% 100%;
+  display: flex; flex-direction: column; align-items: center;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs; padding: $sp-1 $sp-2;
+  font-weight: 700; font-size: 10px; white-space: nowrap; pointer-events: none; opacity: 0;
+}
+.cg__tip.is-on { opacity: 1; }
+.cg__tip strong { font-size: 11px; }
+.cg__sr { position: fixed; top: 0; left: -640px; width: 320px; margin: 0; }
+
+// 입력줄 — label 과 input 를 한 줄에. 숫자를 넣으면 즉시 반영된다
+.cg__inputRow {
+  display: flex; align-items: center; justify-content: center; gap: $sp-2; padding: $sp-1 0 $sp-2;
+}
+.cg__lab { font-weight: 700; font-size: 11px; color: rgba(23, 20, 26, .72); }
+.cg__input {
+  width: 64px; box-sizing: border-box; border: 1px solid rgba(23, 20, 26, .34);
+  border-radius: $r-sm; background: $stage-paper; color: $subject-ink;
+  font-family: inherit; font-weight: 800; font-size: 14px; text-align: right;
+  padding: $sp-1 $sp-2; line-height: 1.4;
+}
+.cg__input:focus-visible { outline: 3px solid $color; outline-offset: 2px; }
+.cg__unit { font-weight: 700; font-size: 11px; color: rgba(23, 20, 26, .72); }
+
+// ── 미리보기 루프: 0~6% 바늘은 왼쪽 끝·호는 비어 있고, 6~58% 에 68 까지 돌며 차오른다.
+//    58% 에 값 라벨이 두 장(0%/68%)을 steps(1, end) 컷으로 갈아 끼우고 구간 툴팁이 함께 뜬다 —
+//    반투명 겹침이 없고, **완성된 장**이 곧 최대 변화 프레임(poster)이 된다.
+//    되돌림은 98% — 24프레임의 마지막 장이 2초의 95.8% 지점이라 그 뒤는 샘플이 없다.
+//    루프 안에서 되돌리면 "바늘이 되돌아가는 중인데 라벨만 68%" 인 어긋난 장이 poster 로 뽑힌다
+//    (실측 2026-09-12: 91.7% 프레임 2.119%).
+.cg.is-demo .cg__arc {
+  animation-name: cgFill;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes cgFill {
+  0%, 6% { stroke-dashoffset: 100; }
+  58%, 96% { stroke-dashoffset: 32; }
+  98%, 100% { stroke-dashoffset: 100; }
+}
+.cg.is-demo .cg__needle {
+  animation-name: cgSwing;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes cgSwing {
+  0%, 6% { transform: rotate(-90deg); }
+  58%, 96% { transform: rotate(32.4deg); }
+  98%, 100% { transform: rotate(-90deg); }
+}
+.cg.is-demo .cg__liveVal { display: none; }
+.cg.is-demo .cg__val { display: block; }
+.cg.is-demo .cg__val--zero,
+.cg.is-demo .cg__val--full {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.cg.is-demo .cg__val--zero { animation-name: cgLblZero; }
+.cg.is-demo .cg__val--full { animation-name: cgLblFull; }
+@keyframes cgLblZero {
+  0%, 56% { opacity: 1; }
+  58%, 100% { opacity: 0; }
+}
+@keyframes cgLblFull {
+  0%, 56% { opacity: 0; }
+  58%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+// 구간 툴팁 — 호버에서 쓰는 그대로를 미리보기에서도 값이 확정되는 58% 에 컷으로 띄운다.
+// 바늘·호만으로는 프레임마다 변하는 면적이 고만고만해 완성 장면이 poster 로 안 뽑힌다
+.cg.is-demo .cg__tip {
+  animation-name: cgTip;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cgTip {
+  0%, 56% { opacity: 0; }
+  58%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 320px 무대의 세로 여유는 174px 뿐 — 헤더·입력줄 여백을 4px 격자 안에서 줄인다.
+  // 좁은 화면에서는 올리지 않고 내리기만 한다 (118-07 실측: 반올림으로 올리면 BD9 가 깨진다)
+  .cg { padding-bottom: 0; }
+  .cg__card { padding: $sp-1 $sp-3 0; }
+  .cg__head { margin-bottom: $sp-1; }
+  .cg__inputRow { padding: $sp-1 0 0; }
+  .cg__val, .cg__liveVal { font-size: 20px; }
+  .cg__input { font-size: 12px; width: 52px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cg.is-demo .cg__arc,
+  .cg.is-demo .cg__needle,
+  .cg.is-demo .cg__val--zero,
+  .cg.is-demo .cg__val--full,
+  .cg.is-demo .cg__tip { animation: none !important; }
+  // 움직임 없이 68% 를 가리킨 최종 상태로 점프한다
+  .cg.is-demo .cg__arc { stroke-dashoffset: 32 !important; }
+  .cg.is-demo .cg__needle { transform: rotate(32.4deg) !important; }
+  .cg.is-demo .cg__val--zero { opacity: 0 !important; }
+  .cg.is-demo .cg__val--full { opacity: 1 !important; }
+  .cg.is-demo .cg__tip { opacity: 1 !important; }
+}

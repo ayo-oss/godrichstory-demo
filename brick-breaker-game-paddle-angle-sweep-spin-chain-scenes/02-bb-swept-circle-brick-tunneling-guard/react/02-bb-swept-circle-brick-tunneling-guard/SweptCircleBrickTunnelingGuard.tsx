@@ -1,0 +1,775 @@
+// SweptCircleBrickTunnelingGuard - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./SweptCircleBrickTunnelingGuard.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+export default function SweptCircleBrickTunnelingGuard() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    const root: HTMLElement = rootEl;
+    type RGB = [number, number, number];
+    type RGBA = [number, number, number, number];
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function ease(x: number): number { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    // 시드 고정 난수 — 선형 합동 생성기(곱 1664525, 더함 1013904223). 같은 시드면 같은 균열 모양
+    function seeded(seed: number): () => number {
+        let s = (seed >>> 0) || 1;
+        return function (): number {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 4294967296;
+        };
+    }
+    // 파스텔 팔레트 — 벽돌은 줄마다 다른 파스텔, 공·패들·글자는 진한 잉크
+    const BG_TOP: RGB = [248, 244, 252];
+    const BG_BOT: RGB = [228, 234, 250];
+    const FIELD: RGB = [253, 251, 255];
+    const FIELD_EDGE: RGB = [196, 186, 240];
+    const ROSE: RGB = [244, 166, 188];
+    const ROSE_DEEP: RGB = [190, 52, 86];
+    const MINT: RGB = [158, 218, 196];
+    const BUTTER: RGB = [250, 226, 148];
+    const WATER: RGB = [166, 206, 246];
+    const LAV: RGB = [196, 182, 240];
+    const LAV_DEEP: RGB = [96, 72, 168];
+    const INK: RGB = [40, 36, 54];
+    const PAPER: RGB = [250, 246, 240];
+    const ROWCOL: RGB[] = [ROSE, BUTTER, MINT, WATER, LAV];
+    function mix(a: RGB, b: RGB, k: number): RGB { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c: RGB, a: number): string {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+
+    // 장면 시계(초)·판 반복 번호·직접 하는 중인지
+    let sceneT = 0;
+    let lap = 0;
+    let manual = false;
+
+    // ── 공 하나의 한 걸음을 계산하는 곳 ───────────────────────────
+    // 공 반지름 · 고정 걸음 · 한 번에 이을 수 있는 시간 상한 · 패들 맞은 자리가 만드는 가장 큰 각도(세로 기준)
+    const BALL_R = 5;
+    const STEP_H = 1 / 120;
+    const DT_MAX = 0.05;
+    const MAX_ANGLE = 58 * Math.PI / 180;
+    const SERVE_WAIT = 0.5;
+    // 모드 — 장면마다 어느 규칙을 켜고 끄는지. 같은 계산에 스위치만 다르게 둬서 오른쪽 대비판이 나온다
+    // sweep: 한 걸음 이동을 stepMax 이하 조각으로 쪼개 조각마다 벽돌 검사 / face: 0 겹침이 얕은 축의 면에서 반사, 1 속도 y 만 뒤집기
+    // angle: 0 패들 맞은 자리로 반사각, 1 거울 반사 / spin: 패들 속도 → 회전 전달 비율 / push: 회전이 옆으로 미는 세기 / decay: 회전이 줄어드는 비율
+    type Mode = { sweep: boolean; stepMax: number; face: number; angle: number; spin: number; push: number; decay: number };
+    type Brick = {
+        x: number; y: number; w: number; h: number; hp: number; hp0: number; row: number; col: number; kind: number;
+        hitT: number; deadT: number; fuse: number; mis: number;
+    };
+    type Ball = { x: number; y: number; vx: number; vy: number; spin: number; st: number; born: number; trail: number[]; id: number };
+    type World = {
+        x: number; y: number; w: number; h: number;
+        t: number; acc: number; step: number;
+        mode: Mode;
+        bricks: Brick[]; balls: Ball[];
+        px: number; py: number; pw: number; ph: number; pv: number;
+        speed: number; trailN: number;
+        follow: number; vmax: number; naive: boolean;
+        aims: number[]; launches: number[]; launchAt: number;
+        ctl: ((w: World, dt: number) => void) | null;
+        hand: boolean; keyDir: number; pointX: number;
+        broken: number; hits: number; padHits: number; lost: number; missed: number; stuck: number;
+        padT: number; lastU: number; lastBreak: number;
+        onBreak: ((w: World, b: Brick) => void) | null;
+        onPad: ((w: World, b: Ball) => void) | null;
+        paint: ((k: Brick) => RGB) | null;
+    };
+    function newWorld(x: number, y: number, w: number, h: number, mode: Mode): World {
+        return {
+            x: x, y: y, w: w, h: h, t: 0, acc: 0, step: STEP_H, mode: mode, bricks: [], balls: [],
+            px: w / 2, py: h - 22, pw: 96, ph: 8, pv: 0, speed: 250, trailN: 10,
+            follow: 12, vmax: 520, naive: false, aims: [0], launches: [0], launchAt: 0, ctl: autoCtl,
+            hand: false, keyDir: 0, pointX: -1,
+            broken: 0, hits: 0, padHits: 0, lost: 0, missed: 0, stuck: 0, padT: -9, lastU: 0, lastBreak: -9,
+            onBreak: null, onPad: null, paint: null,
+        };
+    }
+    function addBrick(w: World, x: number, y: number, bw: number, bh: number, hp: number, row: number, col: number): Brick {
+        const k: Brick = { x: x, y: y, w: bw, h: bh, hp: hp, hp0: hp, row: row, col: col, kind: 0, hitT: -9, deadT: -1, fuse: -1, mis: -9 };
+        w.bricks.push(k);
+        return k;
+    }
+    // 줄×칸 격자 — 가로는 판 폭에 맞춰 칸 폭을 나누고 줄 간격은 bh + gap
+    function fillGrid(w: World, rows: number, cols: number, top: number, bh: number, gap: number, hpOf: (r: number, c: number) => number): void {
+        const bw = (w.w - 16 - (cols - 1) * gap) / cols;
+        for (let r = 0; r < rows; r += 1) {
+            for (let c = 0; c < cols; c += 1) {
+                const hp = hpOf(r, c);
+                if (hp > 0) { addBrick(w, 8 + c * (bw + gap), top + r * (bh + gap), bw, bh, hp, r, c); }
+            }
+        }
+    }
+    function newBall(w: World, id: number): Ball {
+        return { x: w.px, y: w.py - BALL_R, vx: 0, vy: 0, spin: 0, st: 1, born: w.t, trail: [], id: id };
+    }
+    // 발사 — 세로에서 deg 도 기울인 방향으로 w.speed
+    function launchBall(w: World, b: Ball, deg: number): void {
+        const a = deg * Math.PI / 180;
+        b.vx = Math.sin(a) * w.speed;
+        b.vy = -Math.cos(a) * w.speed;
+        b.spin = 0;
+        b.st = 0;
+    }
+    function aliveCount(w: World): number {
+        let n = 0;
+        for (const k of w.bricks) { if (k.deadT < 0) { n += 1; } }
+        return n;
+    }
+    // 패들 맞은 자리 — 패들 중심에서 공까지의 거리를 반폭으로 나눈 값(−1~1)
+    function hitOffset(w: World, b: Ball): number { return clamp((b.x - w.px) / (w.pw / 2), -1, 1); }
+    // 벽 반사를 펴서 낙하 지점 — 판 폭 안쪽(r ~ w−r)으로 접어 넣는다. 접은 값 = 반사를 다 거친 위치
+    function foldW(v: number, lo: number, hi: number): number {
+        const len = hi - lo;
+        const per = 2 * len;
+        const u = ((v - lo) % per + per) % per;
+        return lo + (u <= len ? u : per - u);
+    }
+    // 공이 패들 높이에 닿을 때까지 남은 시간(초)과 그때의 가로 위치 — 벽돌은 무시, 벽만 편다
+    function landing(w: World, b: Ball): number[] {
+        const down = w.py - BALL_R;
+        let t = 0;
+        if (b.vy > 0) { t = (down - b.y) / b.vy; } else { t = ((b.y - BALL_R) + (down - BALL_R)) / Math.max(1e-6, -b.vy); }
+        return [foldW(b.x + b.vx * t, BALL_R, w.w - BALL_R), t];
+    }
+    function pickBall(w: World): Ball | null {
+        let best: Ball | null = null;
+        let bt = 1e9;
+        for (const b of w.balls) {
+            if (b.st !== 0) { continue; }
+            const t = landing(w, b)[1];
+            if (t < bt) { bt = t; best = b; }
+        }
+        return best;
+    }
+    const HAND_V = 280;
+    // 패들 조종 — 자동은 낙하 지점에서 맞은 자리(aim)만큼 비켜 서서 반사각을 정하고, naive 는 낙하 지점 대신 공의 지금 가로 위치(같은 aim 만큼 비켜서)만 따라간다
+    function autoCtl(w: World, dt: number): void {
+        if (w.hand) {
+            if (w.keyDir !== 0) { w.pv = w.keyDir * HAND_V; } else if (w.pointX >= 0) { w.pv = clamp((w.pointX - w.px) * 18, -w.vmax, w.vmax); } else { w.pv = 0; }
+        } else {
+            const b = pickBall(w);
+            let tgt = w.px;
+            if (b) {
+                const aim = w.aims[w.padHits % w.aims.length];
+                tgt = (w.naive ? b.x : landing(w, b)[0]) - aim * w.pw / 2;
+            }
+            w.pv = clamp((tgt - w.px) * w.follow, -w.vmax, w.vmax);
+        }
+        const nx = clamp(w.px + w.pv * dt, w.pw / 2, w.w - w.pw / 2);
+        w.pv = (nx - w.px) / dt;
+        w.px = nx;
+    }
+    // 선분(공이 한 조각에 지나간 길)이 벽돌을 공 반지름만큼 부풀린 상자와 만나는지 — 슬랩 검사. 통과 진단용.
+    // 상자 가장자리 2px 안쪽만 센다(공은 둥근데 상자는 모서리가 각져 스치기만 한 것을 통과로 세지 않으려고)
+    function segHitsBrick(x0: number, y0: number, x1: number, y1: number, k: Brick): boolean {
+        let t0 = 0;
+        let t1 = 1;
+        const dx = x1 - x0;
+        const dy = y1 - y0;
+        const lo = [k.x - BALL_R + 2, k.y - BALL_R + 2];
+        const hi = [k.x + k.w + BALL_R - 2, k.y + k.h + BALL_R - 2];
+        const o = [x0, y0];
+        const d = [dx, dy];
+        for (let a = 0; a < 2; a += 1) {
+            if (Math.abs(d[a]) < 1e-9) {
+                if (o[a] < lo[a] || o[a] > hi[a]) { return false; }
+            } else {
+                let ta = (lo[a] - o[a]) / d[a];
+                let tb = (hi[a] - o[a]) / d[a];
+                if (ta > tb) { const s = ta; ta = tb; tb = s; }
+                t0 = Math.max(t0, ta);
+                t1 = Math.min(t1, tb);
+                if (t0 > t1) { return false; }
+            }
+        }
+        return true;
+    }
+    function hurt(w: World, k: Brick): void {
+        k.hitT = w.t;
+        w.hits += 1;
+        if (k.hp >= 90) { return; }
+        k.hp -= 1;
+        if (k.hp <= 0) {
+            k.deadT = w.t;
+            w.broken += 1;
+            w.lastBreak = w.t;
+            if (w.onBreak) { w.onBreak(w, k); }
+        }
+    }
+    function reflectBricks(w: World, b: Ball, h: number): void {
+        let best: Brick | null = null;
+        let bd = 0;
+        for (const k of w.bricks) {
+            if (k.deadT >= 0) { continue; }
+            const ox = BALL_R + k.w / 2 - Math.abs(b.x - (k.x + k.w / 2));
+            const oy = BALL_R + k.h / 2 - Math.abs(b.y - (k.y + k.h / 2));
+            if (ox <= 0 || oy <= 0) { continue; }
+            const d = Math.min(ox, oy);
+            if (d > bd) { bd = d; best = k; }
+        }
+        if (!best) { return; }
+        const k = best;
+        const cx = k.x + k.w / 2;
+        const cy = k.y + k.h / 2;
+        if (w.mode.face === 0) {
+            // 겹침 깊이가 얕은 축의 면이 맞은 면 — 그 면의 바깥 쪽으로 밀어내고 그 축의 속도만 뒤집는다
+            const ox = BALL_R + k.w / 2 - Math.abs(b.x - cx);
+            const oy = BALL_R + k.h / 2 - Math.abs(b.y - cy);
+            if (ox < oy) {
+                const dir = b.x < cx ? -1 : 1;
+                b.x += dir * ox;
+                b.vx = dir * Math.abs(b.vx);
+            } else {
+                const dir = b.y < cy ? -1 : 1;
+                b.y += dir * oy;
+                b.vy = dir * Math.abs(b.vy);
+            }
+        } else {
+            // 대비판 — 면을 고르지 않고 위아래 속도만 뒤집는다. 옆구리를 맞으면 벽돌 안으로 파고든다
+            if (w.t - k.hitT < h * 1.5) { w.stuck += 1; }
+            b.vy = -b.vy;
+        }
+        hurt(w, k);
+    }
+    function moveBall(w: World, b: Ball, h: number): void {
+        const m = w.mode;
+        if (m.spin > 0) {
+            // 회전은 프레임마다 옆으로 미는 힘이 되고 서서히 줄어든다
+            b.vx += b.spin * m.push * h;
+            b.spin *= Math.exp(-m.decay * h);
+        }
+        // 속도 크기는 늘 w.speed — 회전이 방향만 바꾼다. 거의 수평이 되면 세로 성분을 살려 갇힘을 막는다
+        let s = Math.hypot(b.vx, b.vy) || 1;
+        if (Math.abs(b.vy) < 0.2 * s) { b.vy = (b.vy < 0 ? -1 : 1) * 0.2 * s; s = Math.hypot(b.vx, b.vy); }
+        b.vx *= w.speed / s;
+        b.vy *= w.speed / s;
+        const dist = w.speed * h;
+        const n = m.sweep ? Math.max(1, Math.ceil(dist / m.stepMax)) : 1;
+        const sx = b.x;
+        const sy = b.y;
+        for (let i = 0; i < n; i += 1) {
+            const dt = h / n;
+            const py0 = b.y;
+            const px0 = b.x;
+            const pvx = b.vx;
+            const pvy = b.vy;
+            b.x += b.vx * dt;
+            b.y += b.vy * dt;
+            if (b.x < BALL_R) { b.x = BALL_R; b.vx = Math.abs(b.vx); }
+            if (b.x > w.w - BALL_R) { b.x = w.w - BALL_R; b.vx = -Math.abs(b.vx); }
+            if (b.y < BALL_R) { b.y = BALL_R; b.vy = Math.abs(b.vy); }
+            // 패들 — 공 아래쪽이 패들 윗면 선을 넘어간 걸음에서 맞은 자리를 잰다
+            if (b.vy > 0 && py0 + BALL_R <= w.py + 0.001 && b.y + BALL_R >= w.py && Math.abs(b.x - w.px) <= w.pw / 2 + BALL_R * 0.6) {
+                b.y = w.py - BALL_R;
+                const u = hitOffset(w, b);
+                if (m.angle === 0) {
+                    const a = u * MAX_ANGLE;
+                    b.vx = Math.sin(a) * w.speed;
+                    b.vy = -Math.cos(a) * w.speed;
+                } else {
+                    b.vy = -Math.abs(b.vy);
+                }
+                if (m.spin > 0) { b.spin += w.pv * m.spin; }
+                w.padHits += 1;
+                w.padT = w.t;
+                w.lastU = u;
+                if (w.onPad) { w.onPad(w, b); }
+            }
+            reflectBricks(w, b, h);
+            // 통과 진단 — 이 조각이 지나간 길이 벽돌 상자와 만났는데 맞지 않았으면 통과로 센다(벽돌마다 0.5초에 한 번)
+            // 벽·패들·벽돌에서 튕긴 조각은 직선이 아니라서 건너뛴다
+            const bent = b.vx !== pvx || b.vy !== pvy;
+            for (const k of w.bricks) {
+                if (bent || k.deadT >= 0 || k.hitT === w.t || w.t - k.mis < 0.5) { continue; }
+                // 끝 위치가 벽돌과 겹쳐 있으면 닿은 것이지 건너뛴 게 아니다
+                if (Math.abs(b.x - (k.x + k.w / 2)) < BALL_R + k.w / 2 && Math.abs(b.y - (k.y + k.h / 2)) < BALL_R + k.h / 2) { continue; }
+                if (segHitsBrick(px0, py0, b.x, b.y, k)) { k.mis = w.t; w.missed += 1; }
+            }
+            if (b.y > w.h + BALL_R + 2) { b.st = 2; w.lost += 1; break; }
+        }
+        b.trail.push(b.x, b.y);
+        while (b.trail.length > w.trailN * 2) { b.trail.splice(0, 2); }
+    }
+    function stepWorld(w: World, h: number): void {
+        w.t += h;
+        if (w.ctl) { w.ctl(w, h); }
+        for (const b of w.balls) {
+            if (b.st === 1) {
+                b.x = w.px;
+                b.y = w.py - BALL_R;
+                if (!manual && w.t - b.born >= SERVE_WAIT) { launchBall(w, b, w.launches[w.launchAt % w.launches.length]); w.launchAt += 1; }
+            } else if (b.st === 0) {
+                moveBall(w, b, h);
+            }
+        }
+        // 바닥으로 빠진 공 — 공이 하나 더 남아 있으면 지우고, 마지막이면 패들 위에서 다시 시작한다
+        for (let i = w.balls.length - 1; i >= 0; i -= 1) {
+            const b = w.balls[i];
+            if (b.st !== 2) { continue; }
+            let others = 0;
+            for (const o of w.balls) { if (o !== b && o.st !== 2) { others += 1; } }
+            if (others > 0) { w.balls.splice(i, 1); } else { b.st = 1; b.born = w.t; b.trail = []; b.x = w.px; b.y = w.py - BALL_R; }
+        }
+    }
+    // 시간을 고정 걸음으로 쪼개 부른다 — 한 번에 DT_MAX 를 넘는 시간은 이어 붙이지 않는다
+    function advanceWorld(w: World, dt: number): void {
+        w.acc += Math.min(dt, DT_MAX);
+        while (w.acc >= w.step - 1e-9) {
+            stepWorld(w, w.step);
+            w.acc -= w.step;
+        }
+    }
+    const canvasEl = root.querySelector('[data-role="canvas"]') as HTMLCanvasElement | null;
+    const padEl = root.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseEl = root.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const statusEl = root.querySelector('[data-role="status"]') as HTMLElement | null;
+    const stepEl = root.querySelector('[data-role="step"]') as HTMLButtonElement | null;
+    const doneEl = root.querySelector('[data-role="done"]') as HTMLElement | null;
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !stepEl || !doneEl) { return; }
+    const cv: HTMLCanvasElement = canvasEl;
+    const ctx: CanvasRenderingContext2D = ctxRaw;
+    const pauseBtn: HTMLButtonElement = pauseEl;
+    const stepBtn: HTMLButtonElement = stepEl;
+    const doneP: HTMLElement = doneEl;
+    const pad: HTMLElement = padEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    let dpr = 1;
+    function fitCanvas(): void {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘지 않게
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function skyFill(top: RGB, bot: RGB): void {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, rgba(top, 1));
+        g.addColorStop(1, rgba(bot, 1));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
+    function disc(x: number, y: number, r: number, c: RGB, a: number): void {
+        if (r <= 0.2 || a <= 0) { return; }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x: number, y: number, r: number, width: number, c: RGB, a: number): void {
+        if (r <= 0.2 || a <= 0) { return; }
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function seg(x1: number, y1: number, x2: number, y2: number, width: number, c: RGB, a: number): void {
+        if (a <= 0) { return; }
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.lineWidth = width;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function box(x: number, y: number, w: number, h: number, r: number, c: RGB, a: number): void {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) { return; }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function outline(x: number, y: number, w: number, h: number, r: number, width: number, c: RGB, a: number): void {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) { return; }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.lineWidth = width;
+        ctx.strokeStyle = rgba(c, a);
+        ctx.stroke();
+    }
+    function text(s: string, x: number, y: number, c: RGB, a: number, px: number, weight: number, align: CanvasTextAlign): void {
+        ctx.font = weight + ' ' + px + 'px ' + FONT_STACK;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, a);
+        ctx.fillText(s, x, y);
+    }
+    // 글자 이름표 — 진한 알약 위에 크림색 글자
+    function tag(s: string, x: number, y: number, bg: RGB, fg: RGB, px: number, align: CanvasTextAlign): void {
+        ctx.font = '700 ' + px + 'px ' + FONT_STACK;
+        const w = ctx.measureText(s).width + px * 1.1;
+        const left = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+        box(left, y - px * 0.82, w, px * 1.64, px * 0.82, bg, 0.94);
+        text(s, left + w / 2, y + 0.5, fg, 1, px, 700, 'center');
+    }
+    // 장면 이름표(무대 좌표) — 판 안쪽 위 가운데(바깥 위는 상태 줄·버튼 자리)
+    function panelTag(w: World, s: string, bad: boolean): void {
+        tag(s, w.x + w.w / 2, w.y + 12, bad ? ROSE_DEEP : INK, PAPER, 10, 'center');
+    }
+    // ── 판 그리기 ────────────────────────────────────────────
+    // 상태(벽돌·공·패들)를 그릴 뿐이고 규칙은 건드리지 않는다. 좌표는 판 안쪽(왼쪽 위가 0,0)
+    // 균열 선 개수의 상한(체력 4 벽돌이 마지막 한 대 전에 가장 많이 갈라진 모습)
+    const CRACK_N = 3;
+    const BREAK_S = 0.6;
+    function crackLines(k: Brick, n: number): void {
+        const rng = seeded(k.row * 131 + k.col * 17 + 7);
+        for (let i = 0; i < n; i += 1) {
+            const sx = k.x + k.w * (0.2 + 0.6 * rng());
+            const top = (i % 2) === 0;
+            let cx = sx;
+            let cy = top ? k.y : k.y + k.h;
+            const ty = top ? k.y + k.h * 0.9 : k.y + k.h * 0.1;
+            const steps = 3;
+            for (let s = 0; s < steps; s += 1) {
+                const nx = cx + (rng() - 0.5) * k.w * 0.34;
+                const ny = cy + (ty - cy) / (steps - s);
+                seg(cx, cy, nx, ny, 1.4, INK, 0.62);
+                cx = nx;
+                cy = ny;
+            }
+        }
+    }
+    function drawBrick(w: World, k: Brick, hatch: boolean): void {
+        const base = w.paint ? w.paint(k) : ROWCOL[k.row % ROWCOL.length];
+        const dead = k.deadT >= 0;
+        if (dead) {
+            const age = w.t - k.deadT;
+            if (age >= BREAK_S) { return; }
+            const p = age / BREAK_S;
+            const sc = 1 - ease(clamp(age / 0.14, 0, 1));
+            box(k.x + k.w * (1 - sc) / 2, k.y + k.h * (1 - sc) / 2, k.w * sc, k.h * sc, 3, base, 1 - p);
+            // 조각 — 번호로 정한 방향으로 날아가며 줄어든다(난수 없이 칸 번호에서 계산)
+            outline(k.x - age * 45, k.y - age * 45, k.w + age * 90, k.h + age * 90, 4 + age * 45, 2.2, mix(base, INK, 0.4), 0.6 * (1 - p));
+            for (let i = 0; i < 8; i += 1) {
+                const an = (i * 1.27 + k.col * 0.7 + k.row * 1.9) % TAU;
+                const sp = 38 + 11 * i;
+                const fx = k.x + k.w / 2 + Math.cos(an) * sp * age;
+                const fy = k.y + k.h / 2 + Math.sin(an) * sp * age + 120 * age * age;
+                box(fx - 4, fy - 3, 8 * (1 - p), 6 * (1 - p), 2, base, 1 - p);
+            }
+            return;
+        }
+        const age = w.t - k.hitT;
+        const sq = age >= 0 && age < 0.18 ? Math.sin(age / 0.18 * Math.PI) : 0;
+        if (age >= 0 && age < 0.3) {
+            const e = age * 40;
+            outline(k.x - e, k.y - e, k.w + 2 * e, k.h + 2 * e, 4 + e, 2.2, mix(base, INK, 0.45), 0.75 * (1 - age / 0.3));
+        }
+        const bx = k.x + sq * 1.2;
+        const by = k.y + sq * 1.2;
+        const bw = k.w - sq * 2.4;
+        const bh = k.h - sq * 2.4;
+        box(bx, by + 2, bw, bh, 3, mix(base, INK, 0.28), 1);
+        box(bx, by, bw, bh, 3, mix(base, [255, 255, 255], sq * 0.6), 1);
+        box(bx + 2, by + 1.5, bw - 4, 2, 1, [255, 255, 255], 0.5);
+        if (hatch) {
+            for (let i = 1; i < 4; i += 1) { seg(bx + bw * i / 4 - 3, by + bh - 2, bx + bw * i / 4 + 3, by + 2, 1.2, INK, 0.3); }
+        }
+        if (k.hp0 > 1 && k.hp0 < 90 && k.hp < k.hp0) { crackLines(k, Math.min(CRACK_N, k.hp0 - k.hp)); }
+    }
+    function drawBall(w: World, b: Ball, col: RGB): void {
+        const n = b.trail.length / 2;
+        for (let i = 0; i < n; i += 1) {
+            const f = (i + 1) / n;
+            disc(b.trail[i * 2], b.trail[i * 2 + 1], BALL_R * (0.5 + 0.65 * f), col, 0.14 + 0.4 * f * f);
+        }
+        if (b.st === 2) { return; }
+        disc(b.x, b.y, BALL_R + 3, col, 0.18);
+        disc(b.x, b.y, BALL_R, INK, 1);
+        disc(b.x - 1.7, b.y - 1.8, 1.6, [255, 255, 255], 0.85);
+    }
+    function drawPaddle(w: World): void {
+        if (w.pw <= 0) { return; }
+        const age = w.t - w.padT;
+        const sq = age >= 0 && age < 0.16 ? Math.sin(age / 0.16 * Math.PI) : 0;
+        box(w.px - w.pw / 2, w.py + 2, w.pw, w.ph, 4, mix(LAV, INK, 0.45), 1);
+        box(w.px - w.pw / 2, w.py + sq * 2, w.pw, w.ph - sq * 2, 4, INK, 1);
+        box(w.px - w.pw / 2 + 4, w.py + 1.5 + sq * 2, w.pw - 8, 2, 1, MINT, 0.9);
+    }
+    // 판 하나 — under 는 벽돌 아래(바닥 표시 등), over 는 공 위(예측선·고리 등). 둘 다 판 좌표
+    function drawWorld(w: World, hatch: boolean, ballCol: RGB, under: ((w: World) => void) | null, over: ((w: World) => void) | null): void {
+        ctx.save();
+        box(w.x, w.y, w.w, w.h, 8, FIELD, 1);
+        ctx.beginPath();
+        ctx.roundRect(w.x, w.y, w.w, w.h, 8);
+        ctx.clip();
+        ctx.translate(w.x, w.y);
+        for (let gy = 20; gy < w.h; gy += 20) {
+            for (let gx = 20; gx < w.w; gx += 20) { disc(gx, gy, 0.9, FIELD_EDGE, 0.5); }
+        }
+        if (under) { under(w); }
+        for (const k of w.bricks) { drawBrick(w, k, hatch); }
+        drawPaddle(w);
+        for (const b of w.balls) { drawBall(w, b, ballCol); }
+        if (over) { over(w); }
+        ctx.restore();
+        outline(w.x, w.y, w.w, w.h, 8, 2, FIELD_EDGE, 1);
+    }
+    let shownStatus = '';
+    function pushStatus(s: string): void {
+        if (!statusEl || s === shownStatus) { return; }
+        shownStatus = s;
+        statusEl.textContent = s;
+    }
+    let paused = false;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 표시 — 사람이 처음 손대면 떼고 상태 줄을 polite 로 켠다
+    let demo = root.classList.contains('is-demo');
+    const off = new AbortController();
+    function wake(): void {
+        if (!demo) { return; }
+        demo = false;
+        root.classList.remove('is-demo');
+        if (statusEl) { statusEl.setAttribute('aria-live', 'polite'); }
+    }
+    // 사람이 패들을 잡는다 — 첫 판의 패들만 사람이 몰고, 공은 발사 키를 기다린다
+    function takeOver(): void {
+        if (manual) { return; }
+        manual = true;
+        WS[0].hand = true;
+        wake();
+    }
+    // 한 판 시연이 끝났음을 스크린리더에 한 번만 알린다 — 판이 되풀이돼도 다시 읽지 않는다
+    let doneSaid = false;
+    function checkDone(): void {
+        if (!manual && !doneSaid && sceneT >= LAP_S - 0.6) {
+            doneSaid = true;
+            doneP.textContent = statusText();
+        }
+    }
+    function advance(dt: number): void {
+        sceneT += dt;
+        update(dt);
+        if (!manual && sceneT >= LAP_S) { lap += 1; begin(); }
+    }
+    // 첫 판은 START_S 만큼 앞서 시작한다 — 공이 벽돌을 깨는 중인 장면에서 보인다
+    function runTo(t: number): void {
+        while (sceneT < t - 1e-6) { advance(Math.min(1 / 30, t - sceneT)); }
+    }
+    function begin(): void {
+        sceneT = 0;
+        build();
+        if (lap === 0 && !still) { runTo(START_S); }
+    }
+    function showNow(): void {
+        draw();
+        pushStatus(statusText());
+        checkDone();
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts: number): void {
+        if (still || paused) { rafId = 0; return; }
+        if (lastTs < 0) { lastTs = ts; }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        if (dt > 0) { advance(dt); }
+        showNow();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop(): void {
+        if (rafId) { return; }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop(): void {
+        if (rafId) { window.cancelAnimationFrame(rafId); rafId = 0; }
+    }
+    // 움직임 줄이기 — 루프 없이 벽돌이 몇 장 깨진 정지 장면 한 장
+    function showRest(): void {
+        stopLoop();
+        lap = 0;
+        sceneT = 0;
+        build();
+        runTo(REST_S);
+        showNow();
+    }
+    function play(): void {
+        begin();
+        showNow();
+        if (!paused) { startLoop(); }
+    }
+    function togglePause(): void {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        wake();
+        if (paused) { stopLoop(); } else if (!still) { startLoop(); }
+    }
+    function restart(): void {
+        manual = false;
+        doneSaid = false;
+        lap += 1;
+        begin();
+        showNow();
+    }
+    // 한 걸음 — 멈춘 채 0.1초만 앞으로. 직접 하던 중이면 그대로 이어서
+    const STEP_ONE = 0.1;
+    function stepOnce(): void {
+        wake();
+        if (!paused) {
+            paused = true;
+            pauseBtn.setAttribute('aria-pressed', 'true');
+            stopLoop();
+        }
+        let left = STEP_ONE;
+        while (left > 1e-6) { const d = Math.min(1 / 30, left); advance(d); left -= d; }
+        showNow();
+    }
+    // 멈춰 선 공이 있으면 발사하고 true — 직접 하는 중 공이 빠지면 패들 위에서 기다린다
+    function launchHeld(): boolean {
+        const w = WS[0];
+        for (const b of w.balls) {
+            if (b.st === 1) { launchBall(w, b, w.launches[w.launchAt % w.launches.length]); w.launchAt += 1; return true; }
+        }
+        return false;
+    }
+    pauseBtn.addEventListener('click', togglePause, { signal: off.signal });
+    stepBtn.addEventListener('click', stepOnce, { signal: off.signal });
+    // 키보드 — 무대에 포커스가 있을 때만. 방향키는 패들, Enter·Space 는 발사(멈춘 공이 없으면 일시정지), P 는 일시정지, N 은 한 걸음, R 은 다시
+    pad.addEventListener('keydown', function (e: KeyboardEvent): void {
+        if (e.altKey || e.ctrlKey || e.metaKey) { return; }
+        const k = e.key;
+        if (k === 'ArrowLeft' || k === 'ArrowRight') {
+            e.preventDefault();
+            takeOver();
+            WS[0].keyDir = k === 'ArrowLeft' ? -1 : 1;
+            if (!paused && !rafId && !still) { startLoop(); }
+        } else if (k === 'Enter' || k === ' ') {
+            e.preventDefault();
+            if (manual && launchHeld()) { showNow(); } else { togglePause(); }
+        } else if (k === 'p' || k === 'P') {
+            togglePause();
+        } else if (k === 'n' || k === 'N') {
+            stepOnce();
+        } else if (k === 'r' || k === 'R') {
+            restart();
+        }
+    }, { signal: off.signal });
+    pad.addEventListener('keyup', function (e: KeyboardEvent): void {
+        if ((e.key === 'ArrowLeft' && WS[0].keyDir < 0) || (e.key === 'ArrowRight' && WS[0].keyDir > 0)) { WS[0].keyDir = 0; }
+    }, { signal: off.signal });
+    // 마우스·터치 — 누르면 패들이 그 자리를 따라가고 이어서 움직이는 대로 따라가며, 멈춘 공이 있으면 발사
+    function pointOf(e: MouseEvent): number {
+        const rect = cv.getBoundingClientRect();
+        return (e.clientX - rect.left) / rect.width * W - WS[0].x;
+    }
+    pad.addEventListener('pointerdown', function (e: PointerEvent): void {
+        takeOver();
+        WS[0].pointX = pointOf(e);
+        WS[0].keyDir = 0;
+        launchHeld();
+        if (!paused && !rafId && !still) { startLoop(); }
+    }, { signal: off.signal });
+    pad.addEventListener('pointermove', function (e: PointerEvent): void {
+        if (manual) { WS[0].pointX = pointOf(e); }
+    }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작 — 숨은 동안의 몇 초가 한 프레임에 몰리지 않게
+    document.addEventListener('visibilitychange', function (): void {
+        if (document.hidden) { stopLoop(); } else if (!paused && !still) { startLoop(); }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 정지 장면 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function (): void {
+        still = reduceQuery.matches;
+        if (still) { showRest(); } else { lap = 0; play(); }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function (): void {
+        fitCanvas();
+        showNow();
+    }, { signal: off.signal });
+    // ── 02 빠른 공을 잡는 스윕 충돌(왼쪽) vs 프레임 끝 위치만 검사(오른쪽) ─────────────────
+    // 한 프레임에 공이 가는 길이(px) = BALL_SPEED × FRAME_H. 벽돌 두께 + 공 지름보다 길면 한 줄을 통째로 건너뛴다
+    const FRAME_H = 1 / 60;
+    const BALL_SPEED = 2520;
+    const BRICK_H = 6;
+    // 스윕은 한 프레임 이동을 STEP_MAX 이하 조각(올림(이동 ÷ STEP_MAX) 개)으로 쪼갠다
+    const STEP_MAX = 4;
+    // 장면 시간을 늦춰 보여 준다 — 공이 너무 빨라 눈으로 따라갈 수 없다
+    const SLOW = 0.3;
+    const LAP_S = 12.0;
+    const START_S = 1.4;
+    const REST_S = 3.2;
+    let WS: World[] = [];
+    function build(): void {
+        WS = [];
+        for (let i = 0; i < 2; i += 1) {
+            const w = newWorld(12 + i * 234, 50, 222, 238, { sweep: i === 0, stepMax: STEP_MAX, face: 0, angle: 0, spin: 0, push: 0, decay: 0 });
+            w.step = FRAME_H;
+            w.speed = BALL_SPEED;
+            w.pw = 80;
+            w.px = 82;
+            w.follow = 40;
+            w.vmax = 2400;
+            w.aims = [0.5, -0.4, 0.3, -0.6];
+            w.trailN = 5;
+            // 줄 사이 간격을 프레임 이동 길이(42px)에 맞춘다 — 첫 번째 올라가는 길에는 어느 프레임 끝 위치도 벽돌 상자에 들어가지 않는다
+            const gap = BALL_SPEED * FRAME_H;
+            for (let r = 0; r < 4; r += 1) {
+                // 줄마다 벽돌 네 장을 공 지름보다 넓게 띄운다 — 이웃 벽돌로 번져 깨지는 일 없이 통과만 따로 본다
+                for (let c = 0; c < 4; c += 1) { addBrick(w, 8 + c * 58.7, 23 + r * gap, 30, BRICK_H, 1, r, c); }
+            }
+            w.balls.push(newBall(w, 0));
+            WS.push(w);
+        }
+    }
+    function update(dt: number): void {
+        for (const w of WS) { advanceWorld(w, dt * SLOW); }
+    }
+    function statusText(): string {
+        return '왼쪽 {a}장 · 오른쪽 {b}장 · 오른쪽 통과 {m}번'.replace('{a}', String(WS[0].broken)).replace('{b}', String(WS[1].broken)).replace('{m}', String(WS[1].missed));
+    }
+    // ── draw ──────────────────────────────────────────────
+    // 한 프레임 이동 길이를 잇는 선 — 마지막 프레임에서 공이 어디서 어디로 건너뛰었는지
+    function jumpOver(w: World): void {
+        for (const b of w.balls) {
+            const n = b.trail.length;
+            if (n < 4 || b.st !== 0) { continue; }
+            seg(b.trail[n - 4], b.trail[n - 3], b.trail[n - 2], b.trail[n - 1], 2, ROSE_DEEP, 0.45);
+        }
+    }
+    function draw(): void {
+        skyFill(BG_TOP, BG_BOT);
+        drawWorld(WS[0], false, LAV_DEEP, null, jumpOver);
+        drawWorld(WS[1], false, LAV_DEEP, null, jumpOver);
+        panelTag(WS[0], '스윕 충돌', false);
+        panelTag(WS[1], '프레임 끝 위치만', true);
+    }
+    fitCanvas();
+    if (still) { showRest(); } else { play(); }
+    return function (): void {
+        stopLoop();
+        off.abort();
+    };
+  }, []);
+
+  return (
+    <div className={cx("vj") + " is-demo"} ref={rootRef}>
+        <div className={cx("vj__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'벽돌깨기 시연 무대 — 좌우 방향키로 패들, Enter 로 발사, P 로 일시정지, N 으로 한 걸음, R 로 다시'}>
+          <canvas className={cx("vj__canvas")} data-role="canvas" width={480} height={300} role="img" aria-label={'프레임마다 공이 42픽셀씩 건너뛰는 느린 화면에서 왼쪽은 한 걸음을 잘게 쪼개 벽돌을 검사하고 오른쪽은 걸음 끝 위치만 검사한다. 왼쪽 공은 벽돌에 닿는 즉시 튕기지만 오른쪽 공은 벽돌 줄을 건너뛰어 통과하고, 통과 횟수가 상태 줄에 올라간다'}></canvas>
+        </div>
+        <p className={cx("vj__status")} data-role="status" aria-live="off">{'벽돌깨기 시연'}</p>
+        <div className={cx("vj__ctrl")}>
+          <button className={cx("vj__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          <button className={cx("vj__step")} data-role="step" type="button">{'한 걸음'}</button>
+        </div>
+        <p className={cx("vj__done")} data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  );
+}

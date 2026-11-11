@@ -1,0 +1,145 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 패들 튕기기 — 공은 속도 벡터를 법선으로 되돌리는 반사, 패들은 맞은 칸에 따라 수평 성분이 꺾인다.
+// 패들은 pointermove(마우스) 와 keydown(방향키) 두 경로가 같은 px 값을 공유한다.
+// 격자 미리보기(.is-demo)는 실제 게임의 왕복을 표본 추출한 공 경로 + 패들 추적 + 벽돌 섬광을 키프레임으로 재생한다.
+// 루프의 시작과 끝을 패들 접촉점 한 곳에 두어 경계가 곧 패들 튕김이라 순간이동이 보이지 않는다.
+
+$duration: $dur-loop;
+$easing: linear;      // 공은 등속 — 왕복 속도는 키프레임 간 거리 비율로 표본화했다
+$color: $stage-yellow;
+
+@include stage($stage-ink);
+
+.pb { --kx: 1; --ky: 1; display: flex; flex-direction: column; gap: $sp-3; width: 100%; max-width: 424px; }
+.pb__hint {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  font-weight: 700; font-size: clamp(10px, 2.8vw, 12px); color: $subject-cream;
+}
+.pb__ico { width: 16px; height: 16px; flex: 0 0 auto; color: $color; }
+
+.pb__field {
+  position: relative; height: 176px; border-radius: $r-card;
+  background: rgba($subject-cream, .06);
+  box-shadow: inset 0 0 0 1px rgba($subject-cream, .14);
+  overflow: hidden; touch-action: none; cursor: none;
+}
+.pb__field:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+
+.pb__bricks { position: absolute; inset: 0; }
+.pb__brick {
+  position: absolute; left: 0; top: 0; width: 60px; height: 14px;
+  border-radius: $r-xs;
+}
+.pb__brick--r0 { background: $stage-orange; }
+.pb__brick--r1 { background: $color; }
+.pb__brick--r2 { background: $subject-cream; }
+.pb__brick.is-hit { visibility: hidden; }
+
+.pb__ball {
+  position: absolute; left: 0; top: 0; width: 12px; height: 12px;
+  border-radius: 50%; background: $subject-cream;
+}
+.pb__paddle {
+  position: absolute; left: 0; top: 0; width: 68px; height: 10px;
+  border-radius: $r-pill; background: $color;
+}
+
+.pb__score {
+  position: absolute; left: $sp-2; top: $sp-1; margin: 0;
+  font-weight: 800; font-size: clamp(10px, 2.6vw, 11px); color: $subject-cream;
+  z-index: 1;
+}
+.pb__scoreLoop { position: absolute; inset: 0; display: grid; visibility: hidden; }
+.pb__scoreLoop i { grid-area: 1 / 1; font-style: normal; visibility: hidden; }
+
+.pb__bar { display: flex; align-items: center; justify-content: flex-end; gap: $sp-2; flex-wrap: wrap; }
+.pb__launch, .pb__reset {
+  display: inline-flex; align-items: center; gap: $sp-1; border: 0; border-radius: $r-pill;
+  padding: $sp-1 $sp-3; background: $color; color: $subject-ink; cursor: pointer;
+  font-family: inherit; font-weight: 800; font-size: clamp(10px, 2.6vw, 11px); line-height: 1;
+}
+.pb__launch .pb__ico, .pb__reset .pb__ico { color: $subject-ink; }
+
+// ── 격자 미리보기 루프 ─────────────────────────────────────────────
+// 공 경로: 패들 접촉(0%) → 벽돌 3회 섬광 → 벽 2회 → 패들 접촉 2회 → 하강(94%) → 같은 접촉점(100%).
+// 100% 와 0% 가 같은 점이라 경계가 닫혀 있고, 그 모서리는 패들 튕김으로 읽힌다.
+.pb.is-demo .pb__ball {
+  animation-name: pbBall; animation-duration: $duration; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes pbBall {
+  0%   { transform: translate(calc(var(--kx) * 210px), calc(var(--ky) * 158px)); }
+  9%   { transform: translate(calc(var(--kx) * 318px), calc(var(--ky) * 40px)); }
+  17%  { transform: translate(calc(var(--kx) * 398px), calc(var(--ky) * 116px)); }
+  25%  { transform: translate(calc(var(--kx) * 306px), calc(var(--ky) * 158px)); }
+  33%  { transform: translate(calc(var(--kx) * 252px), calc(var(--ky) * 48px)); }
+  41%  { transform: translate(calc(var(--kx) * 128px), calc(var(--ky) * 52px)); }
+  49%  { transform: translate(calc(var(--kx) * 24px), calc(var(--ky) * 116px)); }
+  57%  { transform: translate(calc(var(--kx) * 110px), calc(var(--ky) * 158px)); }
+  65%  { transform: translate(calc(var(--kx) * 196px), calc(var(--ky) * 100px)); }
+  73%  { transform: translate(calc(var(--kx) * 280px), calc(var(--ky) * 20px)); }
+  81%  { transform: translate(calc(var(--kx) * 398px), calc(var(--ky) * 84px)); }
+  89%  { transform: translate(calc(var(--kx) * 330px), calc(var(--ky) * 130px)); }
+  94%  { transform: translate(calc(var(--kx) * 160px), calc(var(--ky) * 134px)); }
+  100% { transform: translate(calc(var(--kx) * 210px), calc(var(--ky) * 158px)); }
+}
+// 패들 추적 — 공이 패들 선에 닿는 순간(0/25/57/96%) 의 x 로 맞춰 간다
+.pb.is-demo .pb__paddle {
+  animation-name: pbPaddle; animation-duration: $duration; animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+@keyframes pbPaddle {
+  0%   { transform: translate(calc(var(--kx) * 176px), calc(var(--ky) * 158px)); }
+  9%   { transform: translate(calc(var(--kx) * 284px), calc(var(--ky) * 158px)); }
+  25%  { transform: translate(calc(var(--kx) * 272px), calc(var(--ky) * 158px)); }
+  41%  { transform: translate(calc(var(--kx) * 94px),  calc(var(--ky) * 158px)); }
+  57%  { transform: translate(calc(var(--kx) * 76px),  calc(var(--ky) * 158px)); }
+  73%  { transform: translate(calc(var(--kx) * 246px), calc(var(--ky) * 158px)); }
+  89%  { transform: translate(calc(var(--kx) * 296px), calc(var(--ky) * 158px)); }
+  96%  { transform: translate(calc(var(--kx) * 136px), calc(var(--ky) * 158px)); }
+  100% { transform: translate(calc(var(--kx) * 176px), calc(var(--ky) * 158px)); }
+}
+// 벽돌 섬광 — 공이 닿는 9%(r1c4)·33%(r2c3)·41%(r2c1)·73%(r0c4) 에 반투명 스윕.
+// 사라지지 않고 반짝이기만 해서 루프 경계에 되살아나는 순간이동이 없다.
+.pb.is-demo .pb__brick--r1c4 { animation: pbFlash $duration linear infinite; animation-delay: 0ms; }
+.pb.is-demo .pb__brick--r2c3 { animation: pbFlash $duration linear infinite; animation-delay: 460ms; }
+.pb.is-demo .pb__brick--r2c1 { animation: pbFlash $duration linear infinite; animation-delay: 620ms; }
+.pb.is-demo .pb__brick--r0c4 { animation: pbFlash $duration linear infinite; animation-delay: 1260ms; }
+@keyframes pbFlash {
+  0%, 7%, 13%, 100% { opacity: 1; }
+  10% { opacity: .3; }
+}
+// 점수 교체 — 0→1(9%)→2(33%)→0(96%). steps 컷이라 반투명 겹침이 없다
+.pb.is-demo .pb__scoreVal { color: transparent; }
+.pb.is-demo .pb__scoreLoop { visibility: visible; }
+.pb.is-demo .pb__scoreLoop i {
+  animation-duration: $duration; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.pb.is-demo .pb__scoreLoop i:nth-child(1) { animation-name: pbScore0; }
+.pb.is-demo .pb__scoreLoop i:nth-child(2) { animation-name: pbScore1; }
+.pb.is-demo .pb__scoreLoop i:nth-child(3) { animation-name: pbScore2; }
+@keyframes pbScore0 { 0%, 8% { visibility: visible; } 9%, 95% { visibility: hidden; } 96%, 100% { visibility: visible; } }
+@keyframes pbScore1 { 0%, 8% { visibility: hidden; } 9%, 32% { visibility: visible; } 33%, 100% { visibility: hidden; } }
+@keyframes pbScore2 { 0%, 32% { visibility: hidden; } 33%, 95% { visibility: visible; } 96%, 100% { visibility: hidden; } }
+
+@media (max-width: 340px) {
+  .pb { --kx: .68; --ky: .59; gap: $sp-2; }
+  .pb__field { height: 104px; }
+  .pb__brick { width: 40px; height: 10px; }
+  .pb__paddle { width: 52px; height: 8px; }
+  .pb__ball { width: 10px; height: 10px; }
+}
+
+// reduce 에서는 패들 위에 공이 얹힌 정지 상태 한 장을 둔다
+@media (prefers-reduced-motion: reduce) {
+  .pb.is-demo .pb__ball,
+  .pb.is-demo .pb__paddle,
+  .pb.is-demo .pb__brick,
+  .pb.is-demo .pb__scoreLoop i { animation: none !important; }
+  .pb.is-demo .pb__ball { transform: translate(calc(var(--kx) * 210px), calc(var(--ky) * 144px)) !important; }
+  .pb.is-demo .pb__paddle { transform: translate(calc(var(--kx) * 176px), calc(var(--ky) * 158px)) !important; }
+  .pb.is-demo .pb__scoreVal { color: $subject-cream !important; }
+  .pb.is-demo .pb__scoreLoop { visibility: hidden !important; }
+}

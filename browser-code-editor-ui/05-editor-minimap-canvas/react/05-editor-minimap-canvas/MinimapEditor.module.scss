@@ -1,0 +1,156 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// MinimapEditor — vanilla 판(run/299/demo/05-editor-minimap-canvas/style.scss) 의 React 포트.
+// @keyframes 본문은 vanilla 와 같은 글자다 (값을 다시 타이핑하지 않는다).
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어오고 기본값은 vanilla 의 $duration·$easing·$color 와 같다.
+// 스크롤 상자(view)와 트랙(track)을 분리하고 transform 은 track 에만 건다 (051 실측 함정 회피).
+
+$duration: $dur-quick;
+$easing: $ease-spring;
+$color: $stage-yellow;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$line: rgba(255, 255, 255, .14);
+$dim: #beb7ad;
+$fs: clamp(10px, 2.6vw, 12px);
+$lh: 20px;
+
+.stage {
+  box-sizing: border-box; min-height: 100vh;
+  display: grid; place-items: center; margin: 0;
+  background: $stage-ink;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  padding: clamp(8px, 4vw, 24px);
+}
+
+.root {
+  // 미리보기 루프의 이동거리 — 컴포넌트가 실제 스크롤 범위에서 계산해 넣는다
+  --mm-track-y: -200px;
+  --mm-thumb-y: 53px;
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid $line; border-radius: $r-card;
+  background: $tick-panel;
+  box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄
+.bar { display: flex; align-items: center; gap: $sp-2; }
+.ico { display: grid; place-items: center; color: var(--color, #{$color}); font-size: 15px; }
+.name {
+  flex: 0 0 auto; color: $subject-cream;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+.status {
+  flex: 1 1 auto; color: $dim;
+  font-family: $mono; font-weight: 500; font-size: 10px; line-height: 1.4;
+  text-align: right;
+}
+.count {
+  flex: 0 0 auto; padding: $sp-1 $sp-2; border-radius: $r-pill;
+  background: rgba(255, 210, 63, .18); color: $stage-yellow;
+  font-family: $mono; font-weight: 700; font-size: 10px; line-height: 1.4;
+}
+
+// ── 본문(실제 스크롤) + 미니맵
+.body { display: flex; gap: $sp-2; }
+.view {
+  flex: 1 1 auto; height: $lh * 8;
+  overflow: auto; overscroll-behavior: contain;
+  border-radius: $r-sm; background: rgba(0, 0, 0, .28);
+  scrollbar-width: thin;
+}
+.track {
+  box-sizing: border-box; margin: 0; padding: $sp-2;
+  color: $subject-cream;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2;
+  white-space: pre;
+}
+.ln { display: block; }
+.lnDim { color: $dim; }
+.lnTok { color: $subject-sky; }
+
+.map {
+  position: relative; flex: 0 0 48px; height: $lh * 8;
+  border-radius: $r-sm; background: rgba(0, 0, 0, .28);
+  overflow: hidden; cursor: grab; touch-action: none;
+}
+.map:active { cursor: grabbing; }
+.cv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.box {
+  position: absolute; left: 0; right: 0; top: 0; box-sizing: border-box;
+  border: 2px solid $stage-yellow; border-radius: $r-xs;
+  background: rgba(255, 210, 63, .12);
+}
+
+.note {
+  margin: 0; color: $dim;
+  font-weight: 500; font-size: 11px; line-height: 1.4;
+}
+
+// ── 격자 미리보기 루프 (2초)
+// 본문 트랙이 10→50% 에 위로 스크롤되고 60→88% 에 제자리로 돌아온다(복귀는 90% 안에).
+// 상자는 같은 키프레임 지점·같은 이징으로 따라 내려가고 올라온다 — 두 애니메이션이 같은 리듬으로 묶인다.
+// 미리보기 동안에는 실제 스크롤 대신 트랙 transform 이 움직이게 뷰의 스크롤을 잠근다.
+// 미리보기 문장에는 **줄 번호를 쓰지 않는다** — 트랙은 이징으로 연속 이동하는데 문장은 컷이라
+// 어느 시점을 골라도 숫자와 화면이 어긋난 장면이 poster 로 뽑힌다. 실제 조작 때는 컴포넌트가 줄 번호를 쓴다
+.status { display: inline-grid; }
+.stTop, .stMid { grid-area: 1 / 1; }
+.stMid { visibility: hidden; }
+.isDemo .stTop {
+  animation-name: mmStTop; animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.isDemo .stMid {
+  animation-name: mmStMid; animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes mmStTop {
+  0%, 100% { visibility: hidden; }
+}
+@keyframes mmStMid {
+  0%, 100% { visibility: visible; }
+}
+.isDemo .view { overflow: hidden; }
+.isDemo .track {
+  animation-name: mmScroll;
+  animation-duration: $dur-loop; animation-timing-function: var(--easing, #{$easing});
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.isDemo .box {
+  animation-name: mmThumb;
+  animation-duration: $dur-loop; animation-timing-function: var(--easing, #{$easing});
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+
+@keyframes mmScroll {
+  0%, 10% { transform: translateY(0); }
+  50%, 60% { transform: translateY(var(--mm-track-y)); }
+  88%, 100% { transform: translateY(0); }
+}
+@keyframes mmThumb {
+  0%, 10% { transform: translateY(0); }
+  50%, 60% { transform: translateY(var(--mm-thumb-y)); }
+  88%, 100% { transform: translateY(0); }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어오게 한다 (2·3px 는 0 으로 내린다)
+@media (max-width: 340px) {
+  .root { gap: $sp-1; padding: $sp-2; }
+  .view, .map { height: 104px; }
+  .map { flex-basis: 40px; }
+  .track { font-size: 10px; line-height: 16px; padding: $sp-1; }
+  .name { font-size: 11px; }
+  .ico { font-size: 13px; }
+  .status, .count, .note { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .stTop,
+  .isDemo .stMid,
+  .isDemo .track,
+  .isDemo .box {
+    animation: none !important;
+    transform: none !important;
+  }
+}

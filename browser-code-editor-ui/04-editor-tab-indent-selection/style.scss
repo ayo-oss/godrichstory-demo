@@ -1,0 +1,165 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// Tab 들여쓰기와 되돌리기 — 잡힌 줄 전체가 같이 움직이고 선택 범위는 재계산되어 남는다.
+// 실제 조작은 textarea 의 keydown Tab/Shift+Tab (JS). 격자 미리보기(.is-demo)는
+// 선택 밴드가 steps(1, end) 컷으로 켜지고, 선택 줄의 글자가 두 칸씩 slide 로 밀렸다 빠진다.
+// 무대가 옐로라 편집기 판은 잉크로 뒤집고 글자는 크림 — 옐로 면 위 크림 글자는 AA 미달 단골이라
+// 이 데모의 글자는 전부 잉크 판 위에 앉는다.
+
+$duration: $dur-quick;
+$easing: $ease-spring;
+$color: $stage-yellow;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$line: rgba(255, 255, 255, .16);
+$dim: #beb7ad;
+$fs: clamp(11px, 3vw, 13px);
+$lh: 20px;
+$sel: rgba(255, 210, 63, .30);
+
+@include stage($stage-yellow);
+
+.ti {
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border-radius: $r-card;
+  background: $stage-ink;
+  box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄
+.ti__bar { display: flex; align-items: center; gap: $sp-2; }
+.ti__ico { display: grid; place-items: center; color: $color; font-size: 15px; }
+.ti__name {
+  flex: 1 1 auto; color: $subject-cream;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+.ti__key {
+  flex: 0 0 auto; padding: $sp-1 $sp-2; border-radius: $r-pill;
+  border: 1px solid rgba(255, 255, 255, .24);
+  color: $dim; font-family: $mono; font-weight: 700; font-size: 10px; line-height: 1.4;
+}
+
+// ── 두 겹이 겹치는 자리. 미리보기용 pre 를 textarea 와 포갠다 (정적 경로에서는 pre 가 꺼져 있다)
+.ti__wrap { position: relative; display: grid; height: $lh * 5 + $sp-4; }
+.ti__wrap > * { grid-area: 1 / 1; }
+
+%layer {
+  box-sizing: border-box; margin: 0; padding: $sp-2;
+  border: 0; border-radius: $r-sm;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2; // 붙여 넣은 탭 문자도 두 칸 폭으로
+  white-space: pre; overflow: hidden;
+}
+
+.ti__ghost {
+  @extend %layer;
+  background: rgba(0, 0, 0, .28); color: $subject-cream;
+  opacity: 0; pointer-events: none;
+}
+.ti__ln { display: block; }
+.ti__tx { display: inline-block; } // transform 이 inline 에는 안 걸리므로 블록화
+
+.ti__ta {
+  @extend %layer;
+  background: transparent; color: $subject-cream; caret-color: $stage-yellow;
+  resize: none;
+}
+.ti__ta::selection { background: $sel; }
+.ti__ta:focus-visible { outline: 2px solid $stage-yellow; outline-offset: -2px; }
+
+.ti__meta { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin: 0; }
+.ti__status { color: $dim; font-family: $mono; font-weight: 500; font-size: 11px; line-height: 1.4; }
+.ti__lines {
+  flex: 0 0 auto; padding: $sp-1 $sp-2; border-radius: $r-pill;
+  background: rgba(255, 210, 63, .18); color: $stage-yellow;
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+}
+.ti__note {
+  margin: 0; color: $dim;
+  font-weight: 500; font-size: 11px; line-height: 1.4;
+}
+
+// ── 격자 미리보기 루프 (2초)
+// 이야기: 6% 에 선택 밴드가 steps(1, end) 컷으로 켜지고(밴드 컷이 곧 포스터 — 줄 전체가 잡힌 장) →
+// Tab 칩 점등(17%)과 함께 20→26% 두 칸 밀림 → 36→42% 다시 두 칸 →
+// Shift+Tab 칩 점등(55%)과 함께 62%·72% 제자리. 복귀는 78% 안에 끝난다.
+// 밴드를 0% 부터 고정하면 누적면적이 밴드 몫을 잃고 3% 대로 떨어진다(실측 299) — 컷이 면적을 지킨다.
+// 밴드는 실제 편집기처럼 줄 전체 폭으로 깔리고 글자만 그 안에서 밀린다.
+.ti.is-demo .ti__ta { color: transparent; -webkit-text-fill-color: transparent; }
+.ti.is-demo .ti__ghost { opacity: 1; }
+
+.ti.is-demo .ti__ln--sel {
+  animation-name: tiBand;
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.ti.is-demo .ti__ln--sel .ti__tx {
+  animation-name: tiIndent;
+  animation-duration: $dur-loop; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+// 상태 문장도 밴드와 **같은 순간**에 갈아 끼운다 — 어긋나면 「1번 줄 커서 + 3~5줄 선택 밴드」 장면이
+// poster 로 뽑힌다 (실측 2026-09-13: 문장을 JS 로만 쓰다 보니 미리보기에서 영원히 첫 문장이었다)
+.ti__status { display: inline-grid; }
+.ti__stCaret, .ti__stSel { grid-area: 1 / 1; }
+.ti__stSel { visibility: hidden; }
+.ti.is-demo .ti__stCaret { visibility: hidden; }
+.ti.is-demo .ti__stSel { visibility: visible; }
+.ti.is-demo .ti__key--tab {
+  animation-name: tiTabLit;
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.ti.is-demo .ti__key--sft {
+  animation-name: tiSftLit;
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+
+// steps(1, end) 는 구간 끝에서만 값을 바꾼다 — 점프 지점(6%)을 키프레임에 따로 둔다
+@keyframes tiBand {
+  0%, 5% { background-color: rgba(255, 210, 63, 0); }
+  6%, 100% { background-color: $sel; }
+}
+// 2ch = 등폭 글자 두 칸 — 글자 크기가 좁은 화면에서 줄어도 밀림 폭이 글자와 같이 줄어든다
+@keyframes tiIndent {
+  0%, 20% { transform: translateX(0); }
+  26%, 36% { transform: translateX(2ch); }
+  42%, 56% { transform: translateX(4ch); }
+  62%, 72% { transform: translateX(2ch); }
+  78%, 100% { transform: translateX(0); }
+}
+@keyframes tiTabLit {
+  0%, 17% { background-color: rgba(255, 210, 63, 0); color: $dim; border-color: rgba(255, 255, 255, .24); }
+  18%, 52% { background-color: $stage-yellow; color: $stage-ink; border-color: $stage-yellow; }
+  53%, 100% { background-color: rgba(255, 210, 63, 0); color: $dim; border-color: rgba(255, 255, 255, .24); }
+}
+@keyframes tiSftLit {
+  0%, 55% { background-color: rgba(255, 210, 63, 0); color: $dim; border-color: rgba(255, 255, 255, .24); }
+  56%, 84% { background-color: $stage-yellow; color: $stage-ink; border-color: $stage-yellow; }
+  85%, 100% { background-color: rgba(255, 210, 63, 0); color: $dim; border-color: rgba(255, 255, 255, .24); }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어오게 한다 (2·3px 는 0 으로 내린다)
+@media (max-width: 340px) {
+  .ti { gap: $sp-1; padding: $sp-2; }
+  .ti__wrap { height: 16px * 5 + $sp-2; }
+  .ti__ghost, .ti__ta { font-size: 11px; line-height: 16px; padding: $sp-1; }
+  .ti__name { font-size: 11px; }
+  .ti__key { font-size: 9px; padding: 0 $sp-1; }
+  .ti__ico { font-size: 13px; }
+  .ti__status, .ti__lines, .ti__note { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ti.is-demo .ti__ln--sel,
+  .ti.is-demo .ti__ln--sel .ti__tx,
+  .ti.is-demo .ti__key--tab,
+  .ti.is-demo .ti__key--sft {
+    animation: none !important;
+    transform: none !important;
+    background-color: transparent !important;
+    color: $dim !important;
+    border-color: rgba(255, 255, 255, .24) !important;
+  }
+}

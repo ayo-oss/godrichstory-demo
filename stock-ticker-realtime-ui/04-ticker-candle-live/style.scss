@@ -1,0 +1,178 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 마지막 봉이 자라는 캔들 차트 — 확정된 봉 11개는 값이 굳어 그대로 서 있고, 맨 오른쪽 한 봉만
+// 새 값이 들어올 때마다 늘어난다. 주기가 끝나면 그 봉이 확정되고 차트가 한 칸 왼쪽으로 밀린다.
+//
+// 289(SVG 그래프 그리기)와 갈리는 지점: 289 는 이미 다 들어와 있는 정적 데이터를 한 번에 그리고,
+// 여기는 데이터가 계속 들어와 마지막 한 봉이 그 자리에서 실시간으로 늘어난다.
+//
+// 실사용에서는 시드 PRNG 가 260ms 마다 마지막 봉을 갱신하고 JS 가 몸통·심지의 top/height 를 다시 적는다.
+// 미리보기(.is-demo)는 같은 서사를 2초 CSS 루프에 눕힌다 — JS 는 그동안 값을 안 건드린다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $tick-up;
+
+@include stage($stage-ink);
+
+// 툴팁이 절대 배치라 부모 높이 계산에서 빠진다 — 그 높이만큼 아래에 자리를 비워 둔다 (BD8·BD9)
+.cl { position: relative; display: flex; justify-content: center; width: 100%; padding-bottom: $sp-10; }
+
+.cl__board {
+  width: min(100%, 360px); background: $tick-panel; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-3 $sp-2;
+}
+.cl__head { display: flex; align-items: baseline; justify-content: space-between; gap: $sp-2; padding-bottom: $sp-2; }
+.cl__name { margin: 0; }
+.cl__sym { font-weight: 800; font-size: clamp(11px, 3vw, 13px); color: $subject-cream; letter-spacing: .04em; }
+.cl__unit { font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: $tick-mute; margin-left: $sp-1; }
+.cl__now {
+  font-weight: 800; font-size: clamp(12px, 3.4vw, 15px); line-height: 1.4;
+  font-variant-numeric: tabular-nums; color: $subject-cream;
+}
+.cl__now.is-up { color: $color; }
+.cl__now.is-down { color: $tick-down; }
+
+.cl__plot { position: relative; height: clamp(76px, 25vw, 116px); overflow: hidden; }
+// 칸을 13개로 짜고 트랙을 13/12 만큼 넓혀 12칸만 보이게 한다 — 한 칸 밀기가 translateX(-100%/13) 로 딱 떨어진다
+.cl__track { display: grid; grid-template-columns: repeat(13, 1fr); width: calc(100% * 13 / 12); height: 100%; }
+// 버튼은 폭이 fit-content 라 격자 칸이 0 으로 접힌다 — width: 100% 를 반드시 적는다 (281-04 실측)
+.cl__slot {
+  position: relative; width: 100%; height: 100%;
+  padding: 0; margin: 0; border: 0; background: transparent; cursor: pointer;
+}
+.cl__slot:focus-visible { outline: 2px solid $tick-mute; outline-offset: -2px; }
+
+.cl__wick { position: absolute; left: calc(50% - 1px); width: 2px; background: $tick-mute; }
+// 심지도 몸통도 **여는 값 쪽 변**이 기준점이다. 가운데를 기준으로 늘리면 이미 확정된 여는 값 자리까지
+// 같이 움직여 차트가 거짓말을 한다 — 위로 자라는 것은 아래 변, 아래로 자라는 것은 위 변이 origin
+.cl__wick--up { transform-origin: 50% 100%; }
+.cl__wick--dn { transform-origin: 50% 0; }
+.cl__slot--live .cl__wick, .cl__slot--next .cl__wick { background: $color; }
+
+.cl__body { box-sizing: border-box; position: absolute; left: 18%; right: 18%; border-radius: $r-xs; }
+// 방향을 색만으로 전하지 않는다 — 오르는 봉은 속 빈 몸통, 내리는 봉은 채운 몸통으로 형태가 갈린다
+.cl__body.is-up { border: 2px solid $color; background: transparent; transform-origin: 50% 100%; }
+.cl__body.is-down { border: 2px solid $tick-down; background: $tick-down; transform-origin: 50% 0; }
+
+// 아직 안 끝난 봉 위에 붙는 방향 표시 — 색을 못 읽어도 ▲ 로 어느 쪽으로 자라는지 안다
+.cl__tag {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  font-weight: 700; font-size: clamp(7px, 2vw, 9px); line-height: 1; color: $color;
+}
+
+// 툴팁 — 실사용에서는 봉 위에 포인터를 올리면 JS 가 left 를 옮기고 네 값을 갈아 끼운다
+.cl__tip {
+  position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+  display: grid; grid-template-columns: repeat(2, auto); gap: 0 $sp-3;
+  background: $tick-panel; border: 1px solid rgba(154, 147, 166, .45); border-radius: $r-sm;
+  box-shadow: $shadow-press; padding: $sp-1 $sp-2; white-space: nowrap; max-width: 100%;
+}
+.cl__tipRow { display: flex; align-items: baseline; gap: $sp-1; }
+.cl__tipK { font-weight: 700; font-size: clamp(8px, 2.1vw, 9px); line-height: 1.6; color: $tick-mute; }
+.cl__tipV {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.6;
+  color: $subject-cream; font-variant-numeric: tabular-nums;
+}
+
+// 실사용(정적 경로)에서는 대기 칸이 보이면 안 된다. display: none 이 아니라 opacity 0 이라야
+// 격자 칸 폭이 그대로 남아 나머지 12개의 자리가 안 흔들린다
+.cl:not(.is-demo) .cl__slot--next { opacity: 0; }
+.cl__slot--next .cl__tag { opacity: 0; }
+
+// ── 미리보기 루프(2초)
+//    0 → 70%   마지막 봉이 여는 값 선에서 위로 자란다 (몸통·심지 모두 scaleY)
+//    72%       확정 컷 — 트랙이 한 칸 왼쪽으로 밀리고 오른쪽에서 새 봉이 선다 (steps(1, end))
+//    72 → 92%  새 봉이 조금 자란다
+//    94%       루프 복귀 컷 — 24프레임의 마지막 장이 2초의 95.8% 지점이라 96% 안에서 끝낸다
+//    루프 안에서 컷은 두 번(확정·복귀) = 초당 1회로 WCAG 2.3.1 의 초당 3회 미만 아래다
+.cl.is-demo .cl__track {
+  animation-name: clShift;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes clShift {
+  0%, 70% { transform: translateX(0); }
+  72%, 92% { transform: translateX(calc(-100% / 13)); }
+  94%, 100% { transform: translateX(0); }
+}
+
+.cl.is-demo .cl__slot--live .cl__body,
+.cl.is-demo .cl__slot--live .cl__wick,
+.cl.is-demo .cl__slot--next .cl__body,
+.cl.is-demo .cl__slot--next .cl__wick {
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+.cl.is-demo .cl__slot--live .cl__body { animation-name: clGrowBody; }
+.cl.is-demo .cl__slot--live .cl__wick--up { animation-name: clGrowUp; }
+.cl.is-demo .cl__slot--live .cl__wick--dn { animation-name: clGrowDn; }
+.cl.is-demo .cl__slot--next .cl__body,
+.cl.is-demo .cl__slot--next .cl__wick { animation-name: clGrowNext; }
+
+@keyframes clGrowBody {
+  0% { transform: scaleY(.18); }
+  12% { transform: scaleY(.42); }
+  24% { transform: scaleY(.31); }
+  38% { transform: scaleY(.68); }
+  52% { transform: scaleY(.57); }
+  70% { transform: scaleY(1); }
+  92% { transform: scaleY(1); animation-timing-function: steps(1, end); }
+  94%, 100% { transform: scaleY(.18); }
+}
+@keyframes clGrowUp {
+  0% { transform: scaleY(.24); }
+  12% { transform: scaleY(.5); }
+  24% { transform: scaleY(.46); }
+  38% { transform: scaleY(.76); }
+  52% { transform: scaleY(.72); }
+  70% { transform: scaleY(1); }
+  92% { transform: scaleY(1); animation-timing-function: steps(1, end); }
+  94%, 100% { transform: scaleY(.24); }
+}
+@keyframes clGrowDn {
+  0% { transform: scaleY(.3); }
+  24% { transform: scaleY(1); }
+  92% { transform: scaleY(1); animation-timing-function: steps(1, end); }
+  94%, 100% { transform: scaleY(.3); }
+}
+@keyframes clGrowNext {
+  0% { transform: scaleY(0); }
+  70% { transform: scaleY(0); animation-timing-function: steps(1, end); }
+  72% { transform: scaleY(.26); animation-timing-function: $easing; }
+  84% { transform: scaleY(.48); }
+  92% { transform: scaleY(.62); animation-timing-function: steps(1, end); }
+  94%, 100% { transform: scaleY(0); }
+}
+
+// 방향 표시는 확정 컷에 맞춰 자리를 넘긴다 — 아직 안 끝난 봉 위에만 떠 있어야 뜻이 맞는다
+.cl.is-demo .cl__slot--live .cl__tag,
+.cl.is-demo .cl__slot--next .cl__tag {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.cl.is-demo .cl__slot--live .cl__tag { animation-name: clTagLive; }
+.cl.is-demo .cl__slot--next .cl__tag { animation-name: clTagNext; }
+@keyframes clTagLive { 0%, 70% { opacity: 1; } 72%, 92% { opacity: 0; } 94%, 100% { opacity: 1; } }
+@keyframes clTagNext { 0%, 70% { opacity: 0; } 72%, 92% { opacity: 1; } 94%, 100% { opacity: 0; } }
+
+@media (max-width: 340px) {
+  .cl { padding-bottom: $sp-8; }
+  .cl__board { padding: $sp-2; }
+  .cl__head { padding-bottom: $sp-1; }
+  .cl__tip { gap: 0 $sp-2; padding: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 자라는 연출과 확정 컷을 멈추고 마지막 봉을 다 자란 크기로 세워 둔다 — 값은 그대로 갱신된다
+  .cl.is-demo .cl__track { animation: none !important; transform: none !important; }
+  .cl.is-demo .cl__slot--live .cl__body,
+  .cl.is-demo .cl__slot--live .cl__wick { animation: none !important; transform: none !important; }
+  .cl.is-demo .cl__slot--next .cl__body,
+  .cl.is-demo .cl__slot--next .cl__wick { animation: none !important; transform: scaleY(0) !important; }
+  .cl.is-demo .cl__slot--live .cl__tag { animation: none !important; opacity: 1 !important; }
+  .cl.is-demo .cl__slot--next .cl__tag { animation: none !important; opacity: 0 !important; }
+}

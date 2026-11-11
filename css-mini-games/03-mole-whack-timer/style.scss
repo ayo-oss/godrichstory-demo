@@ -1,0 +1,170 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 두더지 잡기 — 3×3 구멍에서 두더지가 무작위로 솟았다 들어간다.
+// 실사용 경로: JS 가 구멍에 .is-up 을 붙였다 떼고, 솟고 들어가는 움직임은 transition 이 그린다.
+// 격자 미리보기(.is-demo): 같은 움직임을 @keyframes 로 그리되 구멍마다 음수 animation-delay 를 달아
+// 위상만 어긋뜨린다. 주기가 전부 2초라 gif 가 한 바퀴에서 매끈하게 이어진다(271 계열 함정 회피).
+// 실사용 코드와 미리보기 코드가 갈라져 있는 것은 의도다 — 252-07 과 같은 계열.
+// 무대가 주황이라 무대 위 글자는 전부 $subject-ink 다(5.50:1). 크림 글자는 3.11:1 로 AA 미달이라 쓰지 않고,
+// 알파를 씌운 잉크(.72)도 주황 위에서는 3.77:1 이라 못 쓴다 — 보조 글자는 굵기·크기로만 낮춘다.
+
+$duration: $dur-loop;
+$easing: $ease-pop;
+$color: $subject-cream;
+
+@include stage($stage-orange);
+
+// 구멍에는 글자가 없어 내용 높이가 0 이다 — 칸을 세로로 채우지 않으면 1fr 행이 통째로 접힌다
+.stage { align-items: stretch; }
+
+.wg {
+  display: flex; flex-direction: column; gap: $sp-2;
+  width: 100%; max-width: 300px; height: 100%;
+}
+
+// ── 머리줄 ───────────────────────────────────────────────
+.wg__bar { display: flex; align-items: center; gap: $sp-2; }
+.wg__title { flex: 1 1 auto; margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 15px); color: $subject-ink; }
+.wg__best { display: inline-flex; align-items: center; gap: $sp-1; color: $subject-ink; }
+.wg__trophy { width: clamp(12px, 3vw, 15px); height: clamp(12px, 3vw, 15px); }
+.wg__restart {
+  display: grid; place-items: center; width: clamp(22px, 5vw, 28px); aspect-ratio: 1; padding: 0;
+  border: 2px solid rgba($subject-ink, .32); border-radius: $r-control;
+  background: none; color: $subject-ink; cursor: pointer;
+}
+.wg__restart svg { width: 62%; height: 62%; }
+.wg__restart:focus-visible { outline: 2px solid $subject-ink; outline-offset: 2px; }
+
+// ── 시계·점수줄 ───────────────────────────────────────────
+.wg__meter { display: flex; align-items: center; gap: $sp-2; }
+.wg__clock { display: inline-flex; align-items: center; gap: $sp-1; color: $subject-ink; }
+.wg__timer { width: clamp(11px, 2.8vw, 14px); height: clamp(11px, 2.8vw, 14px); }
+.wg__num { font-weight: 800; font-size: clamp(11px, 2.8vw, 14px); color: $subject-ink; font-variant-numeric: tabular-nums; }
+.wg__num--score { font-size: clamp(13px, 3.4vw, 17px); }
+.wg__unit { font-weight: 700; font-size: clamp(8px, 2.2vw, 10px); color: $subject-ink; }
+.wg__score { display: inline-flex; align-items: baseline; gap: $sp-1; }
+
+.wg__track {
+  flex: 1 1 auto; display: block; height: 8px; overflow: hidden;
+  border-radius: $r-pill; background-color: rgba($subject-ink, .24);
+}
+// 채움 막대는 시작 변에서 줄어든다 — 그래서 origin 이 중심이 아니다(blog-demo 규칙 8 의 "붙는 지점" 쪽)
+.wg__fill {
+  display: block; width: 100%; height: 100%; border-radius: inherit;
+  background-color: $subject-ink; transform-origin: left center; transform: scaleX(1);
+}
+
+// ── 구멍판 ───────────────────────────────────────────────
+.wg__field {
+  position: relative; flex: 1 1 auto; min-height: 0;
+  display: grid; grid-template: repeat(3, 1fr) / repeat(3, 1fr); gap: $sp-2;
+}
+
+.wg__hole {
+  position: relative; display: block; width: 100%; height: 100%; padding: 0;
+  border: 0; border-radius: 50%; background: none; cursor: pointer;
+}
+.wg__hole:focus-visible { outline: 2px solid $subject-ink; outline-offset: 2px; }
+
+// 구멍 안쪽 — 여기서만 잘린다. 두더지는 이 상자 아래에 숨어 있다가 올라온다
+.wg__window {
+  position: absolute; inset: 0; display: block; overflow: hidden;
+  border-radius: inherit; background-color: $subject-ink;
+}
+// 구멍 테두리(입구 턱) — 클릭을 가로채지 않는다
+.wg__rim {
+  position: absolute; inset: 0; display: block; pointer-events: none;
+  border: 2px solid rgba($subject-cream, .18); border-radius: inherit;
+}
+
+// 두더지 몸통은 CSS(알약 반쪽)이고 얼굴만 Phosphor Duotone 아이콘이다
+.wg__mole {
+  position: absolute; left: 16%; right: 16%; bottom: 0; height: 76%;
+  display: grid; place-items: center;
+  border-radius: $r-pill $r-pill 0 0;
+  background-color: $color; color: $subject-ink;
+  transform: translateY(100%);
+  transition: transform $dur-quick $easing;
+}
+.wg__mole svg { width: 66%; height: 66%; }
+.wg__hole.is-up .wg__mole { transform: translateY(0); }
+
+// 명중 플래시 — 구멍 전체를 한 번 밝히고 퍼지며 사라진다(자기 중심에서 커진다)
+.wg__flash {
+  position: absolute; inset: 0; display: block; pointer-events: none;
+  border-radius: inherit; background-color: $subject-cream; opacity: 0;
+}
+.wg__hole.is-hit .wg__flash {
+  animation-name: wgFlashHit; animation-duration: 380ms; animation-timing-function: $ease-out;
+  animation-iteration-count: 1; animation-fill-mode: both;
+}
+@keyframes wgFlashHit {
+  from { opacity: .8; transform: scale(1); }
+  to   { opacity: 0; transform: scale(1.22); }
+}
+
+// ── 시작·결과 덮개 ────────────────────────────────────────
+.wg__veil {
+  position: absolute; inset: 0; z-index: 3; padding: $sp-2;
+  display: grid; place-items: center; align-content: center; gap: $sp-2;
+  border-radius: $r-card; background-color: rgba($subject-ink, .72);
+}
+.wg__veil[hidden] { display: none; }
+.wg__veilMsg {
+  margin: 0; text-align: center;
+  font-weight: 800; font-size: clamp(10px, 2.6vw, 13px); color: $subject-cream;
+}
+.wg__veilMsg[hidden] { display: none; }
+.wg__start {
+  padding: $sp-2 $sp-5; border: 0; border-radius: $r-pill;
+  background-color: $subject-cream; color: $subject-ink;
+  font-weight: 800; font-size: clamp(11px, 2.8vw, 14px); cursor: pointer;
+  box-shadow: $shadow-press; transition: transform $dur-instant $ease-out;
+}
+.wg__start:active { transform: scale(.94); }
+.wg__start:focus-visible { outline: 2px solid $subject-cream; outline-offset: 2px; }
+
+// ── 격자 미리보기 ─────────────────────────────────────────
+// 구멍 아홉에 -220ms 씩 어긋난 지연을 주면 두더지가 읽는 순서대로 물결처럼 솟는다.
+// 지연이 음수라 첫 프레임부터 이미 여럿이 올라와 있다 — 격자 썸네일이 빈 화면으로 시작하지 않는다.
+.wg.is-demo .wg__veil { opacity: 0; }
+.wg.is-demo .wg__mole,
+.wg.is-demo .wg__flash {
+  animation-duration: $duration; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: both;
+  animation-delay: calc(var(--i) * -220ms);
+}
+.wg.is-demo .wg__mole { animation-name: wgMoleRise; transition: none; }
+.wg.is-demo .wg__flash { animation-name: wgHitLoop; }
+
+@keyframes wgMoleRise {
+  0%   { transform: translateY(100%); }
+  8%   { transform: translateY(0); }
+  20%  { transform: translateY(0); }
+  30%  { transform: translateY(100%); }
+  100% { transform: translateY(100%); }
+}
+@keyframes wgHitLoop {
+  0%   { opacity: 0; transform: scale(.92); }
+  17%  { opacity: 0; transform: scale(.92); }
+  21%  { opacity: .8; transform: scale(1); }
+  34%  { opacity: 0; transform: scale(1.18); }
+  100% { opacity: 0; transform: scale(1.18); }
+}
+
+@media (max-width: 340px) {
+  .wg { gap: $sp-1; }
+  .wg__field { gap: $sp-1; }
+  .wg__veil { padding: $sp-1; }
+  .wg__track { height: 4px; }
+}
+
+// reduce 에서는 솟는 연출을 끄고 두더지를 올라온 채로 세워 둔다 — 무엇을 잡는 게임인지는 그대로 보인다.
+// .is-demo 가 붙은 규칙(0,3,0)을 이기려면 !important 가 필요하다(260 실측)
+@media (prefers-reduced-motion: reduce) {
+  .wg.is-demo .wg__mole { animation: none !important; transform: translateY(0) !important; }
+  .wg.is-demo .wg__flash { animation: none !important; opacity: 0 !important; }
+  .wg__hole.is-hit .wg__flash { animation: none !important; }
+  .wg__mole { transition: none !important; }
+  .wg__start { transition: none !important; }
+}

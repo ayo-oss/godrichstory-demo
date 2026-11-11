@@ -1,0 +1,261 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// EditorThemeSwitcher — vanilla 판(run/299/demo/09-editor-theme-switcher/style.scss) 의 React 포트.
+// @keyframes 본문은 vanilla 와 같은 글자다 (값을 다시 타이핑하지 않는다).
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어오고 기본값은 vanilla 의 $duration·$easing·$color 와 같다.
+// 테마 토큰(--ed-bg·--ed-fg·--tok-*)은 props 가 아니라 [data-theme] 선택자가 정한다.
+// 고대비 판은 글자마다 실제로 대비를 재서 4.5:1 이상으로 맞췄다(실측값 run/299/_probe/theme_contrast.json).
+// 격자 미리보기(.isDemo)는 테마 교체를 steps(1, end) 컷으로 한 프레임에 자른다 — 크로스페이드로
+// 겹치면 poster 에 두 테마가 반투명하게 겹친 유령이 찍힌다.
+
+$duration: $dur-loop;
+$easing: $ease-pop;
+$color: $stage-yellow;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$fs: clamp(11px, 3vw, 13px);
+$lh: 20px;
+
+// 색 변수를 등록한다 — 등록된 <color> 변수만 keyframes 에서 steps(1, end) 로 값이 딱 끊어진다.
+// 초깃값은 라이트 벌(정적 기본 상태)과 같은 값이다
+@property --ed-bg  { syntax: '<color>'; inherits: true; initial-value: #{$stage-paper}; }
+@property --ed-fg  { syntax: '<color>'; inherits: true; initial-value: #{$subject-ink}; }
+@property --tok-key { syntax: '<color>'; inherits: true; initial-value: #{$subject-blue-deep}; }
+@property --tok-str { syntax: '<color>'; inherits: true; initial-value: #7440d4; }
+@property --tok-num { syntax: '<color>'; inherits: true; initial-value: #{$error}; }
+@property --tok-com { syntax: '<color>'; inherits: true; initial-value: #6b6577; }
+
+.stage {
+  box-sizing: border-box; min-height: 100vh;
+  display: grid; place-items: center; margin: 0;
+  background: $stage-ink;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  padding: clamp(8px, 4vw, 24px);
+}
+
+.root { display: flex; flex-direction: column; gap: $sp-2; width: min(100%, 400px); }
+
+// 세 벌의 변수 묶음. 라이트의 문자열 색은 흰 면 위 4.5:1 을 넘기도록 토큰보다 한 단계
+// 내린 값이다(실측값은 theme_contrast.json). 검은 면은 토큰에 없는 색이라 리터럴로 쓴다.
+// 사용자 정의 속성값은 SassScript 가 아닌 CSS 값으로 파싱된다 — 토큰은 #{} 보간으로 넣는다
+.panel[data-theme="light"] {
+  --ed-bg: #{$stage-paper}; --ed-fg: #{$subject-ink};
+  --tok-key: #{$subject-blue-deep}; --tok-str: #7440d4; --tok-num: #{$error}; --tok-com: #6b6577;
+  color-scheme: light;
+}
+.panel[data-theme="dark"], .panel[data-theme="hc"] {
+  --tok-key: #{$stage-yellow}; --tok-str: #{$tick-up}; --tok-num: #{$subject-sky};
+  color-scheme: dark;
+}
+.panel[data-theme="dark"] {
+  --ed-bg: #{$tick-panel}; --ed-fg: #{$subject-cream}; --tok-com: #{$tick-mute};
+}
+.panel[data-theme="hc"] {
+  --ed-bg: #000000; --ed-fg: #{$stage-paper}; --tok-com: #cfc8d9;
+}
+
+.panel {
+  box-sizing: border-box; display: flex; flex-direction: column; gap: $sp-2;
+  padding: $sp-3; border: 1px solid rgba(255, 255, 255, .18); border-radius: $r-card;
+  background: var(--ed-bg); color: var(--ed-fg);
+  box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄 — 아이콘·테두리도 토큰 색을 따라가니 테마 바뀌면 같이 바뀐다
+.bar { display: flex; align-items: center; gap: $sp-2; }
+.ico { display: grid; place-items: center; color: var(--tok-key); font-size: 15px; }
+.name { flex: 1 1 auto; font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4; }
+.cur {
+  display: inline-grid; padding: $sp-1 $sp-2; border: 1px solid var(--tok-key); border-radius: $r-pill;
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+}
+// 이름표 세 장을 한 칸에 겹친다 — 칸 폭이 가장 긴 이름에 맞춰 고정돼 테마를 갈아도 바가 안 흔들린다
+.curName { grid-area: 1 / 1; visibility: hidden; }
+.cur[data-cur="light"] .curName[data-set="light"],
+.cur[data-cur="dark"] .curName[data-set="dark"],
+.cur[data-cur="hc"] .curName[data-set="hc"] { visibility: visible; }
+
+.code {
+  margin: 0; padding: $sp-2; border-radius: $r-sm;
+  background: rgba(0, 0, 0, .05);
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2;
+  white-space: pre; overflow: auto; overscroll-behavior: contain;
+}
+.t--k { color: var(--tok-key); }
+.t--s { color: var(--tok-str); }
+.t--n { color: var(--tok-num); }
+.t--com { color: var(--tok-com); }
+// 고대비에서는 코드를 굵게, 주석만 보통 굵기로 — 색이 아니라 굵기로도 갈라 읽는다
+.panel[data-theme="hc"] .code { font-weight: 700; }
+.panel[data-theme="hc"] .t--com { font-weight: 500; }
+
+// ── 테마 단추 세 칸. 격자는 이 컨테이너가 쓴다 — 단추에 display:grid 를 주면 폭이
+// fit-content 로 접혀 1fr 칸이 0 이 된다(281-04 실측). 단추 안은 flex 다
+.opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: $sp-2; }
+.opt {
+  position: relative; display: flex; align-items: center; justify-content: center; gap: $sp-1;
+  box-sizing: border-box; width: 100%; padding: $sp-1 $sp-2 $sp-2;
+  border: 1px solid rgba(255, 255, 255, .16); border-radius: $r-control;
+  background: rgba(255, 255, 255, .08); color: $subject-cream;
+  font-family: inherit; font-weight: 700; font-size: 11px; line-height: 1.4;
+  cursor: pointer;
+}
+.opt[aria-pressed="true"] { background: $subject-cream; color: $subject-ink; border-color: $subject-cream; }
+.opt:focus-visible { outline: 2px solid var(--color, #{$color}); outline-offset: 2px; }
+// 각 단추의 색 견본 — 그 테마의 배면·키워드·글자 색 세 점
+.dots { display: inline-flex; gap: $sp-1; }
+.dot { width: 8px; height: 8px; border: 1px solid rgba(255, 247, 230, .4); border-radius: 50%; box-sizing: border-box; }
+.opt[data-set="light"] .dot--1 { background: $stage-paper; }
+.opt[data-set="light"] .dot--2 { background: $subject-blue-deep; }
+.opt[data-set="light"] .dot--3 { background: #7440d4; }
+.opt[data-set="dark"] .dot--1 { background: $tick-panel; }
+.opt[data-set="dark"] .dot--2 { background: $stage-yellow; }
+.opt[data-set="dark"] .dot--3 { background: $tick-up; }
+.opt[data-set="hc"] .dot--1 { background: #000000; }
+.opt[data-set="hc"] .dot--2 { background: $stage-yellow; }
+.opt[data-set="hc"] .dot--3 { background: $stage-paper; }
+
+// 눌린 단추 밑 채움 막대 — 채움 막대는 시작 변에서 자라므로 origin 을 왼쪽에 둔다
+// (blog-demo 규칙 8의 "붙는 지점이 있는 요소" 예외). 눌린 단추는 밝은 면이라 막대를 먹색으로
+.ind {
+  position: absolute; left: $sp-2; right: $sp-2; bottom: $sp-1; height: $sp-1;
+  border-radius: $r-pill; background: var(--color, #{$color});
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.opt[aria-pressed="true"] .ind { transform: scaleX(1); background: $subject-ink; }
+
+// ── 격자 미리보기 루프(2초). 10% 에 다크, 40% 에 고대비, 70% 에 라이트로 돌아온다 —
+// 복귀가 루프 안 70% 에 있으므로 24프레임 샘플 안에 다 잡힌다.
+// 패널 색 여섯 개는 등록된 변수라 steps 컷으로 딱 끊어지고, 단추 배면·채움 막대가 같은 박자를 따른다
+.isDemo .panel {
+  animation-name: thBg, thFg, thKey, thStr, thNum, thCom;
+  animation-duration: var(--duration, #{$duration});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.isDemo .opt {
+  animation-duration: var(--duration, #{$duration});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.isDemo .curName {
+  animation-duration: var(--duration, #{$duration}); animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.isDemo .curName[data-set="light"] { animation-name: thName1; }
+.isDemo .curName[data-set="dark"] { animation-name: thName2; }
+.isDemo .curName[data-set="hc"] { animation-name: thName3; }
+.isDemo .opt:nth-child(1) { animation-name: thOpt1; }
+.isDemo .opt:nth-child(2) { animation-name: thOpt2; }
+.isDemo .opt:nth-child(3) { animation-name: thOpt3; }
+.isDemo .ind {
+  animation-duration: var(--duration, #{$duration});
+  animation-iteration-count: infinite;
+}
+.isDemo .opt:nth-child(1) .ind { animation-name: thInd1; }
+.isDemo .opt:nth-child(2) .ind { animation-name: thInd2; }
+.isDemo .opt:nth-child(3) .ind { animation-name: thInd3; }
+
+@keyframes thBg {
+  0%, 9% { --ed-bg: #{$stage-paper}; }
+  10%, 39% { --ed-bg: #{$tick-panel}; }
+  40%, 69% { --ed-bg: #000000; }
+  70%, 100% { --ed-bg: #{$stage-paper}; }
+}
+@keyframes thFg {
+  0%, 9% { --ed-fg: #{$subject-ink}; }
+  10%, 39% { --ed-fg: #{$subject-cream}; }
+  40%, 69% { --ed-fg: #{$stage-paper}; }
+  70%, 100% { --ed-fg: #{$subject-ink}; }
+}
+@keyframes thKey {
+  0%, 9% { --tok-key: #{$subject-blue-deep}; }
+  10%, 100% { --tok-key: #{$stage-yellow}; }
+}
+@keyframes thStr {
+  0%, 9% { --tok-str: #7440d4; }
+  10%, 100% { --tok-str: #{$tick-up}; }
+}
+@keyframes thNum {
+  0%, 9% { --tok-num: #{$error}; }
+  10%, 100% { --tok-num: #{$subject-sky}; }
+}
+@keyframes thCom {
+  0%, 9% { --tok-com: #6b6577; }
+  10%, 39% { --tok-com: #{$tick-mute}; }
+  40%, 69% { --tok-com: #cfc8d9; }
+  70%, 100% { --tok-com: #6b6577; }
+}
+// 이름표도 단추와 **같은 순간**에 갈아 끼운다 — 어긋나면 「라이트 뱃지 + 다크 화면」 장면이 poster 로 뽑힌다
+@keyframes thName1 {
+  0%, 9% { visibility: visible; }
+  10%, 69% { visibility: hidden; }
+  70%, 100% { visibility: visible; }
+}
+@keyframes thName2 {
+  0%, 9% { visibility: hidden; }
+  10%, 39% { visibility: visible; }
+  40%, 100% { visibility: hidden; }
+}
+@keyframes thName3 {
+  0%, 39% { visibility: hidden; }
+  40%, 69% { visibility: visible; }
+  70%, 100% { visibility: hidden; }
+}
+@keyframes thOpt1 {
+  0%, 9% { background: $subject-cream; color: $subject-ink; }
+  10%, 69% { background: rgba(255, 255, 255, .08); color: $subject-cream; }
+  70%, 100% { background: $subject-cream; color: $subject-ink; }
+}
+@keyframes thOpt2 {
+  0%, 9% { background: rgba(255, 255, 255, .08); color: $subject-cream; }
+  10%, 39% { background: $subject-cream; color: $subject-ink; }
+  40%, 100% { background: rgba(255, 255, 255, .08); color: $subject-cream; }
+}
+@keyframes thOpt3 {
+  0%, 39% { background: rgba(255, 255, 255, .08); color: $subject-cream; }
+  40%, 69% { background: $subject-cream; color: $subject-ink; }
+  70%, 100% { background: rgba(255, 255, 255, .08); color: $subject-cream; }
+}
+// 채움 막대 — 컷(접기)은 steps, 자라기는 튕김 이징: 키프레임 안에서 이징을 따로 준다.
+// 접을 때 튕김을 주면 scaleX 가 음수로 넘겨 반쪽 막대가 번쩍인다
+@keyframes thInd1 {
+  0%, 9% { transform: scaleX(1); background: $subject-ink; animation-timing-function: steps(1, end); }
+  10%, 69% { transform: scaleX(0); background: var(--color, #{$color}); animation-timing-function: steps(1, end); }
+  70% { transform: scaleX(0); background: $subject-ink; animation-timing-function: var(--easing, #{$easing}); }
+  86%, 100% { transform: scaleX(1); background: $subject-ink; }
+}
+@keyframes thInd2 {
+  0%, 9% { transform: scaleX(0); background: var(--color, #{$color}); animation-timing-function: steps(1, end); }
+  10% { transform: scaleX(0); background: $subject-ink; animation-timing-function: var(--easing, #{$easing}); }
+  26%, 39% { transform: scaleX(1); background: $subject-ink; animation-timing-function: steps(1, end); }
+  40%, 100% { transform: scaleX(0); background: var(--color, #{$color}); }
+}
+@keyframes thInd3 {
+  0%, 39% { transform: scaleX(0); background: var(--color, #{$color}); animation-timing-function: steps(1, end); }
+  40% { transform: scaleX(0); background: $subject-ink; animation-timing-function: var(--easing, #{$easing}); }
+  56%, 69% { transform: scaleX(1); background: $subject-ink; animation-timing-function: steps(1, end); }
+  70%, 100% { transform: scaleX(0); background: var(--color, #{$color}); }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어온다
+@media (max-width: 340px) {
+  .root { gap: $sp-1; }
+  .panel { padding: $sp-2; gap: $sp-1; }
+  .code { font-size: 11px; line-height: 16px; padding: $sp-1; }
+  .name { font-size: 11px; }
+  .cur { font-size: 10px; }
+  .opts { gap: $sp-1; }
+  .opt { font-size: 10px; padding: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 애니메이션을 끊으면 정적 규칙(라이트 벌 + 눌린 첫 단추)이 그대로 드러난다
+  .isDemo .panel,
+  .isDemo .curName,
+  .isDemo .opt,
+  .isDemo .ind {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,391 @@
+// StarTwinkleOcclusion - vanilla 판(06-aur-star-twinkle-occlusion) 의 React 포트. 같은 계산을 useEffect 안에서 돌린다.
+import { useEffect, useRef } from "react";
+import styles from "./StarTwinkleOcclusion.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+export default function StarTwinkleOcclusion() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    const root: HTMLElement = rootEl;
+    type RGB = [number, number, number];
+    type Pt = [number, number];
+    type Rect = { x: number; y: number; w: number; h: number };
+    type PixelBuffer = { cv: HTMLCanvasElement; c: CanvasRenderingContext2D; img: ImageData; w: number; h: number };
+    // 장면 좌표 — 캔버스 내부는 이 크기 x 배율(dpr)로 잡고, 그림은 늘 480x300 좌표로 그린다
+    const W = 480;
+    const H = 300;
+    // 고정 틱(ms) — 화면 주사율과 상관없이 같은 빠르기로 흐른다
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    // 동작 줄이기에서 멈춰 둘 장면 시각(ms) — 이 시각의 한 장면만 그린다
+    const STILL_MS = 5200;
+    // 밤하늘 — 위는 짙은 남색, 지평선 쪽은 한 단계 밝은 남보라
+    const SKY_TOP: RGB = [8, 10, 24];
+    const SKY_LOW: RGB = [24, 28, 60];
+    // 오로라 빛 — 채도를 낮춘 파스텔이지만 어두운 하늘과의 명도 차는 크게 둔다
+    const MINT: RGB = [150, 240, 200];
+    const TEAL: RGB = [126, 214, 236];
+    const VIOLET: RGB = [192, 168, 255];
+    const PINK: RGB = [255, 178, 214];
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    // 부드러운 계단 3x² - 2x³ — 0 과 1 에서 기울기가 0 이라 이음매가 보이지 않는다
+    function smooth(x: number): number { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+    function mix(a: RGB, b: RGB, k: number): RGB { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    function rgba(c: RGB, a: number): string {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 시드 고정 난수 — 같은 시드면 같은 배치가 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seed: number): () => number {
+        let s = seed >>> 0;
+        return function (): number {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 격자점 해시 — 정수 좌표 (ix, iy) 와 시드에서 0..1 값 하나를 만든다. 같은 점은 언제나 같은 값
+    function hash2(ix: number, iy: number, seed: number): number {
+        let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1013904223)) | 0;
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+    }
+    // 값 노이즈 — 정수 격자점마다 해시 값을 두고, 칸 안에서는 네 모서리 값을 부드러운 계단으로 보간한다. 결과 0..1
+    function noise2(x: number, y: number, seed: number): number {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const u = fx * fx * (3 - 2 * fx);
+        const v = fy * fy * (3 - 2 * fy);
+        const a = hash2(ix, iy, seed);
+        const b = hash2(ix + 1, iy, seed);
+        const c = hash2(ix, iy + 1, seed);
+        const d = hash2(ix + 1, iy + 1, seed);
+        return lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    // 옥타브 합 — 주파수를 두 배로, 세기를 절반으로 줄여 가며 n 겹 더한 뒤 세기 합으로 나눈다. 결과 0..1
+    function octaves(x: number, y: number, n: number, seed: number): number {
+        let sum = 0;
+        let amp = 0.5;
+        let norm = 0;
+        let f = 1;
+        for (let k = 0; k < n; k += 1) {
+            sum += amp * noise2(x * f + k * 17.13, y * f + k * 9.71, seed + k * 31);
+            norm += amp;
+            amp *= 0.5;
+            f *= 2;
+        }
+        return sum / norm;
+    }
+    function textOf(el: HTMLElement): string { return (el.textContent || '').trim(); }
+    const canvasEl = root.querySelector('[data-role="canvas"]') as HTMLCanvasElement | null;
+    const statusEl = root.querySelector('[data-role="status"]') as HTMLElement | null;
+    const pauseEl = root.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !statusEl || !pauseEl) { return; }
+    const cv: HTMLCanvasElement = canvasEl;
+    const ctx: CanvasRenderingContext2D = ctxRaw;
+    const status: HTMLElement = statusEl;
+    const pauseBtn: HTMLButtonElement = pauseEl;
+    // 화면 글자는 DOM 에 있다 — 문구를 바꾸면 버튼·상태 줄도 같이 바뀐다
+    const STATUS0 = textOf(status);
+    const PAUSE_LABEL = textOf(pauseBtn);
+    const RESUME_LABEL = '움직임 다시 켜기';
+    const TXT_PAUSED = '멈췄어요 — 버튼으로 다시 켜기';
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 아래 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 사람이 멈춤 버튼을 눌렀는가
+    let paused = false;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    function wake(): void {
+        if (!demo) { return; }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text: string): void {
+        if (status.textContent !== text) { status.textContent = text; }
+    }
+    // 캔버스 배율 — 화면 배율을 따르되 2 에서 자른다(배율 3 기기에서 픽셀 일이 2.25배로 늘지 않게)
+    let dpr = 1;
+    function fitCanvas(): void {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+    }
+    function begin(): void {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+    }
+    // 작은 픽셀 버퍼 — 계산은 이 크기에서 하고 화면에는 늘려 그린다
+    function makeBuffer(w: number, h: number): PixelBuffer {
+        const b = document.createElement('canvas');
+        b.width = w;
+        b.height = h;
+        const c = b.getContext('2d') as CanvasRenderingContext2D;
+        return { cv: b, c: c, img: c.createImageData(w, h), w: w, h: h };
+    }
+    // 버퍼를 무대 크기로 키워 더한다 — 늘릴 때 브라우저의 이미지 보간이 칸 사이를 메우고, 'lighter' 는 밤하늘 위에 빛을 더한다
+    function blitBuffer(b: PixelBuffer, x: number, y: number, w: number, h: number): void {
+        b.c.putImageData(b.img, 0, 0);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.drawImage(b.cv, x, y, w, h);
+        ctx.restore();
+    }
+    // 높이 y 에서 하늘 색 — 버퍼 계산에서 밝기를 잴 때도 같은 식을 쓴다
+    function skyAt(y: number, h: number): RGB { return mix(SKY_TOP, SKY_LOW, clamp(y / h, 0, 1)); }
+    function drawSky(c: CanvasRenderingContext2D, w: number, h: number): void {
+        const g = c.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, rgba(SKY_TOP, 1));
+        g.addColorStop(1, rgba(SKY_LOW, 1));
+        c.fillStyle = g;
+        c.fillRect(0, 0, w, h);
+    }
+    // 장면 시계(ms) — rAF 루프가 고정 틱으로만 늘린다. 동작 줄이기에서는 STILL_MS 에 멈춘다
+    let simMs = 0;
+    function nowS(): number { return simMs / 1000; }
+    function toScene(ev: PointerEvent): Pt {
+        const r = cv.getBoundingClientRect();
+        return [(ev.clientX - r.left) / Math.max(1, r.width) * W, (ev.clientY - r.top) / Math.max(1, r.height) * H];
+    }
+    // 겹치는 DOM 층의 자리 — 장면 좌표를 무대 백분율로 바꿔 넣는다
+    function place(el: HTMLElement, r: Rect): void {
+        el.style.left = (r.x / W * 100).toFixed(3) + '%';
+        el.style.top = (r.y / H * 100).toFixed(3) + '%';
+        el.style.width = (r.w / W * 100).toFixed(3) + '%';
+        el.style.height = (r.h / H * 100).toFixed(3) + '%';
+    }
+    // 땅 실루엣 — 값 노이즈 한 겹으로 낮은 언덕 선을 만들고 그 아래를 짙게 채운다
+    const GROUND: RGB = [6, 7, 16];
+    function drawGround(c: CanvasRenderingContext2D, y0: number, rough: number, seed: number): void {
+        c.beginPath();
+        c.moveTo(0, H);
+        for (let x = 0; x <= W; x += 8) {
+            c.lineTo(x, y0 + (noise2(x * 0.012, 0.5, seed) - 0.5) * rough);
+        }
+        c.lineTo(W, H);
+        c.closePath();
+        c.fillStyle = rgba(GROUND, 1);
+        c.fill();
+    }
+    // 별 수
+    const STAR_COUNT = 140;
+    // 반짝임 빠르기(rad/s) — 별마다 0.6~1.6배
+    const TWINKLE_SPEED = 2.2;
+    // 가림 세기 — 별 자리 오로라 세기 a(0..1)에서 별빛 x (1 - AURORA_OCCLUSION x a)
+    const AURORA_OCCLUSION = 0.85;
+    // 오로라 버퍼 — 96x60 칸에서 계산해 키운다
+    const BAND_W = 96;
+    const BAND_H = 60;
+    const bandBuf06 = makeBuffer(BAND_W, BAND_H);
+    const rng06 = makeRng(606);
+    const starX = new Float32Array(STAR_COUNT);
+    const starY = new Float32Array(STAR_COUNT);
+    const starR = new Float32Array(STAR_COUNT);
+    const starPhase = new Float32Array(STAR_COUNT);
+    const starRate = new Float32Array(STAR_COUNT);
+    for (let i = 0; i < STAR_COUNT; i += 1) {
+        starX[i] = rng06() * W;
+        starY[i] = rng06() * 250;
+        starR[i] = 0.6 + Math.pow(rng06(), 3) * 1.8;
+        starPhase[i] = rng06() * TAU;
+        starRate[i] = 0.6 + rng06();
+    }
+    const STAR_RGB: RGB = [246, 244, 255];
+    // 띠 중심선 — 옥타브 합 노이즈 + 느린 사인으로 위아래로 흔들린다
+    function bandCenter06(x: number, t: number): number {
+        return 132 + (octaves(x * 0.005 + t * 0.09, t * 0.12, 3, 601) - 0.5) * 120 + 40 * Math.sin(t * 0.9 + x * 0.004);
+    }
+    // 띠 밝기(가로) — 0.3 문턱 위로 편 노이즈
+    function bandBright06(x: number, t: number): number {
+        return smooth((octaves(x * 0.012 - t * 0.25, 2 + t * 0.2, 2, 611) - 0.3) / 0.5);
+    }
+    // 오로라 세기(0..1) — 중심선 아래로는 폭 14px 가우스로 짧게, 위로는 55px 지수 꼬리로 길게
+    function auroraAt(x: number, y: number, t: number): number {
+        const d = y - bandCenter06(x, t);
+        const v = d > 0 ? Math.exp(-(d / 14) * (d / 14)) : Math.exp(d / 55);
+        return clamp(v * bandBright06(x, t) * 1.15, 0, 1);
+    }
+    function paintBand06(t: number): void {
+        const data = bandBuf06.img.data;
+        for (let col = 0; col < BAND_W; col += 1) {
+            const x = (col + 0.5) * W / BAND_W;
+            const yc = bandCenter06(x, t);
+            const br = bandBright06(x, t);
+            for (let row = 0; row < BAND_H; row += 1) {
+                const y = (row + 0.5) * H / BAND_H;
+                const d = y - yc;
+                const v = clamp((d > 0 ? Math.exp(-(d / 14) * (d / 14)) : Math.exp(d / 55)) * br * 1.15, 0, 1);
+                const c = mix(MINT, VIOLET, clamp(-d / 110, 0, 1));
+                const i = (row * BAND_W + col) * 4;
+                data[i] = c[0];
+                data[i + 1] = c[1];
+                data[i + 2] = c[2];
+                data[i + 3] = v * 235;
+            }
+        }
+    }
+    // 별 — 위상이 다른 사인으로 반짝이고, 그 자리의 오로라 세기만큼 어두워진다
+    function drawStars06(t: number): void {
+        for (let i = 0; i < STAR_COUNT; i += 1) {
+            const tw = 0.5 + 0.5 * Math.sin(t * TWINKLE_SPEED * starRate[i] + starPhase[i]);
+            const a = auroraAt(starX[i], starY[i], t);
+            const vis = (0.3 + 0.7 * tw) * (1 - AURORA_OCCLUSION * a);
+            if (vis < 0.02) { continue; }
+            ctx.fillStyle = rgba(STAR_RGB, vis);
+            ctx.beginPath();
+            ctx.arc(starX[i], starY[i], starR[i], 0, TAU);
+            ctx.fill();
+            // 큰 별은 십자 빛살 — 길이도 밝기를 따라 줄었다 늘었다 한다
+            if (starR[i] > 1.5) {
+                const L = starR[i] * 4 * vis;
+                ctx.fillStyle = rgba(STAR_RGB, vis * 0.5);
+                ctx.fillRect(starX[i] - L, starY[i] - 0.4, L * 2, 0.8);
+                ctx.fillRect(starX[i] - 0.4, starY[i] - L, 0.8, L * 2);
+            }
+        }
+    }
+    function itemInit(): void { }
+    function itemStep(dt: number): void { }
+    function itemDraw(): void {
+        const t = nowS();
+        drawSky(ctx, W, H);
+        paintBand06(t);
+        blitBuffer(bandBuf06, 0, 0, W, H);
+        drawStars06(t);
+        drawGround(ctx, 276, 14, 661);
+    }
+    function itemDemo(t: number): void { }
+    function itemStatus(): string { return STATUS0; }
+    function itemSnap(): void { }
+    function itemPointer(p: Pt, on: boolean): boolean { return false; }
+    function itemKey(key: string): boolean { return false; }
+    function render(): void {
+        begin();
+        itemDraw();
+        if (!paused) { say(itemStatus()); }
+    }
+    // 루프가 멈춰 있을 때(동작 줄이기·멈춤) 입력이 들어오면 — 움직이던 값을 목표로 바로 옮겨 한 장 그린다
+    function after(): void {
+        if (rafId) { return; }
+        itemSnap();
+        render();
+    }
+    function setPaused(p: boolean): void {
+        paused = p;
+        pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+        pauseBtn.textContent = p ? RESUME_LABEL : PAUSE_LABEL;
+        if (p) {
+            stopLoop();
+            say(TXT_PAUSED);
+        } else {
+            say(itemStatus());
+            startLoop();
+        }
+    }
+    pauseBtn.addEventListener('click', function (): void { wake(); setPaused(!paused); });
+    cv.addEventListener('pointermove', function (ev: PointerEvent): void {
+        if (itemPointer(toScene(ev), true)) { wake(); after(); }
+    });
+    cv.addEventListener('pointerdown', function (ev: PointerEvent): void {
+        wake();
+        if (itemPointer(toScene(ev), true)) { after(); }
+    });
+    cv.addEventListener('pointerleave', function (): void { itemPointer([W / 2, H / 2], false); });
+    root.addEventListener('keydown', function (ev: KeyboardEvent): void {
+        if (ev.target !== root) { return; }
+        if (itemKey(ev.key)) {
+            ev.preventDefault();
+            wake();
+            after();
+        }
+    });
+    function onResize(): void {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    itemInit();
+    window.addEventListener('resize', onResize);
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts: number): void {
+        if (still || paused) { rafId = 0; return; }
+        if (lastTs < 0) { lastTs = ts; }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 순간이동 대신 이어서 움직인다
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            simMs += FIXED_DT;
+            if (demo) { itemDemo(simMs); }
+            itemStep(FIXED_DT);
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        if (n === 6) { acc = 0; }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop(): void {
+        if (rafId || still || paused) { return; }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop(): void {
+        if (rafId) { window.cancelAnimationFrame(rafId); rafId = 0; }
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 그 순간 한 장면으로, 꺼지면 루프를 다시 돈다
+    function onMotionPref(): void {
+        still = reduceQuery.matches;
+        pauseBtn.hidden = still;
+        if (still) {
+            stopLoop();
+            itemSnap();
+            render();
+        } else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') { reduceQuery.addEventListener('change', onMotionPref); }
+    pauseBtn.hidden = still;
+    if (still) {
+        // 동작 줄이기 — 노이즈 시간을 STILL_MS 에 세운 한 장면. 입력은 after() 가 그 자리에서 반영한다
+        simMs = STILL_MS;
+        itemSnap();
+        render();
+    } else {
+        render();
+        startLoop();
+    }
+    return function (): void {
+        stopLoop();
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') { reduceQuery.removeEventListener('change', onMotionPref); }
+    };
+  }, []);
+
+  return (
+    <div className={cx("au") + " is-demo"} ref={rootRef}>
+        <canvas className={cx("au__canvas")} data-role="canvas" width={480} height={300} aria-hidden="true"></canvas>
+        <button className={cx("au__pause")} data-role="pause" type="button" aria-pressed="false">움직임 멈추기</button>
+        <p className={cx("au__status")} data-role="status" aria-live="off">띠가 지나가면 별이 숨어요</p>
+    </div>
+  );
+}

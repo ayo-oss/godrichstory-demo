@@ -1,0 +1,292 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 괄호·따옴표 자동 닫기 — 여는 짝을 치면 닫는 짝이 같이 들어가고 setSelectionRange 로
+// 커서는 그 사이에 남는다. 이미 닫혀 있는 자리에서 닫는 글자를 치면 preventDefault 로
+// 삽입을 막고 커서만 넘어가며, 빈 짝 가운데서 Backspace 를 치면 두 글자가 함께 지워진다.
+// 격자 미리보기(.is-demo)는 fade 를 타이핑한 뒤 ( 를 쳐서 짝이 튀어들어오는 컷을 보여준다.
+
+$duration: $dur-quick;
+$easing: $ease-pop;
+$color: $subject-blue-deep;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$edge: rgba(23, 20, 26, .14);
+$muted: rgba(23, 20, 26, .72);
+$fs: 15px;
+$lh: 20px;
+
+@include stage($stage-paper);
+
+.br {
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid $edge; border-radius: $r-card;
+  background: $subject-cream; box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄
+.br__bar { display: flex; align-items: center; gap: $sp-2; }
+.br__ico { display: grid; place-items: center; color: $subject-blue; font-size: 15px; }
+.br__name {
+  flex: 1 1 auto; color: $subject-ink;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+// 상태 알약 — 실제 값은 JS 가 채우고, 미리보기에서는 겹켜진 값 장이 차례로 켜진다
+.br__pill { display: grid; justify-items: center; }
+.br__pill > * { grid-area: 1 / 1; }
+.br__state, .br__sv {
+  padding: $sp-1 $sp-2; border-radius: $r-pill;
+  background: $color; color: $stage-paper;
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+  white-space: nowrap;
+}
+.br__sv { opacity: 0; }
+
+// ── 코드 줄. 글자는 투명한 textarea 아래 pre 가 그린다
+.br__wrap {
+  position: relative; display: grid; overflow: hidden;
+  box-sizing: border-box; height: 2 * $lh + 2 * $sp-2;
+  background: $stage-paper; border: 1px solid $edge; border-radius: $r-sm;
+}
+.br__wrap > * { grid-area: 1 / 1; }
+%brlayer {
+  box-sizing: border-box; margin: 0; padding: $sp-2; border: 0;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2; white-space: pre;
+}
+.br__hl {
+  @extend %brlayer;
+  overflow: hidden; background: transparent; color: $subject-ink;
+}
+.br__ln { display: block; }
+.br__pp { color: $color; font-weight: 700; }
+// 글자는 투명하고 커서만 남는다 — 짝 색은 아래 pre 가 그린다
+.br__ta {
+  @extend %brlayer;
+  background: transparent; color: transparent; caret-color: $subject-ink;
+  resize: none; overflow: auto; scrollbar-width: none;
+}
+.br__ta::-webkit-scrollbar { display: none; }
+.br__ta::selection { background: rgba($color, .2); }
+.br__ta:focus-visible { outline: 2px solid $color; outline-offset: -2px; }
+
+// ── 미리보기 전용 — 가짜 커서·짝 연결선·삽입 핑. 정적 경로(사람 조작)에서는 전부 숨는다
+// ch 단위로 자리를 잡는다 — 고정폭 글꼴에서 1ch 가 글자 한 칸 폭이라 계산이 필요 없다
+.br__caret, .br__pline, .br__ping {
+  font-family: $mono; font-size: $fs; line-height: $lh;
+  pointer-events: none; opacity: 0;
+}
+.br__caret {
+  position: absolute; top: $sp-2; left: $sp-2; width: 2px; height: $lh;
+  background: $subject-ink; z-index: 2;
+}
+.br__pline {
+  position: absolute; bottom: $sp-2; left: calc(#{$sp-2} + 4ch); width: 2ch; height: 2px;
+  background: $color; transform-origin: left center; z-index: 1;
+}
+.br__ping {
+  position: absolute; top: $sp-2; left: calc(#{$sp-2} + 4ch); width: 2ch; height: $lh;
+  border: 2px solid $color; border-radius: $r-xs; z-index: 1;
+}
+
+// ── 키 기록 줄 — 친 키가 오른쪽으로 밀려 마지막 칸이 파랗게 켜진다
+.br__keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: $sp-2; }
+.br__k {
+  position: relative; display: grid; place-items: center; overflow: hidden;
+  height: 26px; border: 1px solid $edge; border-radius: $r-xs;
+  background: rgba(23, 20, 26, .05);
+  font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4;
+  white-space: nowrap;
+}
+.br__kt { color: $muted; }
+.br__kfill {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: $color; color: $stage-paper; opacity: 0;
+  transition: opacity $duration $easing;
+}
+.br__k.is-on .br__kfill { opacity: 1; }
+
+.br__note { margin: 0; color: $muted; font-weight: 500; font-size: 11px; line-height: 1.4; }
+
+// ── 격자 미리보기 루프 (2초)
+// fade 넉 자를 타이핑하고 10% 에 ( 를 치면 짝이 함께 튀어들어온다. 35% 는 닫는 짝 넘어가기,
+// 60% 는 Backspace 짝 삭제, 72% 에 다시 삽입 — 상태 교체는 전부 steps(1, end) 컷이다.
+.br.is-demo .br__txt {
+  animation-name: brType;
+  animation-duration: $dur-loop; animation-timing-function: steps(4, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.br.is-demo .br__pp {
+  animation-name: brPp;
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+// 가짜 커서 — 0.5초 깜빡임과 2초 이동 두 애니메이션을 나란히 돌린다
+.br.is-demo .br__caret {
+  animation-name: brCaretO, brCaretX;
+  animation-duration: .5s, $dur-loop;
+  animation-timing-function: steps(1, end), $ease-out;
+  animation-iteration-count: infinite, infinite;
+  animation-fill-mode: backwards, backwards;
+}
+.br.is-demo .br__pline {
+  animation-name: brUlO, brUlX;
+  animation-duration: $dur-loop, $dur-loop;
+  animation-timing-function: steps(1, end), $ease-out;
+  animation-iteration-count: infinite, infinite;
+  animation-fill-mode: backwards, backwards;
+}
+.br.is-demo .br__ping {
+  animation-name: brPing;
+  animation-duration: $dur-loop; animation-timing-function: $ease-out;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+// 상태 알약 — 실제 값은 감추고 겹켜진 값 장을 컷으로 갈아 끼운다
+.br.is-demo .br__state { color: transparent; }
+.br.is-demo .br__sv {
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.br.is-demo .br__sv--1 { animation-name: brSv1; }
+.br.is-demo .br__sv--2 { animation-name: brSv2; }
+.br.is-demo .br__sv--3 { animation-name: brSv3; }
+// 키 칸 — 켜짐은 컷, 눌림은 2px transform 으로 표시한다
+.br.is-demo .br__kfill, .br.is-demo .br__k {
+  animation-duration: $dur-loop;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.br.is-demo .br__kfill { animation-timing-function: steps(1, end); }
+.br.is-demo .br__k { animation-timing-function: $ease-out; transition: none; }
+.br.is-demo .br__k:nth-child(1) .br__kfill { animation-name: brKf1; }
+.br.is-demo .br__k:nth-child(2) .br__kfill { animation-name: brKf2; }
+.br.is-demo .br__k:nth-child(3) .br__kfill { animation-name: brKf3; }
+.br.is-demo .br__k:nth-child(4) .br__kfill { animation-name: brKf4; }
+.br.is-demo .br__k:nth-child(1) { animation-name: brKp1; }
+.br.is-demo .br__k:nth-child(2) { animation-name: brKp2; }
+.br.is-demo .br__k:nth-child(3) { animation-name: brKp3; }
+.br.is-demo .br__k:nth-child(4) { animation-name: brKp4; }
+
+@keyframes brType {
+  0%, 2% { clip-path: inset(0 100% 0 0); }
+  14%, 100% { clip-path: inset(0 0 0 0); }
+}
+// 짝은 살짝 크게 나타났다가 3% 뒤에 제 자리 크기로 앉는다 — 전 구간 steps 컷이라
+// 샘플 사이 어중간한 크기의 글자가 프레임에 잡히지 않는다
+@keyframes brPp {
+  0%, 9% { opacity: 0; transform: scale(1.35); }
+  10%, 12% { opacity: 1; transform: scale(1.35); }
+  13%, 59% { opacity: 1; transform: scale(1); }
+  60%, 71% { opacity: 0; transform: scale(1); }
+  72%, 74% { opacity: 1; transform: scale(1.35); }
+  75%, 100% { opacity: 1; transform: scale(1); }
+}
+@keyframes brCaretO {
+  0% { opacity: 1; }
+  50% { opacity: 0; }
+  100% { opacity: 1; }
+}
+// 4ch 는 fade 끝, 5ch 는 짝 가운데, 6ch 는 닫는 짝 뒤 — ch 로 재니 글꼴 폭과 무관하다
+@keyframes brCaretX {
+  0%, 9% { transform: translateX(4ch); }
+  10%, 34% { transform: translateX(5ch); }
+  40%, 51% { transform: translateX(6ch); }
+  56%, 59% { transform: translateX(5ch); }
+  60%, 71% { transform: translateX(4ch); }
+  72%, 100% { transform: translateX(5ch); }
+}
+@keyframes brUlO {
+  0%, 9% { opacity: 0; }
+  10%, 59% { opacity: 1; }
+  60%, 71% { opacity: 0; }
+  72%, 100% { opacity: 1; }
+}
+@keyframes brUlX {
+  0%, 10% { transform: scaleX(0); }
+  16%, 59% { transform: scaleX(1); }
+  60%, 72% { transform: scaleX(0); }
+  78%, 100% { transform: scaleX(1); }
+}
+@keyframes brPing {
+  0%, 9% { opacity: 0; transform: scale(.8); }
+  10% { opacity: .9; transform: scale(.8); }
+  17%, 71% { opacity: 0; transform: scale(1.5); }
+  72% { opacity: .9; transform: scale(.8); }
+  79%, 100% { opacity: 0; transform: scale(1.5); }
+}
+@keyframes brSv1 {
+  0%, 9% { opacity: 0; }
+  10%, 34% { opacity: 1; }
+  35%, 71% { opacity: 0; }
+  72%, 100% { opacity: 1; }
+}
+@keyframes brSv2 {
+  0%, 34% { opacity: 0; }
+  35%, 51% { opacity: 1; }
+  52%, 100% { opacity: 0; }
+}
+@keyframes brSv3 {
+  0%, 51% { opacity: 0; }
+  52%, 71% { opacity: 1; }
+  72%, 100% { opacity: 0; }
+}
+@keyframes brKf1 {
+  0%, 9% { opacity: 0; }
+  10%, 34% { opacity: 1; }
+  35%, 100% { opacity: 0; }
+}
+@keyframes brKf2 {
+  0%, 34% { opacity: 0; }
+  35%, 51% { opacity: 1; }
+  52%, 100% { opacity: 0; }
+}
+@keyframes brKf3 {
+  0%, 51% { opacity: 0; }
+  52%, 71% { opacity: 1; }
+  72%, 100% { opacity: 0; }
+}
+@keyframes brKf4 {
+  0%, 71% { opacity: 0; }
+  72%, 100% { opacity: 1; }
+}
+@keyframes brKp1 {
+  0%, 9% { transform: translateY(0); }
+  10% { transform: translateY(2px); }
+  14%, 100% { transform: translateY(0); }
+}
+@keyframes brKp2 {
+  0%, 34% { transform: translateY(0); }
+  35% { transform: translateY(2px); }
+  39%, 100% { transform: translateY(0); }
+}
+@keyframes brKp3 {
+  0%, 51% { transform: translateY(0); }
+  52% { transform: translateY(2px); }
+  56%, 100% { transform: translateY(0); }
+}
+@keyframes brKp4 {
+  0%, 71% { transform: translateY(0); }
+  72% { transform: translateY(2px); }
+  76%, 100% { transform: translateY(0); }
+}
+
+// ── 좁은 화면: 여백과 키 칸을 줄여 무대 안에 들어온다 (줄 높이 20px 는 그대로)
+@media (max-width: 340px) {
+  .br { gap: $sp-1; padding: $sp-2; }
+  .br__wrap { height: $lh + 2 * $sp-2; }
+  .br__keys { gap: $sp-1; }
+  .br__k { height: 24px; font-size: 10px; }
+  .br__note { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .br.is-demo .br__txt, .br.is-demo .br__pp, .br.is-demo .br__caret,
+  .br.is-demo .br__pline, .br.is-demo .br__ping, .br.is-demo .br__sv,
+  .br.is-demo .br__kfill, .br.is-demo .br__k {
+    animation: none !important;
+  }
+  .br.is-demo .br__txt { clip-path: none !important; }
+  .br.is-demo .br__pp { opacity: 1 !important; transform: none !important; }
+  .br.is-demo .br__caret, .br.is-demo .br__pline, .br.is-demo .br__ping { opacity: 0 !important; }
+  .br.is-demo .br__sv { opacity: 0 !important; }
+  .br.is-demo .br__state { color: $stage-paper !important; }
+  .br.is-demo .br__kfill { opacity: 0 !important; }
+}

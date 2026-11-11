@@ -1,0 +1,437 @@
+// CirclePackInflate - vanilla 판(04-gen-art-circle-pack-inflate) 의 React 포트. 같은 계산을 useEffect 안에서 돌린다.
+import { useEffect, useRef } from "react";
+import styles from "./CirclePackInflate.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+export default function CirclePackInflate() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    const root: HTMLElement = rootEl;
+    type RGB = [number, number, number];
+    const W = 480;
+    const H = 300;
+    const FIXED_DT = 16;
+    const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
+    // 파스텔 팔레트 — 어두운 무대(INK) 위에 밝은 선·면을 얹어 명도 차로 형태가 읽힌다
+    const INK: RGB = [29, 26, 44];
+    const PAPER: RGB = [255, 248, 234];
+    const PAL: RGB[] = [
+        [124, 196, 255],
+        [255, 160, 190],
+        [126, 226, 192],
+        [190, 164, 255],
+        [255, 208, 168],
+        [246, 228, 140],
+        [150, 222, 236],
+        [232, 182, 228],
+        [196, 220, 160],
+    ];
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function rgba(c: RGB, a: number): string {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    function mix(a: RGB, b: RGB, k: number): RGB { return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)]; }
+    // 시드 고정 난수 — 같은 씨앗이면 같은 수열, 곧 같은 그림이 다시 나온다 (32비트 정수 섞기)
+    function makeRng(seedValue: number): () => number {
+        let s = seedValue >>> 0;
+        return function (): number {
+            s = (s + 0x6d2b79f5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    // 다음 씨앗 — 다시 그리기를 누를 때마다 정수 하나만 바뀐다(10007~99995 사이 다섯 자리)
+    function nextSeed(s: number): number { return ((s * 7919 + 104729) % 89989) + 10007; }
+    const canvasEl = root.querySelector('[data-role="canvas"]') as HTMLCanvasElement | null;
+    const statusEl = root.querySelector('[data-role="status"]') as HTMLElement | null;
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    // 그림판 — 자란 결과를 쌓아 두는 화면 밖 캔버스. 프레임마다 이걸 옮겨 그리고 그 위에 지금 자라는 부분만 얹는다
+    const artEl = document.createElement('canvas');
+    const actxRaw = artEl.getContext('2d');
+    if (!canvasEl || !ctxRaw || !statusEl || !actxRaw) { return; }
+    const cv: HTMLCanvasElement = canvasEl;
+    const ctx: CanvasRenderingContext2D = ctxRaw;
+    const status: HTMLElement = statusEl;
+    const actx: CanvasRenderingContext2D = actxRaw;
+    const redrawBtn = root.querySelector('[data-role="redraw"]') as HTMLButtonElement | null;
+    const replayBtn = root.querySelector('[data-role="replay"]') as HTMLButtonElement | null;
+    const pauseBtn = root.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 동작 줄이기 설정을 바꿔도 tail 의 change 리스너가 이 값을 다시 읽는다
+    let still = reduceQuery.matches;
+    // 자동 시연 중인가 — 사람이 처음 만지는 순간 시연을 멈추고 상태 줄을 읽어 주기 시작한다
+    let demo = root.classList.contains('is-demo');
+    // 지금 그림의 씨앗과, 그 씨앗을 심은 뒤 흐른 성장 시간(ms, 일시정지 동안은 멈춘다)
+    let seed = 0;
+    let age = 0;
+    function wake(): void {
+        if (!demo) { return; }
+        demo = false;
+        root.classList.remove('is-demo');
+        status.setAttribute('aria-live', 'polite');
+    }
+    function say(text: string): void {
+        if (status.textContent !== text) { status.textContent = text; }
+    }
+    let dprNow = 0;
+    function fitCanvas(): void {
+        // 배율은 2 에서 자른다 — 배율 3 기기에서 화소가 2.25배로 늘어 프레임마다 일이 그만큼 커지지 않게
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (dpr === dprNow) { return; }
+        // 캔버스 크기를 바꾸면 내용이 지워진다 — 그려 둔 그림판을 잠깐 옮겨 두었다가 새 배율로 다시 담는다
+        const keep = document.createElement('canvas');
+        keep.width = artEl.width;
+        keep.height = artEl.height;
+        const kctx = keep.getContext('2d');
+        if (kctx && dprNow) { kctx.drawImage(artEl, 0, 0); }
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        artEl.width = cv.width;
+        artEl.height = cv.height;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        actx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (kctx && dprNow) { actx.drawImage(keep, 0, 0, W, H); }
+        dprNow = dpr;
+    }
+    function clearArt(c: RGB): void {
+        actx.fillStyle = rgba(c, 1);
+        actx.fillRect(0, 0, W, H);
+    }
+    function blitArt(): void { ctx.drawImage(artEl, 0, 0, W, H); }
+    // 오른쪽 아래 수치 상자 — 씨앗과 항목별 개수를 이름표 + 값 한 줄씩
+    function drawStats(pairs: [string, string][]): void {
+        ctx.font = '600 11px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'alphabetic';
+        const lines: string[] = [];
+        let wide = 0;
+        for (let i = 0; i < pairs.length; i += 1) {
+            const t = pairs[i][0] + ' ' + pairs[i][1];
+            lines.push(t);
+            wide = Math.max(wide, ctx.measureText(t).width);
+        }
+        const lh = 15;
+        const bw = wide + 16;
+        const bh = lines.length * lh + 8;
+        ctx.fillStyle = rgba(INK, 0.66);
+        ctx.fillRect(W - 10 - bw, H - 10 - bh, bw, bh);
+        ctx.fillStyle = rgba(PAPER, 0.95);
+        for (let i = 0; i < lines.length; i += 1) { ctx.fillText(lines[i], W - 18, H - 10 - bh + 4 + lh * (i + 1) - 3); }
+    }
+    // 격자 버킷 — 점 번호를 칸(한 변 cell px)별 목록에 담아 두고, 반경 안 이웃은 주변 칸만 훑어 찾는다
+    type Buckets = { cell: number; cols: number; rows: number; b: number[][] };
+    function makeBuckets(cell: number): Buckets {
+        const cols = Math.ceil(W / cell) + 1;
+        const rows = Math.ceil(H / cell) + 1;
+        const b: number[][] = [];
+        for (let i = 0; i < cols * rows; i += 1) { b.push([]); }
+        return { cell: cell, cols: cols, rows: rows, b: b };
+    }
+    function bucketAdd(g: Buckets, x: number, y: number, id: number): void {
+        const c = clamp(Math.floor(x / g.cell), 0, g.cols - 1);
+        const r = clamp(Math.floor(y / g.cell), 0, g.rows - 1);
+        g.b[r * g.cols + c].push(id);
+    }
+    function bucketsClear(g: Buckets): void {
+        for (let i = 0; i < g.b.length; i += 1) { g.b[i].length = 0; }
+    }
+    // (x, y) 에서 반경 rad 를 덮는 칸들의 번호를 visit 에 넘긴다 — visit 이 true 를 돌려주면 그 자리에서 멈추고 true
+    function bucketNear(g: Buckets, x: number, y: number, rad: number, visit: (id: number) => boolean): boolean {
+        const c0 = clamp(Math.floor((x - rad) / g.cell), 0, g.cols - 1);
+        const c1 = clamp(Math.floor((x + rad) / g.cell), 0, g.cols - 1);
+        const r0 = clamp(Math.floor((y - rad) / g.cell), 0, g.rows - 1);
+        const r1 = clamp(Math.floor((y + rad) / g.cell), 0, g.rows - 1);
+        for (let r = r0; r <= r1; r += 1) {
+            for (let c = c0; c <= c1; c += 1) {
+                const list = g.b[r * g.cols + c];
+                for (let k = 0; k < list.length; k += 1) {
+                    if (visit(list[k])) { return true; }
+                }
+            }
+        }
+        return false;
+    }
+    // 부푸는 원 채우기 — 빈자리를 몇 번 골라 원을 심고 틱마다 반지름을 키우다가, 이웃 원·테두리와의 틈이 gap 에 닿으면 그 원만 멈춘다
+    type PackOpts = {
+        grow: number; attempts: number; gap: number; maxR: number; startR: number; perTick: number; failTicks: number;
+        x0: number; y0: number; x1: number; y1: number; blocked: (x: number, y: number, r: number) => boolean;
+    };
+    type Pack = {
+        o: PackOpts; rng: () => number; cx: number[]; cy: number[]; cr: number[]; col: number[];
+        growing: number[]; grid: Buckets; fails: number; tries: number; rejects: number; done: boolean;
+    };
+    function makePack(rng: () => number, o: PackOpts): Pack {
+        return { o: o, rng: rng, cx: [], cy: [], cr: [], col: [], growing: [], grid: makeBuckets(o.maxR), fails: 0, tries: 0, rejects: 0, done: false };
+    }
+    // 반지름 r 인 원을 (x, y) 에 둘 수 있는가 — 테두리, 격자 버킷 안 이웃 원(중심 거리 < r + 이웃 r + gap), 막힌 자리 순서로 본다
+    function packFree(p: Pack, x: number, y: number, r: number, self: number): boolean {
+        const g = p.o.gap;
+        if (x - r < p.o.x0 + g || x + r > p.o.x1 - g || y - r < p.o.y0 + g || y + r > p.o.y1 - g) { return false; }
+        const hit = bucketNear(p.grid, x, y, r + p.o.maxR + g, function (j: number): boolean {
+            if (j === self) { return false; }
+            const dx = p.cx[j] - x;
+            const dy = p.cy[j] - y;
+            const lim = r + p.cr[j] + g;
+            return dx * dx + dy * dy < lim * lim;
+        });
+        if (hit) { return false; }
+        return !p.o.blocked(x, y, r + g);
+    }
+    function packStep(p: Pack, onStop: (i: number) => void): boolean {
+        if (p.done) { return true; }
+        // 심기 — attempts 번 무작위 자리를 뽑고, 겹치는 자리는 버린다(거절 표본)
+        let made = 0;
+        for (let a = 0; a < p.o.attempts && made < p.o.perTick; a += 1) {
+            const x = lerp(p.o.x0, p.o.x1, p.rng());
+            const y = lerp(p.o.y0, p.o.y1, p.rng());
+            p.tries += 1;
+            if (packFree(p, x, y, p.o.startR, -1)) {
+                const id = p.cx.length;
+                p.cx.push(x);
+                p.cy.push(y);
+                p.cr.push(p.o.startR);
+                p.col.push(Math.floor(p.rng() * PAL.length));
+                bucketAdd(p.grid, x, y, id);
+                p.growing.push(id);
+                made += 1;
+            } else {
+                p.rejects += 1;
+            }
+        }
+        p.fails = made === 0 ? p.fails + 1 : 0;
+        // 키우기 — 한 칸 키운 반지름이 자리에 맞으면 키우고, 안 맞으면 그 원은 여기서 멈춘다
+        const next: number[] = [];
+        for (let k = 0; k < p.growing.length; k += 1) {
+            const i = p.growing[k];
+            const nr = p.cr[i] + p.o.grow;
+            if (nr <= p.o.maxR && packFree(p, p.cx[i], p.cy[i], nr, i)) {
+                p.cr[i] = nr;
+                next.push(i);
+            } else {
+                onStop(i);
+            }
+        }
+        p.growing = next;
+        if (p.fails >= p.o.failTicks && p.growing.length === 0) { p.done = true; }
+        return p.done;
+    }
+    // 한 틱에 반지름이 자라는 양(px)
+    const GROW_RATE = 0.8;
+    // 한 틱에 새 원 자리를 뽑아 보는 횟수 — 겹치면 버리는 거절 표본
+    const SPAWN_ATTEMPTS = 60;
+    // 원과 원, 원과 테두리 사이에 남기는 틈(px) — 틈이 이만큼으로 줄면 그 원은 멈춘다
+    const CIRCLE_GAP = 2;
+    // 원 하나의 반지름 상한과 처음 반지름(px)
+    const MAX_RADIUS = 34;
+    const START_RADIUS = 1;
+    // 한 틱에 새로 심는 원 수 상한 — 프레임당 계산량 상한
+    const SPAWN_PER_FRAME = 8;
+    // 이만큼 연달아 한 개도 못 심으면 빈자리가 다 찼다고 본다(틱)
+    const FAIL_TICKS = 8;
+    const SEED0 = 47104;
+    const TXT_RUN = '원이 부풀며 자리를 채우는 중';
+    function newPack(s: number): Pack {
+        return makePack(makeRng(s), {
+            grow: GROW_RATE, attempts: SPAWN_ATTEMPTS, gap: CIRCLE_GAP, maxR: MAX_RADIUS, startR: START_RADIUS,
+            perTick: SPAWN_PER_FRAME, failTicks: FAIL_TICKS, x0: 4, y0: 4, x1: W - 4, y1: H - 4,
+            blocked: function (): boolean { return false; },
+        });
+    }
+    let pack: Pack = newPack(SEED0);
+    let stopped = 0;
+    function plant(s: number): void {
+        clearArt(INK);
+        pack = newPack(s);
+        stopped = 0;
+    }
+    // 원 하나 — 바깥 면과, 반지름 62% 자리의 옅은 안쪽 원
+    function disc(c: CanvasRenderingContext2D, i: number, alpha: number): void {
+        const col = PAL[pack.col[i]];
+        c.fillStyle = rgba(col, alpha);
+        c.beginPath();
+        c.arc(pack.cx[i], pack.cy[i], pack.cr[i], 0, TAU);
+        c.fill();
+        if (pack.cr[i] > 3) {
+            c.fillStyle = rgba(mix(col, PAPER, 0.45), alpha);
+            c.beginPath();
+            c.arc(pack.cx[i], pack.cy[i], pack.cr[i] * 0.62, 0, TAU);
+            c.fill();
+        }
+    }
+    // 멈춘 원은 그림판에 한 번만 굳혀 그린다
+    function settleDisc(i: number): void {
+        disc(actx, i, 1);
+        stopped += 1;
+    }
+    function grow(): boolean { return packStep(pack, settleDisc); }
+    function paintFrame(): void {
+        blitArt();
+        // 아직 자라는 원 — 반투명 면 + 밝은 테두리
+        for (let k = 0; k < pack.growing.length; k += 1) {
+            const i = pack.growing[k];
+            disc(ctx, i, 0.7);
+            ctx.strokeStyle = rgba(PAPER, 0.9);
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(pack.cx[i], pack.cy[i], pack.cr[i], 0, TAU);
+            ctx.stroke();
+        }
+    }
+    function statPairs(): [string, string][] {
+        return [['원', String(pack.cx.length)], ['자라는 원', String(pack.growing.length)]];
+    }
+    function runText(): string { return TXT_RUN; }
+    function doneText(): string { return TXT_DONE; }
+
+    const TXT_DONE = '다 자람 — Enter 로 새 씨앗';
+    const TXT_PAUSE = '일시정지 — Space 로 이어서';
+    // 시연 — 첫 200ms 는 빈 판으로 두고(첫 변화 200ms 뒤) 자라게 한 뒤, 다 자라면 900ms 머물고 다음 씨앗으로
+    const DEMO_LEAD = 200;
+    const DEMO_HOLD_MS = 900;
+    // 동작 줄이기에서 한 번에 끝까지 키울 때 틱 수 상한 — 계산이 끝나지 않는 씨앗이 있어도 화면이 멈추지 않게
+    const GROW_GUARD = 6000;
+    let paused = false;
+    let done = false;
+    let holdMs = 0;
+    let clock = 0;
+    function reseed(s: number): void {
+        seed = s;
+        age = 0;
+        done = false;
+        holdMs = 0;
+        plant(s);
+    }
+    function tickGrow(): void {
+        if (done) { return; }
+        age += FIXED_DT;
+        if (grow()) { done = true; }
+    }
+    // 끝까지 한 번에 — 동작 줄이기에서는 자라는 과정 없이 다 자란 그림을 바로 보인다
+    function finishNow(): void {
+        let g = 0;
+        while (!done && g < GROW_GUARD) { tickGrow(); g += 1; }
+    }
+    function report(): void {
+        if (paused) { say(TXT_PAUSE); }
+        else if (done) { say(doneText()); }
+        else { say(runText()); }
+    }
+    function render(): void {
+        paintFrame();
+        const pairs: [string, string][] = [['씨앗', String(seed)]];
+        drawStats(pairs.concat(statPairs()));
+        report();
+    }
+    function setPaused(v: boolean): void {
+        paused = v;
+        if (pauseBtn) { pauseBtn.setAttribute('aria-pressed', v ? 'true' : 'false'); }
+    }
+    // 입력 한 번 뒤 — 동작 줄이기면 그 씨앗의 다 자란 모습으로 바로 그린다
+    function after(): void {
+        if (still) { finishNow(); }
+        render();
+    }
+    function newSeed(): void { setPaused(false); reseed(nextSeed(seed)); }
+    function replaySeed(): void { setPaused(false); reseed(seed); }
+    cv.addEventListener('pointerdown', function (): void { wake(); after(); });
+    cv.addEventListener('keydown', function (ev: KeyboardEvent): void {
+        const k = ev.key;
+        if (k === 'Enter') { newSeed(); }
+        else if (k === 'r' || k === 'R') { replaySeed(); }
+        else if (k === ' ') { setPaused(!paused); }
+        else { return; }
+        ev.preventDefault();
+        wake();
+        after();
+    });
+    if (redrawBtn) { redrawBtn.addEventListener('click', function (): void { wake(); newSeed(); after(); }); }
+    if (replayBtn) { replayBtn.addEventListener('click', function (): void { wake(); replaySeed(); after(); }); }
+    if (pauseBtn) { pauseBtn.addEventListener('click', function (): void { wake(); setPaused(!paused); after(); }); }
+    function onResize(): void {
+        fitCanvas();
+        render();
+    }
+    fitCanvas();
+    window.addEventListener('resize', onResize);
+    reseed(SEED0);
+    function tick(): void {
+        clock += FIXED_DT;
+        if (demo) {
+            if (clock < DEMO_LEAD) { return; }
+            if (done) {
+                holdMs += FIXED_DT;
+                if (holdMs >= DEMO_HOLD_MS) { reseed(nextSeed(seed)); }
+                return;
+            }
+        }
+        if (!paused) { tickGrow(); }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    let acc = 0;
+    function frame(ts: number): void {
+        if (still) { rafId = 0; return; }
+        if (lastTs < 0) { lastTs = ts; }
+        // 탭이 숨었다 돌아와도 한 번에 100ms 까지만 따라잡는다 — 한 프레임에 성장 계산이 몰리지 않게
+        acc += Math.min(ts - lastTs, 100);
+        lastTs = ts;
+        let n = 0;
+        while (acc >= FIXED_DT && n < 6) {
+            tick();
+            acc -= FIXED_DT;
+            n += 1;
+        }
+        render();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop(): void {
+        if (rafId) { return; }
+        lastTs = -1;
+        acc = 0;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    // 동작 줄이기 설정이 페이지를 연 채 바뀌면 — 켜지면 루프를 멈추고 다 자란 그림으로, 꺼지면 루프를 다시 돈다
+    function onMotionPref(): void {
+        still = reduceQuery.matches;
+        if (still) {
+            if (rafId) { window.cancelAnimationFrame(rafId); rafId = 0; }
+            after();
+        } else {
+            startLoop();
+        }
+    }
+    if (typeof reduceQuery.addEventListener === 'function') { reduceQuery.addEventListener('change', onMotionPref); }
+    if (still) {
+        after();
+    } else {
+        render();
+        startLoop();
+    }
+    return function (): void {
+        window.cancelAnimationFrame(rafId);
+        window.removeEventListener('resize', onResize);
+        if (typeof reduceQuery.removeEventListener === 'function') { reduceQuery.removeEventListener('change', onMotionPref); }
+    };
+
+  }, []);
+
+  return (
+    <div className={cx("pc") + " is-demo"} ref={rootRef}>
+        <canvas className={cx("pc__canvas")} data-role="canvas" width={480} height={300} tabIndex={0} aria-label="빈자리에 심은 원이 부풀다가 이웃 원이나 테두리에 닿으면 멈추며 화면을 채우는 그림. Enter 로 새 씨앗을 그리고, R 로 같은 씨앗을 처음부터 다시 키우고, Space 로 일시정지한다"></canvas>
+        <p className={cx("pc__status")} data-role="status" aria-live="off">원이 부풀며 자리를 채우는 중</p>
+        <div className={cx("pc__tools")}>
+          <button className={cx("pc__btn")} data-role="redraw" type="button">다시 그리기</button>
+          <button className={cx("pc__btn")} data-role="replay" type="button">같은 씨앗</button>
+          <button className={cx("pc__btn")} data-role="pause" type="button" aria-pressed="false">일시정지</button>
+        </div>
+    </div>
+  );
+}

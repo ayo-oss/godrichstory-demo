@@ -1,0 +1,99 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 1년 잔디 격자 — 53주 × 7일. 칸은 JS 가 만들고 강도(0~4)는 시드 고정 난수,
+// 오늘 칸만 localStorage 값으로 덮는다. 색 강도는 보조 신호일 뿐이라 범례에 숫자를 같이 적고
+// 칸마다 aria-label 에 날짜와 횟수를 넣는다 (WCAG 1.4.1 — 색만으로 정보를 주지 않는다).
+// 격자 미리보기(.is-demo)는 주 단위 animation-delay 로 왼쪽부터 차오르는 물결을 CSS 로 재생한다.
+// 사람이 격자에 손을 대거나 버튼을 누르면 JS 가 .is-demo 를 떼고 정적 표시로 넘어간다.
+
+$duration: $dur-loop;
+$easing: $ease-spring;
+$color: $stage-yellow;
+
+@include stage($stage-ink);
+
+.cg { display: flex; flex-direction: column; gap: $sp-3; width: 100%; max-width: 424px; }
+.cg__hint {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  font-weight: 700; font-size: clamp(10px, 2.8vw, 12px); color: $subject-cream;
+}
+.cg__ico { width: 16px; height: 16px; flex: 0 0 auto; color: $color; }
+
+// 말풍선은 절대배치라 부모 높이에 안 잡힌다 — padding-top 으로 자리를 미리 비워 둔다 (BD9)
+.cg__wrap { position: relative; padding-top: $sp-5; }
+.cg__tip {
+  position: absolute; left: 0; top: 0; height: $sp-4;
+  display: inline-flex; align-items: center; border-radius: $r-xs;
+  padding: 0 $sp-2; background: rgba($subject-cream, .12); color: $subject-cream;
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 11px); white-space: nowrap;
+}
+
+.cg__grid { display: flex; flex-direction: column; }
+.cg__row { display: flex; }
+// 칸 사이 1px 씩은 gap 이 아니라 **투명 테두리**로 벌린다. 53주 × 7일을 424px 안에 넣으려면
+// 칸 간격이 4px 격자에 못 맞는데(BD17), 테두리는 간격이 아니라 칸 자신의 일부라 그 규칙 밖이다.
+// background-clip: padding-box 가 있어야 배경이 테두리 밑으로 새지 않는다.
+.cg__cell {
+  box-sizing: border-box; width: 7px; height: 7px; flex: 0 0 auto;
+  border: 1px solid transparent; border-radius: 50%;
+  background: rgba($subject-cream, .10); background-clip: padding-box;
+}
+.cg__cell--l1 { background: rgba($color, .30); }
+.cg__cell--l2 { background: rgba($color, .52); }
+.cg__cell--l3 { background: rgba($color, .76); }
+// 가장 높은 단계만 안쪽 테두리를 더해 색 말고 무늬로도 갈린다
+.cg__cell--l4 { background: $color; box-shadow: inset 0 0 0 1px rgba($stage-ink, .55); }
+.cg__cell.is-today { box-shadow: 0 0 0 2px rgba($subject-cream, .9); }
+
+.cg__bar { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; flex-wrap: wrap; }
+.cg__legend { display: flex; align-items: center; gap: $sp-1; margin: 0; }
+.cg__legendLabel {
+  margin-right: $sp-1; font-weight: 700; font-size: clamp(9px, 2.4vw, 11px);
+  color: rgba($subject-cream, .72);
+}
+// 숫자를 색 칩 **안**에 넣으면 2단계(노랑 52%) 위에서 어느 글자색도 AA 를 못 넘는다 (실측 4.06·4.21:1).
+// 칩은 칸과 같은 모양의 점으로만 두고 숫자는 무대 배경(잉크) 위에 따로 적는다 — 17.11:1.
+.cg__keyItem { display: inline-flex; align-items: center; gap: $sp-1; }
+.cg__key { width: 10px; height: 10px; border-radius: 50%; }
+.cg__keyNum { font-weight: 800; font-size: 9px; line-height: 1; color: $subject-cream; }
+.cg__key--l0 { background: rgba($subject-cream, .10); }
+.cg__key--l1 { background: rgba($color, .30); }
+.cg__key--l2 { background: rgba($color, .52); }
+.cg__key--l3 { background: rgba($color, .76); }
+.cg__key--l4 { background: $color; box-shadow: inset 0 0 0 1px rgba($stage-ink, .55); }
+
+.cg__add {
+  display: inline-flex; align-items: center; gap: $sp-1; border: 0; border-radius: $r-pill;
+  padding: $sp-1 $sp-3; background: $color; color: $subject-ink; cursor: pointer;
+  font-family: inherit; font-weight: 800; font-size: clamp(10px, 2.6vw, 11px); line-height: 1.6;
+}
+.cg__add .cg__ico { color: $subject-ink; }
+.cg__add:focus-visible { outline: 2px solid $subject-cream; outline-offset: 2px; }
+
+// ── 격자 미리보기 물결 ──────────────────────────────────────────
+// 주(열)마다 12ms 씩 늦게 시작해 왼쪽부터 차오른다. 0% 와 100% 를 같은 값으로 둬서
+// 루프 경계에 점프가 없고, 지연이 걸린 루프에는 fill-mode: backwards 가 반드시 붙는다
+// (없으면 지연 구간에 작성 상태가 그대로 한 번 번쩍인다 — 252-08 실측).
+.cg.is-demo .cg__cell {
+  animation-name: cgWave; animation-duration: $duration; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+  animation-delay: calc(var(--c) * 12ms);
+}
+@keyframes cgWave {
+  0%   { transform: scale(.15); opacity: .3; }
+  14%  { transform: scale(1); opacity: 1; }
+  86%  { transform: scale(1); opacity: 1; }
+  100% { transform: scale(.15); opacity: .3; }
+}
+
+@media (max-width: 340px) {
+  .cg { gap: $sp-2; }
+  .cg__wrap { padding-top: $sp-4; }
+  .cg__cell { width: 5px; height: 5px; }
+  .cg__key { width: 8px; height: 8px; }
+}
+
+// reduce 에서는 물결을 끄고 잔디가 다 자란 한 장으로 세운다
+@media (prefers-reduced-motion: reduce) {
+  .cg.is-demo .cg__cell { animation: none !important; transform: none !important; opacity: 1 !important; }
+}

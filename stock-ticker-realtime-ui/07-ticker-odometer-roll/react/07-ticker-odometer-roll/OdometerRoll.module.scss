@@ -1,0 +1,153 @@
+// OdometerRoll — vanilla 판(run/296/demo/07-ticker-odometer-roll/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고, 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$tick-panel: #231f28;
+$tick-up: #3ddc97;
+$tick-down: #ff7a5e;
+$tick-mute: #9a93a6;
+$ease-out: ease-out;
+$dur-base: 300ms;
+$dur-enter: 600ms;
+$dur-loop: 2s;
+$r-card: 16px;
+$sp-1: 4px;
+$sp-2: 8px;
+$sp-3: 12px;
+$sp-4: 16px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+// 굴림 위치는 숫자라야 보간된다 — 등록하지 않으면 9 에서 0 으로 컷으로 점프한다.
+// inherits: false 로 등록했으므로 값은 반드시 자릿수 칸 자신에 올린다 (부모에 걸면 안 먹는다).
+@property --d { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+$duration: $dur-loop;
+$easing: $ease-out;
+// 한 칸의 높이. 굴림 거리는 이 값의 배수다 — 글자 높이와 칸 높이가 같아야 위아래가 안 잘린다
+$cell: 1.15em;
+
+.root { display: flex; justify-content: center; width: 100%; }
+.board {
+  width: min(100%, 320px); background: $tick-panel; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-4 $sp-3; overflow: hidden; text-align: center;
+}
+.label {
+  margin: 0 0 $sp-2; font-weight: 700; font-size: clamp(10px, 2.8vw, 12px);
+  line-height: 1.4; color: $tick-mute; letter-spacing: .06em;
+}
+
+// ── 숫자판. 자릿수 칸 개수가 고정이라 값이 커지거나 작아져도 판이 좌우로 안 튄다
+.value {
+  margin: 0; display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: clamp(26px, 9vw, 40px); line-height: 1.15;
+  font-variant-numeric: tabular-nums; color: $tick-down;
+  // 값이 오르면 상승색, 내리면 하락색 — 방향은 색만이 아니라 아래 줄의 ▲▼ 와 부호도 같이 말한다
+  transition: color $dur-base $easing;
+}
+.root.isUp .value { color: $tick-up; }
+.root.isDown .value { color: $tick-down; }
+// 부호 칸 — 두 글자를 같은 칸에 겹쳐 두고 컷으로 갈아 끼운다
+.sign { display: grid; width: .66em; height: $cell; }
+.glyph { grid-area: 1 / 1; line-height: 1.15; }
+.root:not(.isDemo) .glyphB { opacity: 0; }
+// 자릿수 칸 — 0 부터 9 까지 세로로 쌓은 띠를 끌어올린다. 칸은 넘치는 부분을 자른다
+.digit { display: block; overflow: hidden; width: .64em; height: $cell; }
+.strip {
+  display: block;
+  transform: translateY(calc(var(--d) * -#{$cell}));
+  // 실사용에서 값이 바뀌면 여기가 굴러간다. 등록한 숫자 속성이라 9 에서 0 으로도 이어서 흐른다
+  transition: --d $dur-enter $easing;
+}
+.n { display: block; height: $cell; line-height: 1.15; text-align: center; }
+// 구분자와 소수점은 굴리지 않는다 — 제자리에 박혀 있어야 자릿수가 어디서 끊기는지 눈이 안 잃는다
+.fixed { display: block; width: .3em; height: $cell; line-height: 1.15; }
+// 앞자리 0 은 흐리게. 칸은 그대로 두고 읽는 자리만 또렷하게 남긴다 (값이 0 을 지날 때 실사용에서 나타난다)
+.digit.isLead, .fixed.isLead { opacity: .32; }
+.unit {
+  align-self: center; margin-left: $sp-1; font-weight: 700; font-size: .42em;
+  line-height: 1.4; color: $tick-mute;
+}
+
+// ── 전일 대비 한 줄
+.delta {
+  margin: $sp-2 0 0; display: flex; align-items: center; justify-content: center; gap: $sp-1;
+  font-weight: 700; font-size: clamp(10px, 2.8vw, 12px); line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.deltaLabel { color: $tick-mute; }
+// 두 장을 같은 칸에 겹친다 — 컷 교체라 자릿수가 늘어도 줄이 안 흔들린다
+.deltaWrap { display: grid; justify-items: center; }
+.deltaText { grid-area: 1 / 1; }
+.deltaA, .deltaText.isMinus { color: $tick-down; }
+.deltaB, .deltaText.isPlus { color: $tick-up; }
+.delta .unit { font-size: 1em; margin-left: 0; }
+.root:not(.isDemo) .deltaB { opacity: 0; }
+
+// ── 미리보기 루프(2초): 24~45% 에 값이 오르고(상승색) 60~81% 에 도로 내린다(하락색).
+//    자릿수는 오른쪽 끝부터 3% 씩 밀려 굴러간다 — 진짜 오도미터의 자리올림 순서이자,
+//    한 프레임에 한두 칸만 굴러 나머지 자리가 읽히게 하는 장치다.
+//    부호 칸과 전일 대비 줄은 굴림이 시작되는 자리(25% · 61%)에서 steps(1, end) 컷으로 갈린다.
+//    되돌림이 81% 에 끝난다. 색 방향은 루프 안에서 2회 = 초당 1회로 WCAG 2.3.1 아래다.
+.root.isDemo .value { animation-name: odHue; }
+.root.isDemo .strip[data-d="0"] { animation-name: odRoll0; }
+.root.isDemo .strip[data-d="1"] { animation-name: odRoll1; }
+.root.isDemo .strip[data-d="2"] { animation-name: odRoll2; }
+.root.isDemo .strip[data-d="3"] { animation-name: odRoll3; }
+.root.isDemo .strip[data-d="4"] { animation-name: odRoll4; }
+.root.isDemo .strip[data-d="5"] { animation-name: odRoll5; }
+.root.isDemo .value, .root.isDemo .strip {
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+// −1,369.25 에서 +2,776.65 로 올랐다 도로 내린다. 자릿수마다 굴러갈 곳과 굴러갈 때가 다르다 —
+// 오른쪽 끝(odRoll5)이 먼저 떠나고 왼쪽으로 3% 씩 밀린다
+@keyframes odRoll5 { 0%, 24% { --d: 5; } 30%, 60% { --d: 5; } 66%, 100% { --d: 5; } }
+@keyframes odRoll4 { 0%, 27% { --d: 2; } 33%, 63% { --d: 6; } 69%, 100% { --d: 2; } }
+@keyframes odRoll3 { 0%, 30% { --d: 9; } 36%, 66% { --d: 6; } 72%, 100% { --d: 9; } }
+@keyframes odRoll2 { 0%, 33% { --d: 6; } 39%, 69% { --d: 7; } 75%, 100% { --d: 6; } }
+@keyframes odRoll1 { 0%, 36% { --d: 3; } 42%, 72% { --d: 7; } 78%, 100% { --d: 3; } }
+@keyframes odRoll0 { 0%, 39% { --d: 1; } 45%, 75% { --d: 2; } 81%, 100% { --d: 1; } }
+@keyframes odHue {
+  0%, 24% { color: $tick-down; }
+  45%, 60% { color: $tick-up; }
+  81%, 100% { color: $tick-down; }
+}
+// 부호 칸·전일 대비 줄의 컷 — 굴림이 시작되는 프레임에 한 번에 갈린다
+.root.isDemo .glyphA, .root.isDemo .glyphB,
+.root.isDemo .deltaA, .root.isDemo .deltaB {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+.root.isDemo .glyphA, .root.isDemo .deltaA { animation-name: odCutA; }
+.root.isDemo .glyphB, .root.isDemo .deltaB { animation-name: odCutB; }
+@keyframes odCutA {
+  0%, 23% { opacity: 1; }
+  25%, 59% { opacity: 0; }
+  61%, 100% { opacity: 1; }
+}
+@keyframes odCutB {
+  0%, 23% { opacity: 0; }
+  25%, 59% { opacity: 1; }
+  61%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .board { padding: $sp-2; }
+  .label { margin: 0 0 $sp-1; }
+  .delta { margin: $sp-1 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 굴림과 색 흐름만 멈춘다 — 값은 그 자리에 그대로 서 있고 방향은 ▲▼ 와 부호가 말한다
+  .value { transition: none !important; }
+  .strip { transition: none !important; }
+  .root.isDemo .value, .root.isDemo .strip { animation: none !important; }
+  .root.isDemo .glyphA, .root.isDemo .deltaA { animation: none !important; opacity: 1 !important; }
+  .root.isDemo .glyphB, .root.isDemo .deltaB { animation: none !important; opacity: 0 !important; }
+}

@@ -1,0 +1,127 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 등락률 히트맵 — 균등 격자(4×3) 타일의 배경이 등락률을 따라 색으로 바뀐다.
+// 289 의 요일×시간 히트맵과 갈리는 지점: 여기는 축이 없고(시간축 없음) 색이 실시간으로 바뀐다.
+// 실사용에서는 시드 PRNG 가 850ms 마다 타일 세 개씩 --chg 를 갈아 끼우고, 등록된 커스텀 속성이라
+// 색이 컷으로 튀지 않고 이어서 흐른다. 방향은 색만으로 전하지 않고 ▲▼ 와 +/− 부호를 같이 적는다.
+// 미리보기(.is-demo)는 같은 흐름을 CSS 키프레임으로 2초 루프에 눕혀 대각선 세 파도로 갈라 보여 준다.
+
+// 등락률은 숫자라야 보간된다 — 등록하지 않으면 키프레임·transition 이 컷으로 점프한다.
+// inherits: false 로 등록했으므로 값은 반드시 타일 자신에 올린다 (부모 격자에 걸면 안 먹는다).
+@property --chg { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --va  { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --vb  { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --p   { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+$duration: $dur-loop;
+$easing: $ease-out;
+// 혼합 상한 50%. 이 위로 올리면 타일이 밝아져 크림 글자가 4.5:1 아래로 떨어진다
+// (run/296/_probe/타일대비.py 실측: 상승 50% #3c775e 위 크림 4.93:1 · 하락 50% #8a4c45 위 6.16:1,
+//  상승 55% 는 4.35:1 로 미달). 그래서 글자색은 타일 어디서나 크림 한 가지로 간다
+$mix-cap: 50%;
+
+@include stage($stage-yellow);
+
+.hm { display: flex; justify-content: center; width: 100%; }
+.hm__board {
+  width: min(100%, 380px); background: $tick-panel; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-2; overflow: hidden;
+}
+.hm__head { display: flex; align-items: center; justify-content: space-between; padding: 0 $sp-1 $sp-2; }
+.hm__title { margin: 0; font-weight: 800; font-size: clamp(11px, 3vw, 13px); color: $subject-cream; }
+// 라이브 배지 — 글자로도 상태를 말한다
+.hm__live {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: $tick-up;
+  border: 1px solid $tick-up; border-radius: $r-pill; padding: 0 $sp-2; line-height: 1.6;
+}
+
+// 균등 격자 — 트리맵처럼 칸 크기가 값을 나르지 않는다. 4열 3행 모두 같은 크기다
+.hm__grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: $sp-1;
+}
+.hm__tile {
+  // 타일의 등락률: 미리보기는 --p 로 지금 값(--va)과 다음 값(--vb) 사이를 오가고,
+  // 실사용에서는 JS 가 이 자리에 인라인으로 --chg 를 써 넣어 이 규칙을 덮는다
+  --chg: calc(var(--va) + (var(--vb) - var(--va)) * var(--p));
+  // 0 부근은 판 색 그대로. 위로 갈수록 상승색, 아래로 갈수록 하락색을 섞는다 (1% 당 11%, 상한 50%)
+  --up-mix: clamp(0%, calc(var(--chg) * 11%), #{$mix-cap});
+  --down-mix: clamp(0%, calc(var(--chg) * -11%), #{$mix-cap});
+  background-color: color-mix(in oklab, $tick-down var(--down-mix),
+                    color-mix(in oklab, $tick-up var(--up-mix), $tick-panel));
+  // 실사용에서 값이 바뀔 때 색이 컷으로 튀지 않고 이어진다 — 등록한 숫자 속성이라 보간된다
+  transition: --chg $dur-base $easing;
+  display: grid; align-content: center; justify-items: center; gap: 0;
+  min-height: 32px; padding: $sp-1 0; border-radius: $r-xs;
+}
+.hm__sym {
+  font-weight: 700; font-size: clamp(8px, 2.2vw, 10px); line-height: 1.3;
+  color: $subject-cream; letter-spacing: .04em; opacity: .78;
+}
+// 지금 값·다음 값 두 장을 같은 칸에 겹친다 — 컷 교체라 폭이 달라도 자리가 안 흔들린다
+.hm__val { display: grid; justify-items: center; }
+.hm__chg {
+  grid-area: 1 / 1; font-variant-numeric: tabular-nums;
+  font-weight: 800; font-size: clamp(9px, 2.6vw, 11px); line-height: 1.3; color: $subject-cream;
+}
+// 실사용(정적 경로)에서는 지금 값만 보인다 — 다음 값 장은 자리만 지키고 안 보인다.
+// display: none 으로 지우면 칸 폭이 무너진다
+.hm:not(.is-demo) .hm__chg--b { opacity: 0; }
+
+// ── 미리보기 루프(2초): 8% 에 숫자가 컷으로 바뀌고 색은 8~20% 에 이어서 따라간다(실사용과 같은 순서 —
+//    JS 가 숫자를 쓰면 색은 transition 으로 따라온다). 60% 에 원래 값으로 되돌아오고 72% 에 색이 앉는다.
+//    되돌림이 96% 안에 끝난다 — 24프레임의 마지막 장이 2초의 95.8% 지점이라 그 뒤는 샘플이 없다.
+//    한 타일의 색 변화는 루프 안에서 2회 = 초당 1회로 WCAG 2.3.1(초당 3회 미만) 아래다.
+.hm.is-demo .hm__tile {
+  animation-name: hmWave;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+// 대각선 세 파도. 지연은 낱개 속성으로 준다 — animation 단축은 delay 를 0 으로 리셋한다.
+// 음수 지연이라 루프 이음매가 안 생긴다(어느 순간을 찍어도 같은 위상)
+.hm.is-demo .hm__tile[data-g="1"] { animation-delay: -667ms; }
+.hm.is-demo .hm__tile[data-g="2"] { animation-delay: -1333ms; }
+@keyframes hmWave {
+  0%, 8% { --p: 0; }
+  20%, 60% { --p: 1; }
+  72%, 100% { --p: 0; }
+}
+// 숫자 교체는 steps(1, end) 컷 — 반투명하게 겹친 유령 프레임이 안 생긴다
+.hm.is-demo .hm__chg--a, .hm.is-demo .hm__chg--b {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+.hm.is-demo .hm__chg--a { animation-name: hmTextA; }
+.hm.is-demo .hm__chg--b { animation-name: hmTextB; }
+.hm.is-demo .hm__tile[data-g="1"] .hm__chg--a,
+.hm.is-demo .hm__tile[data-g="1"] .hm__chg--b { animation-delay: -667ms; }
+.hm.is-demo .hm__tile[data-g="2"] .hm__chg--a,
+.hm.is-demo .hm__tile[data-g="2"] .hm__chg--b { animation-delay: -1333ms; }
+@keyframes hmTextA {
+  0%, 6% { opacity: 1; }
+  8%, 58% { opacity: 0; }
+  60%, 100% { opacity: 1; }
+}
+@keyframes hmTextB {
+  0%, 6% { opacity: 0; }
+  8%, 58% { opacity: 1; }
+  60%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .hm__board { padding: $sp-1; }
+  .hm__head { padding: 0 $sp-1 $sp-1; }
+  .hm__tile { min-height: 30px; padding: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 색이 흐르는 것과 숫자가 바뀌는 것만 멈춘다 — 값은 그대로 읽히고 방향은 ▲▼ 와 부호가 말한다
+  .hm__tile { transition: none !important; }
+  .hm.is-demo .hm__tile { animation: none !important; }
+  .hm.is-demo .hm__chg--a { animation: none !important; opacity: 1 !important; }
+  .hm.is-demo .hm__chg--b { animation: none !important; opacity: 0 !important; }
+}

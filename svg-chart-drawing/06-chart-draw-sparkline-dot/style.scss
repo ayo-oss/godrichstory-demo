@@ -1,0 +1,146 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// KPI 카드 안 스파크라인 — 실제 사용에선 JS 가 buildPath() 로 라인을 심어 완성된
+// 그래프와 종가 점이 곧 뜨고 pointermove 로 가까운 점의 툴팁이 따라온다.
+// 미리보기(.is-demo)는 같은 path 에 stroke-dashoffset 키프레임을 얹어 짧게 그려지는
+// 라인 — 종가 점 팝 — 증감 칩과 헤더 숫자의 steps 컷 교체를 2초 루프로 보여 준다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+
+@include stage($stage-yellow);
+
+.cs { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.cs__card {
+  width: min(100%, 340px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.cs__title { margin: 0 0 $sp-1; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.cs__row { display: flex; align-items: baseline; gap: $sp-2; margin-bottom: $sp-1; }
+// 큰 숫자 두 장을 같은 칸에 겹친다 — 컷 교체라 폭이 달라도 자리는 흔들리지 않는다
+.cs__numWrap { display: grid; }
+.cs__num {
+  grid-area: 1 / 1; font-weight: 800; font-size: clamp(24px, 7vw, 30px); line-height: 1.05;
+  color: $subject-ink; font-variant-numeric: tabular-nums;
+}
+// 증감 칩 — 상승 계열색. 텍스트가 곧 상태를 읽으므로 색만으로 의존하지 않는다
+.cs__chip {
+  align-self: center; font-weight: 800; font-size: clamp(10px, 2.6vw, 11px); color: $subject-blue-deep;   // 연회색 면 위 $chart-1 은 3.53:1 — deep 4.97:1
+  background: rgba(47, 109, 246, .14); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+.cs__plot { position: relative; }
+.cs__svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.cs__line {
+  fill: none; stroke: $chart-1; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
+}
+// 종가 점 — 상승 추세라 라인과 같은 계열색. 팝은 점 중심에서 커진다
+.cs__dot { fill: $chart-1; transform-box: fill-box; transform-origin: center; }
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.cs__tip {
+  position: absolute; transform: translate(-50%, -130%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $stage-yellow; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.cs__tip.is-on { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.cs__tipDay { opacity: .72; }
+.cs__tipVal { font-size: 12px; }
+// 스크린리더용 표 — absolute+clip 은 레이아웃 크기가 그대로 scrollHeight 에 잡혀 넘침(BD8)이 뜨므로
+// fixed 로 캔버스 밖에 둔다. 스크린리더는 그대로 읽는다
+.cs__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// 실사용(정적)에서는 최종 숫자만 — 카운트업 없이 곧바로 완성 상태
+.cs:not(.is-demo) .cs__num--half { display: none; }
+
+// ── 미리보기 루프: 0~4% 빈 칸 → 6~40% 라인이 짧게 그어진다 → 22% 헤더 숫자가 최종값으로
+//    컷 교체되고 26% 증감 칩이 따라 나선다(카드의 주인공 숫자가 먼저 확정된다) →
+//    42~54% 종가 점이 중심에서 팝 → 56% 툴팁 컷 → 58~96% 완성 상태로 머문다.
+//    되돌림은 98% — 24프레임의 마지막 장이 2초의 95.8% 지점이라 그 뒤는 샘플이 없다.
+//    루프 안에서 지우면 "다 사라지는 장" 이 최대 변화가 돼 poster 가 빈 카드로 뽑힌다
+//    (실측 2026-09-12: 95.8% 프레임이 3.078% 로 1위였다. 255-03 "퇴장을 재현하지 않는다" 와 같은 계열).
+.cs.is-demo .cs__line { stroke-dasharray: 100; }
+.cs.is-demo .cs__line {
+  animation-name: csLine;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+@keyframes csLine {
+  0%, 4% { stroke-dashoffset: 100; }
+  40%, 96% { stroke-dashoffset: 0; }
+  98%, 100% { stroke-dashoffset: 100; }
+}
+// 종가 점 팝 — 라인이 다 그어진 뒤(40%) 점 중심에서 팝. 98% 에 컷으로 사라진다
+.cs.is-demo .cs__dot {
+  animation-name: csDot;
+  animation-duration: $duration;
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes csDot {
+  0%, 40% { transform: scale(0); }
+  54%, 96% { transform: scale(1); }
+  98%, 100% { transform: scale(0); }
+}
+// 헤더 숫자 컷 교체 — 카드의 주인공 숫자가 먼저 최종값으로 확정되고(22%) 칩이 뒤따르며(26%)
+// 라인이 그려진다(40% 완성). KPI 카드는 숫자가 먼저 읽혀야 한다 (steps 컷, 반투명 크로스페이드 아님)
+.cs.is-demo .cs__num--half,
+.cs.is-demo .cs__num--full {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.cs.is-demo .cs__num--half { animation-name: csNumHalf; }
+@keyframes csNumHalf {
+  0%, 20% { opacity: 1; }
+  22%, 96% { opacity: 0; }
+  98%, 100% { opacity: 1; }
+}
+.cs.is-demo .cs__num--full { animation-name: csNumFull; }
+@keyframes csNumFull {
+  0%, 20% { opacity: 0; }
+  22%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+// 증감 칩과 미리보기 툴팁(종가 위에 JS 가 미리 세팅)은 숫자 뒤를 따라 컷 등장
+.cs.is-demo .cs__chip,
+.cs.is-demo .cs__tip {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.cs.is-demo .cs__chip { animation-name: csChip; }
+@keyframes csChip {
+  0%, 24% { opacity: 0; }
+  26%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+.cs.is-demo .cs__tip { animation-name: csTip; }
+@keyframes csTip {
+  0%, 54% { opacity: 0; }
+  56%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .cs__card { padding: $sp-2 $sp-3 $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs.is-demo .cs__line,
+  .cs.is-demo .cs__dot,
+  .cs.is-demo .cs__num--half,
+  .cs.is-demo .cs__num--full,
+  .cs.is-demo .cs__chip,
+  .cs.is-demo .cs__tip { animation: none !important; }
+  // 움직임 없이 다 그어진 최종 상태로 점프한다
+  .cs.is-demo .cs__line { stroke-dashoffset: 0 !important; }
+  .cs.is-demo .cs__dot { transform: scale(1) !important; }
+  .cs.is-demo .cs__num--half { opacity: 0 !important; }
+  .cs.is-demo .cs__num--full,
+  .cs.is-demo .cs__chip,
+  .cs.is-demo .cs__tip { opacity: 1 !important; }
+}

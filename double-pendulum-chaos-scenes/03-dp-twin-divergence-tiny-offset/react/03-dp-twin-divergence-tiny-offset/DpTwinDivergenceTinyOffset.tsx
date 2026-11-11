@@ -1,0 +1,318 @@
+import { useEffect, useRef } from "react";
+import styles from "./DpTwinDivergenceTinyOffset.module.scss";
+
+function main(root: HTMLDivElement, canvas: HTMLCanvasElement, statusEl: HTMLElement, btnEl: HTMLButtonElement): () => void {
+  type Pt = { x: number; y: number };
+  var ctx0 = canvas.getContext('2d');
+  if (!ctx0) { return function (): void { return; }; }
+  var ctx: CanvasRenderingContext2D = ctx0;
+  var wrap: HTMLElement = canvas.parentElement ? canvas.parentElement : root;
+  var CALC_W = 320, CALC_H = 200;
+  var FIXED_DT = 16;
+  var REDUCE_STEP_FRAMES = 40;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var demo = !reduce;
+  if (!demo) root.classList.remove('is-demo');
+  function stopDemo(): void { demo = false; root.classList.remove('is-demo'); }
+  var paused = false;
+  var ownInput = false;
+  var cw = 480, ch = 300, sc = 1.5, elapsed = 0, rafId = 0;
+  var cleaners: Array<() => void> = [];
+
+  function listen(target: EventTarget, type: string, fn: (e: Event) => void): void {
+    target.addEventListener(type, fn);
+    cleaners.push(function (): void { target.removeEventListener(type, fn); });
+  }
+  function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+  function setStatus(msg: string): void { statusEl.textContent = msg; }
+  function hsl(h: number, s: number, l: number, a: number): string {
+    return 'hsla(' + (h % 360) + ',' + s + '%,' + l + '%,' + a + ')';
+  }
+  function canvasPoint(e: PointerEvent): Pt {
+    var r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * CALC_W, y: (e.clientY - r.top) / r.height * CALC_H };
+  }
+
+  // 배경 — 어두운 잉크색 위에 방사형 빛무리를 (gx, gy) 에 깐다
+  function beginDraw(inner: string, outer: string, gx: number, gy: number): void {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#1d1a2b';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.setTransform(sc, 0, 0, sc, 0, 0);
+    var g = ctx.createRadialGradient(gx, gy, 8, gx, gy, 230);
+    g.addColorStop(0, inner);
+    g.addColorStop(1, outer);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CALC_W, CALC_H);
+  }
+  function seg(x1: number, y1: number, x2: number, y2: number, w: number, col: string): void {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = w;
+    ctx.strokeStyle = col;
+    ctx.stroke();
+  }
+  function disc(x: number, y: number, r: number, col: string): void {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+  function glow(x: number, y: number, r: number, rgb: string, a: number): void {
+    var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(' + rgb + ',' + a + ')');
+    g.addColorStop(1, 'rgba(' + rgb + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  function drawTrail(arr: Pt[], rgb: string, w: number, alpha: number): void {
+    ctx.lineCap = 'round';
+    for (var i = 1; i < arr.length; i += 1) {
+      var f = i / arr.length;
+      ctx.beginPath();
+      ctx.moveTo(arr[i - 1].x, arr[i - 1].y);
+      ctx.lineTo(arr[i].x, arr[i].y);
+      ctx.strokeStyle = 'rgba(' + rgb + ',' + (alpha * f * f) + ')';
+      ctx.lineWidth = w * (0.3 + 0.7 * f);
+      ctx.stroke();
+    }
+  }
+  function pushTrail(arr: Pt[], x: number, y: number, max: number): void {
+    arr.push({ x: x, y: y });
+    if (arr.length > max) { arr.shift(); }
+  }
+
+  function defaultToggle(): void {
+    if (reduce) {
+      for (var i = 0; i < REDUCE_STEP_FRAMES; i += 1) { elapsed += FIXED_DT; stepFrame(); }
+      draw();
+      setStatus('한 장면씩 넘기는 중');
+      return;
+    }
+    paused = !paused;
+    btnEl.textContent = paused ? '재생' : '멈춤';
+    setStatus(paused ? '일시정지됨' : '시연 중');
+  }
+  var onButton: () => void = defaultToggle;
+  // 기법: 출발 각도가 OFFSET 만 다른 두 진자를 같은 식으로 적분하고, 두 끝 추가 사이 거리를 로그 눈금으로 쌓는다
+  var DT = 0.01;
+  var SUBSTEPS = 4;
+  var START_T1 = 2.2;
+  var START_T2 = 2.6;
+  var OFFSET = 1e-6;
+  var SPLIT_DIST = 0.1;
+  var SIM_RESET_FRAMES = 420;
+  var TRAIL_LEN = 110;
+  var L1 = 1.0;
+  var L2 = 1.0;
+  var M1 = 1.0;
+  var M2 = 1.0;
+  var G = 9.81;
+  var UNIT = 38, PIVOT_X = 112, PIVOT_Y = 78;
+  var PREROLL_FRAMES = 150;
+  // 라그랑주 운동방정식 — 각도는 아래 방향이 0, 시계 방향이 양수
+  function accTheta1(t1: number, t2: number, w1: number, w2: number): number {
+    var d = t1 - t2;
+    var den = L1 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+    return (-G * (2 * M1 + M2) * Math.sin(t1) - M2 * G * Math.sin(t1 - 2 * t2)
+      - 2 * Math.sin(d) * M2 * (w2 * w2 * L2 + w1 * w1 * L1 * Math.cos(d))) / den;
+  }
+  function accTheta2(t1: number, t2: number, w1: number, w2: number): number {
+    var d = t1 - t2;
+    var den = L2 * (2 * M1 + M2 - M2 * Math.cos(2 * d));
+    return (2 * Math.sin(d) * (w1 * w1 * L1 * (M1 + M2) + G * (M1 + M2) * Math.cos(t1)
+      + w2 * w2 * L2 * M2 * Math.cos(d))) / den;
+  }
+  // 룽게-쿠타 4단계 — 한 걸음을 네 번 기울기로 평균 낸다 (s = [t1, t2, w1, w2])
+  function rk4Step(s: number[], h: number): void {
+    var t1 = s[0], t2 = s[1], w1 = s[2], w2 = s[3];
+    var h2 = h * 0.5;
+    var k1a = w1, k1b = w2, k1c = accTheta1(t1, t2, w1, w2), k1d = accTheta2(t1, t2, w1, w2);
+    var u1 = t1 + h2 * k1a, u2 = t2 + h2 * k1b, u3 = w1 + h2 * k1c, u4 = w2 + h2 * k1d;
+    var k2a = u3, k2b = u4, k2c = accTheta1(u1, u2, u3, u4), k2d = accTheta2(u1, u2, u3, u4);
+    u1 = t1 + h2 * k2a; u2 = t2 + h2 * k2b; u3 = w1 + h2 * k2c; u4 = w2 + h2 * k2d;
+    var k3a = u3, k3b = u4, k3c = accTheta1(u1, u2, u3, u4), k3d = accTheta2(u1, u2, u3, u4);
+    u1 = t1 + h * k3a; u2 = t2 + h * k3b; u3 = w1 + h * k3c; u4 = w2 + h * k3d;
+    var k4a = u3, k4b = u4, k4c = accTheta1(u1, u2, u3, u4), k4d = accTheta2(u1, u2, u3, u4);
+    s[0] = t1 + h / 6 * (k1a + 2 * k2a + 2 * k3a + k4a);
+    s[1] = t2 + h / 6 * (k1b + 2 * k2b + 2 * k3b + k4b);
+    s[2] = w1 + h / 6 * (k1c + 2 * k2c + 2 * k3c + k4c);
+    s[3] = w2 + h / 6 * (k1d + 2 * k2d + 2 * k3d + k4d);
+  }
+  function bobOne(s: number[], ox: number, oy: number): Pt {
+    return { x: ox + UNIT * L1 * Math.sin(s[0]), y: oy + UNIT * L1 * Math.cos(s[0]) };
+  }
+  function bobTwo(s: number[], ox: number, oy: number): Pt {
+    var a = bobOne(s, ox, oy);
+    return { x: a.x + UNIT * L2 * Math.sin(s[1]), y: a.y + UNIT * L2 * Math.cos(s[1]) };
+  }
+  function drawArms(s: number[], ox: number, oy: number, c1: string, c2: string, w: number): void {
+    var a = bobOne(s, ox, oy), b = bobTwo(s, ox, oy);
+    seg(ox, oy, a.x, a.y, w, c1);
+    seg(a.x, a.y, b.x, b.y, w, c2);
+  }
+
+  var simA: number[] = [START_T1, START_T2, 0, 0];
+  var simB: number[] = [START_T1 + OFFSET, START_T2, 0, 0];
+  var trailA: Pt[] = [];
+  var trailB: Pt[] = [];
+  var sepHist: number[] = [];
+  var frameCount = 0;
+  var splitFrame = -1;
+  var sepNow = OFFSET;
+
+  function advance(): void {
+    for (var i = 0; i < SUBSTEPS; i += 1) { rk4Step(simA, DT); rk4Step(simB, DT); }
+    var pa = bobTwo(simA, PIVOT_X, PIVOT_Y), pb = bobTwo(simB, PIVOT_X, PIVOT_Y);
+    pushTrail(trailA, pa.x, pa.y, TRAIL_LEN);
+    pushTrail(trailB, pb.x, pb.y, TRAIL_LEN);
+    sepNow = Math.hypot(pa.x - pb.x, pa.y - pb.y) / UNIT;
+    sepHist.push(sepNow);
+    frameCount += 1;
+    if (splitFrame < 0 && sepNow > SPLIT_DIST) {
+      splitFrame = frameCount;
+      setStatus('두 진자가 갈라졌다');
+    }
+  }
+  function restart(): void {
+    simA = [START_T1, START_T2, 0, 0];
+    simB = [START_T1 + OFFSET, START_T2, 0, 0];
+    trailA = [];
+    trailB = [];
+    sepHist = [];
+    frameCount = 0;
+    splitFrame = -1;
+    setStatus('시연 중');
+    for (var i = 0; i < PREROLL_FRAMES; i += 1) { advance(); }
+  }
+  function stepFrame(): void {
+    advance();
+    if (frameCount >= SIM_RESET_FRAMES) { restart(); }
+  }
+
+  function logLevel(d: number): number { return clamp((Math.log(Math.max(d, 1e-9)) / Math.LN10 + 8) / 8.4, 0, 1); }
+
+  function draw(): void {
+    var pb = bobTwo(simB, PIVOT_X, PIVOT_Y);
+    var warm = splitFrame >= 0 ? clamp((frameCount - splitFrame) / 30, 0, 1) : 0;
+    beginDraw(warm > 0.5 ? '#5a4160' : '#463e68', warm > 0.5 ? '#2f2238' : '#2a2442', pb.x, pb.y);
+    glow(pb.x, pb.y, 90, '159,216,255', 0.24);
+    drawTrail(trailB, '159,216,255', 4, 0.85);
+    drawTrail(trailA, '255,179,199', 3, 0.85);
+    drawArms(simB, PIVOT_X, PIVOT_Y, 'rgba(159,216,255,0.85)', 'rgba(159,216,255,0.85)', 6);
+    drawArms(simA, PIVOT_X, PIVOT_Y, '#ffb3c7', '#ffb3c7', 2.5);
+    var pa = bobTwo(simA, PIVOT_X, PIVOT_Y);
+    disc(PIVOT_X, PIVOT_Y, 4, '#fff1c9');
+    glow(pb.x, pb.y, 22, '159,216,255', 0.7);
+    disc(pb.x, pb.y, 7, '#9fd8ff');
+    glow(pa.x, pa.y, 18, '255,179,199', 0.7);
+    disc(pa.x, pa.y, 5, '#ffb3c7');
+    if (splitFrame >= 0 && frameCount - splitFrame < 40) {
+      var f = (frameCount - splitFrame) / 40;
+      ctx.beginPath();
+      ctx.arc(pb.x, pb.y, 10 + f * 40, 0, 6.2832);
+      ctx.strokeStyle = 'rgba(255,241,201,' + (0.9 * (1 - f)) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // 두 끝 추가 사이 거리 — 세로 로그 눈금
+    var cx = 196, cy = 12, cwid = 116, chei = 54;
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(cx, cy, cwid, chei);
+    ctx.strokeStyle = 'rgba(255,241,201,0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    var ty = cy + chei - logLevel(SPLIT_DIST) * chei;
+    ctx.beginPath();
+    ctx.moveTo(cx, ty);
+    ctx.lineTo(cx + cwid, ty);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    for (var i = 0; i < sepHist.length; i += 1) {
+      var px = cx + i / SIM_RESET_FRAMES * cwid;
+      var py = cy + chei - logLevel(sepHist[i]) * chei;
+      if (i === 0) { ctx.moveTo(px, py); } else { ctx.lineTo(px, py); }
+    }
+    ctx.strokeStyle = '#c9b8ff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    var lx = cx + (sepHist.length - 1) / SIM_RESET_FRAMES * cwid;
+    disc(lx, cy + chei - logLevel(sepNow) * chei, 3, '#ffffff');
+  }
+
+  function fit(): void {
+    var r = wrap.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width));
+    ch = Math.max(1, Math.round(r.height));
+    canvas.width = cw;
+    canvas.height = ch;
+    sc = cw / CALC_W;
+    draw();
+  }
+  var lastTs: number | null = null;
+  var accMs = 0;
+  function tick(ts: number): void {
+    if (lastTs === null) { lastTs = ts; }
+    var frameDt = Math.min(ts - lastTs, 48);
+    lastTs = ts;
+    if (!paused) {
+      accMs += frameDt;
+      while (accMs >= FIXED_DT) { elapsed += FIXED_DT; stepFrame(); accMs -= FIXED_DT; }
+    }
+    draw();
+    rafId = requestAnimationFrame(tick);
+  }
+  for (var w0 = 0; w0 < PREROLL_FRAMES; w0 += 1) { elapsed += FIXED_DT; stepFrame(); }
+  fit();
+  listen(window, 'resize', fit);
+  listen(btnEl, 'click', function (): void { onButton(); });
+  if (!ownInput) {
+    listen(canvas, 'pointerdown', function (): void { onButton(); });
+    listen(canvas, 'keydown', function (e: Event): void {
+      var k = (e as KeyboardEvent).key;
+      if (k === 'Enter' || k === ' ') { e.preventDefault(); onButton(); }
+    });
+  }
+  if (reduce) {
+    if (!ownInput) { btnEl.textContent = '다음 장면'; setStatus('한 장면씩 넘기는 중'); }
+  } else {
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function destroy(): void {
+    cancelAnimationFrame(rafId);
+    for (var i = 0; i < cleaners.length; i += 1) { cleaners[i](); }
+  }
+  return destroy;
+}
+
+
+export default function DpTwinDivergenceTinyOffset() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const statusRef = useRef<HTMLParagraphElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const canvas = canvasRef.current;
+    const statusEl = statusRef.current;
+    const btnEl = btnRef.current;
+    if (!root || !canvas || !statusEl || !btnEl) return;
+    return main(root, canvas, statusEl, btnEl);
+  }, []);
+
+  return (
+    <main className={styles.stage}>
+      <div className={`${styles.bp} is-demo`} ref={rootRef}>
+        <canvas className={styles.bp__canvas} ref={canvasRef} width={480} height={300} tabIndex={0} aria-label="출발 각도를 백만분의 일만 다르게 한 두 진자를 겹쳐 돌리고 끝 추가 사이 거리를 로그 눈금 그래프로 그려, 하나로 보이던 둘이 갈라서는 순간을 보인다." />
+        <p className={styles.bp__status} ref={statusRef} aria-live="polite">시연 중</p>
+        <button className={styles.bp__btn} ref={btnRef} type="button">멈춤</button>
+        <p className={styles.bp__caption}>출발 각도를 백만분의 일만 다르게 한 두 진자를 겹쳐 돌리고 끝 추가 사이 거리를 로그 눈금 그래프로 그려, 하나로 보이던 둘이 갈라서는 순간을 보인다.</p>
+      </div>
+    </main>
+  );
+}

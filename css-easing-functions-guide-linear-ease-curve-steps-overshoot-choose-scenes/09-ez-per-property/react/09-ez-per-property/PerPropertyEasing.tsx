@@ -1,0 +1,458 @@
+// PerPropertyEasing - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./PerPropertyEasing.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+    type RGB = [number, number, number];
+    type Fn = (p: number) => number;
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    // 파스텔 팔레트 — 바탕은 짙은 자두색, 상자는 연한 색, 글자는 연한 색 또는 짙은 잉크
+    const INK: RGB = [40, 36, 54];
+    const PAPER: RGB = [250, 246, 240];
+    const ROSE: RGB = [244, 162, 186];
+    const MINT: RGB = [148, 212, 182];
+    const SKY: RGB = [150, 192, 244];
+    const SUN: RGB = [250, 218, 146];
+    const LILAC: RGB = [196, 176, 244];
+    const NEU: RGB = [236, 230, 250];
+    const BGC: RGB = [46, 42, 68];
+    const PANEL: RGB = [62, 57, 92];
+    const GRID: RGB = [92, 86, 124];
+    const DIM: RGB = [196, 190, 224];
+    function rgba(c: RGB, a: number): string {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s: string, ...v: string[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+    function f3(v: number): string { return (Math.round(v * 1000) / 1000).toFixed(3); }
+    function pct(v: number): string { return String(Math.round(v * 100)); }
+    // ── 이징 계산. 모두 진행률 p(0 에서 1) 를 받아 변화량 비율을 돌려준다
+    const LINEAR: Fn = function (p: number): number { return clamp(p, 0, 1); };
+    // 3차 곡선 한 점 — 제어값 두 개(a, b) 와 매개값 s 로 좌표 하나를 얻는다
+    function bz(a: number, b: number, s: number): number {
+        const u = 1 - s;
+        return 3 * u * u * s * a + 3 * u * s * s * b + s * s * s;
+    }
+    // CSS cubic-bezier(x1, y1, x2, y2) 와 같은 곡선. 시간 p 에 맞는 매개값 s 를 반으로 줄이는 반복 근사로 찾고 그 s 의 y 를 돌려준다
+    function cubic(x1: number, y1: number, x2: number, y2: number): Fn {
+        return function (p: number): number {
+            if (p <= 0) { return 0; }
+            if (p >= 1) { return 1; }
+            let lo = 0;
+            let hi = 1;
+            let s = p;
+            for (let i = 0; i < 32; i += 1) {
+                s = (lo + hi) / 2;
+                if (bz(x1, x2, s) < p) { lo = s; } else { hi = s; }
+            }
+            return bz(y1, y2, s);
+        };
+    }
+    // CSS steps(n, jump-end) 와 steps(n, jump-start) — 값이 계단으로만 바뀐다
+    function stepsFn(n: number, jumpStart: boolean): Fn {
+        return function (p: number): number {
+            if (p <= 0) { return 0; }
+            if (p >= 1) { return 1; }
+            return jumpStart ? Math.min(1, Math.ceil(p * n) / n) : Math.floor(p * n) / n;
+        };
+    }
+    // CSS linear(점 목록) — 점은 같은 간격 위치에 놓이고 사이는 직선으로 잇는다
+    function linearFn(pts: number[]): Fn {
+        return function (p: number): number {
+            if (p <= 0) { return pts[0]; }
+            if (p >= 1) { return pts[pts.length - 1]; }
+            const x = p * (pts.length - 1);
+            const i = Math.floor(x);
+            return lerp(pts[i], pts[i + 1], x - i);
+        };
+    }
+    // 순간 속도 — 진행률 곡선의 기울기(길이 1 을 시간 1 에 가는 직선이 1 배)
+    function slopeAt(fn: Fn, p: number): number {
+        const h = 0.002;
+        const a = Math.max(0, p - h);
+        const b = Math.min(1, p + h);
+        return (fn(b) - fn(a)) / (b - a);
+    }
+    // 목표의 비율 q 에 처음 닿는 시간(0 에서 1) — 반으로 줄이는 반복 근사
+    function reachTime(fn: Fn, q: number): number {
+        let lo = 0;
+        let hi = 1;
+        for (let i = 0; i < 30; i += 1) {
+            const m = (lo + hi) / 2;
+            if (fn(m) < q) { lo = m; } else { hi = m; }
+        }
+        return hi;
+    }
+    // ── 그리기 도구
+    const rootEl = root;
+    const canvasEl = rootEl.querySelector('[data-role="canvas"]') as HTMLCanvasElement | null;
+    const padEl = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseEl = rootEl.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const statusEl = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const doneEl = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !doneEl || !statusEl) {
+        return function (): void { /* 무대가 없으면 할 일이 없다 */ };
+    }
+    const cv: HTMLCanvasElement = canvasEl;
+    const ctx: CanvasRenderingContext2D = ctxRaw;
+    const pad: HTMLElement = padEl;
+    const pauseBtn: HTMLButtonElement = pauseEl;
+    const doneP: HTMLElement = doneEl;
+    const statusP: HTMLElement = statusEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const UI_FONT = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    const CODE_FONT = 'ui-monospace, "Cascadia Mono", Consolas, "Noto Sans KR", monospace';
+    let dpr = 1;
+    function fitCanvas(): void {
+        // 배율은 2 에서 자른다 — 계산은 늘 480×300 이고 화면 배율만 이 값
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function box(x: number, y: number, w: number, h: number, r: number, c: RGB, a: number): void {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) { return; }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x: number, y: number, r: number, c: RGB, a: number): void {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function seg(x1: number, y1: number, x2: number, y2: number, c: RGB, a: number, w: number): void {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+    // 점선 세로·가로선
+    function dash(x1: number, y1: number, x2: number, y2: number, c: RGB, a: number): void {
+        ctx.setLineDash([3, 3]);
+        seg(x1, y1, x2, y2, c, a, 1);
+        ctx.setLineDash([]);
+    }
+    // 글자 — maxW 가 있으면 그 폭에 들어가도록 글자 크기를 줄인다(문구가 로케일마다 길이가 달라서)
+    function text(s: string, x: number, y: number, c: RGB, px: number, weight: number, align: CanvasTextAlign, maxW?: number, mono?: boolean): void {
+        const face = mono ? CODE_FONT : UI_FONT;
+        let size = px;
+        ctx.font = weight + ' ' + size + 'px ' + face;
+        if (maxW !== undefined) {
+            while (size > 8 && ctx.measureText(s).width > maxW) {
+                size -= 0.5;
+                ctx.font = weight + ' ' + size + 'px ' + face;
+            }
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillText(s, x, y);
+    }
+    function panel(x: number, y: number, w: number, h: number): void { box(x, y, w, h, 10, PANEL, 1); }
+    // 아래쪽 눈금 — 상수 이름과 지금 값 · 크기 막대
+    function hud(name: string, val: string, frac: number): void {
+        const label = name + ' ' + val;
+        ctx.font = '700 11px ' + CODE_FONT;
+        const w = ctx.measureText(label).width + 20;
+        const x = 12;
+        const y = H - 30;
+        box(x, y, w, 20, 10, NEU, 0.96);
+        text(label, x + w / 2, y + 10.5, INK, 11, 700, 'center', undefined, true);
+        const mx = x + w + 10;
+        box(mx, y + 6, 140, 8, 4, [78, 72, 104], 1);
+        box(mx, y + 6, 140 * clamp(frac, 0, 1), 8, 4, MINT, 1);
+    }
+    // 그래프 한 칸 — 가로는 시간(0 에서 1), 세로는 lo 에서 hi 까지의 값
+    type Graph = { x: number; y: number; w: number; h: number; lo: number; hi: number };
+    function gX(g: Graph, p: number): number { return g.x + g.w * p; }
+    function gY(g: Graph, v: number): number { return g.y + g.h * (1 - (v - g.lo) / (g.hi - g.lo)); }
+    function graphFrame(g: Graph): void {
+        box(g.x - 6, g.y - 6, g.w + 12, g.h + 12, 8, PANEL, 1);
+        seg(g.x, gY(g, 0), g.x + g.w, gY(g, 0), GRID, 1, 1);
+        seg(g.x, gY(g, 1), g.x + g.w, gY(g, 1), GRID, 1, 1);
+        dash(g.x, gY(g, 0), g.x, gY(g, 1), GRID, 1);
+        dash(g.x + g.w, gY(g, 0), g.x + g.w, gY(g, 1), GRID, 1);
+    }
+    // 곡선 한 줄 — 시간 upTo(0 에서 1) 까지 그리고, 끝에 점을 찍는다
+    function plot(g: Graph, fn: Fn, c: RGB, lw: number, upTo: number, dot: boolean, wash?: number): void {
+        const n = 72;
+        if (wash !== undefined && wash > 0 && upTo > 0) {
+            // 곡선 아래를 옅게 채워 진행이 면으로 보이게 한다
+            ctx.beginPath();
+            ctx.moveTo(gX(g, 0), gY(g, 0));
+            for (let i = 0; i <= n; i += 1) {
+                const p = (i / n) * upTo;
+                ctx.lineTo(gX(g, p), gY(g, fn(p)));
+            }
+            ctx.lineTo(gX(g, upTo), gY(g, 0));
+            ctx.closePath();
+            ctx.fillStyle = rgba(c, wash);
+            ctx.fill();
+        }
+        ctx.beginPath();
+        for (let i = 0; i <= n; i += 1) {
+            const p = (i / n) * upTo;
+            const px = gX(g, p);
+            const py = gY(g, fn(p));
+            if (i === 0) { ctx.moveTo(px, py); } else { ctx.lineTo(px, py); }
+        }
+        ctx.strokeStyle = rgba(c, 1);
+        ctx.lineWidth = lw;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+        if (dot) { disc(gX(g, upTo), gY(g, fn(upTo)), lw + 1.5, c, 1); }
+    }
+    // ── 시간·상태·낭독
+    let sceneT = 0;
+    let lap = 0;
+    let paused = false;
+    let still = false;
+    let lastStatus = '';
+    let lastMode = -9;
+    function pushStatus(s: string): void {
+        if (s === lastStatus) { return; }
+        lastStatus = s;
+        statusP.textContent = s;
+    }
+    // 화면을 한 번 그린다 — 움직임 줄이기이면 시간표 끝(REST_S)의 한 장
+    function redraw(): void {
+        const t = still ? REST_S : sceneT;
+        ctx.clearRect(0, 0, W, H);
+        box(0, 0, W, H, 0, BGC, 1);
+        draw(t);
+        pushStatus(statusText(t));
+        const m = still ? -2 : modeId(t);
+        if (m !== lastMode) {
+            lastMode = m;
+            doneP.textContent = speakText(t);
+        }
+    }
+    // 프레임 간격이 튀어도 한 번에 몰리지 않게 자른다
+    const DT_MAX = 0.05;
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts: number): void {
+        rafId = 0;
+        if (still || paused || document.hidden) { return; }
+        if (lastTs < 0) { lastTs = ts; }
+        const dt = Math.min((ts - lastTs) / 1000, DT_MAX);
+        lastTs = ts;
+        sceneT += dt;
+        if (sceneT >= LAP_S) {
+            sceneT -= LAP_S;
+            lap += 1;
+        }
+        redraw();
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function startLoop(): void {
+        if (rafId) { return; }
+        // 멈췄던 사이의 시간을 첫 프레임 dt 로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop(): void {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    // 장면이 처음으로 돌아갈 때 해야 할 일이 있으면 이 함수를 바꿔 건다
+    let onReset: () => void = function (): void { /* 기본은 할 일 없음 */ };
+    function restart(): void {
+        onReset();
+        sceneT = 0;
+        lap = 0;
+        redraw();
+        if (!paused && !still) { startLoop(); }
+    }
+    function togglePause(): void {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        if (paused) { stopLoop(); } else if (!still) { startLoop(); }
+    }
+    const off = new AbortController();
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // 페이지를 연 채 움직임 줄이기 설정을 바꿔도 change 리스너가 다시 읽는다
+    still = reduceQuery.matches;
+    pauseBtn.addEventListener('click', function (): void { togglePause(); }, { signal: off.signal });
+    pad.addEventListener('keydown', function (e: KeyboardEvent): void {
+        if (e.key === ' ' || e.key === 'Enter' || e.key === 'p' || e.key === 'P') {
+            e.preventDefault();
+            togglePause();
+            return;
+        }
+        if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            restart();
+            return;
+        }
+        if (onKey(e)) {
+            e.preventDefault();
+            // 멈춘 채이거나 움직임 줄이기이면 루프가 없으니 바로 다시 그린다
+            redraw();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작
+    document.addEventListener('visibilitychange', function (): void {
+        if (document.hidden) { stopLoop(); } else if (!paused && !still) { startLoop(); }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 끝 장면 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function (): void {
+        still = reduceQuery.matches;
+        if (still) { stopLoop(); redraw(); } else { restart(); }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function (): void {
+        fitCanvas();
+        redraw();
+    }, { signal: off.signal });
+    // 캔버스 좌표(480×300) — 화면 크기와 상관없이 같은 좌표계
+    function stageXY(e: PointerEvent): [number, number] {
+        const r = cv.getBoundingClientRect();
+        return [((e.clientX - r.left) / r.width) * W, ((e.clientY - r.top) / r.height) * H];
+    }
+    // CSS 기본 키워드 네 개의 실제 곡선 값(CSS 표준이 정한 제어값)
+    const EASE: Fn = cubic(0.25, 0.1, 0.25, 1);
+    const EASE_IN: Fn = cubic(0.42, 0, 1, 1);
+    const EASE_OUT: Fn = cubic(0, 0, 0.58, 1);
+    const EASE_IN_OUT: Fn = cubic(0.42, 0, 0.58, 1);
+    // 09 — 카드의 이동과 투명도에 이징을 따로 걸면(split: 이동 ease-out, 투명도 linear) 두 값이 어긋나고(drift), 같은 이징으로 맞추면(shared) 어긋남이 0 이다. 두 줄을 겹쳐 놓고 어긋남이 가장 큰 시점을 읽는다
+    const DURATION = 1.4;
+    const T0 = 0.3;
+    const T1 = 2.4;
+    const LAP_S = 4.2;
+    const REST_S = 1.9;
+    const TRAVEL = 220;
+    const CW = 30;
+    type Plan = { name: string; move: Fn; fade: Fn };
+    const split: Plan = { name: 'split', move: EASE_OUT, fade: LINEAR };
+    const shared: Plan = { name: 'shared', move: EASE_OUT, fade: EASE_OUT };
+    const GR: Graph = { x: 336, y: 88, w: 122, h: 100, lo: 0, hi: 1 };
+    // 어긋남 — 이동 값과 투명도 값의 차이가 가장 큰 곳(drift)과 그 시간
+    function maxDrift(pl: Plan): [number, number] {
+        let best = 0;
+        let at = 0;
+        for (let i = 0; i <= 1000; i += 1) {
+            const d = Math.abs(pl.move(i / 1000) - pl.fade(i / 1000));
+            if (d > best) { best = d; at = i / 1000; }
+        }
+        return [best, at];
+    }
+    const DRIFT: [number, number] = maxDrift(split);
+    const SAME: [number, number] = maxDrift(shared);
+    function legP(t: number): number {
+        if (t < T1) { return clamp((t - T0) / DURATION, 0, 1); }
+        return 1 - clamp((t - T1) / DURATION, 0, 1);
+    }
+    // 되돌아오는 구간은 같은 곡선을 거꾸로 읽는다
+    function val(fn: Fn, t: number): number {
+        return t < T1 ? fn(legP(t)) : 1 - fn(1 - legP(t));
+    }
+    function draw(t: number): void {
+        const plans = [split, shared];
+        for (let k = 0; k < 2; k += 1) {
+            const pl = plans[k];
+            const y = 48 + k * 90;
+            const mv = val(pl.move, t);
+            const fd = val(pl.fade, t);
+            box(14, y, 300, 82, 10, PANEL, 1);
+            text(pl.name, 24, y + 11, k === 0 ? ROSE : MINT, 11.5, 800, 'left', 70, true);
+            text(k === 0 ? 'translate ease-out · opacity linear' : 'translate ease-out · opacity ease-out', 90, y + 11, DIM, 9.5, 700, 'left', 214, true);
+            seg(24, y + 40, 24 + TRAVEL + CW, y + 40, GRID, 0.9, 1);
+            box(24, y + 25, mv * TRAVEL + CW, 30, 8, k === 0 ? ROSE : MINT, 0.14);
+            box(24 + mv * TRAVEL, y + 25, CW, 30, 8, k === 0 ? ROSE : MINT, 0.15 + 0.85 * fd);
+            ctx.strokeStyle = rgba(k === 0 ? ROSE : MINT, 0.5);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(24 + mv * TRAVEL, y + 25, CW, 30, 8);
+            ctx.stroke();
+            box(24, y + 62, 120, 5, 2.5, [78, 72, 104], 1);
+            box(24, y + 62, 120 * mv, 5, 2.5, SKY, 1);
+            box(166, y + 62, 120, 5, 2.5, [78, 72, 104], 1);
+            box(166, y + 62, 120 * fd, 5, 2.5, SUN, 1);
+            text('translate ' + pct(mv), 24, y + 74, SKY, 9, 700, 'left', 120, true);
+            text('opacity ' + pct(fd), 166, y + 74, SUN, 9, 700, 'left', 120, true);
+        }
+        graphFrame(GR);
+        text('두 속성의 진행률', GR.x + GR.w / 2, 68, NEU, 10.5, 700, 'center', 150);
+        plot(GR, split.move, SKY, 2.5, 1, false);
+        plot(GR, split.fade, SUN, 2.5, 1, false);
+        const dx = gX(GR, DRIFT[1]);
+        seg(dx, gY(GR, split.move(DRIFT[1])), dx, gY(GR, split.fade(DRIFT[1])), ROSE, 1, 3);
+        const pc = t < T1 ? legP(t) : 1 - legP(t);
+        dash(gX(GR, pc), gY(GR, 0), gX(GR, pc), gY(GR, 1), PAPER, 0.7);
+        text(fill('drift {a}% (시간 {b}에서)', pct(DRIFT[0]), f2(DRIFT[1])), 397, 214, ROSE, 10.5, 700, 'center', 150);
+        text(fill('shared 는 drift {a}%', pct(SAME[0])), 397, 232, MINT, 10.5, 700, 'center', 150);
+        hud('drift', pct(DRIFT[0]) + '%', DRIFT[0]);
+    }
+    function statusText(t: number): string {
+        const dm = val(split.move, t);
+        const df = val(split.fade, t);
+        return fill('split 이동 {a}% 투명도 {b}%', pct(dm), pct(df));
+    }
+    function modeId(t: number): number { return t < T0 ? 0 : (t < T1 ? 1 : 2); }
+    function speakText(t: number): string {
+        void t;
+        return fill('이동에 ease-out, 투명도에 linear 를 따로 걸면 시간 {a}에서 두 값이 {b}% 어긋나고, 둘 다 ease-out 으로 맞추면 어긋남이 {c}%다', f2(DRIFT[1]), pct(DRIFT[0]), pct(SAME[0]));
+    }
+    function onKey(e: KeyboardEvent): boolean { void e; return false; }
+    function sceneInit(): void { /* 이 장면은 조작 없이 시간표로만 움직인다 */ }
+    sceneInit();
+    fitCanvas();
+    // 캔버스 설명에는 이 장면이 계산한 핵심 값이 든 문장을 쓴다
+    cv.setAttribute('aria-label', speakText(REST_S));
+    redraw();
+    if (!still) { startLoop(); }
+    return function (): void {
+        stopLoop();
+        off.abort();
+    };
+
+}
+
+export default function PerPropertyEasing() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터'}>
+          <canvas className={cx("ez__canvas")} data-role="canvas" width={480} height={300} role="img" aria-label={'이동과 투명도에 서로 다른 이징을 걸었을 때와 같은 이징일 때의 어긋남을 겹쳐 보는 장면'}></canvas>
+        </div>
+        <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+        <div className={cx("ez__ctrl")}>
+          <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+        </div>
+        <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  );
+}

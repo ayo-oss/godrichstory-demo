@@ -1,0 +1,166 @@
+// InstallCopyTabs — vanilla 판(run/294/demo/01-terminal-install-copy-tabs/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다 — 275 실측).
+// 클래스 이름만 CSS 모듈용으로 바꿨고 duration·easing·color 는 props 가 CSS 변수로 넣어 준다.
+@use "../../../../site/static/demo-tokens" as *;
+
+// 설치 명령 복사 상자 — 같은 패키지를 npm·pnpm·yarn 문법으로 갈아 끼우고 그 줄을 클립보드에 넣는다.
+// 명령 세 줄은 같은 격자 칸(grid-area: 1 / 1)에 겹쳐 두어 문법이 바뀌어도 줄 높이가 흔들리지 않는다.
+// 격자 미리보기(.isDemo)는 npm → pnpm → yarn 을 steps(1, end) 로 컷 전환하고,
+// 그 사이 복사 버튼이 한 번 채워졌다가 90% 안에 되돌아오는 2초 루프.
+// 고정폭 서체는 font 단축이 아니라 font-family 낱개로 준다 (BD20).
+
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$line: rgba(255, 255, 255, .16);
+$dim: rgba(255, 255, 255, .58);
+
+@include stage($stage-ink);
+
+.root {
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid $line; border-radius: $r-card;
+  background: rgba(255, 255, 255, .05);
+  font-family: $mono;
+}
+
+// ── 관리자 탭: 인디케이터를 밀지 않고 탭마다 자기 밑줄을 켠다 (BD19 회피)
+.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: $sp-1; }
+.tab {
+  box-sizing: border-box; width: 100%; padding: $sp-1 0;
+  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: none; color: $dim; cursor: pointer;
+  font-family: inherit; font-weight: 700; font-size: clamp(11px, 3vw, 12px); line-height: 1.4;
+  transition: color var(--duration) var(--easing), border-color var(--duration) var(--easing);
+}
+.tab[aria-selected="true"] { color: $subject-cream; border-bottom-color: var(--color); }
+.tab:focus-visible { outline: 2px solid $subject-blue; outline-offset: 2px; }
+
+// ── 명령 줄
+.row { display: flex; align-items: center; gap: $sp-2; min-width: 0; }
+.sign { flex: 0 0 auto; color: var(--color); font-weight: 700; font-size: clamp(12px, 3.2vw, 13px); line-height: 1.4; }
+.slot { display: grid; flex: 1 1 auto; min-width: 0; }
+.slot > * { grid-area: 1 / 1; }
+.cmd {
+  color: $subject-cream; font-family: inherit; font-weight: 500;
+  font-size: clamp(11px, 3vw, 13px); line-height: 1.4;
+  white-space: nowrap; overflow: hidden; visibility: hidden;
+}
+.cmd b { color: $stage-yellow; font-weight: 700; }
+.root[data-mgr="npm"] .cmd[data-mgr="npm"],
+.root[data-mgr="pnpm"] .cmd[data-mgr="pnpm"],
+.root[data-mgr="yarn"] .cmd[data-mgr="yarn"] { visibility: visible; }
+
+// ── 복사 버튼: 채움은 배경 요소를 scaleX 로 늘려 왼쪽 변에서 자란다 (blog-demo 규칙 8 의 붙는 지점)
+.copy {
+  position: relative; overflow: hidden; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: $sp-1;
+  box-sizing: border-box; min-height: 28px; padding: 0 $sp-2;
+  border: 1px solid $line; border-radius: $r-control;
+  background: rgba(255, 255, 255, .06); color: $subject-cream; cursor: pointer;
+  font-family: inherit; font-weight: 700; font-size: clamp(10px, 2.8vw, 11px); line-height: 1;
+}
+.copy::before {
+  content: ""; position: absolute; inset: 0; background: var(--color);
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform var(--duration) var(--easing);
+}
+.root.isDone .copy::before { transform: scaleX(1); }
+.root.isDone .copy { color: $stage-ink; }
+.copy:focus-visible { outline: 2px solid $subject-blue; outline-offset: 2px; }
+.ico, .word { position: relative; }
+.ico { display: grid; place-items: center; font-size: 14px; }
+
+// ── 상태 줄: 복사 뒤에만 보인다. 자리는 늘 차지해 줄 수가 흔들리지 않는다
+.note {
+  margin: 0; min-height: 14px; color: var(--color); visibility: hidden;
+  font-family: inherit; font-weight: 500; font-size: clamp(10px, 2.6vw, 11px); line-height: 1.3;
+  transform: translateY(4px); transition: transform var(--duration) var(--easing);
+}
+.root.isDone .note { visibility: visible; transform: translateY(0); }
+
+// ── 격자 미리보기 루프 (2초)
+// 0~33% npm · 34~66% pnpm · 67~100% yarn 을 컷으로 갈고, 8~30% 에 복사 채움이 지나간다.
+// 되돌림은 0% 경계에서만 일어나 복귀 프레임이 poster 로 뽑히지 않는다 (blog-demo 「복귀 90%」)
+.root.isDemo .cmd,
+.root.isDemo .tab {
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.root.isDemo .cmd[data-mgr="npm"] { animation-name: icShow1; }
+.root.isDemo .cmd[data-mgr="pnpm"] { animation-name: icShow2; }
+.root.isDemo .cmd[data-mgr="yarn"] { animation-name: icShow3; }
+@keyframes icShow1 {
+  0%, 33% { visibility: visible; }
+  34%, 100% { visibility: hidden; }
+}
+@keyframes icShow2 {
+  0%, 33% { visibility: hidden; }
+  34%, 66% { visibility: visible; }
+  67%, 100% { visibility: hidden; }
+}
+@keyframes icShow3 {
+  0%, 66% { visibility: hidden; }
+  67%, 100% { visibility: visible; }
+}
+.root.isDemo .tab:nth-child(1) { animation-name: icTab1; }
+.root.isDemo .tab:nth-child(2) { animation-name: icTab2; }
+.root.isDemo .tab:nth-child(3) { animation-name: icTab3; }
+@keyframes icTab1 {
+  0%, 33% { color: $subject-cream; border-bottom-color: $chart-3; }
+  34%, 100% { color: $dim; border-bottom-color: transparent; }
+}
+@keyframes icTab2 {
+  0%, 33% { color: $dim; border-bottom-color: transparent; }
+  34%, 66% { color: $subject-cream; border-bottom-color: $chart-3; }
+  67%, 100% { color: $dim; border-bottom-color: transparent; }
+}
+@keyframes icTab3 {
+  0%, 66% { color: $dim; border-bottom-color: transparent; }
+  67%, 100% { color: $subject-cream; border-bottom-color: $chart-3; }
+}
+// 채움은 연속 보간이라 steps 와 섞지 않는다 (266-09 실측: steps 짝은 clip-path·transform 을 컷으로 죽인다)
+.root.isDemo .copy::before {
+  animation-name: icFill; animation-duration: $dur-loop; animation-timing-function: var(--easing);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes icFill {
+  0%, 8% { transform: scaleX(0); }
+  20%, 74% { transform: scaleX(1); }
+  86%, 100% { transform: scaleX(0); }
+}
+.root.isDemo .copy {
+  animation-name: icBtn; animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes icBtn {
+  0%, 19% { color: $subject-cream; }
+  20%, 79% { color: $stage-ink; }
+  80%, 100% { color: $subject-cream; }
+}
+.root.isDemo .note {
+  animation-name: icNote; animation-duration: $dur-loop; animation-timing-function: var(--easing);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes icNote {
+  0%, 19% { visibility: hidden; transform: translateY(4px); }
+  20% { visibility: visible; transform: translateY(4px); }
+  30%, 79% { visibility: visible; transform: translateY(0); }
+  80%, 100% { visibility: hidden; transform: translateY(0); }
+}
+
+@media (max-width: 340px) {
+  .root { padding: $sp-2; gap: $sp-1; }
+  .copy { padding: 0 $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .cmd,
+  .root.isDemo .tab,
+  .root.isDemo .copy,
+  .root.isDemo .copy::before,
+  .root.isDemo .note { animation: none !important; }
+  .root.isDemo .cmd[data-mgr="npm"] { visibility: visible !important; }
+  .root.isDemo .cmd[data-mgr="pnpm"],
+  .root.isDemo .cmd[data-mgr="yarn"] { visibility: hidden !important; }
+  .tab, .copy::before, .note { transition: none !important; }
+}

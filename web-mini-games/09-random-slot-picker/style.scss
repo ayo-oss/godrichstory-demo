@@ -1,0 +1,156 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 랜덤 슬롯 뽑기 — 세 칸짜리 창(overflow: hidden) 안에서 이름 트랙이 칸 단위로 움직인다.
+// 칸 높이는 --row 하나로 잡고 창 높이·강조 틀·미리보기 이동거리가 전부 그 값을 쓴다.
+// 미리보기 루프는 후보 수(--rows)만큼 정확히 올라가므로 한 바퀴 뒤 이음새가 튀지 않는다.
+// 실제 뽑기는 JS 가 transform 을 걸고 transition 이 감속한다 — CSS 시계로 재는 격자 미리보기와는 별개 경로다.
+// 글자 대비: 먹 무대 위 글자는 크림(17.11:1), 크림 창 안 이름은 잉크(17.11:1), 노란 배너 위는 잉크(12.63:1).
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $subject-blue-deep;
+// 토큰 이징에는 슬롯이 필요한 긴 감속 꼬리가 없다 — 이 항목 전용으로 하나 더 둔다
+$reel-ease: cubic-bezier(.1, .7, .1, 1);
+
+@include stage($stage-ink);
+
+.sl {
+  --row: clamp(24px, 9vw, 44px);
+  --rows: 8;
+  display: flex; flex-direction: column; gap: $sp-2;
+  width: 100%; max-width: 400px; max-height: 100%;
+}
+
+.sl__bar { display: flex; align-items: baseline; justify-content: space-between; gap: $sp-2; }
+.sl__title { margin: 0; font-weight: 800; font-size: clamp(11px, 2.8vw, 15px); color: $subject-cream; }
+.sl__count { margin: 0; font-weight: 700; font-size: clamp(9px, 2.4vw, 12px); color: $subject-cream; }
+.sl__countNum { font-weight: 800; font-size: clamp(11px, 2.8vw, 14px); color: $subject-cream; }
+.sl__countLabel { font-weight: 700; }
+
+.sl__body { display: flex; align-items: center; gap: clamp(8px, 3vw, 16px); }
+
+.sl__window {
+  position: relative; flex: 0 0 auto;
+  width: clamp(104px, 34vw, 160px); height: calc(var(--row) * 3);   // 창 높이는 칸 높이의 정수배
+  overflow: hidden; border-radius: $r-card;
+  background-color: $subject-cream;
+}
+// 실제 뽑기(감속 중)에는 칸이 창 경계에 걸린다 — 위아래를 크림으로 흐려 글자가 잘린 채 끝나지 않게
+.sl__window::before,
+.sl__window::after {
+  content: ""; position: absolute; left: 0; right: 0; z-index: 1;
+  height: 14%; pointer-events: none;
+}
+.sl__window::before { top: 0; background-image: linear-gradient($subject-cream, rgba($subject-cream, 0)); }
+.sl__window::after { bottom: 0; background-image: linear-gradient(rgba($subject-cream, 0), $subject-cream); }
+.sl__track {
+  display: flex; flex-direction: column;
+  transition-property: transform;
+  transition-duration: 2200ms;
+  transition-timing-function: $reel-ease;
+}
+.sl__item {
+  display: grid; place-items: center;
+  height: var(--row);
+  font-weight: 800; font-size: clamp(12px, 3.4vw, 18px); line-height: 1;
+  color: $subject-ink;
+}
+// 당첨 자리는 **가운데 밴드 하나**로 표시한다 — 선 두 줄은 어느 칸이 당첨인지 모호했다 (poster 육안 검사 2026-09-14).
+// 테두리는 inset box-shadow 라 box-sizing 과 무관하게 칸 높이를 어긋나게 하지 않는다
+.sl__frame {
+  position: absolute; left: 0; right: 0; top: var(--row); height: var(--row); z-index: 2;
+  box-sizing: border-box; border-radius: $r-sm;
+  background-color: rgba($subject-blue-deep, .14);
+  box-shadow: inset 0 0 0 2px $color;
+  pointer-events: none;
+}
+
+.sl__side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: $sp-2; }
+.sl__btn {
+  padding: clamp(8px, 2vw, 12px) $sp-3;
+  border: 2px solid $subject-cream; border-radius: $r-pill;
+  background: none; color: $subject-cream;
+  font-weight: 700; font-size: clamp(10px, 2.6vw, 13px); line-height: 1;
+  cursor: pointer;
+  transition: transform $dur-quick $easing;
+}
+.sl__btn:focus-visible { outline: 2px solid $subject-cream; outline-offset: 2px; }
+.sl__btn:active { transform: scale(.97); }
+.sl__btn--go {
+  border-color: $color;
+  background-color: $color; color: $subject-cream;
+  font-weight: 800; font-size: clamp(11px, 3vw, 15px);
+}
+.sl__btn[disabled] { cursor: default; opacity: .82; }
+
+.sl__out { display: grid; }
+.sl__banner, .sl__ghost {
+  grid-area: 1 / 1; justify-self: start; margin: 0;
+  padding: $sp-1 $sp-3; border-radius: $r-pill;
+  font-weight: 700; font-size: clamp(10px, 2.6vw, 13px); line-height: 1.3;
+  color: $subject-cream;
+}
+.sl__banner.is-win { background-color: $stage-yellow; color: $subject-ink; }
+.sl__ghost { opacity: 0; }
+.sl__ghost--b { background-color: $stage-yellow; color: $subject-ink; }
+
+// ── 격자 미리보기 ───────────────────────────────────────────
+// 트랙이 2초에 정확히 후보 수만큼(= 한 벌) 올라간다 — 벌이 넷이라 이음새가 안 보인다.
+// 칸 수만큼의 steps 로 끊어 올리므로 **모든 프레임에서 칸이 창에 딱 맞는다** — 글자가 잘린 채 찍히지 않는다
+.sl.is-demo .sl__track {
+  animation-name: slRoll; animation-duration: $duration;
+  animation-timing-function: steps(var(--rows), end); animation-iteration-count: infinite;
+}
+.sl.is-demo .sl__banner {
+  animation-name: slBannerOff; animation-duration: $duration;
+  animation-timing-function: steps(1, end); animation-iteration-count: infinite;
+}
+.sl.is-demo .sl__ghost--a {
+  animation-name: slGhostA; animation-duration: $duration;
+  animation-timing-function: steps(1, end); animation-iteration-count: infinite;
+}
+.sl.is-demo .sl__ghost--b {
+  animation-name: slGhostB; animation-duration: $duration;
+  animation-timing-function: steps(1, end); animation-iteration-count: infinite;
+}
+
+// 0~62% 에 한 벌을 올리고 62% 뒤에는 **멈춰 선다** — 발표 구간에 릴이 계속 돌면
+// 정지 프레임(poster·썸네일)에서 가운데 칸과 발표 이름이 어긋난다.
+// 한 벌(= --rows 칸)을 올려 멈추므로 가운데 칸은 다시 목록 두 번째(서연)다
+@keyframes slRoll {
+  0%   { transform: translateY(0); }
+  62%  { transform: translateY(calc(var(--row) * var(--rows) * -1)); }
+  100% { transform: translateY(calc(var(--row) * var(--rows) * -1)); }
+}
+@keyframes slBannerOff {
+  0%   { opacity: 0; }
+  88%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+@keyframes slGhostA {
+  0%   { opacity: 1; }
+  62%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+@keyframes slGhostB {
+  0%   { opacity: 0; }
+  62%  { opacity: 1; }
+  88%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .sl { gap: $sp-1; }
+  .sl__side { gap: $sp-1; }
+  .sl__btn { padding: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sl__track { transition: none !important; }
+  .sl__btn { transition: none !important; }
+  .sl.is-demo .sl__track,
+  .sl.is-demo .sl__banner,
+  .sl.is-demo .sl__ghost { animation: none !important; }
+  .sl.is-demo .sl__ghost { opacity: 0 !important; }
+  .sl.is-demo .sl__banner { opacity: 1 !important; }
+}

@@ -1,0 +1,291 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+$duration: $dur-enter;
+$easing: $ease-out;
+$color: $stage-orange;
+
+@include stage($stage-ink);
+
+.ecb {
+  position: relative;
+}
+
+.pane {
+  box-sizing: border-box;
+  width: 288px;
+  border-radius: $r-card;
+  overflow: hidden;
+  box-shadow: $shadow-raised;
+  background: $subject-cream;
+  color: $subject-ink;
+}
+
+.pane__head {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 $sp-3;
+  background: rgba(23, 20, 26, .06);
+  border-bottom: 1px solid rgba(23, 20, 26, .12);
+}
+.pane__file {
+  display: flex;
+  align-items: center;
+  gap: $sp-1;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba($subject-ink, .72);
+}
+.pane__file .ic { flex: none; }
+
+.pane__body {
+  position: relative;
+  box-sizing: border-box;
+  padding: $sp-3;
+}
+.ecb__peek {
+  margin: 0;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: pre;
+}
+.ecb__peek code { font: inherit; }
+.k { color: $subject-orange-deep; }
+.s { color: $subject-blue-deep; }
+.n { color: $error; }
+
+// 접힘/펼침 — grid-template-rows 0fr → 1fr, 고정 높이 없이 실제 콘텐츠 높이로 보간
+.ecb__more {
+  display: grid;
+  grid-template-rows: 0fr;
+}
+// 실제 상호작용(비-데모)일 때만 transition — is-demo 루프는 keyframe 애니메이션만 쓴다
+// (같은 속성에 transition 과 animation 을 동시에 걸면 강제 currentTime 재생 시 충돌해
+// 접힘이 여러 프레임에 걸쳐 보간되지 않고 한 프레임에 훅 꺼지는 문제가 있었다)
+.ecb:not(.is-demo) .ecb__more {
+  transition: grid-template-rows $duration $easing;
+}
+.ecb.is-open .ecb__more { grid-template-rows: 1fr; }
+.ecb__moreInner {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+.ecb__line { display: block; }
+
+// 바닥 페이드 띠 — 접힌 상태에서만 보인다
+.ecb__fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 32px;
+  background: linear-gradient(to bottom, rgba(255, 247, 230, 0), $subject-cream);
+  pointer-events: none;
+}
+.ecb.is-open .ecb__fade { opacity: 0; }
+
+.ecb__toggleRow {
+  box-sizing: border-box;
+  padding: 0 $sp-3 $sp-3;
+}
+.ecb__toggle {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: $sp-1;
+  height: 24px;
+  padding: 0 $sp-2;
+  border: 0;
+  border-radius: $r-pill;
+  background: rgba(23, 20, 26, .08);
+  color: inherit;
+  cursor: pointer;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  transition: transform $dur-quick $easing, background $dur-quick $easing;
+}
+.ecb__toggle:hover { background: rgba(23, 20, 26, .14); }
+.ecb__toggle:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+
+// 라벨 두 장을 겹쳐 놓고 opacity 만 바꾼다(레이아웃이 안 흔들린다) — pane__copy 의 copy__state 방식과 동일
+.ecb__labelWrap {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 14px;
+}
+.ecb__label {
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+  transition: opacity $dur-quick $easing;
+}
+.ecb__label--more { opacity: 1; }
+.ecb__label--less { opacity: 0; }
+.ecb.is-open .ecb__label--more { opacity: 0; }
+.ecb.is-open .ecb__label--less { opacity: 1; }
+
+.ecb__caret {
+  flex: none;
+  transition: transform $dur-quick $easing;
+}
+.ecb.is-open .ecb__caret { transform: rotate(180deg); }
+
+.ecb__cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  width: 12px;
+  height: 12px;
+  border: 2px solid $subject-cream;
+  border-radius: 50%;
+  background: $subject-ink;
+  box-shadow: $shadow-press;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(252px, 16px);
+}
+.ecb.is-demo .ecb__cursor { opacity: 1; }
+
+// ── 자동 루프 (2s) ────────────────────────────────────
+// 함정1 대책: 46-62%(펼침 마무리, 다섯 줄 등장)에서 면적 변화가 가장 크게 남도록,
+// 64% 재접힘 직전(62%)에 여분 줄 텍스트를 opacity 0 으로 먼저 비워 둔다.
+// 이후 grid-template-rows 1fr→0fr 재접힘은 "이미 빈 영역"을 접는 것이라 픽셀 변화가 작다.
+// 접힘 구간도 0.16 (32%, 0.64s) 로 펼침(0.28, 0.56s)보다 넓게 잡아 프레임당 변화율을 낮춘다.
+.ecb.is-demo .ecb__more {
+  animation-name: ecb-grid;
+  animation-duration: $dur-loop;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+.ecb.is-demo .ecb__fade {
+  animation-name: ecb-fade;
+  animation-duration: $dur-loop;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.ecb.is-demo .ecb__caret {
+  animation-name: ecb-caret;
+  animation-duration: $dur-loop;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+.ecb.is-demo .ecb__toggle {
+  animation-name: ecb-press;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+.ecb.is-demo .ecb__label--more,
+.ecb.is-demo .ecb__label--less {
+  animation-duration: $dur-loop;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.ecb.is-demo .ecb__label--more { animation-name: ecb-label-more; }
+.ecb.is-demo .ecb__label--less { animation-name: ecb-label-less; }
+.ecb.is-demo .ecb__moreInner .ecb__line {
+  opacity: 0;
+  animation-name: ecb-line;
+  animation-duration: $dur-loop;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+@for $i from 1 through 5 {
+  .ecb.is-demo .ecb__moreInner .ecb__line:nth-child(#{$i}) {
+    animation-delay: ($i - 1) * 0.015s;
+  }
+}
+.ecb.is-demo .ecb__cursor {
+  animation-name: ecb-cursor;
+  animation-duration: $dur-loop;
+  animation-timing-function: $ease-spring;
+  animation-iteration-count: infinite;
+}
+
+// fr 값 하나로만 62%→86% 를 맡기면 크롬이 변화를 앞쪽 몇 프레임에 몰아
+// 한 프레임에 훅 접히는 것처럼 보인다(실측). 촘촘한 중간 정지점을 직접 박아
+// 프레임마다 변화폭을 고르게 나눈다 — 펼침 쪽도 대칭으로 맞춘다.
+// (poster 수정: 하이라이트 막을 없애고, 줄은 접힘이 시작되는 86%까지 완전 불투명하게
+// 유지한다 — 62~86% 사이 "펼쳐진 빈 상자"가 반투명 유령으로 보이던 문제 대책)
+@keyframes ecb-grid {
+  0%, 14%   { grid-template-rows: 0fr; }
+  20%       { grid-template-rows: .12fr; }
+  26%       { grid-template-rows: .32fr; }
+  32%       { grid-template-rows: .55fr; }
+  38%       { grid-template-rows: .8fr; }
+  44%, 62%  { grid-template-rows: 1fr; }
+  68%       { grid-template-rows: .8fr; }
+  74%       { grid-template-rows: .55fr; }
+  80%       { grid-template-rows: .32fr; }
+  83%       { grid-template-rows: .16fr; }
+  86%, 100% { grid-template-rows: 0fr; }
+}
+@keyframes ecb-fade {
+  0%, 14%   { opacity: 1; }
+  30%       { opacity: 0; }
+  88%       { opacity: 0; }
+  96%, 100% { opacity: 1; }
+}
+// 카레트·라벨은 접힘이 거의 끝나는 84% 에 함께 되돌아온다.
+// 63% 에 되돌리면 아직 펼쳐진 창에 「더 보기」가 적혀 화면이 거짓말을 한다 (poster 육안 실측)
+@keyframes ecb-caret {
+  0%, 14%   { transform: rotate(0deg); }
+  40%, 83%  { transform: rotate(180deg); }
+  84%, 100% { transform: rotate(0deg); }
+}
+@keyframes ecb-press {
+  0%, 12%  { transform: scale(1); }
+  14%      { transform: scale(.94); }
+  18%, 100% { transform: scale(1); }
+}
+@keyframes ecb-label-more {
+  0%, 15%   { opacity: 1; }
+  16%, 83%  { opacity: 0; }
+  84%, 100% { opacity: 1; }
+}
+@keyframes ecb-label-less {
+  0%, 15%   { opacity: 0; }
+  16%, 83%  { opacity: 1; }
+  84%, 100% { opacity: 0; }
+}
+// 다섯 줄 등장 — translateY(6px) → 0, 46~60% 안에 끝내고 접힘이 시작되는 86%까지
+// 완전 불투명을 유지한다(62~86% 사이 반투명 유령 방지). 사라짐은 접힘과 함께.
+@keyframes ecb-line {
+  0%, 44%   { opacity: 0; transform: translateY(6px); }
+  60%, 86%  { opacity: 1; transform: translateY(0); }
+  100%      { opacity: 0; transform: translateY(6px); }
+}
+// 커서는 86% 안에 처음 자리로 돌아와 그 뒤로는 가만히 있는다(텔레포트 금지).
+@keyframes ecb-cursor {
+  0%, 2%    { transform: translate(252px, 16px); }
+  12%, 74%  { transform: translate(48px, 138px); }
+  86%, 100% { transform: translate(252px, 16px); }
+}
+
+@media (max-width: 340px) {
+  .pane { width: 100%; }
+  .ecb__peek { font-size: 10px; line-height: 16px; }
+  .pane__body { padding: $sp-2; }
+  .ecb__toggleRow { padding: 0 $sp-2 $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ecb.is-demo .ecb__more,
+  .ecb.is-demo .ecb__fade,
+  .ecb.is-demo .ecb__caret,
+  .ecb.is-demo .ecb__toggle,
+  .ecb.is-demo .ecb__label--more,
+  .ecb.is-demo .ecb__label--less,
+  .ecb.is-demo .ecb__moreInner .ecb__line,
+  .ecb.is-demo .ecb__cursor { animation: none !important; }
+  .ecb.is-demo .ecb__more { grid-template-rows: 0fr; }
+  .ecb.is-demo .ecb__cursor { opacity: 0; }
+}

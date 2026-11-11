@@ -1,0 +1,192 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// SignatureExport — vanilla 판(run/287/demo/07-signature-export-crop/style.scss) 의 React 포트.
+// 실제 크롭은 canvas 2D(getImageData → drawImage → toDataURL)가 하고,
+// 격자 미리보기(.isDemo)는 canvas 를 감추고 같은 장면을 CSS @keyframes 로 재현한다.
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어온다. @keyframes 본문은 vanilla 와 같은 글자.
+
+@include stage($stage-yellow);
+
+.root { display: flex; justify-content: center; width: 100%; }
+.card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; overflow: hidden;
+}
+.bar {
+  display: flex; align-items: center; justify-content: space-between; gap: $sp-2;
+  background: $subject-ink; padding: $sp-2 $sp-3;
+}
+.label {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  font-weight: 800; font-size: clamp(9px, 2.4vw, 11px); line-height: 1.3; color: $stage-paper;
+}
+.ico { width: 14px; height: 14px; flex: 0 0 auto; }
+.btn {
+  display: flex; align-items: center; gap: $sp-1; cursor: pointer;
+  border: 1px solid $subject-blue; background: $subject-blue; color: $stage-paper;
+  border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); padding: $sp-1 $sp-2; line-height: 1.3;
+}
+.btn:focus-visible { outline: 3px solid $stage-paper; outline-offset: 2px; }
+
+.body { display: grid; grid-template-columns: 1.6fr 1fr; gap: $sp-2; padding: $sp-2; }
+.pad {
+  position: relative; background: $subject-cream; border-radius: $r-sm;
+  aspect-ratio: 200 / 100; touch-action: none; overflow: hidden;
+}
+.ink, .ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ghost { display: none; }
+.stroke {
+  fill: none; stroke: var(--color, #{$subject-ink}); stroke-width: 4;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+// 크롭 테두리 — 네 변이 잉크 바깥선까지 함께 조여든다. 1px 점선을 scale 로 줄이면 선과 점이 같이
+// 굵어지므로 여기서는 절대배치 오버레이의 변(inset)을 움직인다. 실사용에서는 JS 가 잰 바운딩 박스를
+// 퍼센트로 넣어 같은 자리로 조인다
+.crop {
+  position: absolute; inset: 0; pointer-events: none;
+  border: 1px dashed $subject-blue; border-radius: $r-xs;
+  transition: inset $dur-base $ease-spring;
+}
+
+.out { display: flex; flex-direction: column; gap: $sp-1; min-width: 0; }
+.outLabel { font-weight: 800; font-size: 9px; line-height: 1.3; color: rgba(23, 20, 26, .72); }
+.frame {
+  position: relative; flex: 1 1 auto; min-height: 0; display: grid; place-items: center;
+  border: 1px solid rgba(23, 20, 26, .16); border-radius: $r-sm; overflow: hidden;
+  // 투명 배경을 뜻하는 체크무늬
+  background-color: $stage-paper;
+  background-image: repeating-conic-gradient(rgba(23, 20, 26, .1) 0% 25%, transparent 0% 50%);
+  background-size: 12px 12px;
+}
+.hint {
+  padding: 0 $sp-1; text-align: center; font-weight: 700;
+  font-size: clamp(8px, 2.2vw, 9px); line-height: 1.3; color: rgba(23, 20, 26, .72);
+}
+.img { display: none; max-width: 100%; max-height: 100%; }
+.root.hasOut .img { display: block; }
+.root.hasOut .hint { display: none; }
+// 결과 사본은 축소되어 들어가므로 선을 조금 굵게 — 원본과 같은 굵기로 보이고 등장 프레임도 또렷하다
+.thumb { display: none; position: absolute; inset: $sp-1; }
+.thumb .stroke { stroke-width: 6; }
+
+.live {
+  position: relative; margin: 0; padding: 0 $sp-3 $sp-2; font-weight: 700;
+  font-size: clamp(8px, 2.2vw, 10px); line-height: 1.3; color: rgba(23, 20, 26, .72);
+}
+.liveDemo { display: none; position: absolute; left: $sp-3; top: 0; }
+
+// ── 미리보기 루프: 0~10% 버튼이 자기 중심에서 눌리고, 12~44% 크롭 테두리가 판 전체에서
+//    잉크 바깥선까지 네 변이 함께 조여든다. 46% 에 잘린 결과가 오른쪽 칸에 컷으로 나타나
+//    62% 까지 scale(.86) → scale(1) 로 팝한다 — poster 가 이 구간에서 뽑힌다.
+//    64% 문구가 바뀌고, 70~84% 결과가 clip-path 위프로 지워지고, 84~92% 테두리가 판 전체로 벌어진다.
+.root.isDemo .ink { visibility: hidden; }
+.root.isDemo .ghost { display: block; }
+.root.isDemo .thumb { display: block; }
+
+.root.isDemo .btn {
+  animation-name: exPress;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes exPress {
+  0% { transform: scale(1); }
+  4% { transform: scale(.9); }
+  10%, 100% { transform: scale(1); }
+}
+
+.root.isDemo .crop {
+  animation-name: exCrop;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+@keyframes exCrop {
+  0%, 12% { inset: 0; }
+  44%, 84% { inset: 19% 15% 16% 11%; }
+  92%, 100% { inset: 0; }
+}
+
+// 결과는 나타날 때만 컷(steps)이고 커지는 건 자기 중심 팝이다 — transform-origin 은 기본값 50% 50%.
+// 등장은 46% 에 이미 scale(.86) 인 채로 컷해 한 칸에 거의 다 나타나고(면적차 최대 = poster),
+// 퇴장은 70~84% 의 clip-path 위프라 프레임마다 지워지는 띠만 변한다.
+// 실측 2026-09-12: 퇴장을 scale 축소로 두면 그쪽이 poster 를 가져갔다 (1.69 대 1.13)
+.root.isDemo .thumb {
+  animation-name: exShow, exPop, exWipe;
+  animation-duration: var(--duration, #{$dur-loop}), var(--duration, #{$dur-loop}), var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end), $ease-pop, var(--easing, #{$ease-out});
+  animation-iteration-count: infinite, infinite, infinite;
+  animation-fill-mode: backwards, backwards, backwards;
+}
+@keyframes exShow {
+  0%, 45% { opacity: 0; }
+  46%, 100% { opacity: 1; }
+}
+@keyframes exPop {
+  0%, 45% { transform: scale(.86); }
+  62%, 100% { transform: scale(1); }
+}
+// 위프는 컷(steps)과 같은 애니메이션에 묶지 않는다 — steps 는 clip-path 보간을 죽인다
+@keyframes exWipe {
+  0%, 70% { clip-path: inset(0 0 0 0); }
+  84%, 100% { clip-path: inset(0 100% 0 0); }
+}
+
+.root.isDemo .hint {
+  animation-name: exHint;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes exHint {
+  0%, 45% { opacity: 1; }
+  46%, 85% { opacity: 0; }
+  86%, 100% { opacity: 1; }
+}
+
+// 안내 문구는 칸 두 개를 steps(1, end) 로 갈아 끼운다 — 반투명 겹침이 없다
+.root.isDemo .liveReal { color: transparent; }
+.root.isDemo .liveDemo {
+  display: block;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.root.isDemo .sayBefore { animation-name: exSayBefore; }
+.root.isDemo .sayAfter { animation-name: exSayAfter; }
+// 문구가 되돌아오는 컷은 94% — 크롭 테두리가 다 벌어진 뒤라 다른 움직임과 겹치지 않고,
+// 마지막 프레임(95.8%)이 첫 프레임과 같은 문구가 되어 루프 이음매도 맞는다
+@keyframes exSayBefore {
+  0%, 63% { opacity: 1; }
+  64%, 93% { opacity: 0; }
+  94%, 100% { opacity: 1; }
+}
+@keyframes exSayAfter {
+  0%, 63% { opacity: 0; }
+  64%, 93% { opacity: 1; }
+  94%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .bar { padding: $sp-1 $sp-2; }
+  .body { gap: $sp-1; padding: $sp-1; }
+  .live { padding: 0 $sp-2 $sp-1; }
+  .liveDemo { left: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .btn,
+  .root.isDemo .crop,
+  .root.isDemo .thumb,
+  .root.isDemo .hint,
+  .root.isDemo .liveDemo { animation: none !important; }
+  // 움직임 없이 「잘라낸 결과가 나와 있는」 최종 상태로 세운다
+  .root.isDemo .crop { inset: 19% 15% 16% 11% !important; }
+  .root.isDemo .thumb {
+    opacity: 1 !important; transform: scale(1) !important; clip-path: inset(0 0 0 0) !important;
+  }
+  .root.isDemo .hint { opacity: 0 !important; }
+  .root.isDemo .sayBefore { opacity: 0 !important; }
+  .root.isDemo .sayAfter { opacity: 1 !important; }
+}

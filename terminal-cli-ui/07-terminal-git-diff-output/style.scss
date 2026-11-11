@@ -1,0 +1,144 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// diff 출력 접기 — 터미널이 찍어 놓은 diff 텍스트를 묶음(hunk) 단위로 접는다.
+// 접기는 grid-template-rows 를 0fr 과 1fr 사이에서 옮겨 높이를 보간한다.
+// 안쪽 상자에 min-height: 0 과 overflow: hidden 이 함께 있어야 0fr 에서 실제로 눌린다.
+// 밝은 테마 터미널이라 무대는 페이퍼다. 더한 줄·뺀 줄은 배경 색조로 나누고 글자는 잉크로 둔다 —
+// 페이퍼 무대(흰 바탕) 위 초록 글자는 4.5:1 을 못 넘긴다($chart-3 는 3.40:1).
+// 맨 앞 + - 기호가 색과 같은 정보를 글자로도 준다.
+
+$duration: $dur-base;
+$easing: $ease-spring;
+$color: $chart-3;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$ink-soft: rgba(23, 20, 26, .72);
+$line: rgba(23, 20, 26, .14);
+
+@include stage($stage-paper);
+
+.dh {
+  display: flex; flex-direction: column; gap: $sp-2;
+  box-sizing: border-box; width: min(100%, 408px);
+  padding: $sp-3; border: 1px solid $line; border-radius: $r-card;
+  background: $stage-paper; font-family: $mono;
+}
+
+.dh__stat {
+  display: flex; align-items: center; gap: $sp-2; margin: 0;
+  color: $ink-soft; font-weight: 600; font-size: clamp(9px, 2.4vw, 10px); line-height: 1.4;
+}
+.dh__chip {
+  box-sizing: border-box; padding: 0 $sp-1; border-radius: $r-xs;
+  color: $subject-ink; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.dh__chip--add { background: rgba(43, 157, 116, .26); }
+.dh__chip--del { background: rgba(194, 54, 26, .18); }
+.dh__statTxt { flex: 1 1 auto; min-width: 0; }
+
+.dh__hunk { border: 1px solid $line; border-radius: $r-sm; overflow: hidden; }
+.dh__head {
+  display: flex; align-items: center; gap: $sp-2;
+  box-sizing: border-box; width: 100%; padding: $sp-1 $sp-2;
+  border: 0; border-radius: 0; background: rgba(23, 20, 26, .05);
+  color: $ink-soft; cursor: pointer; text-align: left;
+  font-family: inherit; font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); line-height: 1.6;
+}
+.dh__head:focus-visible { outline: 2px solid $subject-blue; outline-offset: -2px; }
+// 화살표는 스스로 완결한 아이콘이라 제 중심에서 돈다 (blog-demo 규칙 8)
+.dh__caret {
+  display: grid; place-items: center; flex: 0 0 auto; font-size: 12px; color: $subject-ink;
+  transform: rotate(0deg); transform-origin: 50% 50%;
+  transition: transform $duration $easing;
+}
+.dh__head[aria-expanded="true"] .dh__caret { transform: rotate(90deg); }
+.dh__at { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; }
+
+// 접히는 칸: 0fr 에서 눌리려면 안쪽에 min-height: 0 이 있어야 한다
+.dh__body {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows $duration $easing;
+}
+.dh__head[aria-expanded="true"] + .dh__body { grid-template-rows: 1fr; }
+.dh__inner { min-height: 0; overflow: hidden; }
+
+.dh__row {
+  display: flex; align-items: center; gap: $sp-1; margin: 0;
+  box-sizing: border-box; padding: 0 $sp-2; color: $subject-ink;
+  font-weight: 600; font-size: clamp(9px, 2.6vw, 11px); line-height: 1.6;
+  white-space: nowrap; overflow: hidden;
+}
+.dh__sign { flex: 0 0 auto; width: 8px; font-weight: 800; }
+// 더한 줄의 왼쪽 막대 — 줄 왼쪽 변에 붙은 표시라 그 변을 원점으로 자란다 (blog-demo 규칙 8 의 예외)
+.dh__row--add { position: relative; background: rgba(43, 157, 116, .22); }
+.dh__row--add::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: $color; transform: scaleY(1); transform-origin: center top;
+}
+.dh__row--del { background: rgba(194, 54, 26, .14); }
+// 뺀 줄 기호도 잉크다 — 뺀 줄 바탕 #f6e3df 위에서 $error 는 4.42:1 로 4.5:1 에 0.08 모자란다 (이 편 실측).
+// 줄을 가르는 건 배경 색조와 맨 앞의 - 기호이지 글자색이 아니다
+
+// ── 격자 미리보기 루프 (2초)
+// 0~6% 접힌 채로 시작해 6~26% 에 펼쳐지고 그대로 선다.
+// 루프 안에서 다시 접지 않는다 — 접히는 쪽이 펼치는 쪽보다 변한 면적이 커서 빈 상자가 poster 로
+// 뽑히기 때문이다 (248-09·255 실측). 되돌림은 0% 경계에서만 일어난다.
+// 미리보기에서만 펼침을 steps(1, end) 컷으로 바꾼다 — 높이가 보간되는 중간 프레임은 마지막 줄이
+// 반쯤 잘린 장면이라 그게 poster 로 뽑힌다. 실제 클릭은 위의 transition 그대로 부드럽게 열린다 (252-07 계열).
+// 컷만으로는 움직인 프레임이 모자라 더한 줄의 왼쪽 막대가 34%·48% 에 차례로 자란다 (252 실측)
+.dh.is-demo .dh__body {
+  animation-name: dhFold; animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes dhFold {
+  0%, 6% { grid-template-rows: 0fr; }
+  7%, 100% { grid-template-rows: 1fr; }
+}
+.dh.is-demo .dh__caret {
+  animation-name: dhCaret; animation-duration: $dur-loop; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes dhCaret {
+  0%, 6% { transform: rotate(0deg); }
+  26%, 100% { transform: rotate(90deg); }
+}
+.dh.is-demo .dh__row--add:nth-of-type(3)::before { animation-name: dhMark1; }
+.dh.is-demo .dh__row--add:nth-of-type(4)::before { animation-name: dhMark2; }
+.dh.is-demo .dh__row--add::before {
+  animation-duration: $dur-loop; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+@keyframes dhMark1 {
+  0%, 34% { transform: scaleY(0); }
+  46%, 100% { transform: scaleY(1); }
+}
+@keyframes dhMark2 {
+  0%, 48% { transform: scaleY(0); }
+  60%, 100% { transform: scaleY(1); }
+}
+.dh.is-demo .dh__chip {
+  animation-name: dhChip; animation-duration: $dur-loop; animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+  animation-delay: 0s;
+}
+.dh.is-demo .dh__chip--del { animation-delay: 100ms; }
+// 칩은 스스로 완결한 배지라 제 중심에서 커진다 (blog-demo 규칙 8)
+@keyframes dhChip {
+  0%, 68% { transform: scale(1); }
+  74% { transform: scale(1.22); }
+  82%, 100% { transform: scale(1); }
+}
+
+@media (max-width: 340px) {
+  .dh { padding: $sp-2; gap: $sp-1; }
+  .dh__head, .dh__row { padding-left: $sp-1; padding-right: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dh.is-demo .dh__body,
+  .dh.is-demo .dh__caret,
+  .dh.is-demo .dh__chip,
+  .dh.is-demo .dh__row--add::before { animation: none !important; }
+  .dh.is-demo .dh__body { grid-template-rows: 1fr !important; }
+  .dh.is-demo .dh__caret { transform: rotate(90deg) !important; }
+  .dh__body, .dh__caret { transition: none !important; }
+}

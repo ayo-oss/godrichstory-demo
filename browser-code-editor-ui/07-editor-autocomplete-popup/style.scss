@@ -1,0 +1,218 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 커서 자리 자동완성 — 치던 낱말(조각)로 startsWith 좁히기를 하고, 거울 요소로 잰 커서 x 좌표
+// 바로 아래에 role="listbox" 팝업을 뜨게 한다. ↑↓ 로 항목을 고르고(aria-activedescendant 갱신),
+// Enter 로 조각을 통째로 갈아 끼운다. 고정 위치 드롭다운이 아니라 커서를 따라가는 팝업이다.
+// 팝업은 절대배치라 부모 높이 계산에서 빠진다 — 아래 키워드 칩 줄이 열린 팝업 높이만큼의
+// 여유(예약 높이)를 함께 담당한다(237 실측: 확보가 없으면 320px 에서 넘친다).
+// 격자 미리보기(.is-demo)는 조각 두 상태를 steps(1, end) 컷으로 갈아 끼우고 팝업을 컷 + translateY
+// 팝으로 띄운 다음, 선택 밴드가 1번 항목에서 2번 항목으로 옮겨 간다. 페이드는 쓰지 않는다.
+
+$duration: $dur-quick;
+$easing: $ease-pop;
+$color: $subject-blue;
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$line: rgba(23, 20, 26, .16);
+$dim: rgba(23, 20, 26, .72);
+$fs: clamp(11px, 3vw, 13px);
+$lh: 20px;
+
+@include stage($stage-paper);
+
+// 격자 미리보기 루프 공통 — 낱개 속성만 쓴다(단축은 delay 를 지운다), 시작 전은 0% 상태로 채운다
+@mixin loop($name, $timing) {
+  animation-name: $name;
+  animation-duration: $dur-loop;
+  animation-timing-function: $timing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+
+.ac {
+  display: flex; flex-direction: column; gap: $sp-1;
+  box-sizing: border-box; width: min(100%, 400px);
+  padding: $sp-3; border: 1px solid $line; border-radius: $r-card;
+  background: $stage-paper; box-shadow: $shadow-raised;
+}
+
+// ── 파일 이름 줄
+.ac__bar { display: flex; align-items: center; gap: $sp-2; }
+.ac__ico { display: grid; place-items: center; color: $color; font-size: 15px; }
+.ac__name {
+  flex: 1 1 auto; color: $subject-ink;
+  font-family: $mono; font-weight: 700; font-size: 12px; line-height: 1.4;
+}
+.ac__hint {
+  flex: 0 0 auto; padding: $sp-1 $sp-2; border: 1px solid $line; border-radius: $r-pill;
+  color: $dim; font-family: $mono; font-weight: 700; font-size: 10px; line-height: 1.4;
+}
+
+// ── 입력줄. 테두리는 이 껍데기가 갖고 pre·textarea 는 포개 얹는다(01 과 같은 두 겹 기법)
+// 트랙을 minmax(0, 1fr) 로 못박는다 — auto 트랙은 항목 내용만큼 커질 수 있다
+.ac__field { position: relative; display: grid; grid-template-rows: minmax(0, 1fr); height: $lh + $sp-4 + 2px;
+  border: 1px solid $line; border-radius: $r-sm; background: $subject-cream; }
+.ac__hl, .ac__ta { grid-area: 1 / 1; }
+
+%layer {
+  box-sizing: border-box; margin: 0; padding: $sp-2;
+  border: 0; border-radius: $r-sm;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh;
+  letter-spacing: 0; tab-size: 2;
+  white-space: pre; overflow: hidden;
+}
+.ac__hl {
+  @extend %layer;
+  color: $subject-ink; pointer-events: none;
+}
+// 글자는 투명하고 캐럿만 남긴다 — 글자색은 아래 pre 가 그린다
+.ac__ta {
+  @extend %layer;
+  background: transparent; color: transparent; caret-color: $subject-ink;
+  resize: none;
+  -webkit-text-fill-color: transparent;
+}
+.ac__ta::selection { background: rgba(47, 109, 246, .24); }
+.ac__ta:focus-visible { outline: 2px solid $color; outline-offset: 2px; }
+
+// 거울 요소 — 커서 x 좌표를 재는 자로, 화면에 보이지 않게 절대배치로 뺀다
+.ac__mirror {
+  position: absolute; top: 0; left: 0; visibility: hidden; white-space: pre;
+  font-family: $mono; font-weight: 500; font-size: $fs; line-height: $lh; letter-spacing: 0;
+}
+
+// 미리보기 전용 두 조각 — 절대배치로 같은 지점에 포개고 한쪽만 보인다
+.ac__line { position: relative; display: block; }
+.ac__base { color: $subject-ink; }
+.ac__frag { position: absolute; left: 0; top: 0; visibility: hidden; white-space: pre; color: $subject-ink; }
+// 치던 조각에 깔리는 밑줄 — 실사용 경로(.ac__word)와 미리보기(.ac__u)가 같은 옷을 입는다
+.ac__word, .ac__u {
+  text-decoration: underline; text-decoration-color: $color;
+  text-decoration-thickness: 2px; text-underline-offset: 3px;
+}
+.ac__caret {
+  display: inline-block; width: 2px; height: 14px;
+  background: $subject-ink; vertical-align: -2px;
+}
+
+// ── 후보 팝업 — 커서 바로 아래. listbox 경로로 스크린리더가 읽는다
+.ac__pop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 3;
+  min-width: 120px; box-sizing: border-box;
+  padding: $sp-1; border: 1px solid $line; border-radius: $r-control;
+  background: $subject-cream; box-shadow: $shadow-raised;
+  opacity: 0; visibility: hidden; transform: translateY(4px); pointer-events: none;
+  transition: opacity $duration $ease-out, transform $duration $easing, visibility $duration;
+}
+.ac.is-open .ac__pop { opacity: 1; visibility: visible; transform: translateY(0); pointer-events: auto; }
+.ac__opt {
+  padding: $sp-1 $sp-2; border-radius: $r-sm;
+  color: $subject-ink; font-family: $mono; font-weight: 500; font-size: 12px; line-height: 1.4;
+  white-space: nowrap;
+}
+// 고른 항목 — 깊은 파랑 면 위 크림(옅은 파랑 면이면 미달이다)
+.ac__opt[aria-selected="true"] { background: $subject-blue-deep; color: $subject-cream; }
+
+// ── 키워드 칩 줄. 열린 팝업이 덮는 자리이자, 절대배치 높이의 예약분이다
+.ac__keys { display: flex; flex-wrap: wrap; align-items: center; gap: $sp-1; }
+.ac__klabel { color: $dim; font-weight: 700; font-size: 10px; line-height: 1.4; }
+.ac__k {
+  padding: $sp-1 $sp-2; border: 1px solid $line; border-radius: $r-pill;
+  background: $stage-paper; color: $subject-ink;
+  font-family: $mono; font-weight: 500; font-size: 10px; line-height: 1.4;
+}
+
+.ac__note {
+  margin: 0; color: $dim;
+  font-weight: 500; font-size: 11px; line-height: 1.4;
+}
+
+// ── 격자 미리보기 루프 (2초)
+// 0~5% "document." 를 치던 중(캐럿 깜빡임) → 6% 조각이 "document.q" 로 컷 교체, 8% 팝업이 컷 + 팝으로
+// 열리며 후보 2개 → 42% 선택 밴드가 1번(querySelector)에서 2번(querySelectorAll)으로 컷 이동 → 유지.
+// 팝업이 사라지는 장면은 찍지 않는다 — 퇴장 프레임이 poster 로 뽑히면 빈 화면이 된다.
+.ac.is-demo .ac__base { color: transparent; }  // 공간은 유지한 채 감춘다(display:none 은 레이아웃을 지운다)
+.ac.is-demo .ac__frag--a { @include loop(acFragA, steps(1, end)); }
+.ac.is-demo .ac__frag--b { @include loop(acFragB, steps(1, end)); }
+.ac.is-demo .ac__pop {
+  animation-name: acPopVis, acPopIn;
+  animation-duration: $dur-loop, $dur-loop;
+  animation-timing-function: steps(1, end), $easing;
+  animation-iteration-count: infinite, infinite;
+  animation-fill-mode: backwards, backwards;
+}
+.ac.is-demo #ac-opt0 { @include loop(acSel0, steps(1, end)); }
+.ac.is-demo #ac-opt1 { @include loop(acSel1, steps(1, end)); }
+// 캐럿은 루프 내내 깜빡인다 — steps 컷이라 반투명 유령이 없다
+.ac.is-demo .ac__caret { @include loop(acBlink, steps(1, end)); }
+
+@keyframes acFragA {
+  0%, 5% { visibility: visible; }
+  6%, 100% { visibility: hidden; }
+}
+@keyframes acFragB {
+  0%, 5% { visibility: hidden; }
+  6%, 100% { visibility: visible; }
+}
+@keyframes acPopVis {
+  0%, 7% { opacity: 0; visibility: hidden; }
+  8%, 100% { opacity: 1; visibility: visible; }
+}
+@keyframes acPopIn {
+  0%, 7% { transform: translateY(6px); }
+  18%, 100% { transform: translateY(0); }
+}
+@keyframes acSel0 {
+  0%, 38% { background: $subject-blue-deep; color: $subject-cream; }
+  42%, 100% { background: transparent; color: $subject-ink; }
+}
+@keyframes acSel1 {
+  0%, 38% { background: transparent; color: $subject-ink; }
+  42%, 100% { background: $subject-blue-deep; color: $subject-cream; }
+}
+// 2초에 여섯 번 깜빡임 — 8% 간격 컷
+@keyframes acBlink {
+  0%, 7% { opacity: 1; }
+  8%, 15% { opacity: 0; }
+  16%, 23% { opacity: 1; }
+  24%, 31% { opacity: 0; }
+  32%, 39% { opacity: 1; }
+  40%, 47% { opacity: 0; }
+  48%, 55% { opacity: 1; }
+  56%, 63% { opacity: 0; }
+  64%, 71% { opacity: 1; }
+  72%, 79% { opacity: 0; }
+  80%, 87% { opacity: 1; }
+  88%, 95% { opacity: 0; }
+  96%, 100% { opacity: 1; }
+}
+
+// ── 좁은 화면: 행간과 여백을 줄여 무대 안에 들어오게 한다. 칩은 앞 4개만(get* 계열은 폭이 길어 줄이 넘는다)
+@media (max-width: 340px) {
+  .ac { gap: $sp-1; padding: $sp-2; }
+  .ac__keys > :nth-child(n+6) { display: none; }
+  .ac__field { height: 16px + $sp-2 + 2px; }
+  .ac__hl, .ac__ta { font-size: 11px; line-height: 16px; padding: $sp-1; }
+  .ac__mirror { font-size: 11px; line-height: 16px; }
+  .ac__caret { height: 12px; vertical-align: -2px; }
+  .ac__opt { font-size: 11px; padding: $sp-1; }
+  .ac__k, .ac__klabel { font-size: 10px; }
+  .ac__name { font-size: 11px; }
+  .ac__note { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac.is-demo .ac__frag--a,
+  .ac.is-demo .ac__frag--b,
+  .ac.is-demo .ac__pop,
+  .ac.is-demo .ac__caret,
+  .ac.is-demo #ac-opt0,
+  .ac.is-demo #ac-opt1 {
+    animation: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+  }
+  // 조각은 두 번째 상태로, 캐럿은 켠 채 멈춘다
+  .ac.is-demo .ac__frag--a { visibility: hidden !important; }
+  .ac.is-demo .ac__caret { opacity: 1 !important; }
+}

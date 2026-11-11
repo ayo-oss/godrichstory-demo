@@ -1,0 +1,202 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// SignatureFitInput — vanilla 판(run/287/demo/08-signature-fit-to-input/style.scss) 의 React 포트.
+// 실제 동작은 canvas 2D 가 하고, 미리보기(.isDemo)는 같은 모양의 SVG 손글씨를 stroke-dashoffset 으로 긋고
+// 래퍼를 transform 으로 줄여 폼 칸에 앉힌다. duration·easing·color 는 props 로 받아 CSS 변수로 들어온다.
+// @keyframes 본문은 vanilla 와 같은 글자.
+
+@include stage($stage-orange);
+
+.root { display: flex; justify-content: center; width: 100%; }
+.card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3; display: grid; gap: $sp-2;
+}
+
+// 줄어든 손글씨가 아래 폼 줄 위로 넘어와 앉아야 하므로 판을 위에 쌓는다 (DOM 순서상 폼 줄이 나중이다)
+.pad {
+  position: relative; z-index: 2; background: $subject-cream; border-radius: $r-sm;
+  aspect-ratio: 300 / 76; touch-action: none;
+}
+.hint {
+  position: absolute; left: $sp-2; top: $sp-1; margin: 0;
+  display: flex; align-items: center; gap: $sp-1;
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); line-height: 1.3; color: rgba(23, 20, 26, .72);
+}
+.ico { width: 12px; height: 12px; flex: 0 0 auto; }
+.reset {
+  position: absolute; right: $sp-1; top: $sp-1; z-index: 3;
+  display: inline-flex; align-items: center; gap: $sp-1; cursor: pointer;
+  border: 1px solid rgba(23, 20, 26, .24); background: $stage-paper; color: rgba(23, 20, 26, .72);
+  border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); line-height: 1.2; padding: $sp-1 $sp-2;
+}
+.reset:focus-visible, .fit:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+
+.inkWrap {
+  position: absolute; inset: 0; pointer-events: none;
+  // 붙는 지점이 있는 요소다 — 글씨가 칸의 왼쪽 기준선에 맞아야 하므로 줄어드는 축을 자기 중심이 아닌 왼쪽 가운데에 둔다
+  transform-origin: left center;
+}
+.ink, .ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ghost { display: none; fill: none; }
+.stroke {
+  stroke: var(--color, #{$subject-ink}); stroke-width: 5; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100;
+}
+.strokeC { stroke-width: 8; }
+.rule {
+  position: absolute; left: 6%; right: 6%; bottom: 14%; height: 0;
+  border-bottom: 1px dashed rgba(23, 20, 26, .34);
+}
+
+.form { display: flex; align-items: center; gap: $sp-2; }
+.formLabel {
+  width: 32px; flex: 0 0 auto; font-weight: 800;
+  font-size: clamp(9px, 2.4vw, 11px); line-height: 1.3; color: rgba(23, 20, 26, .72);
+}
+.slot {
+  flex: 1 1 auto; min-height: 32px; display: flex; align-items: center; justify-content: flex-end;
+  padding: 0 $sp-2; border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-sm; background: $stage-paper;
+}
+.slot.isFilled { border-color: $subject-blue; }
+.ok {
+  width: 14px; height: 14px; flex: 0 0 auto; opacity: 0; transform: scale(.4);
+  fill: none; stroke: $subject-blue; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round;
+}
+.slot.isFilled .ok { opacity: 1; transform: scale(1); }
+.fit {
+  flex: 0 0 auto; cursor: pointer; border: 0; background: $subject-blue; color: $stage-paper;
+  border-radius: $r-control; font-family: inherit; font-weight: 800;
+  font-size: clamp(9px, 2.4vw, 11px); line-height: 1.2; padding: $sp-2 $sp-3;
+}
+.live {
+  position: relative; margin: 0; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 11px); line-height: 1.4; color: rgba(23, 20, 26, .66); white-space: nowrap;
+}
+.liveDemo { display: none; position: absolute; left: 0; top: 0; opacity: 0; }
+
+// ── 미리보기 루프 (2s): 0~44% 큰 손글씨가 그어지고(마지막 획은 굵고 빠르게), 46~52% 「칸에 넣기」가 눌리고,
+//    54~76% 글씨 덩어리가 왼쪽 가운데를 축으로 줄며 아래 칸으로 들어간다(poster 후보).
+//    78~86% 칸 테두리가 컷으로 바뀌고 확인 표시가 팝, 86~94% 칸 안에서 글씨가 되감겨 지워지고
+//    94~98% 빈 판이 제자리로 돌아온다 — 지우는 장면을 작게 줄여 poster 가 그쪽으로 가지 않게 했다.
+.root.isDemo .ink { visibility: hidden; }
+.root.isDemo .ghost { display: block; }
+.root.isDemo .stroke {
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+.root.isDemo .strokeA { animation-name: fiDrawA; }
+.root.isDemo .strokeB { animation-name: fiDrawB; }
+.root.isDemo .strokeC { animation-name: fiDrawC; }
+@keyframes fiDrawA {
+  0%, 2% { stroke-dashoffset: 100; }
+  22%, 86% { stroke-dashoffset: 0; }
+  94%, 100% { stroke-dashoffset: 100; }
+}
+@keyframes fiDrawB {
+  0%, 22% { stroke-dashoffset: 100; }
+  34%, 86% { stroke-dashoffset: 0; }
+  92%, 100% { stroke-dashoffset: 100; }
+}
+@keyframes fiDrawC {
+  0%, 36% { stroke-dashoffset: 100; }
+  44%, 86% { stroke-dashoffset: 0; }
+  90%, 100% { stroke-dashoffset: 100; }
+}
+
+.root.isDemo .inkWrap {
+  animation-name: fiFit;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-spring;
+  animation-iteration-count: infinite;
+}
+@keyframes fiFit {
+  0%, 54% { transform: translate(0, 0) scale(1); }
+  76%, 94% { transform: translate($sp-10, 82%) scale(.34); }
+  98%, 100% { transform: translate(0, 0) scale(1); }
+}
+
+// 54% 에 줄어들기 시작하므로 46~52% 에 버튼이 자기 중심에서 눌린다 (transform-origin 기본값 50% 50%)
+.root.isDemo .fit {
+  animation-name: fiPress;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes fiPress {
+  0%, 46% { transform: scale(1); }
+  49% { transform: scale(.88); }
+  54%, 100% { transform: scale(1); }
+}
+
+// 칸 테두리는 반투명 겹침이 없게 컷으로 갈아 끼운다
+.root.isDemo .slot {
+  animation-name: fiSlotOk;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes fiSlotOk {
+  0%, 77% { border-color: rgba(23, 20, 26, .28); }
+  78%, 87% { border-color: $subject-blue; }
+  88%, 100% { border-color: rgba(23, 20, 26, .28); }
+}
+
+// 확인 표시는 자기 중심에서 팝 — 컷만 쓰면 프레임이 모자라니 scale 움직임을 함께 준다
+.root.isDemo .ok {
+  animation-name: fiOkPop;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+@keyframes fiOkPop {
+  0%, 77% { opacity: 0; transform: scale(.4); }
+  78% { opacity: 1; transform: scale(.4); }
+  84%, 87% { opacity: 1; transform: scale(1); }
+  88%, 100% { opacity: 0; transform: scale(.4); }
+}
+
+// 미리보기 문구는 실제 값이 아니므로 실제 칸은 자리만 남기고(color: transparent) 두 문장을 컷으로 갈아 끼운다
+.root.isDemo .liveReal { color: transparent; }
+.root.isDemo .liveDemo {
+  display: block;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.root.isDemo .sayBefore { animation-name: fiSayBefore; }
+.root.isDemo .sayAfter { animation-name: fiSayAfter; }
+@keyframes fiSayBefore {
+  0%, 77% { opacity: 1; }
+  78%, 93% { opacity: 0; }
+  94%, 100% { opacity: 1; }
+}
+@keyframes fiSayAfter {
+  0%, 77% { opacity: 0; }
+  78%, 93% { opacity: 1; }
+  94%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .card { padding: $sp-2; }
+  .formLabel { width: 28px; }
+  .fit { padding: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .stroke,
+  .root.isDemo .inkWrap,
+  .root.isDemo .fit,
+  .root.isDemo .slot,
+  .root.isDemo .ok,
+  .root.isDemo .liveDemo { animation: none !important; }
+  // 움직임 없이 글씨가 칸에 앉은 최종 상태로 세운다
+  .root.isDemo .stroke { stroke-dashoffset: 0 !important; }
+  .root.isDemo .inkWrap { transform: translate($sp-10, 82%) scale(.34) !important; }
+  .root.isDemo .slot { border-color: $subject-blue !important; }
+  .root.isDemo .ok { opacity: 1 !important; transform: scale(1) !important; }
+  .root.isDemo .sayBefore { opacity: 0 !important; }
+  .root.isDemo .sayAfter { opacity: 1 !important; }
+}

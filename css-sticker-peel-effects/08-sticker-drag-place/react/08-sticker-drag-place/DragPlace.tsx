@@ -1,0 +1,117 @@
+// DragPlace — vanilla 판(run/378/demo/08-sticker-drag-place/index.html) 의 React 포트.
+// 포인터 좌표를 GRID 칸 크기로 나눈 몫을 반올림해 항상 격자 위 한 점으로 되돌린다(snap) —
+// 자유 좌표가 아니라 항상 격자 스냅 계산이다. 자동 루프도 같은 slots 좌표만 순회한다.
+import { useEffect, useRef } from "react";
+import styles from "./DragPlace.module.scss";
+
+type Box<T> = { current: T };
+
+const GRID = 78;
+const BOARD_W = 190, BOARD_H = 190;
+const LERP_RATE = 0.22;
+const ORBIT_MS = 650;
+
+export default function DragPlace() {
+  const rootRef = useRef(null) as unknown as Box<HTMLDivElement>;
+  const boardRef = useRef(null) as unknown as Box<HTMLDivElement>;
+  const chipRef = useRef(null) as unknown as Box<HTMLButtonElement>;
+  const rafRef = useRef(0) as unknown as Box<number>;
+
+  useEffect(() => {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const wrap = rootRef.current;
+    const board = boardRef.current;
+    const chip = chipRef.current;
+    if (!wrap || !board || !chip) return;
+
+    let isDemo = true;
+    let dragging = false;
+    let target = { x: GRID / 2, y: GRID / 2 };
+    const shown = { x: target.x, y: target.y };
+
+    function human() { if (isDemo) { wrap!.classList.remove(styles.isDemo); isDemo = false; } }
+
+    function snap(px: number, py: number) {
+      const col = Math.max(0, Math.min(1, Math.round((px - GRID / 2) / GRID)));
+      const row = Math.max(0, Math.min(1, Math.round((py - GRID / 2) / GRID)));
+      return { x: col * GRID + GRID / 2, y: row * GRID + GRID / 2 };
+    }
+
+    function onDown(e: PointerEvent) {
+      human();
+      dragging = true;
+      chip!.setPointerCapture(e.pointerId);
+    }
+    function onMove(e: PointerEvent) {
+      if (!dragging) return;
+      const rect = board!.getBoundingClientRect();
+      const px = Math.max(0, Math.min(BOARD_W, e.clientX - rect.left));
+      const py = Math.max(0, Math.min(BOARD_H, e.clientY - rect.top));
+      target = snap(px, py);
+    }
+    function endDrag() { dragging = false; }
+    function onKeyDown(e: KeyboardEvent) {
+      human();
+      let col = target.x > GRID ? 1 : 0, row = target.y > GRID ? 1 : 0;
+      if (e.key === "ArrowRight") col = 1;
+      else if (e.key === "ArrowLeft") col = 0;
+      else if (e.key === "ArrowDown") row = 1;
+      else if (e.key === "ArrowUp") row = 0;
+      else return;
+      e.preventDefault();
+      target = { x: col * GRID + GRID / 2, y: row * GRID + GRID / 2 };
+    }
+    chip.addEventListener("pointerdown", onDown);
+    chip.addEventListener("pointermove", onMove);
+    chip.addEventListener("pointerup", endDrag);
+    chip.addEventListener("pointercancel", endDrag);
+    chip.addEventListener("keydown", onKeyDown);
+
+    const slots = [[0, 0], [1, 0], [0, 1], [1, 1]];
+    let slotIdx = 0, last = 0;
+    function autoAdvance(ts: number) {
+      if (ts - last < ORBIT_MS) return;
+      last = ts;
+      slotIdx = (slotIdx + 1) % slots.length;
+      target = { x: slots[slotIdx][0] * GRID + GRID / 2, y: slots[slotIdx][1] * GRID + GRID / 2 };
+    }
+
+    function loop(ts: number) {
+      if (!last) last = ts;
+      if (isDemo && !reduce && !dragging) autoAdvance(ts);
+      if (reduce) { shown.x = target.x; shown.y = target.y; }
+      else {
+        shown.x += (target.x - shown.x) * LERP_RATE;
+        shown.y += (target.y - shown.y) * LERP_RATE;
+      }
+      chip!.style.transform = "translate(" + (shown.x - GRID / 2).toFixed(2) + "px, " + (shown.y - GRID / 2).toFixed(2) + "px)";
+      rafRef.current = requestAnimationFrame(loop);
+    }
+    rafRef.current = requestAnimationFrame(loop);
+
+    return () => {
+      chip!.removeEventListener("pointerdown", onDown);
+      chip!.removeEventListener("pointermove", onMove);
+      chip!.removeEventListener("pointerup", endDrag);
+      chip!.removeEventListener("pointercancel", endDrag);
+      chip!.removeEventListener("keydown", onKeyDown);
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  return (
+    <main className={styles.stage}>
+      <div className={styles.wrap + " " + styles.isDemo} ref={rootRef}>
+        <div className={styles.board} ref={boardRef}>
+          <span className={styles.cell} aria-hidden="true"></span>
+          <span className={styles.cell} aria-hidden="true"></span>
+          <span className={styles.cell} aria-hidden="true"></span>
+          <span className={styles.cell} aria-hidden="true"></span>
+          <button className={styles.chip} ref={chipRef} type="button" aria-label="스티커, 끌어서 격자 칸에 놓는다">
+            <span className={styles.chipMark} aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}

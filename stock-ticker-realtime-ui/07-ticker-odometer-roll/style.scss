@@ -1,0 +1,145 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 오도미터 숫자판 — 평가손익 한 덩어리가 자릿수마다 세로로 굴러간다.
+// 278-07 의 카운트업과 갈리는 지점: ① 소수점 두 자리까지 굴리고 ② 음수가 되면 부호 칸이 바뀌고
+// ③ 천 단위 구분자와 소수점은 굴리지 않고 제자리에 박혀 있고 ④ 오르내림이 색 방향까지 바꾼다.
+// 실사용에서는 시드 PRNG 가 700ms 마다 값을 올렸다 내렸다 하고, 등록한 --d 가 transition 으로
+// 이어져 자릿수가 실제로 굴러간다. 미리보기(.is-demo)는 같은 두 번(오름 → 내림)을 CSS 키프레임에 눕혔다.
+
+// 굴림 위치는 숫자라야 보간된다 — 등록하지 않으면 9 에서 0 으로 컷으로 점프한다.
+// inherits: false 로 등록했으므로 값은 반드시 자릿수 칸 자신에 올린다 (부모에 걸면 안 먹는다).
+@property --d { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+$duration: $dur-loop;
+$easing: $ease-out;
+// 한 칸의 높이. 굴림 거리는 이 값의 배수다 — 글자 높이와 칸 높이가 같아야 위아래가 안 잘린다
+$cell: 1.15em;
+
+@include stage($stage-ink);
+
+.od { display: flex; justify-content: center; width: 100%; }
+.od__board {
+  width: min(100%, 320px); background: $tick-panel; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-4 $sp-3; overflow: hidden; text-align: center;
+}
+.od__label {
+  margin: 0 0 $sp-2; font-weight: 700; font-size: clamp(10px, 2.8vw, 12px);
+  line-height: 1.4; color: $tick-mute; letter-spacing: .06em;
+}
+
+// ── 숫자판. 자릿수 칸 개수가 고정이라 값이 커지거나 작아져도 판이 좌우로 안 튄다
+.od__value {
+  margin: 0; display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: clamp(26px, 9vw, 40px); line-height: 1.15;
+  font-variant-numeric: tabular-nums; color: $tick-down;
+  // 값이 오르면 상승색, 내리면 하락색 — 방향은 색만이 아니라 아래 줄의 ▲▼ 와 부호도 같이 말한다
+  transition: color $dur-base $easing;
+}
+.od.is-up .od__value { color: $tick-up; }
+.od.is-down .od__value { color: $tick-down; }
+// 부호 칸 — 두 글자를 같은 칸에 겹쳐 두고 컷으로 갈아 끼운다
+.od__sign { display: grid; width: .66em; height: $cell; }
+.od__glyph { grid-area: 1 / 1; line-height: 1.15; }
+.od:not(.is-demo) .od__glyph--b { opacity: 0; }
+// 자릿수 칸 — 0 부터 9 까지 세로로 쌓은 띠를 끌어올린다. 칸은 넘치는 부분을 자른다
+.od__digit { display: block; overflow: hidden; width: .64em; height: $cell; }
+.od__strip {
+  display: block;
+  transform: translateY(calc(var(--d) * -#{$cell}));
+  // 실사용에서 값이 바뀌면 여기가 굴러간다. 등록한 숫자 속성이라 9 에서 0 으로도 이어서 흐른다
+  transition: --d $dur-enter $easing;
+}
+.od__n { display: block; height: $cell; line-height: 1.15; text-align: center; }
+// 구분자와 소수점은 굴리지 않는다 — 제자리에 박혀 있어야 자릿수가 어디서 끊기는지 눈이 안 잃는다
+.od__fixed { display: block; width: .3em; height: $cell; line-height: 1.15; }
+// 앞자리 0 은 흐리게. 칸은 그대로 두고 읽는 자리만 또렷하게 남긴다 (값이 0 을 지날 때 실사용에서 나타난다)
+.od__digit.is-lead, .od__fixed.is-lead { opacity: .32; }
+.od__unit {
+  align-self: center; margin-left: $sp-1; font-weight: 700; font-size: .42em;
+  line-height: 1.4; color: $tick-mute;
+}
+
+// ── 전일 대비 한 줄
+.od__delta {
+  margin: $sp-2 0 0; display: flex; align-items: center; justify-content: center; gap: $sp-1;
+  font-weight: 700; font-size: clamp(10px, 2.8vw, 12px); line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.od__deltaLabel { color: $tick-mute; }
+// 두 장을 같은 칸에 겹친다 — 컷 교체라 자릿수가 늘어도 줄이 안 흔들린다
+.od__deltaWrap { display: grid; justify-items: center; }
+.od__deltaText { grid-area: 1 / 1; }
+.od__deltaText--a, .od__deltaText.is-minus { color: $tick-down; }
+.od__deltaText--b, .od__deltaText.is-plus { color: $tick-up; }
+.od__delta .od__unit { font-size: 1em; margin-left: 0; }
+.od:not(.is-demo) .od__deltaText--b { opacity: 0; }
+
+// ── 미리보기 루프(2초): 24~45% 에 값이 오르고(상승색) 60~81% 에 도로 내린다(하락색).
+//    자릿수는 오른쪽 끝부터 3% 씩 밀려 굴러간다 — 진짜 오도미터의 자리올림 순서이자,
+//    한 프레임에 한두 칸만 굴러 나머지 자리가 읽히게 하는 장치다(poster 가 통째로 흐려지지 않는다).
+//    부호 칸과 전일 대비 줄은 굴림이 시작되는 자리(25% · 61%)에서 steps(1, end) 컷으로 갈린다 —
+//    실사용과 같은 순서다: JS 가 부호·전일 대비를 즉시 쓰고, 자릿수는 transition 으로 뒤따라 굴러온다.
+//    반투명하게 겹친 유령 프레임이 안 생긴다. 되돌림이 81% 에 끝난다: 24프레임의 마지막 장이
+//    2초의 95.8% 지점이라 96% 뒤는 샘플이 없다. 색 방향은 루프 안에서 2회 = 초당 1회로
+//    WCAG 2.3.1(초당 3회 미만) 아래다.
+.od.is-demo .od__value { animation-name: odHue; }
+.od.is-demo .od__strip[data-d="0"] { animation-name: odRoll0; }
+.od.is-demo .od__strip[data-d="1"] { animation-name: odRoll1; }
+.od.is-demo .od__strip[data-d="2"] { animation-name: odRoll2; }
+.od.is-demo .od__strip[data-d="3"] { animation-name: odRoll3; }
+.od.is-demo .od__strip[data-d="4"] { animation-name: odRoll4; }
+.od.is-demo .od__strip[data-d="5"] { animation-name: odRoll5; }
+.od.is-demo .od__value, .od.is-demo .od__strip {
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+// −1,369.25 에서 +2,776.65 로 올랐다 도로 내린다. 자릿수마다 굴러갈 곳과 굴러갈 때가 다르다 —
+// 오른쪽 끝(odRoll5)이 먼저 떠나고 왼쪽으로 3% 씩 밀린다
+@keyframes odRoll5 { 0%, 24% { --d: 5; } 30%, 60% { --d: 5; } 66%, 100% { --d: 5; } }
+@keyframes odRoll4 { 0%, 27% { --d: 2; } 33%, 63% { --d: 6; } 69%, 100% { --d: 2; } }
+@keyframes odRoll3 { 0%, 30% { --d: 9; } 36%, 66% { --d: 6; } 72%, 100% { --d: 9; } }
+@keyframes odRoll2 { 0%, 33% { --d: 6; } 39%, 69% { --d: 7; } 75%, 100% { --d: 6; } }
+@keyframes odRoll1 { 0%, 36% { --d: 3; } 42%, 72% { --d: 7; } 78%, 100% { --d: 3; } }
+@keyframes odRoll0 { 0%, 39% { --d: 1; } 45%, 75% { --d: 2; } 81%, 100% { --d: 1; } }
+@keyframes odHue {
+  0%, 24% { color: $tick-down; }
+  45%, 60% { color: $tick-up; }
+  81%, 100% { color: $tick-down; }
+}
+// 부호 칸·전일 대비 줄의 컷 — 굴림이 시작되는 프레임에 한 번에 갈린다
+.od.is-demo .od__glyph--a, .od.is-demo .od__glyph--b,
+.od.is-demo .od__deltaText--a, .od.is-demo .od__deltaText--b {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+.od.is-demo .od__glyph--a, .od.is-demo .od__deltaText--a { animation-name: odCutA; }
+.od.is-demo .od__glyph--b, .od.is-demo .od__deltaText--b { animation-name: odCutB; }
+@keyframes odCutA {
+  0%, 23% { opacity: 1; }
+  25%, 59% { opacity: 0; }
+  61%, 100% { opacity: 1; }
+}
+@keyframes odCutB {
+  0%, 23% { opacity: 0; }
+  25%, 59% { opacity: 1; }
+  61%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .od__board { padding: $sp-2; }
+  .od__label { margin: 0 0 $sp-1; }
+  .od__delta { margin: $sp-1 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 굴림과 색 흐름만 멈춘다 — 값은 그 자리에 그대로 서 있고 방향은 ▲▼ 와 부호가 말한다
+  .od__value { transition: none !important; }
+  .od__strip { transition: none !important; }
+  .od.is-demo .od__value, .od.is-demo .od__strip { animation: none !important; }
+  .od.is-demo .od__glyph--a, .od.is-demo .od__deltaText--a { animation: none !important; opacity: 1 !important; }
+  .od.is-demo .od__glyph--b, .od.is-demo .od__deltaText--b { animation: none !important; opacity: 0 !important; }
+}

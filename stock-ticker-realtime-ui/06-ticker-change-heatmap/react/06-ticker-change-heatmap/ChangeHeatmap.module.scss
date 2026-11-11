@@ -1,0 +1,129 @@
+// ChangeHeatmap — vanilla 판(run/296/demo/06-ticker-change-heatmap/style.scss) 의 React 포트.
+// @keyframes 본문·퍼센트는 vanilla 에서 그대로 옮겼다(손으로 다시 타이핑하지 않았다).
+// 클래스 이름만 CSS 모듈용으로 바꿨고, 토큰은 이 파일 맨 위에 지역 복사했다
+// (BD23 단독 컴파일 — @use 경로 의존을 지운다).
+
+// ── 토큰 지역 복사 (site/static/demo-tokens.scss)
+$tick-panel: #231f28;
+$tick-up: #3ddc97;
+$tick-down: #ff7a5e;
+$subject-cream: #fff7e6;
+$ease-out: ease-out;
+$dur-base: 300ms;
+$dur-loop: 2s;
+$r-card: 16px;
+$r-xs: 4px;
+$r-pill: 999px;
+$sp-1: 4px;
+$sp-2: 8px;
+$shadow-raised: 0 14px 24px rgba(23, 20, 26, .32);
+
+// 등락률은 숫자라야 보간된다 — 등록하지 않으면 키프레임·transition 이 컷으로 점프한다.
+// inherits: false 로 등록했으므로 값은 반드시 타일 자신에 올린다 (부모 격자에 걸면 안 먹는다).
+@property --chg { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --va  { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --vb  { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --p   { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+$duration: $dur-loop;
+$easing: $ease-out;
+// 혼합 상한 50%. 이 위로 올리면 타일이 밝아져 크림 글자가 4.5:1 아래로 떨어진다
+// (실측: 상승 50% #3c775e 위 크림 4.93:1 · 하락 50% #8a4c45 위 6.16:1, 상승 55% 는 4.35:1 로 미달)
+$mix-cap: 50%;
+
+.root { display: flex; justify-content: center; width: 100%; }
+.board {
+  width: min(100%, 380px); background: $tick-panel; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-2; overflow: hidden;
+}
+.head { display: flex; align-items: center; justify-content: space-between; padding: 0 $sp-1 $sp-2; }
+.title { margin: 0; font-weight: 800; font-size: clamp(11px, 3vw, 13px); color: $subject-cream; }
+// 라이브 배지 — 글자로도 상태를 말한다
+.liveTag {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: $tick-up;
+  border: 1px solid $tick-up; border-radius: $r-pill; padding: 0 $sp-2; line-height: 1.6;
+}
+
+// 균등 격자 — 트리맵처럼 칸 크기가 값을 나르지 않는다. 4열 3행 모두 같은 크기다
+.grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: $sp-1;
+}
+.tile {
+  --chg: calc(var(--va) + (var(--vb) - var(--va)) * var(--p));
+  --up-mix: clamp(0%, calc(var(--chg) * 11%), #{$mix-cap});
+  --down-mix: clamp(0%, calc(var(--chg) * -11%), #{$mix-cap});
+  background-color: color-mix(in oklab, $tick-down var(--down-mix),
+                    color-mix(in oklab, $tick-up var(--up-mix), $tick-panel));
+  transition: --chg $dur-base $easing;
+  display: grid; align-content: center; justify-items: center; gap: 0;
+  min-height: 32px; padding: $sp-1 0; border-radius: $r-xs;
+}
+.sym {
+  font-weight: 700; font-size: clamp(8px, 2.2vw, 10px); line-height: 1.3;
+  color: $subject-cream; letter-spacing: .04em; opacity: .78;
+}
+// 지금 값·다음 값 두 장을 같은 칸에 겹친다 — 컷 교체라 폭이 달라도 자리가 안 흔들린다
+.val { display: grid; justify-items: center; }
+.chg {
+  grid-area: 1 / 1; font-variant-numeric: tabular-nums;
+  font-weight: 800; font-size: clamp(9px, 2.6vw, 11px); line-height: 1.3; color: $subject-cream;
+}
+// 실사용(정적 경로)에서는 지금 값만 보인다 — 다음 값 장은 자리만 지키고 안 보인다
+.root:not(.isDemo) .chgB { opacity: 0; }
+
+// ── 미리보기 루프(2초): 8% 에 숫자가 컷으로 바뀌고 색은 8~20% 에 이어서 따라간다.
+//    60% 에 원래 값으로 되돌아오고 72% 에 색이 앉는다 — 되돌림이 96% 안에 끝난다.
+//    한 타일의 색 변화는 루프 안에서 2회 = 초당 1회로 WCAG 2.3.1(초당 3회 미만) 아래다.
+.root.isDemo .tile {
+  animation-name: hmWave;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+// 대각선 세 파도. 지연은 낱개 속성으로 준다 — animation 단축은 delay 를 0 으로 리셋한다
+.root.isDemo .tile[data-g="1"] { animation-delay: -667ms; }
+.root.isDemo .tile[data-g="2"] { animation-delay: -1333ms; }
+@keyframes hmWave {
+  0%, 8% { --p: 0; }
+  20%, 60% { --p: 1; }
+  72%, 100% { --p: 0; }
+}
+// 숫자 교체는 steps(1, end) 컷 — 반투명하게 겹친 유령 프레임이 안 생긴다
+.root.isDemo .chgA, .root.isDemo .chgB {
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+}
+.root.isDemo .chgA { animation-name: hmTextA; }
+.root.isDemo .chgB { animation-name: hmTextB; }
+.root.isDemo .tile[data-g="1"] .chgA,
+.root.isDemo .tile[data-g="1"] .chgB { animation-delay: -667ms; }
+.root.isDemo .tile[data-g="2"] .chgA,
+.root.isDemo .tile[data-g="2"] .chgB { animation-delay: -1333ms; }
+@keyframes hmTextA {
+  0%, 6% { opacity: 1; }
+  8%, 58% { opacity: 0; }
+  60%, 100% { opacity: 1; }
+}
+@keyframes hmTextB {
+  0%, 6% { opacity: 0; }
+  8%, 58% { opacity: 1; }
+  60%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  .board { padding: $sp-1; }
+  .head { padding: 0 $sp-1 $sp-1; }
+  .tile { min-height: 30px; padding: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  // 색이 흐르는 것과 숫자가 바뀌는 것만 멈춘다 — 값은 그대로 읽히고 방향은 ▲▼ 와 부호가 말한다
+  .tile { transition: none !important; }
+  .root.isDemo .tile { animation: none !important; }
+  .root.isDemo .chgA { animation: none !important; opacity: 1 !important; }
+  .root.isDemo .chgB { animation: none !important; opacity: 0 !important; }
+}

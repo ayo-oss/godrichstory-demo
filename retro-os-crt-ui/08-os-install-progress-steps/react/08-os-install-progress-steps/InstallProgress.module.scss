@@ -1,0 +1,174 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// InstallProgress — vanilla 판(run/023/demo/08-os-install-progress-steps/style.scss) 의 React 포트.
+// @keyframes 본문은 vanilla 와 같은 글자다(값을 다시 타이핑하지 않는다).
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어오고 기본값은 vanilla 와 같다.
+
+$duration: $dur-quick;
+$easing: $ease-pop;
+$color: $subject-blue-deep;
+$tile: 20px;   // 칸 한 칸 = 블록 16px + 줄 4px
+$cells: 12;    // 트랙 안 칸 수 — steps(12, end) 의 박자와 1:1 이다
+$mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+$edge: rgba(23, 20, 26, .38);
+$lite: rgba(255, 255, 255, .95);
+$muted: rgba(23, 20, 26, .72);
+
+.stage {
+  box-sizing: border-box; min-height: 100vh;
+  display: grid; place-items: center; margin: 0;
+  background: $stage-paper;
+  font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+  padding: clamp(8px, 4vw, 24px);
+}
+
+// ── 설치 대화상자
+.root {
+  box-sizing: border-box; width: min(100%, 276px);
+  border: 2px solid; border-color: $lite $edge $edge $lite;
+  background: $subject-cream; box-shadow: $shadow-raised;
+}
+.root button { font-family: inherit; cursor: pointer; }
+.root button:focus-visible { outline: 2px solid var(--color, #{$color}); outline-offset: 1px; }
+
+// ── 제목줄
+.title {
+  display: flex; align-items: center; gap: $sp-1;
+  height: 24px; padding: 0 $sp-1; box-sizing: border-box;
+  background: var(--color, #{$color}); color: $subject-cream;
+}
+.tico { display: grid; place-items: center; }
+.tname { flex: 1 1 auto; font-weight: 700; font-size: 12px; line-height: 1.4; white-space: nowrap; overflow: hidden; }
+.tbtns { display: flex; align-items: center; gap: $sp-1; }
+.gb { width: 14px; height: 13px; box-sizing: border-box; border: 2px solid rgba(255, 247, 230, .85); }
+.gbMin { border: 0; border-bottom: 2px solid rgba(255, 247, 230, .85); width: 12px; align-self: flex-end; }
+
+// ── 본문
+.body { display: flex; flex-direction: column; gap: $sp-2; padding: $sp-3; }
+
+// 진행 트랙 — 눌려 들어간 칸. 안은 정확히 칸 12개 폭이다
+.track {
+  position: relative; align-self: center; box-sizing: content-box;
+  width: $tile * $cells; height: 20px;
+  border: 2px solid; border-color: $edge $lite $lite $edge;
+  background: $stage-paper;
+}
+// 칸 도안 — 타일 하나(20px)를 background-size 로 정의하고 정지점은 타일 비율로 준다
+.fill {
+  position: absolute; inset: 0;
+  background-image: linear-gradient(90deg, var(--color, #{$color}) 0 80%, transparent 80% 100%);
+  background-size: $tile 100%;
+  background-repeat: repeat-x;
+}
+// 트랙색 덮개 — 오른쪽에 붙어 scaleX 로 줄어들며 칸을 왼쪽부터 드러낸다.
+// 채움 시작 변에 붙어야 하므로 transform-origin 을 오른쪽 가운데로 둔다(중심 아님의 이유)
+.cover {
+  position: absolute; inset: 0;
+  background: $stage-paper;
+  transform-origin: right center;
+  transform: scaleX(0);
+}
+// 완료 표시 — 트랙 오른쪽 끝에 얹힌 체크. 정적 기본값은 보임(완료 상태)
+.done {
+  position: absolute; top: 2px; right: 2px; width: 16px; height: 16px;
+  display: grid; place-items: center; color: $stage-paper; z-index: 1;
+}
+
+// ── 문구·숫자 줄 — 겹켜진 값 장을 컷으로 갈아 끼운다(정적 기본값은 마지막 장)
+.meta {
+  display: flex; align-items: baseline; justify-content: space-between;
+  align-self: center; width: $tile * $cells;
+}
+.phrases, .nums { display: grid; }
+.phrases > *, .nums > * { grid-area: 1 / 1; }
+.phrases { justify-items: start; }
+.nums { justify-items: end; }
+.sv { font-weight: 700; font-size: 11px; line-height: 1.4; color: $subject-ink; white-space: nowrap; }
+.nm { font-family: $mono; font-weight: 700; font-size: 11px; line-height: 1.4; color: $muted; white-space: nowrap; }
+.sv, .nm { opacity: 0; }
+.sv5, .nm12 { opacity: 1; }
+
+// ── 단추
+.actions { display: flex; justify-content: flex-end; }
+.btn {
+  min-width: 88px; height: 26px; box-sizing: border-box; padding: 0 $sp-2;
+  background: $subject-cream; color: $subject-ink;
+  border: 2px solid; border-color: $lite $edge $edge $lite;
+  font-weight: 700; font-size: 11px; line-height: 1.4;
+  transition: transform var(--duration, #{$duration}) $ease-out;
+}
+.btn:active { border-color: $edge $lite $lite $edge; transform: translateY(1px); }
+
+// ── 격자 미리보기 루프 (2초): 덮개가 steps(12, end) 로 0 부터 75% 사이에 칸을 하나씩 드러내고
+// (칸 박자 6.25% 간격), 문구는 네 박자, 숫자는 칸 박자에 맞춘다. 75% 부터 88% 사이에 완료 표시가
+// 튀고, 90% 안에 모든 연출이 빠져 다음 바퀴를 준비한다.
+.isDemo .cover {
+  animation-name: ipCover;
+  animation-duration: $dur-loop; animation-timing-function: steps(12, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.isDemo .sv, .isDemo .nm {
+  animation-name: ipSv;   // 문구 장: 제자리에서 18.75% 동안 켜진다(네 박자)
+  animation-duration: $dur-loop; animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+.isDemo .nm { animation-name: ipNm; }  // 숫자 장: 6.25% 동안 켜진다(칸 박자)
+// 음수 animation-delay — 같은 키프레임을 각자의 박자로 위상 이동해 쓴다(루프마다 같은 간격 유지)
+.isDemo .sv1 { animation-delay: 0ms; }
+.isDemo .sv2 { animation-delay: -1625ms; }
+.isDemo .sv3 { animation-delay: -1250ms; }
+.isDemo .sv4 { animation-delay: -875ms; }
+.isDemo .sv5 { animation-delay: -500ms; }
+.isDemo .nm1 { animation-delay: 0ms; }
+.isDemo .nm2 { animation-delay: -1875ms; }
+.isDemo .nm3 { animation-delay: -1750ms; }
+.isDemo .nm4 { animation-delay: -1625ms; }
+.isDemo .nm5 { animation-delay: -1500ms; }
+.isDemo .nm6 { animation-delay: -1375ms; }
+.isDemo .nm7 { animation-delay: -1250ms; }
+.isDemo .nm8 { animation-delay: -1125ms; }
+.isDemo .nm9 { animation-delay: -1000ms; }
+.isDemo .nm10 { animation-delay: -875ms; }
+.isDemo .nm11 { animation-delay: -750ms; }
+.isDemo .nm12 { animation-delay: -625ms; }
+// 완료 표시 — 스스로 완결한 요소라 자기 중심에서 커진다
+.isDemo .done {
+  animation-name: ipDone;
+  animation-duration: $dur-loop; animation-timing-function: $easing;
+  animation-iteration-count: infinite; animation-fill-mode: backwards;
+}
+
+@keyframes ipCover {
+  0% { transform: scaleX(1); }
+  75%, 100% { transform: scaleX(0); }
+}
+@keyframes ipSv {
+  0%, 18.75% { opacity: 1; }
+  18.76%, 100% { opacity: 0; }
+}
+@keyframes ipNm {
+  0%, 6.25% { opacity: 1; }
+  6.26%, 100% { opacity: 0; }
+}
+@keyframes ipDone {
+  0%, 74% { opacity: 0; transform: scale(.3); }
+  75% { opacity: 1; transform: scale(.4); }
+  80% { transform: scale(1.3); }
+  84%, 86% { opacity: 1; transform: scale(1); }
+  87%, 100% { opacity: 0; transform: scale(1); }
+}
+
+// ── 좁은 화면: 본문 여백을 줄인다(트랙 폭 240px 는 고정 — 칸 도안의 기준이라 못 줄인다)
+@media (max-width: 340px) {
+  .body { gap: $sp-1; padding: $sp-2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .isDemo .cover, .isDemo .sv, .isDemo .nm, .isDemo .done {
+    animation: none !important;
+  }
+  .isDemo .cover { transform: scaleX(0) !important; }
+  .isDemo .sv, .isDemo .nm { opacity: 0 !important; }
+  .isDemo .sv5, .isDemo .nm12 { opacity: 1 !important; }
+  .isDemo .done { opacity: 1 !important; transform: none !important; }
+}

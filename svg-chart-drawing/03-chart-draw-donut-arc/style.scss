@@ -1,0 +1,122 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 한 조각씩 그려지는 도넛 그래프 — 실제 사용에선 JS 가 arcPath() 로 완성된 원호 네 개를
+// 심어 완성된 도넛이 곧 뜨고 조각에 올라가면 툴팁이 채널과 비율을 말해 준다.
+// 미리보기(.is-demo)는 같은 path 에 pathLength=100 + stroke-dashoffset 키프레임을 얹어
+// 붓질하듯 조각을 한 개씩 그려 채우는 모양을 2초 루프로 보여 준다.
+
+$duration: $dur-loop;
+$easing: linear;        // 붓은 등속으로 긋는다 — 드로잉에 ease-out 을 주면 끝에서 늘어진다
+
+@include stage($stage-ink);
+
+.cn { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.cn__card {
+  width: min(100%, 400px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4;
+}
+.cn__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.cn__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.cn__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+.cn__body { display: flex; align-items: center; gap: $sp-4; }
+.cn__plot { position: relative; flex: none; }
+.cn__svg { display: block; width: 168px; height: auto; touch-action: none; }
+// 조각 — 실제 원호 path 를 굵은 stroke 로 그린다. 계열색은 고정 순서대로만 (dataviz 검증 팔레트)
+.cn__slice { fill: none; stroke-width: 26; }
+.cn__slice:nth-child(1) { stroke: $chart-1; }
+.cn__slice:nth-child(2) { stroke: $chart-2; }
+.cn__slice:nth-child(3) { stroke: $chart-3; }
+.cn__slice:nth-child(4) { stroke: $chart-4; }
+// 조각 사이 2px 간격 — path 를 gap 각도만큼 줄여 그렸으므로 크림 배경이 자연 분할선으로 보인다
+// 중앙 합계 라벨 — 텍스트는 잉크 토큰
+.cn__sumLabel { fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 10px; text-anchor: middle; }
+.cn__sumVal { fill: $subject-ink; font-weight: 800; font-size: 21px; text-anchor: middle; }
+// 범례 — 색점과 채널명과 비율을 한 줄에. 색만으로 구분하지 않는다
+.cn__legend { list-style: none; margin: 0; padding: 0; display: grid; gap: $sp-2; flex: 1; min-width: 0; }
+.cn__item { display: flex; align-items: center; gap: $sp-2; }
+.cn__dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.cn__item:nth-child(1) .cn__dot { background: $chart-1; }
+.cn__item:nth-child(2) .cn__dot { background: $chart-2; }
+.cn__item:nth-child(3) .cn__dot { background: $chart-3; }
+.cn__item:nth-child(4) .cn__dot { background: $chart-4; }
+.cn__name { font-weight: 700; font-size: clamp(11px, 3vw, 12.5px); color: $subject-ink; }
+.cn__pct {
+  margin-left: auto; font-weight: 800; font-size: clamp(11px, 3vw, 12.5px);
+  color: rgba(23, 20, 26, .66); font-variant-numeric: tabular-nums;
+}
+// 툴팁 — 절대 배치라 루트에 padding-bottom 이 있어야 높이가 무대를 넘기지 않는다
+.cn__tip {
+  position: absolute; transform: translate(-50%, -130%);
+  display: flex; align-items: baseline; gap: $sp-1; pointer-events: none;
+  background: $subject-ink; color: $subject-cream; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.cn__tip.is-on { opacity: 1; transition: opacity $dur-quick $ease-out; }
+.cn__tipCh { opacity: .72; }
+.cn__tipVal { font-size: 12px; }
+// 스크린리더용 표 — absolute+clip 은 레이아웃 크기가 그대로 scrollHeight 에 잡혀 넘침(BD8)이 뜨므로
+// fixed 로 캔버스 밖에 둔다. 스크린리더는 그대로 읽는다
+.cn__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 조각이 --d(0.24s) 간격으로 하나씩 그려진다 — 이전 조각이 끝나는 순간
+//    다음 조각의 붓질이 시작된다 (드로잉 0.24s = 간격 0.24s). 마지막 조각은 52% 에 완성.
+//    pathLength=100 이라 dashoffset 이 원호 길이와 무관하게 0~100 으로 돈다.
+//    animation-delay 는 낱개 속성으로 — 단축을 쓰면 delay 가 리셋된다. backwards 로 대기 구간 채움.
+//    되돌림은 98% — 24프레임의 마지막 장이 95.8% 지점이라 그 뒤는 샘플이 없다. 루프 안에서
+//    지우면 "다 지워지는 장" 이 최대 변화가 돼 poster 로 뽑힌다 (255-03 과 같은 계열).
+.cn.is-demo .cn__slice { stroke-dasharray: 100; }
+.cn.is-demo .cn__slice {
+  animation-name: cnDraw;
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-delay: var(--d, 0s);
+  animation-fill-mode: backwards;
+  animation-iteration-count: infinite;
+}
+@keyframes cnDraw {
+  0%, 4% { stroke-dashoffset: 100; }
+  16%, 96% { stroke-dashoffset: 0; }
+  98%, 100% { stroke-dashoffset: 100; }
+}
+// 범례 넷과 중앙 합계는 도넛이 다 그려진 54% 에 **한 번에** 컷으로 붙는다 — 조각마다 따로 붙이면
+// 최대 변화 프레임이 첫 조각의 붓질에 잡혀 poster 가 "파란 조각 하나" 가 된다 (실측 2026-09-12)
+.cn.is-demo .cn__item,
+.cn.is-demo .cn__sumLabel,
+.cn.is-demo .cn__sumVal {
+  animation-name: cnReveal;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes cnReveal {
+  0%, 52% { opacity: 0; }
+  54%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 320px 에서 도넛을 줄여 카드 전체가 세로 200px 안에 들어온다
+  .cn__svg { width: 122px; }
+  .cn__card { padding: $sp-2 $sp-3; }
+  .cn__body { gap: $sp-3; }
+  .cn__legend { gap: $sp-1; }
+  .cn__head { margin-bottom: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cn.is-demo .cn__slice,
+  .cn.is-demo .cn__item,
+  .cn.is-demo .cn__sumLabel,
+  .cn.is-demo .cn__sumVal { animation: none !important; }
+  // 움직임 없이 다 그려진 최종 상태로 점프한다
+  .cn.is-demo .cn__slice { stroke-dashoffset: 0 !important; }
+  .cn.is-demo .cn__item,
+  .cn.is-demo .cn__sumLabel,
+  .cn.is-demo .cn__sumVal { opacity: 1 !important; }
+}

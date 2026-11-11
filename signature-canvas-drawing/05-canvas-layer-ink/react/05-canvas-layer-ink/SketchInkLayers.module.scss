@@ -1,0 +1,154 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// SketchInkLayers — vanilla 판(run/287/demo/05-canvas-layer-ink/style.scss) 의 React 포트.
+// 실제 동작은 canvas 두 장이고, 미리보기(.isDemo)는 같은 그림을 SVG 두 겹으로 재현한다.
+// duration·easing·color 는 props 로 받아 CSS 변수로 들어온다. @keyframes 본문은 vanilla 와 같은 글자.
+
+@include stage($stage-ink);
+
+.root { display: flex; justify-content: center; width: 100%; }
+.card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; overflow: hidden;
+}
+.layers {
+  display: flex; flex-direction: column; gap: $sp-1;
+  background: $subject-ink; padding: $sp-2 $sp-3;
+}
+.row { display: flex; align-items: center; gap: $sp-2; }
+.layer, .merge {
+  display: flex; align-items: center; gap: $sp-1; cursor: pointer; flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, .34); background: transparent; color: $stage-paper;
+  border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); padding: $sp-1 $sp-2; line-height: 1.3;
+}
+.layer[aria-pressed="true"] { background: $subject-blue; border-color: $subject-blue; }
+.layer:focus-visible, .merge:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+.ico { width: 14px; height: 14px; flex: 0 0 auto; }
+
+.slot { position: relative; display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+.range { width: 100%; height: 12px; margin: 0; cursor: pointer; accent-color: $subject-blue; }
+.range:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+// 미리보기용 가짜 슬라이더 — 진짜 range 는 JS 없이 못 움직이므로 .isDemo 동안만 자리를 바꿔 보여 준다
+.fake {
+  display: none; position: absolute; left: 0; right: 0; top: 50%; height: 4px;
+  transform: translateY(-50%); border-radius: $r-pill; background: rgba(255, 255, 255, .28);
+}
+.fakeFill {
+  position: absolute; inset: 0; border-radius: $r-pill; background: $subject-blue;
+  // 채움 막대는 시작 변에서 자란다 — 규칙 8 이 허용하는 비중심 origin
+  transform-origin: left center; transform: scaleX(.34);
+}
+.fakeKnob {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 100%;
+  // translateX 의 %는 자기 폭 기준이라, 손잡이를 트랙 폭의 %로 옮기려면 감싼 요소가 트랙과 같은 폭이어야 한다
+  transform: translateX(34%);
+}
+.fakeKnob::after {
+  content: ""; position: absolute; left: -4px; top: -2px; width: 8px; height: 8px;
+  border-radius: 50%; background: $stage-paper;
+}
+
+.board { position: relative; background: $subject-cream; aspect-ratio: 300 / 88; touch-action: none; }
+.sketch, .ink, .ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.sketch { opacity: .34; }        // 슬라이더가 바꾸는 값 — 밑그림 판만 옅어진다
+.ghost { display: none; fill: none; }
+.guide { opacity: .34; }         // 미리보기의 밑그림 겹 — 진짜 판의 opacity 와 같은 값에서 시작한다
+.guideCurve { stroke: rgba(23, 20, 26, .55); stroke-width: 5; stroke-linecap: round; }
+.guideRing { stroke: rgba(23, 20, 26, .55); stroke-width: 3; stroke-dasharray: 6 5; }
+.guideBase { stroke: rgba(23, 20, 26, .55); stroke-width: 3; stroke-dasharray: 6 5; }
+.trace {
+  stroke: var(--color, #{$subject-ink}); stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100.5;   // 100 이면 round 뚜껑이 길이 0에서도 점으로 찍힌다 — 반 밖으로 밀어 둔다
+}
+.finish {
+  stroke: var(--color, #{$subject-ink}); stroke-width: 9; stroke-linecap: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100.5;
+}
+
+// ── 미리보기 루프 (2s)
+//    0~8% 밑그림이 연하게 깔려 있고 · 8~44% 잉크가 그 위를 따라 그어진다
+//    46~50% 마지막 굵은 마무리 획을 빠르게 그어 poster 가 이 장이 되게 한다
+//    54~68% 밑그림 겹의 opacity 가 여러 프레임에 걸쳐 0.34 → 0 으로 내려가고 슬라이더 손잡이도 왼쪽으로 간다
+//    66~88% 마무리 획 → 잉크 획 순으로 되감기고 밑그림이 돌아와 0% 와 같은 상태가 된다
+.root.isDemo .sketch, .root.isDemo .ink { visibility: hidden; }
+.root.isDemo .ghost { display: block; }
+.root.isDemo .range { visibility: hidden; }   // display:none 은 자리까지 없앤다 — 칸은 그대로 두고 감춘다
+.root.isDemo .fake { display: block; }
+
+.root.isDemo .trace {
+  animation-name: liTrace;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: linear;   // 펜이 일정한 속도로 밑그림을 따라간다
+  animation-iteration-count: infinite;
+}
+@keyframes liTrace {
+  0%, 8% { stroke-dashoffset: 100.5; }
+  44%, 72% { stroke-dashoffset: 0; }
+  88%, 100% { stroke-dashoffset: 100.5; }
+}
+.root.isDemo .finish {
+  animation-name: liFinish;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+@keyframes liFinish {
+  0%, 46% { stroke-dashoffset: 100.5; }
+  50%, 66% { stroke-dashoffset: 0; }
+  80%, 100% { stroke-dashoffset: 100.5; }
+}
+
+// 밑그림 겹은 여러 프레임에 걸쳐 옅어진다 — 한 프레임에 사라지면 그 장이 poster 로 뽑힌다
+.root.isDemo .guide {
+  animation-name: liFade;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+@keyframes liFade {
+  0%, 54% { opacity: .34; }
+  68%, 74% { opacity: 0; }
+  88%, 100% { opacity: .34; }
+}
+.root.isDemo .fakeKnob {
+  animation-name: liKnob;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+@keyframes liKnob {
+  0%, 54% { transform: translateX(34%); }
+  68%, 74% { transform: translateX(0); }
+  88%, 100% { transform: translateX(34%); }
+}
+.root.isDemo .fakeFill {
+  animation-name: liFill;
+  animation-duration: var(--duration, #{$dur-loop});
+  animation-timing-function: var(--easing, #{$ease-out});
+  animation-iteration-count: infinite;
+}
+@keyframes liFill {
+  0%, 54% { transform: scaleX(.34); }
+  68%, 74% { transform: scaleX(0); }
+  88%, 100% { transform: scaleX(.34); }
+}
+
+@media (max-width: 340px) {
+  .layers { padding: $sp-1 $sp-2; }
+  .row { gap: $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root.isDemo .trace,
+  .root.isDemo .finish,
+  .root.isDemo .guide,
+  .root.isDemo .fakeKnob,
+  .root.isDemo .fakeFill { animation: none !important; }
+  // 움직임 없이 잉크만 남은 최종 상태로 세운다
+  .root.isDemo .trace,
+  .root.isDemo .finish { stroke-dashoffset: 0 !important; }
+  .root.isDemo .guide { opacity: 0 !important; }
+  .root.isDemo .fakeKnob { transform: translateX(0) !important; }
+  .root.isDemo .fakeFill { transform: scaleX(0) !important; }
+}

@@ -1,0 +1,139 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 아래에서 채워지는 누적 영역 그래프 — 실제 사용에선 JS 가 누적 경계선으로 세 레이어의 path 를 채워
+// 완성 형태가 곧 뜨고, pointermove 로 가이드선과 세 계열 값 툴팁이 따라온다. 격자 미리보기(.is-demo)는
+// 같은 레이어에 clip-path 위프를 얹어 아래 레이어부터 차례로 채워 올라가는 모양을 2초 루프로 보여 준다.
+
+$duration: $dur-loop;
+$easing: linear;        // 면이 차오르는 속도는 일정 — 게이지가 아니라 채움이라 등속이 자연스럽다
+$color: $chart-1;
+
+@include stage($stage-ink);
+
+.ca { display: flex; justify-content: center; width: 100%; padding-bottom: $sp-2; }
+.ca__card {
+  width: min(100%, 420px); background: $subject-cream; border-radius: $r-card;
+  box-shadow: $shadow-raised; padding: $sp-3 $sp-4 $sp-2;
+}
+.ca__head { display: flex; align-items: center; justify-content: space-between; gap: $sp-2; margin-bottom: $sp-2; }
+.ca__title { margin: 0; font-weight: 800; font-size: clamp(12px, 3vw, 14px); color: $subject-ink; }
+.ca__chip {
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); color: rgba(23, 20, 26, .66);
+  border: 1px solid rgba(23, 20, 26, .28); border-radius: $r-pill; padding: $sp-1 $sp-2;
+}
+
+.ca__plot { position: relative; }
+.ca__svg { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+.ca__grid line { stroke: rgba(23, 20, 26, .12); stroke-width: 1; }
+.ca__ticks text, .ca__labels text {
+  fill: rgba(23, 20, 26, .72); font-weight: 700; font-size: 9px;
+  text-anchor: end; dominant-baseline: middle;
+}
+.ca__labels text { text-anchor: middle; font-size: 9.5px; }
+.ca__axis { stroke: rgba(23, 20, 26, .32); stroke-width: 1.5; }
+// 레이어 — 계열 색은 차트 토큰 고정 순서(1 블루, 2 레드오렌지, 3 딥민트).
+// 겹침 2px 표면 간격 규칙 대신 경계선을 크림 stroke 1.5px 로 긋는다
+.ca__layer { fill-opacity: .9; stroke: $subject-cream; stroke-width: 1.5; }
+.ca__layer--1 { fill: $color; }
+.ca__layer--2 { fill: $chart-2; }
+.ca__layer--3 { fill: $chart-3; }
+// 직접 라벨 — 글자색은 그 라벨이 얹힌 면의 밝기로 고른다(면색은 손대지 않는다).
+// 블루(#a0afd0)·딥민트(#41a67f) 위에서는 잉크가 4.68:1·6.07:1 로 AA 를 넘는다
+.ca__lab {
+  fill: $subject-ink;
+  font-weight: 800; font-size: 10px; dominant-baseline: middle;
+}
+// 레드오렌지 면(#bb8174)만 잉크가 3.91:1 로 미달이라 흰 글자로 뒤집는다 — 4.66:1
+.ca__lab--2 { fill: $stage-paper; }
+// 계열 영역(면)은 dataviz 검증을 통과한 $chart-1~3 그대로 — 고치지 않는다
+// 호버 가이드선 — 포인터가 가리키는 달을 세로로 짚는다
+.ca__guide { stroke: $subject-cream; stroke-width: 1.5; stroke-dasharray: 3 4; opacity: 0; }
+.ca__guide.is-on { opacity: .95; }
+// 툴팁 — 그래프 안 위쪽에 절대 배치한다. 카드 위로 띄우면 폰 폭에서 카드 밖으로 나간다.
+// transform-origin 은 가이드선이 내려가는 위쪽 변(50% 0) — 붙는 지점이 있는 요소라
+// 중심이 아닌 원점을 쓴다 (스스로 완결한 요소였다면 중심에서 커져야 한다)
+.ca__tip {
+  position: absolute; top: $sp-1; transform: translate(-50%, -4px) scale(.96);
+  transform-origin: 50% 0;
+  display: flex; flex-direction: column; pointer-events: none;
+  background: $subject-ink; color: $stage-paper; border-radius: $r-xs;
+  padding: $sp-1 $sp-2; font-weight: 700; font-size: 10px; white-space: nowrap;
+  opacity: 0;
+}
+.ca__tip.is-on { opacity: 1; transform: translate(-50%, 0) scale(1); transition: opacity $dur-quick $ease-out, transform $dur-quick $ease-out; }
+.ca__tipMon { font-size: 11px; }
+.ca__tipRow { display: flex; align-items: center; gap: $sp-1; }
+.ca__tipName { opacity: .72; }
+.ca__tipRow b { font-size: 11px; margin-left: auto; }
+.ca__sw { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ca__sw--1 { background: $color; }
+.ca__sw--2 { background: $chart-2; }
+.ca__sw--3 { background: $chart-3; }
+// 스크린리더용 표 — fixed 로 캔버스 밖에 둔다
+.ca__sr {
+  position: fixed; top: 0; left: -640px; width: 320px; margin: 0;
+}
+
+// ── 미리보기 루프: 0~4% 빈 칸 → 데스크톱(4~26%) → 모바일(28~48%) → 태블릿(50~66%)이 아래부터
+//    차례로 채워 올라간다 → 70% 에 레이어 이름 라벨 셋과 가이드선·툴팁(9월)이 **한 번에** 컷으로 뜬다
+//    → 96% 까지 완성 상태로 머문다. 위프는 이징 연속 — steps 와 clip-path 를 함께 쓰면 보간이 컷으로
+//    죽는다. 되돌림은 98%(24프레임의 마지막 장이 95.8% 지점이라 그 뒤는 샘플이 없다) — 루프 안에서
+//    접으면 "세 층이 한꺼번에 내려앉는 장" 이 최대 변화가 돼 poster 로 뽑힌다
+//    (실측 2026-09-12: 91.7% 프레임 22.573%). 라벨·툴팁을 완성 시점에 몰아 컷하는 것도 같은 이유다 —
+//    그래야 최대 변화 프레임이 **다 그려진 장**이 된다.
+.ca.is-demo .ca__layer {
+  animation-duration: $duration;
+  animation-timing-function: $easing;
+  animation-iteration-count: infinite;
+}
+.ca.is-demo .ca__layer--1 { animation-name: caWipe1; }
+.ca.is-demo .ca__layer--2 { animation-name: caWipe2; }
+.ca.is-demo .ca__layer--3 { animation-name: caWipe3; }
+@keyframes caWipe1 {
+  0%, 4% { clip-path: inset(100% 0 0 0); }
+  26%, 96% { clip-path: inset(0 0 0 0); }
+  98%, 100% { clip-path: inset(100% 0 0 0); }
+}
+@keyframes caWipe2 {
+  0%, 28% { clip-path: inset(100% 0 0 0); }
+  48%, 96% { clip-path: inset(0 0 0 0); }
+  98%, 100% { clip-path: inset(100% 0 0 0); }
+}
+@keyframes caWipe3 {
+  0%, 50% { clip-path: inset(100% 0 0 0); }
+  66%, 96% { clip-path: inset(0 0 0 0); }
+  98%, 100% { clip-path: inset(100% 0 0 0); }
+}
+// 직접 라벨 셋과 가이드선·툴팁(9월은 JS 가 미리 놓아 둔다)은 세 레이어가 다 채워진 70% 에 한 번에
+// 컷으로 붙는다. 시점을 animation-delay 로 쪼개지 않는 이유 두 가지 — ① 컷(steps) 애니메이션에 지연을
+// 주면 루프 끝에서 한 바퀴가 어긋난다 ② 완성 시점에 몰아야 그 프레임이 최대 변화가 된다(poster)
+.ca.is-demo .ca__lab,
+.ca.is-demo .ca__tip,
+.ca.is-demo .ca__guide {
+  animation-name: caReveal;
+  animation-duration: $duration;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+@keyframes caReveal {
+  0%, 68% { opacity: 0; }
+  70%, 96% { opacity: 1; }
+  98%, 100% { opacity: 0; }
+}
+
+@media (max-width: 340px) {
+  // 320px 에서 8개 라벨이 겹친다 — 홀수 달만 남긴다 (짝수 달은 표·툴팁이 값을 갖고 있다)
+  .ca__labels text:nth-child(even) { display: none; }
+  .ca__labels text { font-size: 9px; }
+  .ca__card { padding: $sp-2 $sp-3 $sp-1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ca.is-demo .ca__layer,
+  .ca.is-demo .ca__lab,
+  .ca.is-demo .ca__tip,
+  .ca.is-demo .ca__guide { animation: none !important; }
+  // 움직임 없이 세 레이어가 다 채워진 최종 상태로 점프한다
+  .ca.is-demo .ca__layer { clip-path: none !important; }
+  .ca.is-demo .ca__lab { opacity: 1 !important; }
+}

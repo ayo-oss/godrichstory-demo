@@ -1,0 +1,188 @@
+@use "../../../../site/static/demo-tokens" as *;
+
+// 펜·형광펜·지우개 도구바 — 실제 필기는 canvas 2D 가 그린다(도구마다 globalCompositeOperation 이 다르다).
+// 격자 미리보기(.is-demo)는 canvas 를 감추고, 같은 장면을 DOM 띠 하나와 SVG 경로 하나로 다시 만든다.
+// demo.py 는 CSS 애니메이션 시계로 24장을 뽑으므로 JS 가 canvas 에 그린 그림은 24장이 전부 같다.
+
+$duration: $dur-loop;
+$easing: $ease-out;
+$color: $subject-ink;
+
+@include stage($stage-ink);
+
+.pt { display: flex; justify-content: center; width: 100%; }
+.pt__card {
+  width: min(100%, 340px); background: $stage-paper; border-radius: $r-card;
+  box-shadow: $shadow-raised; overflow: hidden;
+}
+
+.pt__bar { display: grid; gap: $sp-2; background: $subject-ink; padding: $sp-2 $sp-3; }
+.pt__tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: $sp-1; }
+.pt__tool {
+  position: relative; display: flex; align-items: center; justify-content: center; gap: $sp-1;
+  width: 100%; cursor: pointer; border: 0; background: rgba(255, 255, 255, .1);
+  color: rgba(255, 255, 255, .56); border-radius: $r-control; font-family: inherit;
+  font-weight: 700; font-size: clamp(9px, 2.4vw, 10px); line-height: 1.3; padding: $sp-1 $sp-2;
+}
+.pt__tool[aria-pressed="true"] { color: $stage-paper; }
+.pt__tool:focus-visible { outline: 3px solid $subject-blue; outline-offset: 2px; }
+.pt__ico { width: 12px; height: 12px; flex: 0 0 auto; }
+// 선택 표시는 라벨 아래 얇은 막대 하나 — 버튼 바탕째 갈아 끼우면 poster 가 그 컷 프레임으로 뽑힌다
+.pt__mark {
+  position: absolute; left: 22%; right: 22%; bottom: 2px; height: 3px;
+  border-radius: $r-pill; background: $stage-yellow; opacity: 0;
+}
+.pt__tool[aria-pressed="true"] .pt__mark { opacity: 1; }
+
+.pt__opts { display: flex; align-items: center; gap: $sp-2; }
+.pt__swatches, .pt__widths { display: flex; align-items: center; gap: $sp-1; }
+.pt__widths { margin-left: auto; }
+.pt__swatch {
+  width: 16px; height: 16px; padding: 0; cursor: pointer; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .28);
+}
+.pt__swatch--ink { background: $subject-ink; }
+.pt__swatch--blue { background: $subject-blue; }
+.pt__swatch--red { background: $error; }
+.pt__swatch[aria-pressed="true"] { border-color: $stage-paper; }
+.pt__width {
+  display: flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+  padding: 0; cursor: pointer; border: 0; background: transparent; border-radius: 50%;
+}
+.pt__width[aria-pressed="true"] { background: rgba(255, 255, 255, .2); }
+.pt__dot { display: block; border-radius: 50%; background: $stage-paper; }
+.pt__dot--s { width: 3px; height: 3px; }
+.pt__dot--m { width: 6px; height: 6px; }
+.pt__dot--l { width: 9px; height: 9px; }
+.pt__wipe {
+  cursor: pointer; border: 1px solid rgba(255, 255, 255, .34); background: transparent;
+  color: $stage-paper; border-radius: $r-pill; font-family: inherit; font-weight: 700;
+  font-size: clamp(9px, 2.4vw, 10px); line-height: 1.3; padding: $sp-1 $sp-2;
+}
+.pt__swatch:focus-visible, .pt__width:focus-visible, .pt__wipe:focus-visible {
+  outline: 3px solid $subject-blue; outline-offset: 2px;
+}
+
+.pt__pad {
+  position: relative; overflow: hidden; background: $stage-paper;
+  aspect-ratio: 300 / 104; touch-action: none;
+}
+.pt__sample {
+  position: absolute; left: 7%; right: 7%; top: 12%; margin: 0; white-space: nowrap;
+  font-weight: 700; font-size: clamp(10px, 2.6vw, 12px); line-height: 1.4; color: rgba(23, 20, 26, .82);
+}
+.pt__ink, .pt__ghost { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pt__ghost { display: none; fill: none; }
+// 형광 띠는 multiply 로 겹친다 — canvas 쪽 highlighter 가 쓰는 합성 방식과 같은 결과(글자가 비친다)
+.pt__band {
+  display: none; position: absolute; left: 6%; top: 11%; width: 58%; height: 17%;
+  background: $stage-yellow; mix-blend-mode: multiply; clip-path: inset(0 100% 0 0);
+}
+.pt__stroke {
+  stroke: $color; stroke-width: 14; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 100; stroke-dashoffset: 100;
+}
+.pt__rub { fill: rgba(23, 20, 26, .12); stroke: rgba(23, 20, 26, .55); stroke-width: 2; opacity: 0; }
+
+// ── 미리보기 루프 (2s)
+//  4~30%  형광 띠가 예시 문장 위를 왼쪽에서 오른쪽으로 clip-path 로 칠해진다
+//  34%    도구 선택 표시가 펜으로 컷 (steps(1, end) — 반투명 교차가 없다)
+//  44~50% 굵은 펜 획이 stroke-dashoffset 으로 빠르게 그어진다. 이 구간이 프레임당 변화가 가장 커 poster 가 된다
+//  56%    도구 선택 표시가 지우개로 컷
+//  58~94% 지우개가 획 위를 지나 오른쪽 끝까지 갔다가 띠 줄로 올라와 왼쪽으로 돌아온다
+//  62~78% 펜 획이 시작점 쪽부터 여러 프레임에 걸쳐 걷힌다 (stroke-dashoffset 0 → -100)
+//  80~94% 형광 띠가 오른쪽부터 여러 프레임에 걸쳐 걷힌다. 94% 에 빈 판 + 형광펜 선택으로 돌아와 0% 와 같아진다
+.pt.is-demo .pt__ink { visibility: hidden; }
+.pt.is-demo .pt__ghost { display: block; }
+.pt.is-demo .pt__band { display: block; }
+.pt.is-demo .pt__band,
+.pt.is-demo .pt__stroke,
+.pt.is-demo .pt__rub,
+.pt.is-demo .pt__mark {
+  animation-duration: $duration;
+  animation-iteration-count: infinite;
+}
+.pt.is-demo .pt__band { animation-name: ptBand; animation-timing-function: $easing; }
+.pt.is-demo .pt__stroke { animation-name: ptStroke; animation-timing-function: $easing; }
+.pt.is-demo .pt__rub { animation-name: ptRub; animation-timing-function: linear; }
+.pt.is-demo .pt__mark { animation-timing-function: steps(1, end); }
+.pt.is-demo .pt__tool--pen .pt__mark { animation-name: ptPickPen; }
+.pt.is-demo .pt__tool--hl .pt__mark { animation-name: ptPickHl; }
+.pt.is-demo .pt__tool--er .pt__mark { animation-name: ptPickEr; }
+
+@keyframes ptBand {
+  0%, 4% { clip-path: inset(0 100% 0 0); }
+  30%, 80% { clip-path: inset(0 0 0 0); }
+  94%, 100% { clip-path: inset(0 100% 0 0); }
+}
+@keyframes ptStroke {
+  0%, 44% { stroke-dashoffset: 100; }
+  50%, 62% { stroke-dashoffset: 0; }
+  78%, 100% { stroke-dashoffset: -100; }
+}
+@keyframes ptRub {
+  0%, 56% { opacity: 0; transform: translate(16px, 80px); }
+  58%, 62% { opacity: 1; transform: translate(16px, 80px); }
+  78% { opacity: 1; transform: translate(284px, 80px); }
+  82% { opacity: 1; transform: translate(284px, 24px); }
+  93% { opacity: 1; transform: translate(20px, 24px); }
+  94%, 100% { opacity: 0; transform: translate(16px, 80px); }
+}
+@keyframes ptPickHl {
+  0%, 33% { opacity: 1; }
+  34%, 93% { opacity: 0; }
+  94%, 100% { opacity: 1; }
+}
+@keyframes ptPickPen {
+  0%, 33% { opacity: 0; }
+  34%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+@keyframes ptPickEr {
+  0%, 55% { opacity: 0; }
+  56%, 93% { opacity: 1; }
+  94%, 100% { opacity: 0; }
+}
+
+// 컷만 두면 움직인 프레임이 모자라니 컷 옆에 눌림 움직임을 붙인다 (transform 이라 유령 프레임이 안 생긴다)
+.pt.is-demo .pt__tool--pen,
+.pt.is-demo .pt__tool--er {
+  animation-duration: $duration;
+  animation-timing-function: $ease-pop;
+  animation-iteration-count: infinite;
+}
+.pt.is-demo .pt__tool--pen { animation-name: ptPressPen; }
+.pt.is-demo .pt__tool--er { animation-name: ptPressEr; }
+// 버튼은 스스로 완결한 요소라 자기 중심에서 눌린다 (transform-origin 기본값 50% 50%)
+@keyframes ptPressPen {
+  0%, 32% { transform: scale(1); }
+  35% { transform: scale(.9); }
+  40%, 100% { transform: scale(1); }
+}
+@keyframes ptPressEr {
+  0%, 54% { transform: scale(1); }
+  57% { transform: scale(.9); }
+  62%, 100% { transform: scale(1); }
+}
+
+@media (max-width: 340px) {
+  .pt__bar { gap: $sp-1; padding: $sp-1 $sp-2; }
+  .pt__opts { gap: $sp-1; }
+  .pt__sample { left: 6%; right: 6%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pt.is-demo .pt__band,
+  .pt.is-demo .pt__stroke,
+  .pt.is-demo .pt__rub,
+  .pt.is-demo .pt__mark,
+  .pt.is-demo .pt__tool--pen,
+  .pt.is-demo .pt__tool--er { animation: none !important; }
+  // 움직임 없이 형광 띠와 펜 획이 다 그어진 최종 상태로 세운다
+  .pt.is-demo .pt__band { clip-path: inset(0 0 0 0) !important; }
+  .pt.is-demo .pt__stroke { stroke-dashoffset: 0 !important; }
+  .pt.is-demo .pt__rub { opacity: 0 !important; }
+  .pt.is-demo .pt__tool--hl .pt__mark,
+  .pt.is-demo .pt__tool--er .pt__mark { opacity: 0 !important; }
+  .pt.is-demo .pt__tool--pen .pt__mark { opacity: 1 !important; }
+}

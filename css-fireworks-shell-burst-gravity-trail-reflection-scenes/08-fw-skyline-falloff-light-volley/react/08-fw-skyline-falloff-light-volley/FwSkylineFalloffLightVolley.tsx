@@ -1,0 +1,447 @@
+import { useEffect, useRef } from "react";
+import styles from "./FwSkylineFalloffLightVolley.module.scss";
+
+const W = 480;
+const H = 300;
+const PI2 = Math.PI * 2;
+const FIXED_DT = 16;
+const REDUCE_STEP_MS = 900;
+const KEY_STEP = 14;
+const IDLE_TICKS = 150;
+const BTN_PAUSE = '멈춤';
+const BTN_PLAY = '재생';
+const BTN_NEXT = '다음 장면';
+
+type RGB = [number, number, number];
+interface Input { x: number; y: number; idle: number; vx: number; vy: number; dpr: number; }
+interface Scene {
+    step(): void;
+    draw(ctx: CanvasRenderingContext2D): void;
+    label(): string;
+    tap(): void;
+}
+type Maker = (inp: Input, reduce: boolean) => Scene;
+
+// 파스텔 알갱이 팔레트와 밤하늘 두 끝 색
+const PINK: RGB = [255, 170, 196];
+const MINT: RGB = [150, 226, 196];
+const LILAC: RGB = [196, 176, 255];
+const SKY_BLUE: RGB = [150, 214, 255];
+const BUTTER: RGB = [255, 230, 150];
+const CREAM: RGB = [255, 247, 230];
+const PALETTE: RGB[] = [PINK, MINT, LILAC, SKY_BLUE, BUTTER];
+const SKY_TOP: RGB = [18, 16, 32];
+const SKY_BOT: RGB = [46, 40, 76];
+
+function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+function smooth(x: number): number { const c = clamp(x, 0, 1); return c * c * (3 - 2 * c); }
+// 시드 고정 난수 — 같은 시드면 언제나 같은 수열 (선형 합동 방식)
+function lcg(seed: number): () => number {
+    let s = seed >>> 0;
+    return function (): number {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return s / 4294967296;
+    };
+}
+// 정수 하나와 시드로 0 이상 1 미만의 값을 만드는 해시 (같은 입력은 늘 같은 값)
+function hash1(i: number, seed: number): number {
+    let h = (Math.imul(i | 0, 374761393) + Math.imul(seed | 0, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+}
+function hash2(x: number, y: number, seed: number): number {
+    return hash1((Math.imul(x | 0, 73856093) ^ Math.imul(y | 0, 19349663)) | 0, seed);
+}
+// 1차원 값 노이즈 — 정수점 해시를 smooth 로 이어 붙인다
+function noise1(x: number, seed: number): number {
+    const xi = Math.floor(x);
+    return lerp(hash1(xi, seed), hash1(xi + 1, seed), smooth(x - xi));
+}
+// 2차원 값 노이즈
+function vnoise(x: number, y: number, seed: number): number {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    const fx = smooth(x - xi);
+    const fy = smooth(y - yi);
+    const a = lerp(hash2(xi, yi, seed), hash2(xi + 1, yi, seed), fx);
+    const b = lerp(hash2(xi, yi + 1, seed), hash2(xi + 1, yi + 1, seed), fx);
+    return lerp(a, b, fy);
+}
+function rgba(c: RGB, a: number): string {
+    return 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+}
+function mixRGB(a: RGB, b: RGB, k: number): RGB {
+    return [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+}
+// 밤하늘 바탕 — 위가 어둡고 아래가 보랏빛
+function drawSky(ctx: CanvasRenderingContext2D, height: number): void {
+    const g = ctx.createLinearGradient(0, 0, 0, height);
+    g.addColorStop(0, rgba(SKY_TOP, 1));
+    g.addColorStop(1, rgba(SKY_BOT, 1));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, height);
+}
+
+function start(root: HTMLElement, canvas: HTMLCanvasElement, statusEl: HTMLElement, btnEl: HTMLElement, make: Maker): () => void {
+    const ctx0 = canvas.getContext('2d');
+    if (!ctx0) {
+        return function (): void { return; };
+    }
+    const ctx: CanvasRenderingContext2D = ctx0;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const inp: Input = { x: W / 2, y: H / 2, idle: 99999, vx: 0, vy: 0, dpr: 1 };
+    let lastPx = -1;
+    let lastPy = -1;
+    // 화면 배율이 바뀌어도 캔버스 픽셀 수를 다시 맞춘다
+    function fit(): void {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        inp.dpr = dpr;
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    fit();
+    const scene = make(inp, reduce);
+    let paused = false;
+    let rafId = 0;
+    let lastTs = -1;
+    let accMs = 0;
+    let lastLabel = '';
+    const cleaners: Array<() => void> = [];
+    function listen(target: EventTarget, type: string, fn: (e: any) => void): void {
+        target.addEventListener(type, fn);
+        cleaners.push(function (): void { target.removeEventListener(type, fn); });
+    }
+    function show(): void {
+        ctx.setTransform(inp.dpr, 0, 0, inp.dpr, 0, 0);
+        scene.draw(ctx);
+        const t = scene.label();
+        if (t !== lastLabel) {
+            lastLabel = t;
+            statusEl.textContent = t;
+        }
+    }
+    function tickOnce(): void {
+        inp.idle += 1;
+        inp.vx *= 0.9;
+        inp.vy *= 0.9;
+        scene.step();
+    }
+    function advance(ms: number): void {
+        const n = Math.round(ms / FIXED_DT);
+        for (let i = 0; i < n; i += 1) {
+            tickOnce();
+        }
+    }
+    function refresh(): void {
+        if (reduce) {
+            advance(FIXED_DT * 6);
+            show();
+        }
+    }
+    function toLocal(e: PointerEvent): void {
+        const r = canvas.getBoundingClientRect();
+        const nx = clamp((e.clientX - r.left) * W / r.width, 0, W);
+        const ny = clamp((e.clientY - r.top) * H / r.height, 0, H);
+        if (lastPx >= 0) {
+            inp.vx = lerp(inp.vx, nx - lastPx, 0.5);
+            inp.vy = lerp(inp.vy, ny - lastPy, 0.5);
+        }
+        lastPx = nx;
+        lastPy = ny;
+        inp.x = nx;
+        inp.y = ny;
+        inp.idle = 0;
+    }
+    function tick(ts: number): void {
+        if (lastTs < 0) {
+            lastTs = ts;
+        }
+        const frameDt = Math.min(ts - lastTs, 160);
+        lastTs = ts;
+        if (!paused) {
+            accMs += frameDt;
+            while (accMs >= FIXED_DT) {
+                tickOnce();
+                accMs -= FIXED_DT;
+            }
+            show();
+        }
+        rafId = requestAnimationFrame(tick);
+    }
+    btnEl.textContent = reduce ? BTN_NEXT : BTN_PAUSE;
+    if (reduce) {
+        root.classList.remove('is-demo');
+    }
+    show();
+    listen(btnEl, 'click', function (): void {
+        if (reduce) {
+            advance(REDUCE_STEP_MS);
+            show();
+            return;
+        }
+        paused = !paused;
+        if (paused) {
+            root.classList.remove('is-demo');
+        }
+        else {
+            root.classList.add('is-demo');
+        }
+        btnEl.textContent = paused ? BTN_PLAY : BTN_PAUSE;
+    });
+    listen(canvas, 'pointermove', function (e: PointerEvent): void {
+        toLocal(e);
+        refresh();
+    });
+    listen(canvas, 'pointerdown', function (e: PointerEvent): void {
+        lastPx = -1;
+        toLocal(e);
+        scene.tap();
+        refresh();
+    });
+    listen(canvas, 'keydown', function (e: KeyboardEvent): void {
+        const k = e.key;
+        let dx = 0;
+        let dy = 0;
+        if (k === 'Enter' || k === ' ') {
+            e.preventDefault();
+            scene.tap();
+            refresh();
+            return;
+        }
+        if (k === 'ArrowLeft') {
+            dx = -KEY_STEP;
+        }
+        else if (k === 'ArrowRight') {
+            dx = KEY_STEP;
+        }
+        else if (k === 'ArrowUp') {
+            dy = -KEY_STEP;
+        }
+        else if (k === 'ArrowDown') {
+            dy = KEY_STEP;
+        }
+        else {
+            return;
+        }
+        e.preventDefault();
+        inp.x = clamp(inp.x + dx, 0, W);
+        inp.y = clamp(inp.y + dy, 0, H);
+        inp.vx = dx * 0.5;
+        inp.vy = dy * 0.5;
+        inp.idle = 0;
+        refresh();
+    });
+    listen(window, 'resize', function (): void {
+        fit();
+        show();
+    });
+    if (!reduce) {
+        rafId = requestAnimationFrame(tick);
+    }
+    return function (): void {
+        cancelAnimationFrame(rafId);
+        for (let i = 0; i < cleaners.length; i += 1) {
+            cleaners[i]();
+        }
+    };
+}
+
+const VOLLEY_N = 4;
+const SKY_GLOW = 120;
+const LIGHT_FALLOFF = 90;
+const GAP_MS = 260;
+const VOLLEY_PAUSE = 60;
+const BUILDING_N = 14;
+const FLASH_LIFE = 60;
+const SPARK_N = 52;
+const SPARK_DRAG = 0.968;
+const SPARK_GRAVITY = 0.04;
+const BAND_N = 4;
+const PREWARM_STEPS = 22;
+const BUILDING_BASE: RGB = [34, 30, 56];
+const TXT_AUTO = '폭발이 광원이 된다 — 거리 제곱에 반비례해 건물이 밝아진다';
+const TXT_TAP = '누른 자리가 새 광원이 된다';
+
+interface Flash { x: number; y: number; hue: RGB; age: number; }
+interface Spark { x: number; y: number; vx: number; vy: number; age: number; life: number; hue: RGB; }
+interface Building { x: number; w: number; h: number; seed: number; }
+
+// 광원 하나가 점 (px, py) 에 주는 밝기 — 거리 제곱에 반비례하는 감쇠(LIGHT_FALLOFF 만큼 떨어지면 절반)
+function lightAt(f: Flash, px: number, py: number): number {
+    const d = Math.hypot(f.x - px, f.y - py);
+    const k = 1 - f.age / FLASH_LIFE;
+    return (k * k) / (1 + (d / LIGHT_FALLOFF) * (d / LIGHT_FALLOFF));
+}
+
+function makeScene(inp: Input, reduce: boolean): Scene {
+    const rng = lcg(808);
+    const GAP_STEPS = Math.round(GAP_MS / FIXED_DT);
+    const gain = reduce ? 0.5 : 1;
+    const buildings: Building[] = [];
+    let bx = -6;
+    for (let i = 0; i < BUILDING_N; i += 1) {
+        const w = 26 + Math.floor(rng() * 18);
+        buildings.push({ x: bx, w: w, h: 46 + Math.floor(rng() * 72), seed: i * 17 + 3 });
+        bx += w + 2;
+    }
+    let flashes: Flash[] = [];
+    let sparks: Spark[] = [];
+    let volleyLeft = VOLLEY_N;
+    let gapTimer = 2;
+    let colorIdx = 0;
+    function burst(x: number, y: number): void {
+        const hue = PALETTE[colorIdx % PALETTE.length];
+        colorIdx += 1;
+        flashes.push({ x: x, y: y, hue: hue, age: 0 });
+        if (flashes.length > 8) {
+            flashes.shift();
+        }
+        for (let i = 0; i < SPARK_N; i += 1) {
+            const a = rng() * PI2;
+            const sp = 1.8 + rng() * 1.8;
+            sparks.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life: 55 + rng() * 20, hue: i % 3 === 0 ? CREAM : hue });
+        }
+        if (sparks.length > 280) {
+            sparks.splice(0, sparks.length - 280);
+        }
+    }
+    const scene: Scene = {
+        step(): void {
+            gapTimer -= 1;
+            if (gapTimer <= 0) {
+                if (volleyLeft > 0) {
+                    burst(60 + rng() * 360, 55 + rng() * 75);
+                    volleyLeft -= 1;
+                    gapTimer = volleyLeft > 0 ? GAP_STEPS : VOLLEY_PAUSE;
+                }
+                else {
+                    volleyLeft = VOLLEY_N;
+                    gapTimer = 1;
+                }
+            }
+            const liveF: Flash[] = [];
+            for (let i = 0; i < flashes.length; i += 1) {
+                flashes[i].age += 1;
+                if (flashes[i].age < FLASH_LIFE) {
+                    liveF.push(flashes[i]);
+                }
+            }
+            flashes = liveF;
+            const alive: Spark[] = [];
+            for (let i = 0; i < sparks.length; i += 1) {
+                const s = sparks[i];
+                s.age += 1;
+                s.vx *= SPARK_DRAG;
+                s.vy = s.vy * SPARK_DRAG + SPARK_GRAVITY;
+                s.x += s.vx;
+                s.y += s.vy;
+                if (s.age < s.life) {
+                    alive.push(s);
+                }
+            }
+            sparks = alive;
+        },
+        draw(ctx: CanvasRenderingContext2D): void {
+            drawSky(ctx, H);
+            ctx.globalCompositeOperation = 'lighter';
+            // 하늘 — 광원마다 퍼지는 빛무리
+            for (let i = 0; i < flashes.length; i += 1) {
+                const f = flashes[i];
+                const k = (1 - f.age / FLASH_LIFE);
+                const r = SKY_GLOW * (0.55 + 0.45 * (1 - k));
+                const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r);
+                g.addColorStop(0, rgba(f.hue, k * k * 0.7 * gain));
+                g.addColorStop(1, rgba(f.hue, 0));
+                ctx.fillStyle = g;
+                ctx.fillRect(f.x - r, f.y - r, r * 2, r * 2);
+            }
+            for (let i = 0; i < sparks.length; i += 1) {
+                const s = sparks[i];
+                const a = Math.pow(1 - s.age / s.life, 0.8);
+                ctx.strokeStyle = rgba(s.hue, a * 0.5);
+                ctx.lineWidth = 1.1;
+                ctx.beginPath();
+                ctx.moveTo(s.x - s.vx * 1.6, s.y - s.vy * 1.6);
+                ctx.lineTo(s.x, s.y);
+                ctx.stroke();
+                ctx.fillStyle = rgba(s.hue, a);
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, 1.3 + 1.7 * a, 0, PI2);
+                ctx.fill();
+            }
+            ctx.globalCompositeOperation = 'source-over';
+            // 건물 — 띠마다 모든 광원의 밝기를 더해 색을 섞는다
+            for (let b = 0; b < buildings.length; b += 1) {
+                const bd = buildings[b];
+                const bandH = bd.h / BAND_N;
+                for (let band = 0; band < BAND_N; band += 1) {
+                    const cy = H - bd.h + (band + 0.5) * bandH;
+                    let r = BUILDING_BASE[0];
+                    let gg = BUILDING_BASE[1];
+                    let bb = BUILDING_BASE[2];
+                    for (let i = 0; i < flashes.length; i += 1) {
+                        const l = lightAt(flashes[i], bd.x + bd.w / 2, cy) * 1.9 * gain;
+                        r += flashes[i].hue[0] * l * 0.55;
+                        gg += flashes[i].hue[1] * l * 0.55;
+                        bb += flashes[i].hue[2] * l * 0.55;
+                    }
+                    ctx.fillStyle = 'rgb(' + Math.round(clamp(r, 0, 255)) + ',' + Math.round(clamp(gg, 0, 255)) + ',' + Math.round(clamp(bb, 0, 255)) + ')';
+                    ctx.fillRect(bd.x, H - bd.h + band * bandH, bd.w, bandH + 0.5);
+                }
+                // 창문 — 불이 켜진 창은 빛을 받으면 더 밝아진다
+                for (let wy = 8; wy < bd.h - 4; wy += 11) {
+                    for (let wx = 5; wx < bd.w - 5; wx += 9) {
+                        if (hash2(wx + bd.seed, wy, 5) > 0.6) {
+                            let lit = 0;
+                            for (let i = 0; i < flashes.length; i += 1) {
+                                lit += lightAt(flashes[i], bd.x + wx, H - bd.h + wy);
+                            }
+                            ctx.fillStyle = rgba(BUTTER, clamp(0.25 + lit * 1.4 * gain, 0, 1));
+                            ctx.fillRect(bd.x + wx, H - bd.h + wy, 3, 4);
+                        }
+                    }
+                }
+            }
+        },
+        label(): string {
+            return inp.idle < IDLE_TICKS ? TXT_TAP : TXT_AUTO;
+        },
+        tap(): void {
+            burst(inp.x, clamp(inp.y, 40, H - 110));
+        }
+    };
+    for (let i = 0; i < PREWARM_STEPS; i += 1) {
+        scene.step();
+    }
+    return scene;
+}
+
+export default function FwSkylineFalloffLightVolley() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const statusRef = useRef<HTMLParagraphElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const canvas = canvasRef.current;
+    const statusEl = statusRef.current;
+    const btnEl = btnRef.current;
+    if (!root || !canvas || !statusEl || !btnEl) return;
+    return start(root, canvas, statusEl, btnEl, makeScene);
+  }, []);
+
+  return (
+    <main className={styles.stage}>
+      <div className={`${styles.sc} is-demo`} ref={rootRef}>
+        <canvas className={styles.sc__canvas} ref={canvasRef} width={480} height={300} tabIndex={0} aria-label="터질 때마다 하늘이 물들고 건물 실루엣이 거리별로 밝아지는 연속 발사" />
+        <p className={styles.sc__status} ref={statusRef} aria-live="polite">폭발이 광원이 된다 — 거리 제곱에 반비례해 건물이 밝아진다</p>
+        <button className={styles.sc__btn} ref={btnRef} type="button">멈춤</button>
+        <p className={styles.sc__caption}>터질 때마다 하늘이 물들고 건물 실루엣이 거리별로 밝아지는 연속 발사</p>
+      </div>
+    </main>
+  );
+}
