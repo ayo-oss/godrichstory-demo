@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>タイムスタンプのバネ — コールバック引数で作る減衰振動 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="デモの舞台 — SpaceかEnterで一時停止、Rで最初から">
+    <canvas class="ez__canvas" data-role="canvas" width="480" height="300" role="img" aria-label="30Hzと144Hzで、フレームごとに1/60秒と仮定したバネと時間差で解いたバネの静止までの時間を四行で比べる場面"></canvas>
+  </div>
+  <p class="ez__status" data-role="status" aria-live="off">場面の準備</p>
+  <div class="ez__ctrl">
+    <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+  </div>
+  <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function main(root) {
+    // 무대 좌표 — 캔버스 안 계산은 늘 480×300. 화면에 보이는 크기와 상관없다
+    const W = 480;
+    const H = 300;
+    const TAU = Math.PI * 2;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 파스텔 팔레트 — 바탕은 짙은 자두색, 상자는 연한 색, 글자는 연한 색 또는 짙은 잉크
+    const INK = [40, 36, 54];
+    const PAPER = [250, 246, 240];
+    const ROSE = [244, 162, 186];
+    const MINT = [148, 212, 182];
+    const SKY = [150, 192, 244];
+    const SUN = [250, 218, 146];
+    const LILAC = [196, 176, 244];
+    const NEU = [236, 230, 250];
+    const BGC = [46, 42, 68];
+    const PANEL = [62, 57, 92];
+    const GRID = [92, 86, 124];
+    const DIM = [196, 190, 224];
+    function rgba(c, a) {
+        return 'rgba(' + Math.round(clamp(c[0], 0, 255)) + ',' + Math.round(clamp(c[1], 0, 255)) + ',' + Math.round(clamp(c[2], 0, 255)) + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+    }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    function n0(v) { return String(Math.round(v)); }
+    // ── 무대 요소
+    const rootEl = root;
+    const canvasEl = rootEl.querySelector('[data-role="canvas"]');
+    const padEl = rootEl.querySelector('[data-role="pad"]');
+    const pauseEl = rootEl.querySelector('[data-role="pause"]');
+    const statusEl = rootEl.querySelector('[data-role="status"]');
+    const doneEl = rootEl.querySelector('[data-role="done"]');
+    const actEl = rootEl.querySelector('[data-role="act"]');
+    const ctxRaw = canvasEl ? canvasEl.getContext('2d') : null;
+    if (!canvasEl || !ctxRaw || !pauseEl || !padEl || !doneEl || !statusEl) {
+        return function () { };
+    }
+    const cv = canvasEl;
+    const ctx = ctxRaw;
+    const pad = padEl;
+    const pauseBtn = pauseEl;
+    const doneP = doneEl;
+    const statusP = statusEl;
+    // 외부 웹폰트는 부르지 않는다 — 기기에 있는 글꼴 목록만
+    const UI_FONT = 'system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif';
+    const CODE_FONT = 'ui-monospace, "Cascadia Mono", Consolas, "Noto Sans KR", monospace';
+    let dpr = 1;
+    function fitCanvas() {
+        // 배율은 2 에서 자른다 — 계산은 늘 480×300 이고 화면 배율만 이 값
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    function box(x, y, w, h, r, c, a) {
+        if (w <= 0.2 || h <= 0.2 || a <= 0) {
+            return;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function disc(x, y, r, c, a) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fillStyle = rgba(c, a);
+        ctx.fill();
+    }
+    function ring(x, y, r, c, a, w) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = w;
+        ctx.stroke();
+    }
+    function seg(x1, y1, x2, y2, c, a, w) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = rgba(c, a);
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+    function dash(x1, y1, x2, y2, c, a) {
+        ctx.setLineDash([3, 3]);
+        seg(x1, y1, x2, y2, c, a, 1);
+        ctx.setLineDash([]);
+    }
+    // 글자 — maxW 가 있으면 그 폭에 들어가도록 글자 크기를 줄인다(문구가 로케일마다 길이가 달라서)
+    function text(s, x, y, c, px, weight, align, maxW, mono) {
+        const face = mono ? CODE_FONT : UI_FONT;
+        let size = px;
+        ctx.font = weight + ' ' + size + 'px ' + face;
+        if (maxW !== undefined) {
+            while (size > 8 && ctx.measureText(s).width > maxW) {
+                size -= 0.5;
+                ctx.font = weight + ' ' + size + 'px ' + face;
+            }
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = rgba(c, 1);
+        ctx.fillText(s, x, y);
+    }
+    // 아래쪽 눈금 알약들 — 상수 이름과 지금 값
+    function chips(list) {
+        const y = H - 28;
+        let x = 10;
+        for (let i = 0; i < list.length; i += 1) {
+            const label = list[i][0] + ' ' + list[i][1];
+            ctx.font = '700 10px ' + CODE_FONT;
+            const w = ctx.measureText(label).width + 16;
+            box(x, y, w, 18, 9, NEU, 0.96);
+            text(label, x + w / 2, y + 9.5, INK, 10, 700, 'center', undefined, true);
+            x += w + 6;
+        }
+    }
+    // 가로 막대 — 바탕 위에 frac(0 에서 1) 만큼 채우고 끝에 머리를 단다
+    function bar(x, y, w, h, frac, c, a) {
+        box(x, y, w, h, h / 2, PANEL, 1);
+        if (frac > 0) {
+            const fw = Math.max(h, w * clamp(frac, 0, 1));
+            box(x, y, fw, h, h / 2, c, a);
+            disc(x + fw - h / 2, y + h / 2, h / 2 - 2.5, PAPER, 1);
+        }
+    }
+    function lane(periodMs) { return { period: periodMs, next: periodMs }; }
+    function runLane(l, nowMs, cb) {
+        let n = 0;
+        while (l.next <= nowMs && n < 400) {
+            cb(l.period, l.next);
+            l.next += l.period;
+            n += 1;
+        }
+        return n;
+    }
+    // ── 시간·상태·낭독
+    // sceneT = 장면 시간(초). 一時停止·탭 숨김·간격 폭주 구간은 더하지 않는다
+    let sceneT = 0;
+    let lap = 0;
+    let paused = false;
+    let still = false;
+    let settling = false;
+    let holdFlag = false;
+    let rawGap = 0;
+    let lastStatus = '';
+    let lastMode = -9;
+    // 프레임 간격이 튀어도 장면 시간이 한 번에 몰리지 않게 자른다
+    const DT_MAX = 0.05;
+    const timerIds = [];
+    function later(fn, ms) { timerIds.push(window.setTimeout(fn, ms)); }
+    function every(fn, ms) {
+        const id = window.setInterval(fn, ms);
+        timerIds.push(id);
+        return id;
+    }
+    function clearTimers() {
+        for (let i = 0; i < timerIds.length; i += 1) {
+            window.clearTimeout(timerIds[i]);
+            window.clearInterval(timerIds[i]);
+        }
+        timerIds.length = 0;
+    }
+    function pushStatus(s) {
+        if (s === lastStatus) {
+            return;
+        }
+        lastStatus = s;
+        statusP.textContent = s;
+    }
+    function redraw() {
+        ctx.clearRect(0, 0, W, H);
+        box(0, 0, W, H, 0, BGC, 1);
+        ctx.save();
+        ctx.translate(0, 6);
+        draw();
+        ctx.restore();
+        pushStatus(statusText());
+        const m = still ? -2 : modeId();
+        if (m !== lastMode) {
+            lastMode = m;
+            doneP.textContent = speakText();
+        }
+    }
+    let rafId = 0;
+    let lastTs = -1;
+    function frame(ts) {
+        rafId = 0;
+        if (still || paused || document.hidden) {
+            return;
+        }
+        rawGap = lastTs < 0 ? 0 : ts - lastTs;
+        const dt = lastTs < 0 ? 0 : Math.min(rawGap / 1000, DT_MAX);
+        lastTs = ts;
+        sceneT += dt;
+        if (sceneT >= LAP_S) {
+            lap += 1;
+            resetScene();
+        }
+        advance(ts, dt);
+        redraw();
+        if (!holdFlag) {
+            rafId = window.requestAnimationFrame(frame);
+        }
+    }
+    function startLoop() {
+        if (rafId || holdFlag) {
+            return;
+        }
+        // 멈췄던 사이의 시간을 첫 프레임 간격으로 넘기지 않는다
+        lastTs = -1;
+        rafId = window.requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+        if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+        }
+    }
+    function resetScene() {
+        clearTimers();
+        holdFlag = false;
+        sceneT = 0;
+        reset();
+    }
+    // 움직임 줄이기 — 루프를 돌리지 않고 장면의 끝 상태를 계산해 한 장만 그린다
+    function finalState() {
+        stopLoop();
+        settling = true;
+        resetScene();
+        const n = Math.round(REST_S * 60);
+        for (let i = 1; i <= n; i += 1) {
+            sceneT = i / 60;
+            rawGap = 1000 / 60;
+            advance(sceneT * 1000, 1 / 60);
+        }
+        settling = false;
+        clearTimers();
+        redraw();
+    }
+    function restart() {
+        lap = 0;
+        resetScene();
+        redraw();
+        if (!paused && !still) {
+            startLoop();
+        }
+    }
+    function togglePause() {
+        paused = !paused;
+        pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        if (paused) {
+            stopLoop();
+        }
+        else if (!still) {
+            startLoop();
+        }
+    }
+    const off = new AbortController();
+    const reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    still = reduceQuery.matches;
+    pauseBtn.addEventListener('click', function () { togglePause(); }, { signal: off.signal });
+    if (actEl) {
+        actEl.addEventListener('click', function () { onAction(); redraw(); }, { signal: off.signal });
+    }
+    pad.addEventListener('keydown', function (e) {
+        if (e.key === ' ' || e.key === 'Enter' || e.key === 'p' || e.key === 'P') {
+            e.preventDefault();
+            togglePause();
+            return;
+        }
+        if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            restart();
+            return;
+        }
+        if ((e.key === 'a' || e.key === 'A') && actEl) {
+            e.preventDefault();
+            onAction();
+            redraw();
+            return;
+        }
+        if (onKey(e)) {
+            e.preventDefault();
+            redraw();
+        }
+    }, { signal: off.signal });
+    // 탭이 숨으면 멈추고, 돌아오면 시계를 다시 맞춰 시작
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            stopLoop();
+        }
+        else if (!paused && !still) {
+            startLoop();
+        }
+    }, { signal: off.signal });
+    // 설정이 바뀌면 — 켜지면 끝 장면 한 장, 꺼지면 다시 움직인다
+    reduceQuery.addEventListener('change', function () {
+        still = reduceQuery.matches;
+        if (still) {
+            finalState();
+        }
+        else {
+            restart();
+        }
+    }, { signal: off.signal });
+    window.addEventListener('resize', function () {
+        fitCanvas();
+        redraw();
+    }, { signal: off.signal });
+    // 03 — 스프링 한 단계를 콜백이 받는 시간 차(timestamp 의 차이)로 정확히 풀어, 가상 프레임 간격이 달라도 정착 시간이 같은지 잰다
+    const LAP_S = 5.4;
+    const REST_S = 5.2;
+    const STIFFNESS = 200;
+    const ZETA = 0.45;
+    const W0 = Math.sqrt(STIFFNESS);
+    const WD = W0 * Math.sqrt(1 - ZETA * ZETA);
+    const POS_A = 54;
+    const POS_B = 404;
+    // 목표가 옮겨 가는 장면 시간(초)
+    const JUMPS = [0.4, 2.2, 4.0];
+    function nm(v) { return v >= 0 ? n0(v) : '—'; }
+    function nms(v) { return v >= 0 ? n0(v) + 'ms' : '—'; }
+    function mk(hz, byDt) {
+        return { hz: hz, byDt: byDt, l: lane(1000 / hz), x: POS_A, v: 0, target: POS_A, t0: -1, settleMs: -1, settled: true, trail: [], ji: 0 };
+    }
+    let rows = [mk(30, false), mk(30, true), mk(144, false), mk(144, true)];
+    function reset() {
+        rows = [mk(30, false), mk(30, true), mk(144, false), mk(144, true)];
+    }
+    // 시간 차 h(초) 만큼 감쇠 진동의 닫힌 식으로 한 번에 나아간다 — h 가 얼마든 같은 곡선 위에 있다
+    function exactStep(s, h) {
+        const e = s.x - s.target;
+        const d = Math.exp(-ZETA * W0 * h);
+        const cs = Math.cos(WD * h);
+        const sn = Math.sin(WD * h);
+        const b = (s.v + ZETA * W0 * e) / WD;
+        s.x = s.target + d * (e * cs + b * sn);
+        s.v = d * (s.v * cs - ((ZETA * W0 * s.v + W0 * W0 * e) / WD) * sn);
+    }
+    // 간격을 모르고 프레임마다 60분의 1초라고 가정한 단계
+    function guessStep(s) {
+        const h = 1 / 60;
+        s.v += (-STIFFNESS * (s.x - s.target) - 2 * ZETA * W0 * s.v) * h;
+        s.x += s.v * h;
+    }
+    function advance(ts, dt) {
+        void ts;
+        void dt;
+        const nowMs = sceneT * 1000;
+        for (let i = 0; i < rows.length; i += 1) {
+            const s = rows[i];
+            runLane(s.l, nowMs, function (gap, vtm) {
+                // 가상 눈금이 점프 시각을 지나는 순간 목표를 옮긴다 — 실제 프레임 시각과 상관없이 같은 값이 나온다
+                if (s.ji < JUMPS.length && vtm >= JUMPS[s.ji] * 1000) {
+                    s.target = s.ji % 2 === 0 ? POS_B : POS_A;
+                    s.t0 = JUMPS[s.ji] * 1000;
+                    s.settled = false;
+                    s.ji += 1;
+                }
+                if (s.byDt) {
+                    exactStep(s, gap / 1000);
+                }
+                else {
+                    guessStep(s);
+                }
+                if (!s.settled && Math.abs(s.x - s.target) < 1.2 && Math.abs(s.v) < 8) {
+                    s.settled = true;
+                    s.settleMs = vtm - s.t0;
+                }
+            });
+            s.trail.push(s.x);
+            if (s.trail.length > 16) {
+                s.trail.shift();
+            }
+        }
+    }
+    function draw() {
+        for (let i = 0; i < rows.length; i += 1) {
+            const s = rows[i];
+            const y = 40 + i * 57;
+            const c = s.byDt ? SKY : ROSE;
+            box(8, y, W - 16, 52, 10, [54, 49, 80], 1);
+            text(fill(s.byDt ? '{a}Hz · 時間差で解く' : '{a}Hz · フレームごとに1/60秒と仮定', String(s.hz)), 20, y + 11, PAPER, 10.5, 700, 'left', 270);
+            const label = s.settleMs >= 0 ? fill('静止まで {a}ms', n0(s.settleMs)) : '移動中';
+            text(label, W - 20, y + 11, s.settleMs >= 0 ? c : DIM, 10.5, 700, 'right', 160);
+            const ly = y + 33;
+            seg(POS_A, ly, POS_B, ly, GRID, 1, 2);
+            ring(s.target, ly, 11, PAPER, 0.9, 1.5);
+            // 잔상 — 최근 위치들
+            for (let k = 0; k < s.trail.length; k += 1) {
+                disc(s.trail[k], ly, 3 + 6 * (k / s.trail.length), c, 0.12 + 0.3 * (k / s.trail.length));
+            }
+            seg(s.target, ly, s.x, ly, c, 0.55, 5);
+            disc(s.x, ly, 9, c, 1);
+        }
+        chips([['STIFFNESS', n0(STIFFNESS)], ['SETTLE_MS', nm(rows[1].settleMs) + '/' + nm(rows[3].settleMs)], ['DT', f1(1000 / 30) + '/' + f1(1000 / 144)]]);
+    }
+    function statusText() {
+        return fill('時間差版の静止 {a} · {b}', nms(rows[1].settleMs), nms(rows[3].settleMs));
+    }
+    function modeId() { return rows[0].ji; }
+    function speakText() {
+        return fill('時間差で解いたバネは30Hzで{a}、144Hzで{b}で落ち着き、間隔が違ってもほぼ同じです。フレームごとに1/60秒と仮定した版は{c}と{d}に分かれます', nms(rows[1].settleMs), nms(rows[3].settleMs), nms(rows[0].settleMs), nms(rows[2].settleMs));
+    }
+    function onKey(e) { void e; return false; }
+    function onAction() { }
+    fitCanvas();
+    if (still) {
+        finalState();
+    }
+    else {
+        resetScene();
+        redraw();
+        startLoop();
+    }
+    return function () {
+        stopLoop();
+        clearTimers();
+        off.abort();
+    };
+}
+})();
+</script>
+</body>
+</html>
