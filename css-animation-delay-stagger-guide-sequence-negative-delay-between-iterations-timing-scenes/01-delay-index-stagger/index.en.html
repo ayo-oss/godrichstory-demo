@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Index-Variable Stagger: Reading the Gap From One List — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="Demo stage: Space or Enter pauses, R restarts, left and right arrows pick another value">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="Ten cards rise one after another at a gap set by an index variable, and each card start time is drawn as a bar in the chart below"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">Scene ready</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // 무대 좌표 — 안쪽 상자는 늘 480×300 이고 화면 크기에 맞춰 통째로 축소한다
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scEl = make('div', 'sc', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scEl.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // ── 엔진이 푼 시간 읽기 — 모델이 아니라 getAnimations() 와 getComputedTiming() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    // 애니메이션 하나의 시작·끝 시각(ms) — 반복이 무한이면 끝은 max 로 자른다
+    function span(a, max) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        if (!t) {
+            return { s: 0, e: 0, k: 0 };
+        }
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const e = typeof t.endTime === 'number' && isFinite(t.endTime) ? t.endTime : max;
+        return { s: d, e: Math.min(e, max), k: 0 };
+    }
+    function delayOf(a) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        return t && typeof t.delay === 'number' ? t.delay : 0;
+    }
+    // 현재 단계(before·active·after) — 타입 정의에 phase 가 없는 환경이 있어 문자열로 읽는다
+    function phaseStr(e) {
+        const t = e ? e.getComputedTiming() : null;
+        if (!t || t.localTime === null || t.localTime === undefined) {
+            return 'none';
+        }
+        const lt = Number(t.localTime);
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const end = typeof t.endTime === 'number' ? t.endTime : Infinity;
+        if (lt < d) {
+            return 'before';
+        }
+        return lt >= end ? 'after' : 'active';
+    }
+    function phaseOf(a) {
+        return phaseStr(a.effect);
+    }
+    function progressOf(a) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        return t && typeof t.progress === 'number' ? t.progress : 0;
+    }
+    // 임시 사본 애니메이션을 시각 t 에 놓고 단계(before·active·after)를 읽는다. 원본은 건드리지 않는다
+    function phaseAt(a, t) {
+        const eff = a.effect;
+        if (!eff || !eff.target) {
+            return 'none';
+        }
+        const pr = new Animation(new KeyframeEffect(eff.target, eff.getKeyframes(), eff.getTiming()), document.timeline);
+        pr.pause();
+        pr.currentTime = t;
+        const ph = phaseStr(pr.effect);
+        pr.cancel();
+        return ph;
+    }
+    // 화면 밖 사본 요소의 애니메이션을 0 부터 to ms 까지 step ms 씩 놓으며 transform·opacity 가 바뀐 구간을 모은다
+    function scrubRuns(el, to, step) {
+        const an = el.getAnimations()[0];
+        const out = [];
+        if (!an) {
+            return out;
+        }
+        an.pause();
+        let prev = '';
+        let open = -1;
+        for (let t = 0; t <= to; t += step) {
+            an.currentTime = t;
+            const cs = getComputedStyle(el);
+            const key = (cs.transform === 'none' ? 'matrix(1, 0, 0, 1, 0, 0)' : cs.transform) + '|' + cs.opacity;
+            if (t > 0 && key !== prev) {
+                if (open < 0) {
+                    open = t - step;
+                }
+            }
+            else if (open >= 0) {
+                out.push({ s: open, e: t - step, k: 0 });
+                open = -1;
+            }
+            prev = key;
+        }
+        if (open >= 0) {
+            out.push({ s: open, e: to, k: 0 });
+        }
+        return out;
+    }
+    // ── 아래 차트 상자 그리기
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    // 가로 막대 줄: 한 줄 = 한 구간. 줄 높이는 줄 수에 맞춰 줄인다
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((46 - (n - 1)) / n), 2, 8);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k' + sg.k, x, 6 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 54, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 54, 60, 0);
+    }
+    function marker(ms, max, cls) {
+        bar('mk ' + cls, CX0 + clamp(ms, 0, max) / max * CW, 4, 2, 48);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // Reduced motion — 모든 애니메이션이 꺼져 delay 는 0 이고 장면은 끝 상태 한 장이다
+            statusP.textContent = 'Reduced motion on · delay 0';
+            readB.textContent = 'Showing only the final state instead of the sequence; every delay is 0ms';
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 01 인덱스 변수 stagger — 카드마다 --i 를 주고 delay 는 calc(var(--i) * var(--gap)) 로 만든다
+    const GAPS = [120, 60, 150, 90];
+    const ITEM_N = 10;
+    const DUR = 520;
+    let cards = [];
+    let curGap = 120;
+    function build(i) {
+        curGap = GAPS[i];
+        const grid = make('div', 's1', scEl);
+        grid.style.setProperty('--gap', curGap + 'ms');
+        grid.style.setProperty('--dur', DUR + 'ms');
+        for (let n = 0; n < ITEM_N; n += 1) {
+            const c = make('div', 's1__c k' + (n % 5), grid);
+            c.style.setProperty('--i', String(n));
+            const num = make('b', 's1__n', c);
+            num.textContent = String(n + 1);
+        }
+        cards = animsIn(grid);
+        const segs = [];
+        let lastEnd = 0;
+        for (let n = 0; n < cards.length; n += 1) {
+            const sg = span(cards[n], 99999);
+            sg.k = n % 5;
+            lastEnd = Math.max(lastEnd, sg.e);
+            segs.push(sg);
+        }
+        const cycle = Math.max(2000, lastEnd + 360);
+        for (let n = 0; n < segs.length; n += 1) {
+            segs[n].e = Math.min(segs[n].e, cycle);
+        }
+        drawRows(segs, cycle);
+        axis(cycle);
+        const lastDelay = cards.length ? delayOf(cards[cards.length - 1]) : 0;
+        marker(lastDelay, cycle, 'k0');
+        const ok = Math.abs(lastDelay - (ITEM_N - 1) * curGap) < 0.5;
+        setReads(fill('STAGGER_MS {a} · ITEM_N {b} · LAST_START {c}ms', f0(curGap), f0(ITEM_N), f0(lastDelay)), fill(ok ? 'Last card delay {a}ms = ({b}-1)×{c}ms, matches the engine' : 'Last card delay {a}ms = ({b}-1)×{c}ms, differs from the engine', f0(lastDelay), f0(ITEM_N), f0(curGap)));
+        return cycle;
+    }
+    function frame(t) {
+        let started = 0;
+        for (let n = 0; n < cards.length; n += 1) {
+            if (phaseOf(cards[n]) !== 'before') {
+                started += 1;
+            }
+        }
+        return fill('Now {a}ms · cards started {b}/{c}', f0(t), f0(started), f0(ITEM_N));
+    }
+    return run({ count: GAPS.length, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>

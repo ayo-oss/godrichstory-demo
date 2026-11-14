@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>반복 사이 쉼 — 키프레임 % 로 만드는 맥박 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="쉼을 키프레임에 넣은 맥박과 delay 만 준 맥박이 반복되고 아래 차트에 움직인 구간과 쉰 구간이 놓이는 장면"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">장면 준비</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // 무대 좌표 — 안쪽 상자는 늘 480×300 이고 화면 크기에 맞춰 통째로 축소한다
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scEl = make('div', 'sc', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scEl.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // ── 엔진이 푼 시간 읽기 — 모델이 아니라 getAnimations() 와 getComputedTiming() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    // 애니메이션 하나의 시작·끝 시각(ms) — 반복이 무한이면 끝은 max 로 자른다
+    function span(a, max) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        if (!t) {
+            return { s: 0, e: 0, k: 0 };
+        }
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const e = typeof t.endTime === 'number' && isFinite(t.endTime) ? t.endTime : max;
+        return { s: d, e: Math.min(e, max), k: 0 };
+    }
+    function delayOf(a) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        return t && typeof t.delay === 'number' ? t.delay : 0;
+    }
+    // 현재 단계(before·active·after) — 타입 정의에 phase 가 없는 환경이 있어 문자열로 읽는다
+    function phaseStr(e) {
+        const t = e ? e.getComputedTiming() : null;
+        if (!t || t.localTime === null || t.localTime === undefined) {
+            return 'none';
+        }
+        const lt = Number(t.localTime);
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const end = typeof t.endTime === 'number' ? t.endTime : Infinity;
+        if (lt < d) {
+            return 'before';
+        }
+        return lt >= end ? 'after' : 'active';
+    }
+    function phaseOf(a) {
+        return phaseStr(a.effect);
+    }
+    function progressOf(a) {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        return t && typeof t.progress === 'number' ? t.progress : 0;
+    }
+    // 임시 사본 애니메이션을 시각 t 에 놓고 단계(before·active·after)를 읽는다. 원본은 건드리지 않는다
+    function phaseAt(a, t) {
+        const eff = a.effect;
+        if (!eff || !eff.target) {
+            return 'none';
+        }
+        const pr = new Animation(new KeyframeEffect(eff.target, eff.getKeyframes(), eff.getTiming()), document.timeline);
+        pr.pause();
+        pr.currentTime = t;
+        const ph = phaseStr(pr.effect);
+        pr.cancel();
+        return ph;
+    }
+    // 화면 밖 사본 요소의 애니메이션을 0 부터 to ms 까지 step ms 씩 놓으며 transform·opacity 가 바뀐 구간을 모은다
+    function scrubRuns(el, to, step) {
+        const an = el.getAnimations()[0];
+        const out = [];
+        if (!an) {
+            return out;
+        }
+        an.pause();
+        let prev = '';
+        let open = -1;
+        for (let t = 0; t <= to; t += step) {
+            an.currentTime = t;
+            const cs = getComputedStyle(el);
+            const key = (cs.transform === 'none' ? 'matrix(1, 0, 0, 1, 0, 0)' : cs.transform) + '|' + cs.opacity;
+            if (t > 0 && key !== prev) {
+                if (open < 0) {
+                    open = t - step;
+                }
+            }
+            else if (open >= 0) {
+                out.push({ s: open, e: t - step, k: 0 });
+                open = -1;
+            }
+            prev = key;
+        }
+        if (open >= 0) {
+            out.push({ s: open, e: to, k: 0 });
+        }
+        return out;
+    }
+    // ── 아래 차트 상자 그리기
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    // 가로 막대 줄: 한 줄 = 한 구간. 줄 높이는 줄 수에 맞춰 줄인다
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((46 - (n - 1)) / n), 2, 8);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k' + sg.k, x, 6 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 54, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 54, 60, 0);
+    }
+    function marker(ms, max, cls) {
+        bar('mk ' + cls, CX0 + clamp(ms, 0, max) / max * CW, 4, 2, 48);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 모든 애니메이션이 꺼져 delay 는 0 이고 장면은 끝 상태 한 장이다
+            statusP.textContent = '움직임 줄이기 켜짐 · delay 0';
+            readB.textContent = '순차 등장 대신 최종 상태만 보여 준다 — 모든 delay 는 0ms';
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 04 반복 사이 쉼 — iteration-delay 는 없다. 키프레임 끝 구간을 정지로 두어 쉼을 만든다
+    const RESTS = [40, 20, 60];
+    const CYCLE_MS = 1600;
+    const B_DELAY = 600;
+    let animA = null;
+    let moveMs = 960;
+    function circle(parent, cls, cx0) {
+        const wrap = make('div', 's4__w', parent);
+        put(wrap, cx0 - 24, 32, 48, 48);
+        make('i', 's4__ring ' + cls + ' k0', wrap);
+        const c = make('i', 's4__c ' + cls + ' k0', wrap);
+        return c;
+    }
+    function build(i) {
+        const rest = RESTS[i];
+        const host = make('div', 's4', scEl);
+        const ca = circle(host, 's4a r' + rest, 112);
+        const cb = circle(host, 's4b', 336);
+        cb.className = cx('s4__c s4b k3');
+        cb.previousElementSibling.className = cx('s4__ring s4b k3');
+        const la = make('b', 'tag', host);
+        la.textContent = 'keyframes 에 쉼 넣기';
+        put(la, 40, 104, 0, 0);
+        const lb = make('b', 'tag', host);
+        lb.textContent = 'delay 만 주기';
+        put(lb, 280, 104, 0, 0);
+        animA = ca.getAnimations()[0] || null;
+        // 화면 밖 사본을 0 부터 3200ms 까지 2ms 씩 놓으며 transform·opacity 가 바뀐 구간을 읽는다
+        const pa = ca.cloneNode(true);
+        const pb = cb.cloneNode(true);
+        probeEl.appendChild(pa);
+        probeEl.appendChild(pb);
+        const runsA = scrubRuns(pa, 3200, 2);
+        const runsB = scrubRuns(pb, 3200, 2);
+        moveMs = runsA.length ? runsA[0].e - runsA[0].s : 0;
+        const restA = runsA.length > 1 ? runsA[1].s - runsA[0].e : 0;
+        const restB = runsB.length > 1 ? runsB[1].s - runsB[0].e : 0;
+        const startB = runsB.length ? runsB[0].s : 0;
+        const rowA = bar('trk', CX0, 14, CW, 10);
+        const rowB = bar('trk', CX0, 34, CW, 10);
+        for (let n = 0; n < runsA.length; n += 1) {
+            bar('bar k0', CX0 + runsA[n].s / 3200 * CW, 14, Math.max(2, (runsA[n].e - runsA[n].s) / 3200 * CW), 10);
+        }
+        for (let n = 0; n < runsB.length; n += 1) {
+            bar('bar k3', CX0 + runsB[n].s / 3200 * CW, 34, Math.max(2, (runsB[n].e - runsB[n].s) / 3200 * CW), 10);
+        }
+        rowA.setAttribute('data-row', 'a');
+        rowB.setAttribute('data-row', 'b');
+        axis(3200);
+        setReads(fill('REST_PCT {a} · CYCLE_MS {b} · MOVE_MS {c}', f0(rest), f0(CYCLE_MS), f0(moveMs)), fill('A 는 반복 사이 {a}ms 쉼 · B 는 delay {b}ms 가 첫 반복에만 걸려 쉼 {c}ms', f0(restA), f0(startB > 0 ? startB : B_DELAY), f0(restB)));
+        return 3200;
+    }
+    function frame(t) {
+        const inRest = (t % CYCLE_MS) > moveMs;
+        const iter = Math.floor(t / CYCLE_MS) + 1;
+        return fill('지금 {a}ms · A {b}회째 {c}', f0(t), f0(iter), inRest ? '쉼' : '움직임');
+    }
+    return run({ count: RESTS.length, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>
