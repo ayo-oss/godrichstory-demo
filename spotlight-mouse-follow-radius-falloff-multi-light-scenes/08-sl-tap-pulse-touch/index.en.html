@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Pulse Spreading From the Tap for Touch — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="Demo stage: Space or Enter pauses, R restarts, left and right arrows pick another value">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="A pulse born at the tap grows in radius and fades in brightness, announcing the light by spreading"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">Scene ready</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // ── 524 스포트라이트 공통 — 무대 좌표·문구 틀·요소 조립·광원 오버레이 (523 core.ts 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — getAnimations() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur) { return { s: d, e: d + dur, k: 0 }; }
+    // ── 아래 차트 상자 그리기
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k0', x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── 스포트라이트 공통 조각
+    // beam — 광원 오버레이. 배경을 매 프레임 JS 산술로 다시 쓴다(계산 한 겹의 화면 전파).
+    //   커서 십자·고스트 링은 별도 요소로 분리 — 빛 계산과 표식은 다른 층
+    function makeBeam() {
+        return make('i', 'beam', scWrap);
+    }
+    // 가우시안 거리감쇠 — d 의 밝기 b = exp(-(d/f)^2). f=FALLOFF_PX
+    function gauss(d, f) { return Math.exp(-(d * d) / (f * f)); }
+    // gaussGrad — 광원 중심 (cx,cy) · 반경 r(이 안은 1) · 감쇠 폭 f. 정지점 11개로 샘플한
+    // radial-gradient 문자열. tint 는 'r,g,b' (크림 255,247,230). maxA 는 중심 알파.
+    // circle 뒤에 반경을 명시한다 — 생략하면 farthest-corner 로 확장돼 마지막 정지점 알파가
+    // 화면 전체에 패드된다(04 poster 실측: 무대 전체가 밝아지는 원인)
+    function gaussGrad(cx, cy, r, f, tint, maxA) {
+        const stops = [];
+        const total = r + f * 2;
+        for (let i = 0; i <= 10; i += 1) {
+            const frac = i / 10;
+            const d = r + frac * f * 2;
+            const a = maxA * gauss(d - r, f);
+            stops.push('rgba(' + tint + ',' + f2(a) + ') ' + f1(clamp(d / total, 0, 1) * 100) + '%');
+        }
+        return 'radial-gradient(circle ' + f1(total) + 'px at ' + f1(cx) + 'px ' + f1(cy) + 'px, rgba(' + tint + ',' + f2(maxA) + ') 0px, ' + stops.join(', ') + ')';
+    }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    // linearGrad — 02 비교용 선형 감쇠 (1 - d/f) 같은 폭. 정지점 개수·구간 동일
+    function linearGrad(cx, cy, r, f, tint, maxA) {
+        const stops = [];
+        const total = r + f * 2;
+        for (let i = 0; i <= 10; i += 1) {
+            const frac = i / 10;
+            const d = r + frac * f * 2;
+            const a = maxA * clamp(1 - (d - r) / (f * 2), 0, 1);
+            stops.push('rgba(' + tint + ',' + f2(a) + ') ' + f1(clamp(d / total, 0, 1) * 100) + '%');
+        }
+        return 'radial-gradient(circle ' + f1(total) + 'px at ' + f1(cx) + 'px ' + f1(cy) + 'px, rgba(' + tint + ',' + f2(maxA) + ') 0px, ' + stops.join(', ') + ')';
+    }
+    // route — 주입 시연 경로. t<200ms 중심 고정(418 규칙), 이후 피겨-8 연속 이동(424 규칙)
+    //   u=(t-200)/1800 · 중심 (224,78) 을 벗어난 타원(중심 224,66 · 반경 190x44) — 프로브·중앙 픽셀 계산이
+    //   캡처 간격 사이에 0 으로 빠지지 않게 (측정 프로브가 항상 광원 영향 안에 있게)
+    function route(t) {
+        if (t < 200) {
+            return { x: 224, y: 66 };
+        }
+        const u = (t - 200) / 1800;
+        return { x: 224 + 190 * Math.sin(u * Math.PI * 2), y: 66 + 44 * Math.sin(u * Math.PI * 4) };
+    }
+    // 커서 표식 — 십자(01·02·07) / 링(09). 빛과 별개 층
+    function makeCursor(cls) {
+        return make('i', cls, scWrap);
+    }
+    // ── 포인터 이벤트 좌표를 무대(480x300) 좌표로 — 실제 손 조작 경로 공용
+    function stagePoint(e) {
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 모든 애니메이션이 꺼지고 장면은 중앙 고정 조명 한 장 (큐 접근성 서술)
+            statusP.textContent = 'Reduced motion on: one still centered light';
+            readB.textContent = 'Instead of following the cursor, the light stays centered in a single still frame';
+            doneP.textContent = readB.textContent;
+            cfg.frame(1e9);
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 08 탭 펄스 — pointerdown 자리에서 시작해 반경이 시간에 비례해 커지고 밝기는 감쇠하는 확산 광원.
+    //    마우스 없는 화면(터치)의 대체 광원. 펄스는 최대 3개 동시
+    const TAP_LIFE_MS = 900; // 펄스 수명
+    const TAP_SPEED = 0.24; // 반경 성장 px/ms
+    const TAP_MAX = 3; // 동시 펄스 상한
+    const TAP_AT = [300, 900, 1500]; // 시연 탭 시각 (첫 변화 t≥200ms)
+    const TAP_XY = [{ x: 120, y: 88 }, { x: 300, y: 60 }, { x: 210, y: 110 }];
+    let pulses = [];
+    let pulseEls = [];
+    let added = 0; // 이번 주기에서 이미 추가한 시연 탭 비트 (결정적 재현)
+    let infoEl = null;
+    let tipEl = null;
+    function build(_i) {
+        pulses = [];
+        pulseEls = [];
+        added = 0;
+        for (let k = 0; k < TAP_MAX; k += 1) {
+            const e = make('i', 'pulse', scWrap);
+            pulseEls.push(e);
+        }
+        infoEl = make('b', 'ov ovb', sceneEl);
+        put(infoEl, 10, 6, 380, 14);
+        tipEl = make('b', 'ov ovs', sceneEl);
+        put(tipEl, 10, 136, 380, 12);
+        axis(2000);
+        // 안내 — 펄스 수명 구간 표시
+        const segs = [];
+        for (let k = 0; k < TAP_AT.length; k += 1) {
+            segs.push(spanOf(TAP_AT[k], TAP_LIFE_MS));
+        }
+        drawRows(segs, 2000);
+        setReads(fill('TAP_LIFE_MS {a} · r = {b}px/ms · b = 1 - age/{a}', f0(TAP_LIFE_MS), f2(TAP_SPEED)), fill('From the tap the radius grows and the brightness decays, and at the end of its life it is gone'));
+        return 2000;
+    }
+    function addPulse(x, y, t) {
+        // 새 펄스 — 오래된 것부터 밀어낸다 (동시 상한)
+        pulses.push({ x: x, y: y, t0: t });
+        if (pulses.length > TAP_MAX) {
+            pulses.shift();
+        }
+    }
+    function frame(t) {
+        // 시연 탭 — 결정적 좌표·시각 주입 (사람 손은 pointerdown). 60ms 추가 창이
+        // 캡처 간격(83ms)에 지나쳐지면 펄스가 통째로 빠진다(08 poster 실측) — 시각이
+        // 지났고 아직 이번 주기에서 추가된 적이 없으면 무조건 추가한다
+        for (let k = 0; k < TAP_AT.length; k += 1) {
+            if (t >= TAP_AT[k] && !(added & (1 << k))) {
+                added |= (1 << k);
+                addPulse(TAP_XY[k].x, TAP_XY[k].y, TAP_AT[k]);
+            }
+        }
+        // 렌더 — 펄스별 반경·밝기 산술
+        let alive = 0;
+        let label = 'Idle';
+        for (let i = 0; i < pulseEls.length; i += 1) {
+            const e = pulseEls[i];
+            const p = pulses[i];
+            if (!p || t - p.t0 > TAP_LIFE_MS) {
+                e.style.opacity = '0';
+                continue;
+            }
+            const age = t - p.t0;
+            const r = age * TAP_SPEED;
+            const b = clamp(1 - age / TAP_LIFE_MS, 0, 1);
+            alive += 1;
+            label = 'r=' + f0(r) + 'px b=' + f2(b);
+            e.style.opacity = '1';
+            e.style.borderRadius = '50%';
+            e.style.left = (p.x - r) + 'px';
+            e.style.top = (p.y - r) + 'px';
+            e.style.width = (r * 2) + 'px';
+            e.style.height = (r * 2) + 'px';
+            // 확산 광원 — 안쪽은 옅어지고 테두리 링이 밝다 (파동)
+            e.style.background = 'radial-gradient(circle, rgba(255,247,230,0) ' + f0(Math.max(0, r - 26)) + 'px, rgba(255,247,230,' + f2(0.55 * b) + ') ' + f0(Math.max(0, r - 10)) + 'px, rgba(143,216,189,' + f2(0.4 * b) + ') ' + f0(r) + 'px, rgba(143,216,189,0) ' + f0(r + 6) + 'px)';
+        }
+        if (infoEl) {
+            infoEl.textContent = fill('{a} living pulses · {b}', f0(alive), label);
+        }
+        if (tipEl) {
+            tipEl.textContent = 'Nothing happens without a touch; the light announces itself by spreading';
+        }
+        return fill('Now {a} · {b} pulses · {c}', f0(t) + 'ms', f0(alive), label);
+    }
+    // 실제 입력 경로 — pointerdown (마우스·터치·펜 동일). 손 탭도 같은 addPulse 산술
+    sceneEl.addEventListener('pointerdown', function (ev) {
+        const p = stagePoint(ev);
+        addPulse(clamp(p.x - 8, 0, 448), clamp(p.y - 40, 0, 156), performance.now() % 1e7);
+    });
+    return run({ count: 1, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>
