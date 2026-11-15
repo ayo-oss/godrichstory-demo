@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>中心が隣の中間点を越えた瞬間に場所を譲る閾値スワップ — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="デモの舞台 — SpaceかEnterで一時停止、Rで最初から、左右の矢印キーで別の値へ">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="六行のやることリストで、ドラッグの中心が隣の中間点の基準線を越えた瞬間だけ入れ替わる場面"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">場面の準備</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // ── 523 드래그 정렬 공통 — 무대 좌표·문구 틀·요소 조립 (520 core.ts 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        // clkEl(時計)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — 모델이 아니라 getAnimations() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur) { return { s: d, e: d + dur, k: 0 }; }
+    // ── 아래 차트 상자 그리기
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k0', x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── 523 공통 드래그 허브 — 목록 카드·핸들·고스트 조립
+    const GRIP_SVG = '<svg viewBox="0 0 256 256" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M208,32V224a16,16,0,0,1-16,16H64a16,16,0,0,1-16-16V32A16,16,0,0,1,64,16H192A16,16,0,0,1,208,32Z" opacity="0.2"/><path d="M104,60A12,12,0,1,1,92,48,12,12,0,0,1,104,60Zm60,12a12,12,0,1,0-12-12A12,12,0,0,0,164,72ZM92,116a12,12,0,1,0,12,12A12,12,0,0,0,92,116Zm72,0a12,12,0,1,0,12,12A12,12,0,0,0,164,116ZM92,184a12,12,0,1,0,12,12A12,12,0,0,0,92,184Zm72,0a12,12,0,1,0,12,12A12,12,0,0,0,164,184Z"/></svg>';
+    // Phosphor Duotone dots-six-vertical (MIT) — 인라인이라 외부 의존 0
+    function makeCard(i, label, x, y, w, h) {
+        const e = make('div', 'card', scWrap);
+        put(e, x, y, w, h);
+        e.setAttribute('data-index', String(i));
+        const grip = make('span', 'handle', e);
+        grip.innerHTML = GRIP_SVG;
+        const txt = make('span', 'card__tx', e);
+        txt.textContent = label;
+        return e;
+    }
+    // 고스트 — 드래그 중 실제로 떠 있는 복제 (잉크 바탕 + 크림 글자 + 그림자 = 명도차)
+    function makeGhost(card, x, y) {
+        const g = make('div', 'ghost', scWrap);
+        g.style.width = card.offsetWidth + 'px';
+        g.style.height = card.offsetHeight + 'px';
+        const grip = make('span', 'handle handle--g', g);
+        grip.innerHTML = GRIP_SVG;
+        const txt = make('span', 'card__tx card__tx--g', g);
+        txt.textContent = card.querySelector('.card__tx').textContent;
+        put(g, x, y, 0, 0);
+        return g;
+    }
+    const flipJobs = [];
+    let flipT0 = -1;
+    let flipSettleMs = 520;
+    function flipCommit(container, mutate, playScale, t, settleMs) {
+        const k = (rootEl.clientWidth / W) || 1;
+        const kids = [];
+        for (let i = 0; i < container.children.length; i += 1) {
+            const kk = container.children[i];
+            if (kk.classList.contains(cx('card'))) {
+                kids.push(kk);
+            }
+        }
+        // First — 바꾸기 전 위치
+        const first = [];
+        for (const kk of kids) {
+            const r = kk.getBoundingClientRect();
+            first.push({ el: kk, x: r.left, y: r.top });
+        }
+        // Mutate — DOM 순서를 바꾼다
+        mutate();
+        let moved = 0;
+        flipJobs.length = 0;
+        flipT0 = t;
+        flipSettleMs = settleMs;
+        // Last + Invert — 이동한 만큼의 역변환 벡터를 저장한다
+        for (const f of first) {
+            const r = f.el.getBoundingClientRect();
+            const dx = (f.x - r.left) / k * playScale;
+            const dy = (f.y - r.top) / k * playScale;
+            if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+                f.el.style.transform = '';
+                continue;
+            }
+            moved += 1;
+            if (reduced) {
+                f.el.style.transform = '';
+                continue;
+            }
+            flipJobs.push({ el: f.el, dx: dx, dy: dy });
+        }
+        return moved;
+    }
+    // Play — 저장된 역변환을 easeOutCubic 으로 0 까지 되감는다. p(0~1) 를 돌려준다
+    function flipApply(t) {
+        if (flipT0 < 0) {
+            return 1;
+        }
+        const p = clamp((t - flipT0) / flipSettleMs, 0, 1);
+        const e = 1 - Math.pow(1 - p, 3);
+        for (const j of flipJobs) {
+            j.el.style.transform = 'translate(' + f1(j.dx * (1 - e)) + 'px,' + f1(j.dy * (1 - e)) + 'px)';
+        }
+        if (p >= 1) {
+            for (const j of flipJobs) {
+                j.el.style.transform = '';
+            }
+            flipJobs.length = 0;
+            flipT0 = -1;
+        }
+        return p;
+    }
+    // ── 포인터 이벤트 좌표를 무대(480x300) 좌표로 — 실제 손 조작 경로 공용
+    function stagePoint(e) {
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 장면은 완성 상태 한 장. 드래그는 손 조작(transition 없음)으로 즉시 확정된다
+            statusP.textContent = '動きを減らす設定 · 静的な接触状態';
+            readB.textContent = 'FLIP再生なしの、置く前と置いた後の二状態だけを示す';
+            doneP.textContent = readB.textContent;
+            cfg.frame(1e9);
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    } // 02 임계 스왑 — 드래그 중심점이 이웃 중간점을 지나는 순간 자리가 바뀐다. 기준선·중심점 마커로 판정 순간을 보여 준다
+    const SWAP_THRESHOLD_RATIO = 0.5;
+    const MIDPOINT_EPS_PX = 1;
+    const ROW_H = 22;
+    const GAP = 3;
+    const LIST_X = 30;
+    const LIST_W = 250;
+    const TASKS = ['水を飲む', 'メール返信', '窓を拭く', '報告書', '運動30分', '片付け'];
+    let rows = [];
+    let order = [];
+    let ghostRow = -1;
+    let gEl = null;
+    let midLine = null;
+    let cDot = null;
+    let zoneEl = null;
+    let swaps = 0;
+    let lastCross = '';
+    function slotTop(slot) { return 7 + slot * (ROW_H + GAP); }
+    function layoutRows() {
+        for (const r of rows) {
+            const idx = Number(r.getAttribute('data-index'));
+            if (idx === ghostRow) {
+                continue;
+            }
+            r.style.top = f1(slotTop(order.indexOf(idx))) + 'px';
+        }
+    }
+    function build(_i) {
+        rows = [];
+        order = [0, 1, 2, 3, 4, 5];
+        for (let i = 0; i < 6; i += 1) {
+            const c = makeCard(i, TASKS[i], LIST_X, slotTop(i), LIST_W, ROW_H);
+            c.classList.remove(cx('card'));
+            c.classList.add(cx('card'), cx('card--sm'));
+            rows.push(c);
+        }
+        midLine = make('i', 'mline', scWrap);
+        put(midLine, LIST_X, 0, LIST_W, 1);
+        cDot = make('i', 'cdot', scWrap);
+        cDot.style.width = '5px';
+        cDot.style.height = '5px';
+        zoneEl = make('i', 'zzone', scWrap);
+        put(zoneEl, LIST_X + LIST_W + 10, 7, 150, 0);
+        axis(2000);
+        drawRows([spanOf(600, 900)], 2000);
+        setReads('SWAP_THRESHOLD_RATIO {a} · MIDPOINT_EPS_PX {b}'.replace('{a}', f1(SWAP_THRESHOLD_RATIO)).replace('{b}', f0(MIDPOINT_EPS_PX)), '閾値は隣の中間点の上下 {a}px — 越えた瞬間に配列が変わる'.replace('{a}', f0(MIDPOINT_EPS_PX)));
+        return 2000;
+    }
+    function frame(t) {
+        const ph = t / 2000;
+        let label = '待機';
+        if (t < 300) {
+            ghostRow = -1;
+            if (gEl) {
+                gEl.remove();
+                gEl = null;
+            }
+            order = [0, 1, 2, 3, 4, 5];
+            layoutRows();
+            swaps = 0;
+            if (midLine) {
+                midLine.style.opacity = '0';
+            }
+            if (cDot) {
+                cDot.style.opacity = '0';
+            }
+        }
+        else if (t < 460) {
+            ghostRow = 0;
+            const r = rows[0];
+            if (!gEl) {
+                gEl = makeGhost(r, LIST_X, slotTop(0));
+            }
+            r.style.opacity = '0.18';
+            if (midLine) {
+                midLine.style.opacity = '1';
+            }
+            if (cDot) {
+                cDot.style.opacity = '1';
+            }
+            label = 'つかんだ — 閾値の監視開始';
+        }
+        else if (t < 1560) {
+            // 주입 시연 — 첫 항목을 위→아래→위로 왕복. 중심점 y 가 이웃 중간점을 통과할 때만 스왑
+            const u = ph < 0.78 ? (t - 460) / 1100 : 1 - (t - 460) / 1100;
+            const cyc = Math.abs(Math.sin((t - 460) / 1100 * Math.PI));
+            const cy = slotTop(0) + cyc * 2 * (ROW_H + GAP) + ROW_H / 2; // 중심점 y (아래로 2칸 왕복)
+            if (gEl) {
+                gEl.style.top = f1(cy - ROW_H / 2) + 'px';
+            }
+            // 판정 — 중심이 어느 슬롯 중간점을 지나는지
+            const slotF = (cy - 7) / (ROW_H + GAP);
+            const to = clamp(Math.round(slotF), 0, 5);
+            const cur = order.indexOf(0);
+            // 이웃 중심과의 거리가 임계(0.5 슬롯)를 넘었는지 — 넘어야 바뀐다
+            const dist = Math.abs(slotF - cur);
+            const crossed = dist > SWAP_THRESHOLD_RATIO * 1;
+            if (crossed && to !== cur) {
+                order.splice(cur, 1);
+                order.splice(to, 0, 0);
+                layoutRows();
+                swaps += 1;
+                lastCross = f1(t) + 'ms';
+            }
+            if (midLine) {
+                midLine.style.top = f1(slotTop(cur) + ROW_H + GAP / 2 - 1) + 'px';
+            }
+            if (cDot) {
+                cDot.style.top = f1(cy - 2) + 'px';
+            }
+            void u;
+            label = '中心 {a}px · 隣の中間点まで {b}px'.replace('{a}', f1(cy)).replace('{b}', f1(Math.abs(slotF - cur) * (ROW_H + GAP)));
+        }
+        else if (t < 1640) {
+            if (gEl) {
+                gEl.remove();
+                gEl = null;
+            }
+            rows[0].style.opacity = '';
+            ghostRow = -1;
+            flipCommit(scWrap, function applyDrop2() {
+                const sorted = rows.slice().sort(function (a, b) {
+                    return order.indexOf(Number(a.getAttribute('data-index'))) - order.indexOf(Number(b.getAttribute('data-index')));
+                });
+                for (const s of sorted) {
+                    scWrap.appendChild(s);
+                }
+                layoutRows();
+            }, 1.0, t, 360);
+            label = '離した — FLIPで着地';
+        }
+        else {
+            const p = flipApply(t);
+            label = p < 1 ? 'Play {a}%'.replace('{a}', f0(p * 100)) : '入れ替え {a}回 · 最後 {b}'.replace('{a}', f0(swaps)).replace('{b}', lastCross);
+        }
+        return '現在 {a}ms · {b}'.replace('{a}', f0(t)).replace('{b}', label);
+    }
+    // 실제 손 조작 — pointercancel 포함
+    let dragIdx = -1;
+    function handRelease() {
+        if (dragIdx < 0) {
+            return;
+        }
+        rows[dragIdx].style.opacity = '';
+        if (gEl) {
+            gEl.remove();
+            gEl = null;
+        }
+        flipCommit(scWrap, function applyHand2() {
+            const sorted = rows.slice().sort(function (a, b) {
+                return order.indexOf(Number(a.getAttribute('data-index'))) - order.indexOf(Number(b.getAttribute('data-index')));
+            });
+            for (const s of sorted) {
+                scWrap.appendChild(s);
+            }
+            layoutRows();
+        }, 1.0, performance.now(), 360);
+        dragIdx = -1;
+    }
+    scWrap.addEventListener('pointerdown', function (ev) {
+        const card = ev.target.closest ? ev.target.closest('.' + cx('card')) : null;
+        if (!card) {
+            return;
+        }
+        ev.preventDefault();
+        dragIdx = Number(card.getAttribute('data-index'));
+        card.setPointerCapture(ev.pointerId);
+        card.style.opacity = '0.18';
+        gEl = makeGhost(card, LIST_X, parseFloat(card.style.top) || slotTop(0));
+        if (midLine) {
+            midLine.style.opacity = '1';
+        }
+        if (cDot) {
+            cDot.style.opacity = '1';
+        }
+    });
+    scWrap.addEventListener('pointermove', function (ev) {
+        if (dragIdx < 0 || !gEl) {
+            return;
+        }
+        const cy = clamp(stagePoint(ev).y, 7, 7 + 5 * (ROW_H + GAP) + ROW_H / 2);
+        gEl.style.top = f1(cy - ROW_H / 2) + 'px';
+        const slotF = (cy - 7) / (ROW_H + GAP);
+        const to = clamp(Math.round(slotF), 0, 5);
+        const cur = order.indexOf(dragIdx);
+        const dist = Math.abs(slotF - cur);
+        if (dist > SWAP_THRESHOLD_RATIO && to !== cur) {
+            order.splice(cur, 1);
+            order.splice(to, 0, dragIdx);
+            layoutRows();
+            swaps += 1;
+            lastCross = f1(performance.now()) + 'ms';
+        }
+        if (midLine) {
+            midLine.style.top = f1(slotTop(cur) + ROW_H + GAP / 2 - 1) + 'px';
+        }
+        if (cDot) {
+            cDot.style.top = f1(cy - 2) + 'px';
+        }
+    });
+    scWrap.addEventListener('pointerup', handRelease);
+    // pointercancel — 터치 취소·펜 이탈에도 놓기와 같은 정리 (미해제 함정)
+    scWrap.addEventListener('pointercancel', handRelease);
+    return run({ count: 1, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>

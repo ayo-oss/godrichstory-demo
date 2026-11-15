@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inertia Tilt Where Drag Velocity Tilts the Ghost — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="Demo stage: Space or Enter pauses, R restarts, left and right arrows pick another value">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="The ghost tilts and its shadow deepens in proportion to drag speed, then lerps back as the speed vanishes"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">Scene ready</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // ── 523 드래그 정렬 공통 — 무대 좌표·문구 틀·요소 조립 (520 core.ts 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        // clkEl(Clock)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — 모델이 아니라 getAnimations() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur) { return { s: d, e: d + dur, k: 0 }; }
+    // ── 아래 차트 상자 그리기
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k0', x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── 523 공통 드래그 허브 — 목록 카드·핸들·고스트 조립
+    const GRIP_SVG = '<svg viewBox="0 0 256 256" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M208,32V224a16,16,0,0,1-16,16H64a16,16,0,0,1-16-16V32A16,16,0,0,1,64,16H192A16,16,0,0,1,208,32Z" opacity="0.2"/><path d="M104,60A12,12,0,1,1,92,48,12,12,0,0,1,104,60Zm60,12a12,12,0,1,0-12-12A12,12,0,0,0,164,72ZM92,116a12,12,0,1,0,12,12A12,12,0,0,0,92,116Zm72,0a12,12,0,1,0,12,12A12,12,0,0,0,164,116ZM92,184a12,12,0,1,0,12,12A12,12,0,0,0,92,184Zm72,0a12,12,0,1,0,12,12A12,12,0,0,0,164,184Z"/></svg>';
+    // Phosphor Duotone dots-six-vertical (MIT) — 인라인이라 외부 의존 0
+    function makeCard(i, label, x, y, w, h) {
+        const e = make('div', 'card', scWrap);
+        put(e, x, y, w, h);
+        e.setAttribute('data-index', String(i));
+        const grip = make('span', 'handle', e);
+        grip.innerHTML = GRIP_SVG;
+        const txt = make('span', 'card__tx', e);
+        txt.textContent = label;
+        return e;
+    }
+    // 고스트 — 드래그 중 실제로 떠 있는 복제 (잉크 바탕 + 크림 글자 + 그림자 = 명도차)
+    function makeGhost(card, x, y) {
+        const g = make('div', 'ghost', scWrap);
+        g.style.width = card.offsetWidth + 'px';
+        g.style.height = card.offsetHeight + 'px';
+        const grip = make('span', 'handle handle--g', g);
+        grip.innerHTML = GRIP_SVG;
+        const txt = make('span', 'card__tx card__tx--g', g);
+        txt.textContent = card.querySelector('.card__tx').textContent;
+        put(g, x, y, 0, 0);
+        return g;
+    }
+    const flipJobs = [];
+    let flipT0 = -1;
+    let flipSettleMs = 520;
+    function flipCommit(container, mutate, playScale, t, settleMs) {
+        const k = (rootEl.clientWidth / W) || 1;
+        const kids = [];
+        for (let i = 0; i < container.children.length; i += 1) {
+            const kk = container.children[i];
+            if (kk.classList.contains(cx('card'))) {
+                kids.push(kk);
+            }
+        }
+        // First — 바꾸기 전 위치
+        const first = [];
+        for (const kk of kids) {
+            const r = kk.getBoundingClientRect();
+            first.push({ el: kk, x: r.left, y: r.top });
+        }
+        // Mutate — DOM 순서를 바꾼다
+        mutate();
+        let moved = 0;
+        flipJobs.length = 0;
+        flipT0 = t;
+        flipSettleMs = settleMs;
+        // Last + Invert — 이동한 만큼의 역변환 벡터를 저장한다
+        for (const f of first) {
+            const r = f.el.getBoundingClientRect();
+            const dx = (f.x - r.left) / k * playScale;
+            const dy = (f.y - r.top) / k * playScale;
+            if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+                f.el.style.transform = '';
+                continue;
+            }
+            moved += 1;
+            if (reduced) {
+                f.el.style.transform = '';
+                continue;
+            }
+            flipJobs.push({ el: f.el, dx: dx, dy: dy });
+        }
+        return moved;
+    }
+    // Play — 저장된 역변환을 easeOutCubic 으로 0 까지 되감는다. p(0~1) 를 돌려준다
+    function flipApply(t) {
+        if (flipT0 < 0) {
+            return 1;
+        }
+        const p = clamp((t - flipT0) / flipSettleMs, 0, 1);
+        const e = 1 - Math.pow(1 - p, 3);
+        for (const j of flipJobs) {
+            j.el.style.transform = 'translate(' + f1(j.dx * (1 - e)) + 'px,' + f1(j.dy * (1 - e)) + 'px)';
+        }
+        if (p >= 1) {
+            for (const j of flipJobs) {
+                j.el.style.transform = '';
+            }
+            flipJobs.length = 0;
+            flipT0 = -1;
+        }
+        return p;
+    }
+    // ── 포인터 이벤트 좌표를 무대(480x300) 좌표로 — 실제 손 조작 경로 공용
+    function stagePoint(e) {
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 장면은 완성 상태 한 장. 드래그는 손 조작(transition 없음)으로 즉시 확정된다
+            statusP.textContent = 'Reduced motion on · static touching state';
+            readB.textContent = 'Only the two states before and after the drop, with no FLIP replay';
+            doneP.textContent = readB.textContent;
+            cfg.frame(1e9);
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    } // 08 관성 틸트 — 최근 프레임 이동량으로 속도를 계산해 고스트의 회전각·그림자 높이를 비례시키고, 속도가 0 에 가까워지면 lerp 로 되돌린다
+    const GHOST_TILT_MAX_DEG = 6;
+    const GHOST_SHADOW_BASE_PX = 3;
+    const ROW_H = 30;
+    const GAP = 6;
+    const LIST_X = 24;
+    const LIST_W = 400;
+    const SHOTS = ['beach', 'forest path', 'night view', 'cafe', 'snowy peaks'];
+    let rows = [];
+    let order = [];
+    let dragIdx = -1;
+    let gEl = null;
+    let tiltNow = 0;
+    let shadowNow = GHOST_SHADOW_BASE_PX;
+    let velLast = 0;
+    function slotTop(i) { return 8 + i * (ROW_H + GAP); }
+    function layoutRows() {
+        for (const r of rows) {
+            r.style.top = f1(slotTop(order.indexOf(Number(r.getAttribute('data-index'))))) + 'px';
+        }
+    }
+    let tiltBar = null;
+    function build(_i) {
+        rows = [];
+        order = [0, 1, 2, 3, 4];
+        for (let i = 0; i < 5; i += 1) {
+            const c = makeCard(i, SHOTS[i] + '.jpg', LIST_X, slotTop(i), LIST_W, ROW_H);
+            rows.push(c);
+        }
+        tiltBar = make('i', 'tbar', scWrap);
+        put(tiltBar, LIST_X + LIST_W + 6, 8, 0, 0);
+        axis(2000);
+        drawRows([spanOf(500, 1500)], 2000);
+        setReads('GHOST_TILT_MAX_DEG {a} · GHOST_SHADOW_BASE_PX {b} · lerp {c}'.replace('{a}', f0(GHOST_TILT_MAX_DEG)).replace('{b}', f0(GHOST_SHADOW_BASE_PX)).replace('{c}', '0.18'), 'tilt = -v * MAX_DEG (moving up leans the body back); as v goes to 0 it lerps back to 0');
+        return 2000;
+    }
+    // 속도→기울기·그림자 계산 — 주입 시연과 실제 손 조작이 같은 함수를 쓴다
+    function applyTilt(v, dt) {
+        const tilt = clamp(-v * GHOST_TILT_MAX_DEG / 600, -GHOST_TILT_MAX_DEG, GHOST_TILT_MAX_DEG);
+        // v→0 이면 lerp 로 되돌아간다 (속도가 없을 때 기울기도 없다)
+        const back = Math.abs(v) < 40 ? 0.18 : 1;
+        tiltNow = lerp(tiltNow, tilt, back);
+        shadowNow = lerp(shadowNow, GHOST_SHADOW_BASE_PX + Math.abs(v) * 0.012, 0.2);
+        velLast = v;
+        if (gEl) {
+            gEl.style.transform = 'rotate(' + f1(tiltNow) + 'deg)';
+            gEl.style.boxShadow = '0 ' + f1(shadowNow + 4) + 'px ' + f1(shadowNow * 3) + 'px rgba(0,0,0,.45)';
+        }
+        if (tiltBar) {
+            tiltBar.style.width = '6px';
+            tiltBar.style.height = f1(Math.abs(tiltNow) / GHOST_TILT_MAX_DEG * 44) + 'px';
+            tiltBar.style.top = f1(8 + 22 - (tiltNow > 0 ? Math.abs(tiltNow) / GHOST_TILT_MAX_DEG * 44 : 0)) + 'px';
+        }
+        void dt;
+    }
+    function frame(t) {
+        // 주입 시연 — 잡고 위로 가속 → 정지(v→0, lerp 복귀) → 아래로
+        let label = 'Idle';
+        if (t < 300) {
+            if (gEl) {
+                gEl.remove();
+                gEl = null;
+            }
+            order = [0, 1, 2, 3, 4];
+            layoutRows();
+            tiltNow = 0;
+            shadowNow = GHOST_SHADOW_BASE_PX;
+        }
+        else if (t < 420) {
+            dragIdx = 4;
+            const r = rows[4];
+            if (!gEl) {
+                gEl = makeGhost(r, LIST_X, slotTop(4));
+            }
+            r.style.opacity = '0.18';
+            label = 'Grabbed: v = 0';
+        }
+        else if (t < 1720) {
+            // 결정적 궤적 — sin 가속(위로) 500~1000, 정지 1000~1300, 아래 가속 1300~1700
+            let y = slotTop(4);
+            let v = 0;
+            if (t < 1000) {
+                const u = clamp((t - 500) / 500, 0, 1);
+                y = slotTop(4) - Math.sin(u * Math.PI) * 3.2 * (ROW_H + GAP);
+                v = -Math.cos(u * Math.PI) * 900 * (u > 0.05 && u < 0.95 ? 1 : 0.2);
+            }
+            else if (t < 1300) {
+                y = slotTop(4) - 3.2 * (ROW_H + GAP);
+                v = 0;
+            }
+            else {
+                const u = clamp((t - 1300) / 400, 0, 1);
+                y = slotTop(4) - 3.2 * (ROW_H + GAP) + Math.sin(u * Math.PI) * 1.1 * (ROW_H + GAP);
+                v = Math.cos(u * Math.PI) * 900 * (u > 0.05 && u < 0.95 ? 1 : 0.2);
+            }
+            if (gEl) {
+                gEl.style.top = f1(y) + 'px';
+            }
+            applyTilt(v, 16.7);
+            // 중심점 판정으로 스왑
+            const cy = y + ROW_H / 2;
+            const to = clamp(Math.round((cy - 8 - ROW_H / 2) / (ROW_H + GAP)), 0, 4);
+            const cur = order.indexOf(4);
+            if (to !== cur) {
+                order.splice(cur, 1);
+                order.splice(to, 0, 4);
+                layoutRows();
+            }
+            label = 'v {a}px/s · tilt {b}°'.replace('{a}', f0(v)).replace('{b}', f1(tiltNow));
+        }
+        else if (t < 1800) {
+            if (gEl) {
+                gEl.remove();
+                gEl = null;
+            }
+            rows[4].style.opacity = '';
+            flipCommit(scWrap, function applyTiltDrop() {
+                const sorted = rows.slice().sort(function (a, b) {
+                    return order.indexOf(Number(a.getAttribute('data-index'))) - order.indexOf(Number(b.getAttribute('data-index')));
+                });
+                for (const s of sorted) {
+                    scWrap.appendChild(s);
+                }
+                layoutRows();
+            }, 1.0, t, 380);
+            label = 'Released: FLIP settles';
+        }
+        else {
+            const p = flipApply(t);
+            label = p < 1 ? 'Play {a}%'.replace('{a}', f0(p * 100)) : 'Done';
+        }
+        return 'Now {a}ms · {b}'.replace('{a}', f0(t)).replace('{b}', label);
+    }
+    // 실제 손 조작 — pointermove 프레임 차로 속도를 잰다
+    let lastY = 0;
+    let lastT = 0;
+    function release8() {
+        if (dragIdx < 0) {
+            return;
+        }
+        rows[dragIdx].style.opacity = '';
+        if (gEl) {
+            gEl.remove();
+            gEl = null;
+        }
+        flipCommit(scWrap, function applyHand8() {
+            const sorted = rows.slice().sort(function (a, b) {
+                return order.indexOf(Number(a.getAttribute('data-index'))) - order.indexOf(Number(b.getAttribute('data-index')));
+            });
+            for (const s of sorted) {
+                scWrap.appendChild(s);
+            }
+            layoutRows();
+        }, 1.0, performance.now(), 380);
+        dragIdx = -1;
+    }
+    scWrap.addEventListener('pointerdown', function (ev) {
+        const card = ev.target.closest ? ev.target.closest('.' + cx('card')) : null;
+        if (!card) {
+            return;
+        }
+        ev.preventDefault();
+        dragIdx = Number(card.getAttribute('data-index'));
+        card.setPointerCapture(ev.pointerId);
+        card.style.opacity = '0.18';
+        gEl = makeGhost(card, LIST_X, parseFloat(card.style.top) || slotTop(0));
+        lastY = stagePoint(ev).y;
+        lastT = performance.now();
+    });
+    scWrap.addEventListener('pointermove', function (ev) {
+        if (dragIdx < 0 || !gEl) {
+            return;
+        }
+        const now = performance.now();
+        const y = clamp(stagePoint(ev).y - ROW_H / 2, 8, 8 + 4 * (ROW_H + GAP));
+        const dt = Math.max(1, now - lastT);
+        const v = (y - lastY) / dt * 1000;
+        gEl.style.top = f1(y) + 'px';
+        applyTilt(v, dt);
+        lastY = y;
+        lastT = now;
+        const to = clamp(Math.round((y + ROW_H / 2 - 8 - ROW_H / 2) / (ROW_H + GAP)), 0, 4);
+        const cur = order.indexOf(dragIdx);
+        if (to !== cur) {
+            order.splice(cur, 1);
+            order.splice(to, 0, dragIdx);
+            layoutRows();
+        }
+    });
+    scWrap.addEventListener('pointerup', release8);
+    scWrap.addEventListener('pointercancel', release8);
+    return run({ count: 1, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,436 @@
+// DualSliderFillPercent - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./DualSliderFillPercent.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+    // 무대 좌표 — 안쪽 상자는 늘 480x300 이고 화면 폭에 맞춰 통째로 줄인다
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    const SVGW = 448;
+    const SVGH = 156;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s: string, ...v: string[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v: number): string { return String(Math.round(v)); }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+    const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+    const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+    const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+    const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+    const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+    const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function (): void { /* 무대가 없으면 할 일이 없다 */ };
+    }
+    const innerEl: HTMLElement = innerQ;
+    const sceneEl: HTMLElement = sceneQ;
+    const chartEl: HTMLElement = chartQ;
+    const probeEl: HTMLElement = probeQ;
+    const padEl: HTMLElement = padQ;
+    const pauseBtn: HTMLButtonElement = pauseQ;
+    const statusP: HTMLElement = statusQ;
+    const readA: HTMLElement = readAQ;
+    const readB: HTMLElement = readBQ;
+    const doneP: HTMLElement = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+        const e = document.createElement(tag);
+        if (cls) { e.className = cx(cls); }
+        parent.appendChild(e);
+        return e;
+    }
+    // SVG 무대 — 장면마다 이 안에 path·circle·text 를 놓는다
+    function makeSvg(): SVGSVGElement {
+        const s = document.createElementNS(SVGNS, 'svg');
+        s.setAttribute('viewBox', '0 0 ' + SVGW + ' ' + SVGH);
+        s.setAttribute('class', cx('sc'));
+        scWrap.appendChild(s);
+        return s;
+    }
+    function svgEl(tag: string, cls: string, parent: SVGElement): SVGElement {
+        const e = document.createElementNS(SVGNS, tag);
+        if (cls) { e.setAttribute('class', cx(cls)); }
+        parent.appendChild(e);
+        return e;
+    }
+    function svgPath(parent: SVGSVGElement, cls: string, d: string): SVGPathElement {
+        const p = svgEl('path', cls, parent) as SVGPathElement;
+        p.setAttribute('d', d);
+        return p;
+    }
+    function svgText(parent: SVGSVGElement, cls: string, x: number, y: number, txt: string): SVGTextElement {
+        const t = svgEl('text', cls, parent) as SVGTextElement;
+        t.setAttribute('x', String(x));
+        t.setAttribute('y', String(y));
+        t.textContent = txt;
+        return t;
+    }
+    // 그리기 주역: dasharray 를 총 길이로 두고 dashoffset 을 길이 x (1 - p) 로 내린다
+    function setDraw(p: SVGPathElement, total: number, p01: number): void {
+        p.setAttribute('stroke-dasharray', String(total));
+        p.setAttribute('stroke-dashoffset', String(total * (1 - clamp(p01, 0, 1))));
+    }
+    function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) { e.style.width = w + 'px'; }
+        if (h > 0) { e.style.height = h + 'px'; }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll(): void {
+        // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // ── 경로 길이 측정 — getTotalLength 는 화면에 붙은 뒤에만 값을 준다 (probe 는 visibility:hidden 상자)
+    function measure(d: string): number {
+        const svg = document.createElementNS(SVGNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 ' + SVGW + ' ' + SVGH);
+        svg.setAttribute('class', cx('sc'));
+        probeEl.appendChild(svg);
+        const p = svgPath(svg, '', d);
+        const len = p.getTotalLength();
+        probeEl.removeChild(svg);
+        return len;
+    }
+    // 경로 위 at 지점의 좌표 — getPointAtLength (probe 의 임시 사본으로 잰다)
+    // vb = 메인 svg 의 viewBox — 장면이 시선을 확대했으면 같은 값을 넘겨야 좌표가 어긋나지 않는다
+    function pointAt(d: string, at: number, vb?: string): { x: number; y: number } {
+        const svg = document.createElementNS(SVGNS, 'svg');
+        svg.setAttribute('viewBox', vb || ('0 0 ' + SVGW + ' ' + SVGH));
+        svg.setAttribute('class', cx('sc'));
+        probeEl.appendChild(svg);
+        const p = svgPath(svg, '', d);
+        const pt = p.getPointAtLength(at);
+        probeEl.removeChild(svg);
+        return { x: pt.x, y: pt.y };
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i: number, seed: number): number {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — 모델이 아니라 getAnimations() 와 getComputedTiming() 값
+    function animsIn(host: HTMLElement): Animation[] {
+        return host.getAnimations({ subtree: true });
+    }
+    interface Seg { s: number; e: number; k: number; }
+    function delayOf(a: Animation): number {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        return t && typeof t.delay === 'number' ? t.delay : 0;
+    }
+    function span(a: Animation, max: number): Seg {
+        const t = a.effect ? a.effect.getComputedTiming() : null;
+        if (!t) { return { s: 0, e: 0, k: 0 }; }
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const e = typeof t.endTime === 'number' && isFinite(t.endTime) ? t.endTime : max;
+        return { s: d, e: Math.min(e, max), k: 0 };
+    }
+    function phaseStr(e: AnimationEffect | null): string {
+        const t = e ? e.getComputedTiming() : null;
+        if (!t || t.localTime === null || t.localTime === undefined) { return 'none'; }
+        const lt = Number(t.localTime);
+        const d = typeof t.delay === 'number' ? t.delay : 0;
+        const end = typeof t.endTime === 'number' ? t.endTime : Infinity;
+        if (lt < d) { return 'before'; }
+        return lt >= end ? 'after' : 'active';
+    }
+    function phaseOf(a: Animation): string {
+        return phaseStr(a.effect);
+    }
+    // ── 아래 차트 상자 그리기
+    function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    // 가로 막대 줄: 한 줄 = 한 구간
+    function drawRows(segs: Seg[], max: number): HTMLElement[] {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out: HTMLElement[] = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max: number): void {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    function marker(ms: number, max: number, cls: string): void {
+        bar('mk ' + cls, CX0 + clamp(ms, 0, max) / max * CW, 2, 2, 44);
+    }
+    // ── 값 전파 밴드 — 항목의 계산값(pct)을 넓은 배경 톤에 같은 함수로 흘려보낸다
+    //    (컴포넌트 편 품질: 면적을 부풀리는 게 아니라 값의 전파 범위를 넓히는 것 — 경계가 값과 함께 움직인다)
+    function makeBand(x: number, y: number, w: number, h: number): HTMLElement {
+        const b = make('i', 'vb', scWrap);
+        put(b, x, y, w, h);
+        return b;
+    }
+    // 가로 밴드: p1..p2 (0..1) 구간만 c2a→c2b 그라디언트, 나머지 c1 — 구간이 움직이면
+    // 경계 2개뿐 아니라 구간 내부 픽셀 전부가 같은 프레임에 다시 계산된다
+    function bandH(b: HTMLElement, c1: string, c2a: string, c2b: string, p1: number, p2: number): void {
+        const a = clamp(p1, 0, 1) * 100;
+        const z = clamp(p2, 0, 1) * 100;
+        b.style.background = 'linear-gradient(90deg,' + c1 + ' 0%,' + c1 + ' ' + a + '%,' + c2a + ' ' + a + '%,' + c2b + ' ' + z + '%,' + c1 + ' ' + z + '%,' + c1 + ' 100%)';
+    }
+    // 세로 밴드(06 세로 레일) — 180deg 로 돌려 같은 산술
+    function bandV(b: HTMLElement, c1: string, c2a: string, c2b: string, p1: number, p2: number): void {
+        const a = clamp(p1, 0, 1) * 100;
+        const z = clamp(p2, 0, 1) * 100;
+        b.style.background = 'linear-gradient(180deg,' + c1 + ' 0%,' + c1 + ' ' + a + '%,' + c2a + ' ' + a + '%,' + c2b + ' ' + z + '%,' + c1 + ' ' + z + '%,' + c1 + ' 100%)';
+    }
+    let headEl: HTMLElement | null = null;
+    function setReads(a: string, b: string): void {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── 실행 틀: 프리셋 하나가 한 주기. 시계 애니메이션이 끝나면 다음 프리셋으로 다시 시작한다
+    interface Cfg {
+        count: number;
+        build: (i: number) => number;
+        frame: (t: number) => string;
+        head?: boolean;
+    }
+    function run(cfg: Cfg): () => void {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock: Animation | null = null;
+        let lastStatus = '';
+        function fit(): void {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild(): void {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i] as CSSAnimation;
+                if (an.animationName && an.effect && (an.effect as KeyframeEffect).target === clkEl) { clock = an; }
+            }
+        }
+        function restart(): void {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) { all[i].pause(); } else { all[i].play(); }
+            }
+        }
+        function tick(): void {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) { headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)'; }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) { statusP.textContent = s; lastStatus = s; }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p: boolean): void {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) { all[i].pause(); } else { all[i].play(); }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d: number): void {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev: KeyboardEvent) {
+            if (ev.target === pauseBtn) { return; }
+            if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); setPaused(!paused); }
+            else if (ev.key === 'r' || ev.key === 'R') { shift(-pi); }
+            else if (ev.key === 'ArrowRight') { ev.preventDefault(); shift(1); }
+            else if (ev.key === 'ArrowLeft') { ev.preventDefault(); shift(-1); }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) { setPaused(true); }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 모든 애니메이션이 꺼지고 장면은 완성 상태 한 장이다 (build 마지막 프레임을 그린다)
+            statusP.textContent = '움직임 줄이기 켜짐 · 정적 접점 상태';
+            readB.textContent = '늘어짐 없이 붙기 전과 붙은 뒤의 두 상태만 보여 준다';
+            doneP.textContent = readB.textContent;
+            cfg.frame(1e9);
+        } else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function (): void {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 01 채움 % 산술 — 두 thumb 의 % 로 채움 막대 left/width 가 정확히 확정되는 기본 가격 범위
+    //    pct(v) = (v - MIN) / (MAX - MIN) — 채움 left = pct(lo) * TRACK_W, width = (pct(hi)-pct(lo)) * TRACK_W
+    const MIN = 0;
+    const MAX = 100;
+    const TRACK_X = 64;
+    const TRACK_W = 320;
+    const FILL_LERP = 0.35;    // 변형1: 0.35 → 0.08 (채움이 뒤따라 흐른다)
+    const SWING_MS = 700;
+    let trk: HTMLElement | null = null;
+    let fil: HTMLElement | null = null;
+    let loThm: HTMLElement | null = null;
+    let hiThm: HTMLElement | null = null;
+    let loBub: HTMLElement | null = null;
+    let hiBub: HTMLElement | null = null;
+    let eqEl: HTMLElement | null = null;
+    let bandEl: HTMLElement | null = null;
+    let loVal = 30;
+    let hiVal = 70;
+    let filL = TRACK_X + 0.30 * TRACK_W;   // 채움 표시 위치 (lerp 추적)
+    let filR = TRACK_X + 0.70 * TRACK_W;
+    function pct(v: number): number { return clamp((v - MIN) / (MAX - MIN), 0, 1); }
+    function build(_i: number): number {
+        // 값 전파 밴드 — 채움 % 산술이 무대 배경 톤에도 같은 식으로 흘러간다 (경계 2개가 thumb 를 따라 스윕)
+        bandEl = makeBand(TRACK_X - 24, 112, TRACK_W + 48, 42);
+        trk = make('i', 'trk', scWrap);
+        put(trk, TRACK_X, 74, TRACK_W, 6);
+        fil = make('i', 'fil', scWrap);
+        loThm = make('i', 'thm thm--lo', scWrap);
+        hiThm = make('i', 'thm thm--hi', scWrap);
+        if (loThm) { put(loThm, 0, 68, 18, 18); }
+        if (hiThm) { put(hiThm, 0, 68, 18, 18); }
+        // 값 말풍선 (계층 구분 없음 — 텍스트는 언제나 읽힌다)
+        loBub = make('b', 'ov', sceneEl);
+        put(loBub, 0, 42, 40, 16);
+        loBub.style.color = '#17141a';
+        loBub.style.fontSize = '12px';
+        loBub.style.fontWeight = '800';
+        loBub.style.textAlign = 'center';
+        hiBub = make('b', 'ov', sceneEl);
+        put(hiBub, 0, 42, 40, 16);
+        hiBub.style.color = '#17141a';
+        hiBub.style.fontSize = '12px';
+        hiBub.style.fontWeight = '800';
+        hiBub.style.textAlign = 'center';
+        // 산술 등식 패널 — 계산식이 눈에 보인다
+        eqEl = make('b', 'ov', sceneEl);
+        put(eqEl, 24, 6, 400, 14);
+        eqEl.style.color = 'rgba(23,20,26,.75)';
+        eqEl.style.fontSize = '10px';
+        eqEl.style.fontWeight = '700';
+        // 눈금 9개 — 값 축이 항상 보이게
+        for (let k = 0; k <= 8; k += 1) {
+            const tk = make('i', 'tck', scWrap);
+            put(tk, TRACK_X + k * (TRACK_W / 8) - 1, 84, 2, 5);
+        }
+        // 아래 차트 — 채움 폭의 시계열 (매 프레임 재계산 증거)
+        axis(4000);
+        return 4200;
+    }
+    function frame(t: number): string {
+        const cyc = SWING_MS * 2;
+        const ph = (t % cyc) / cyc;
+        const s = ph < 1 ? ph : 2 - ph;               // 삼각파 왕복
+        // 두 thumb 시나리오: lo 는 30→10→30, hi 는 70→90→70 로 서로 반대로 벌어졌다 좁혀진다
+        const loT = 30 - 20 * s;
+        const hiT = 70 + 20 * s;
+        loVal = loT;
+        hiVal = hiT;
+        // 채움 산술 — 매 프레임 left/width 를 % 에서 다시 계산한다
+        const loPx = TRACK_X + pct(loVal) * TRACK_W;
+        const hiPx = TRACK_X + pct(hiVal) * TRACK_W;
+        filL += (loPx - filL) * FILL_LERP;
+        filR += (hiPx - filR) * FILL_LERP;
+        if (fil) { put(fil, filL, 74, Math.max(2, filR - filL), 6); }
+        if (loThm) { put(loThm, loPx - 9, 68, 18, 18); }
+        if (hiThm) { put(hiThm, hiPx - 9, 68, 18, 18); }
+        if (loBub) { put(loBub, loPx - 20, 42, 40, 16); loBub.textContent = f0(loVal); }
+        if (hiBub) { put(hiBub, hiPx - 20, 42, 40, 16); hiBub.textContent = f0(hiVal); }
+        const wl = (filL - TRACK_X) / TRACK_W * 100;
+        const ww = (filR - filL) / TRACK_W * 100;
+        if (bandEl) { bandH(bandEl, 'rgba(213,218,234,.22)', 'rgba(143,216,189,.62)', 'rgba(201,184,242,.5)', pct(loVal), pct(hiVal)); }
+        // 장면 톤 전파 — 채움 폭(ww%) 이 배경 명도로 흘러간다: 넓은 구간 = 밝은 장면 (값의 전파, 520 08 방식)
+        const tone = Math.round(222 - ww / 80 * 26);
+        sceneEl.style.background = 'rgb(' + tone + ',' + tone + ',' + (tone - 6) + ')';
+        if (eqEl) { eqEl.textContent = 'left ' + f1(wl) + '% · width (max% - min%) = ' + f1(ww) + '%'; }
+        // 차트: 이 프레임 채움 폭을 막대로 쌓는다
+        const cx = CX0 + clamp(t / 4000, 0, 1) * CW;
+        bar('bar k0', cx, 5 + (1 - ww / 80) * 30, 2, 6);
+        setReads(
+            fill('FILL_LERP {a} · TRACK_W {b}px · MIN_PCT/MAX_PCT {c}', f1(FILL_LERP), f0(TRACK_W), '0..100'),
+            fill('채움 width = (pct(max) - pct(min)) x track 폭 — thumb 위치가 어디든 같은 한 식')
+        );
+        return fill('지금 {a} · {b}', f0(loVal) + '~' + f0(hiVal), '채움 ' + f1(ww) + '%');
+    }
+    return run({ count: 1, build: build, frame: frame });
+
+}
+
+export default function DualSliderFillPercent() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'두 thumb 의 % 가 채움 막대의 left 와 width 로 한 프레임 안에 환산되는 기본 가격 범위의 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}
