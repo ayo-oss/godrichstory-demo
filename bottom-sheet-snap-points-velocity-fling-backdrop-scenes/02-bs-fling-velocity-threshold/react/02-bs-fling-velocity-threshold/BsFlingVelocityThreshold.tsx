@@ -116,7 +116,7 @@ function setReads(a: string, b: string): void {
 // 스냅 지점(px) — 닫힘 0 · 반 196 · 전체 392. 시트 높이 h(px) 는 가상 뷰포트 좌표다
 const snapPoints = [0, 196, 392]; // 스냅 지점 배열(닫힘·반·전체)
 const SNAP_POINTS_PX = snapPoints;
-// nearestSnap — 손 뗀 높이에서 각 지점까지 거리(distance)를 재 최근젝 단계를 판정한다.
+// nearestSnap — 손 뗀 높이에서 각 지점까지 거리(distance)를 재 최근접 단계를 판정한다.
 //   타이(294px 지점의 98 대 98)는 위 단계가 이긴다 — 거리 판정의 동점 규칙
 function nearestSnap(h: number, pts: number[]): number {
     let best = pts[0];
@@ -128,7 +128,7 @@ function nearestSnap(h: number, pts: number[]): number {
     return best;
 }
 // flingSnap — 놓기 속도(vMs, px/ms)가 임계를 넘으면 던진 방향의 다음 단계로 통과,
-//   아니면 최근젝. 위로 던짐(vMs>0)=더 높은 단계, 아래 던짐=더 낮은 단계 — 우선순위 계산
+//   아니면 최근접. 위로 던짐(vMs>0)=더 높은 단계, 아래 던짐=더 낮은 단계 — 우선순위 계산
 function flingSnap(h: number, vMs: number, pts: number[], thr: number): number {
     if (Math.abs(vMs) >= thr) {
         const up = vMs > 0;
@@ -279,7 +279,7 @@ function run(cfg: Cfg): () => void {
     };
 }
     // 02 던짐 속도 판정 — 놓기 직전 이동의 시간차로 속도(px/ms)를 계산해 FLING_MS 임계(threshold)와
-    //    비교한다. 0.60px/ms 는 최근젝(반)을 건너뛰어 전체로 통과, 0.20px/ms 는 최근젝 단계로 돌아간다.
+    //    비교한다. 0.60px/ms 는 최근접(반)을 건너뛰어 전체로 통과, 0.20px/ms 는 최근접 단계로 돌아간다.
     //    가까운 단계가 아래여도 위로 던졌다면 위 단계가 이기는 우선순위 계산이다
     const FLING_MS = 0.5;           // 던짐 속도 임계(px/ms) — 변형: 1.2 로 올리면 가벼운 튕김은 먹히지 않는다
     const SNAP_MS = 460;
@@ -316,7 +316,7 @@ function run(cfg: Cfg): () => void {
             h = travel(t, 294, dest, RELEASE2_AT, SNAP_MS);
             ph = t < RELEASE2_AT + SNAP_MS ? '스냅 이동' : '도착';
             if (dest === 392 && t >= RELEASE2_AT + SNAP_MS - 30) { doneP.textContent = fill('던짐 통과 — 방향 {a}', '위로 던짐'); }
-            if (dest === 196 && t >= RELEASE2_AT + SNAP_MS - 30) { doneP.textContent = '최근젝 판정 — 속도 미달'; }
+            if (dest === 196 && t >= RELEASE2_AT + SNAP_MS - 30) { doneP.textContent = '최근접 판정 — 속도 미달'; }
         }
         putSheet(sh02, h);
         setDim(bd02, h, 1.0, 0.44);
@@ -335,7 +335,7 @@ function run(cfg: Cfg): () => void {
         axis(2000);
         setReads(
             fill('FLING_MS {a} px/ms · v = 마지막 이동 거리/시간 — 넘으면 던진 방향의 다음 단계로', f1(FLING_MS)),
-            '임계 위 0.60px/ms — 최근젝(반)을 건너뛰어 전체로, 임계 아래 0.20px/ms 는 최근젝 단계로'
+            '임계 위 0.60px/ms — 최근접(반)을 건너뛰어 전체로, 임계 아래 0.20px/ms 는 최근접 단계로'
         );
         doneP.textContent = '';
         return 2000;

@@ -116,7 +116,7 @@ function setReads(a: string, b: string): void {
 // 스냅 지점(px) — 닫힘 0 · 반 196 · 전체 392. 시트 높이 h(px) 는 가상 뷰포트 좌표다
 const snapPoints = [0, 196, 392]; // 스냅 지점 배열(닫힘·반·전체)
 const SNAP_POINTS_PX = snapPoints;
-// nearestSnap — 손 뗀 높이에서 각 지점까지 거리(distance)를 재 최근젝 단계를 판정한다.
+// nearestSnap — 손 뗀 높이에서 각 지점까지 거리(distance)를 재 최근접 단계를 판정한다.
 //   타이(294px 지점의 98 대 98)는 위 단계가 이긴다 — 거리 판정의 동점 규칙
 function nearestSnap(h: number, pts: number[]): number {
     let best = pts[0];
@@ -128,7 +128,7 @@ function nearestSnap(h: number, pts: number[]): number {
     return best;
 }
 // flingSnap — 놓기 속도(vMs, px/ms)가 임계를 넘으면 던진 방향의 다음 단계로 통과,
-//   아니면 최근젝. 위로 던짐(vMs>0)=더 높은 단계, 아래 던짐=더 낮은 단계 — 우선순위 계산
+//   아니면 최근접. 위로 던짐(vMs>0)=더 높은 단계, 아래 던짐=더 낮은 단계 — 우선순위 계산
 function flingSnap(h: number, vMs: number, pts: number[], thr: number): number {
     if (Math.abs(vMs) >= thr) {
         const up = vMs > 0;
@@ -278,7 +278,7 @@ function run(cfg: Cfg): () => void {
         off.abort();
     };
 }
-    // 01 최근젝 스냅 — 손을 뗀 시트 높이에서 세 지점(닫힘 0 · 반 196 · 전체 392px)까지의
+    // 01 최근접 스냅 — 손을 뗀 시트 높이에서 세 지점(닫힘 0 · 반 196 · 전체 392px)까지의
     //    거리(distance)를 재 가장 가까운 지점으로 이동한다. 294px 지점은 반·전체와 같은 98px —
     //    타이는 위 단계(전체)가 이긴다(nearestSnap 의 동점 규칙)
     const DRAG_FOLLOW = 1.0;        // 드래그 추적 비율 — 1.0 은 이동량을 그대로 반영한다(변형: 0.55)
@@ -308,7 +308,7 @@ function run(cfg: Cfg): () => void {
             h = drag01(t, rh);
             ph = t < 350 ? '잠자리' : '드래그 중';
         } else {
-            // 놓기 — 최근젝 거리 판정으로 스냅 이동(travel). 판정은 놓기 순간 한 번
+            // 놓기 — 최근접 거리 판정으로 스냅 이동(travel). 판정은 놓기 순간 한 번
             h = travel(t, rh, nearestSnap(rh, SNAP_POINTS_PX), RELEASE1_AT, SNAP_MS);
             ph = t < RELEASE1_AT + SNAP_MS ? '스냅 이동' : '도착';
         }
@@ -332,14 +332,14 @@ function run(cfg: Cfg): () => void {
         axis(2000);
         const t1 = RELEASE_H[0];
         setReads(
-            fill('SNAP_POINTS_PX 닫힘 {a} · 반 {b} · 전체 {c}px · 놓기 높이에서 최근젝 거리 판정', f0(SNAP_POINTS_PX[0]), f0(SNAP_POINTS_PX[1]), f0(SNAP_POINTS_PX[2])),
+            fill('SNAP_POINTS_PX 닫힘 {a} · 반 {b} · 전체 {c}px · 놓기 높이에서 최근접 거리 판정', f0(SNAP_POINTS_PX[0]), f0(SNAP_POINTS_PX[1]), f0(SNAP_POINTS_PX[2])),
             i % 2 === 0 ? '294px 놓기 — 타이(98 대 98) → 전체 승리' : '120px 놓기 — 반까지 76px 가장 가깝다'
         );
         if (seg01) { seg01.textContent = i % 2 === 0 ? '294px 놓기 — 타이(98 대 98) → 전체 승리' : '120px 놓기 — 반까지 76px 가장 가깝다'; }
         doneP.textContent = '';
         return 2000;
     }
-    // 실제 입력 경로 — pointerdown/move/up 이 같은 최근젝 판정을 탄다(핸들·헤드 어디서든)
+    // 실제 입력 경로 — pointerdown/move/up 이 같은 최근접 판정을 탄다(핸들·헤드 어디서든)
     let down01 = false;
     let startH01 = 0;
     let baseY01 = 0;
