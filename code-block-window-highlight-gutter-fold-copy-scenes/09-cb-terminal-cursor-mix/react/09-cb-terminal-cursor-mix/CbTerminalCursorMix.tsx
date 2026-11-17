@@ -1,0 +1,401 @@
+// CbTerminalCursorMix - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./CbTerminalCursorMix.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+// ── 528 코드 블록 공통 — 무대 좌표·문구 틀·요소 조립·토크나이저 엔진 (527 core.ts 계승)
+const W = 480;
+const CX0 = 8;
+const CW = 432;
+function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+// 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+function fill(s: string, ...v: string[]): string {
+    const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+    let o = s;
+    for (let i = 0; i < keys.length; i += 1) {
+        o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+    }
+    return o;
+}
+function f0(v: number): string { return String(Math.round(v)); }
+function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+// ── 무대 요소
+const rootEl = root;
+const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+    return function (): void { /* 무대가 없으면 할 일이 없다 */ };
+}
+const innerEl: HTMLElement = innerQ;
+const sceneEl: HTMLElement = sceneQ;
+const chartEl: HTMLElement = chartQ;
+const probeEl: HTMLElement = probeQ;
+const padEl: HTMLElement = padQ;
+const pauseBtn: HTMLButtonElement = pauseQ;
+const statusP: HTMLElement = statusQ;
+const readA: HTMLElement = readAQ;
+const readB: HTMLElement = readBQ;
+const doneP: HTMLElement = doneQ;
+const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+    const e = document.createElement(tag);
+    if (cls) { e.className = cx(cls); }
+    parent.appendChild(e);
+    return e;
+}
+function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+    e.style.left = x + 'px';
+    e.style.top = y + 'px';
+    if (w > 0) { e.style.width = w + 'px'; }
+    if (h > 0) { e.style.height = h + 'px'; }
+}
+const scWrap = make('div', 'scwrap', sceneEl);
+const clkEl = make('i', 'clk', sceneEl);
+function clearAll(): void {
+    // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+    scWrap.textContent = '';
+    chartEl.textContent = '';
+    probeEl.textContent = '';
+}
+// 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+function seedHash(i: number, seed: number): number {
+    const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+    return x - Math.floor(x);
+}
+// ── 엔진이 푼 시간 읽기 — getAnimations() 값
+function animsIn(host: HTMLElement): Animation[] {
+    return host.getAnimations({ subtree: true });
+}
+interface Seg { s: number; e: number; k: number; }
+function spanOf(d: number, dur: number): Seg { return { s: d, e: d + dur, k: 0 }; }
+// ── 아래 차트 상자 그리기 — 시연 구간을 막대로
+function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+    const e = make('i', cls, chartEl);
+    put(e, x, y, w, h);
+    return e;
+}
+function drawRows(segs: Seg[], max: number): HTMLElement[] {
+    const n = segs.length;
+    const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+    const out: HTMLElement[] = [];
+    for (let i = 0; i < n; i += 1) {
+        const sg = segs[i];
+        const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+        const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+        out.push(bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h));
+    }
+    return out;
+}
+function axis(max: number): void {
+    const a = make('b', 'ax', chartEl);
+    a.textContent = '0';
+    put(a, CX0, 40, 0, 0);
+    const b = make('b', 'ax ax--r', chartEl);
+    b.textContent = f0(max) + 'ms';
+    put(b, CX0 + CW - 60, 40, 60, 0);
+}
+let headEl: HTMLElement | null = null;
+function setReads(a: string, b: string): void {
+    readA.textContent = a;
+    readB.textContent = b;
+}
+// ── 코드 블록 엔진 — 이 편의 주역 계산을 9종이 공유한다
+// digitCount — 줄 번호 거터의 폭을 정하는 자릿수 산술. 98줄 → 2자리, 100줄 → 3자리.
+//   9줄에서 99줄로 넘어가도 코드 시작 열이 한 픽셀 안 움직이려면 폭을 '최대 자릿수'로 미리 고정한다
+function digitCount(n: number): number {
+    let d = 1;
+    let v = n;
+    while (v >= 10) { v = Math.floor(v / 10); d += 1; }
+    return d;
+}
+// fmt2 — 줄 번호를 오른쪽 정렬(rightAlign)로 채운다(2 → ' 2'). 거터 안에서 모든 번호의 끝열이 같아진다.
+//   실코드 식별자 fmt2 가 곧 rightAlign 동작이다 — 별도 플래그 없이 fmt2(n, ch) 사용
+function fmt2(n: number, ch: number): string {
+    let s = String(n);
+    while (s.length < ch) { s = ' ' + s; }
+    return s;
+}
+const rightAlign = fmt2; // rightAlign 별명 — 줄 번호 정렬 계산의 이름 (BK9 칩)
+// ── 토크나이저 — 데모 안 문자열 상수만 하이라이트한다(외부 fetch·CDN 하이라이터 금지)
+// TOKEN_KIND 4종: 0 keyword · 1 string · 2 number · 3 comment. 정규식 순서가 곧 우선순위다 —
+//   주석 안의 '문자열' 이 문자열 색으로 칠해지지 않으려면 comment 규칙이 먼저 범위를 잡아야 한다
+const TOKEN_KIND = 4; // 토큰 종류 수(변형: 7 — 함수·속성·연산자까지 각각 색을 준다)
+// spanMap — 토큰 범위(span)에 종류(k)를 대응시키는 맵. tokenize 결과의 각 Tok 이 곧 spanMap
+//   의 한 항목이고 TOKEN_KIND 색이 이 대읩을 따라 칠해진다
+interface Tok { s: number; e: number; k: number; }
+function spanMap(tok: Tok): { span: [number, number]; kind: number; } {
+    return { span: [tok.s, tok.e], kind: tok.k };
+}
+const RE_COMMENT = /(^|\s)\/\/[^\n]*/y;
+const RE_STR = /'[^'\n]*'|"[^"\n]*"/y;
+const RE_NUM = /\b\d+(\.\d+)?\b/y;
+const RE_KW = /\b(const|let|function|return|if|else|for|while|import|from|export|var|new|class)\b/y;
+// tokenize — 소스 한 줄을 토큰 범위(Tok[])로 쪼갠다. 문장 부호 하나가 어느 토큰에 속하는지
+//   경계(boundary)를 정하는 이 계산이 하이라이트의 정확함을 결정한다
+function tokenize(line: string): Tok[] {
+    const out: Tok[] = [];
+    const rules: Array<[RegExp, number]> = [[RE_COMMENT, 3], [RE_STR, 1], [RE_KW, 0], [RE_NUM, 2]];
+    let i = 0;
+    while (i < line.length) {
+        let hit = false;
+        for (const r of rules) {
+            r[0].lastIndex = i;
+            const m = r[0].exec(line);
+            if (m && m.index === i && m[0].length > 0) {
+                out.push({ s: i, e: i + m[0].length, k: r[1] });
+                i += m[0].length;
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) { i += 1; }
+    }
+    return out;
+}
+// ── 코드 창 조립 — .win(.bar(.lights 3점 + .fname) + .code(.gutter + .lines))
+interface Win { el: HTMLElement; bar: HTMLElement; fname: HTMLElement; lights: HTMLElement; code: HTMLElement; gutter: HTMLElement; lines: HTMLElement; }
+function mkWin(): Win {
+    const el = make('div', 'win', scWrap);
+    const b = make('div', 'cb-bar', el);
+    const lights = make('i', 'cb-lights', b);
+    for (let k = 0; k < 3; k += 1) { make('i', 'cb-dot', lights); }
+    const fname = make('b', 'cb-fname', b);
+    fname.textContent = 'main.scss';
+    const code = make('div', 'cb-code', el);
+    const gutter = make('div', 'cb-gutter', code);
+    const lines = make('div', 'cb-lines', code);
+    return { el: el, bar: b, fname: fname, lights: lights, code: code, gutter: gutter, lines: lines };
+}
+// addLine — 줄 하나를 code(토큰 하이라이트 포함)와 gutter(번호)에 같이 넣는다.
+//   gEl 을 돌려주는 이유는 07(행 호버)이 번호까지 같이 밝히기 때문(gutterSync)
+function addLine(win: Win, no: number, ch: number, text: string): { line: HTMLElement; gEl: HTMLElement; } {
+    const gEl = make('b', 'cb-no', win.gutter);
+    gEl.textContent = rightAlign(no, ch);
+    const line = make('div', 'cb-ln', win.lines);
+    const toks = tokenize(text);
+    let pos = 0;
+    for (let i = 0; i < toks.length; i += 1) {
+        const tk = spanMap(toks[i]);
+        if (tk.span[0] > pos) { line.appendChild(document.createTextNode(text.slice(pos, tk.span[0]))); }
+        const sp = make('span', 'tk tk' + tk.kind, line);
+        sp.textContent = text.slice(tk.span[0], tk.span[1]);
+        pos = tk.span[1];
+    }
+    if (pos < text.length) { line.appendChild(document.createTextNode(text.slice(pos))); }
+    return { line: line, gEl: gEl };
+}
+// ── 실행 퀄: 프리셋 하나가 한 주기. 시계 애니메이션이 끝나면 다음 프리셋으로 다시 시작한다
+let piNow = 0; // 현재 프리셋 번호 — frame 안에서도 읽는다(run 의 pi 를 노출)
+interface Cfg {
+    count: number;
+    build: (i: number) => number;
+    frame: (t: number) => string;
+    head?: boolean;
+}
+function run(cfg: Cfg): () => void {
+    const off = new AbortController();
+    let pi = 0;
+    let cycle = 2000;
+    let paused = false;
+    let raf = 0;
+    let clock: Animation | null = null;
+    let lastStatus = '';
+    function fit(): void {
+        const k = rootEl.clientWidth / W;
+        innerEl.style.transform = 'scale(' + k + ')';
+    }
+    function rebuild(): void {
+        clearAll();
+        piNow = pi;
+        cycle = Math.max(2000, cfg.build(pi));
+        headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+        clkEl.style.animationDuration = f0(cycle) + 'ms';
+        const all = animsIn(sceneEl);
+        clock = null;
+        for (let i = 0; i < all.length; i += 1) {
+            const an = all[i] as CSSAnimation;
+            if (an.animationName && an.effect && (an.effect as KeyframeEffect).target === clkEl) { clock = an; }
+        }
+    }
+    function restart(): void {
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            all[i].currentTime = 0;
+            if (paused) { all[i].pause(); } else { all[i].play(); }
+        }
+    }
+    function tick(): void {
+        const ct = clock ? Number(clock.currentTime) : 0;
+        const t = isFinite(ct) ? ct : 0;
+        if (headEl) { headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)'; }
+        const s = cfg.frame(t);
+        if (s !== lastStatus) { statusP.textContent = s; lastStatus = s; }
+        if (!paused && clock && t >= cycle - 1) {
+            pi = (pi + 1) % cfg.count;
+            rebuild();
+            restart();
+        }
+        raf = requestAnimationFrame(tick);
+    }
+    function setPaused(p: boolean): void {
+        paused = p;
+        pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            if (p) { all[i].pause(); } else { all[i].play(); }
+        }
+        doneP.textContent = readB.textContent;
+    }
+    function shift(d: number): void {
+        pi = (pi + d + cfg.count) % cfg.count;
+        rebuild();
+        restart();
+        doneP.textContent = readB.textContent;
+    }
+    pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+    padEl.addEventListener('keydown', function (ev: KeyboardEvent) {
+        if (ev.target === pauseBtn) { return; }
+        if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); setPaused(!paused); }
+        else if (ev.key === 'r' || ev.key === 'R') { shift(-pi); }
+        else if (ev.key === 'ArrowRight') { ev.preventDefault(); shift(1); }
+        else if (ev.key === 'ArrowLeft') { ev.preventDefault(); shift(-1); }
+    }, { signal: off.signal });
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) { setPaused(true); }
+    }, { signal: off.signal });
+    window.addEventListener('resize', fit, { signal: off.signal });
+    fit();
+    rebuild();
+    if (reduced) {
+        // 움직임 줄이기 — 루프를 돌리지 않고 완료 상태 한 장(frame(1e9) 1회) + 문구(393 규칙)
+        cfg.frame(1e9);
+        statusP.textContent = readB.textContent;
+        doneP.textContent = readB.textContent;
+    } else {
+        restart();
+        raf = requestAnimationFrame(tick);
+    }
+    return function (): void {
+        cancelAnimationFrame(raf);
+        off.abort();
+    };
+}
+    // 09 터미널 커서 — 프롬프트·명령·커서·결과를 한 창에 섞는다. 명령은 TIME_GAP(90)ms 간격의
+    //    타이핑 재생(typingReplay)으로 채워진 뒤 결과가 한 줄씩 이어지고, 커서 깜빔(cursorBlink)
+    //    은 입력 멈춤과 재개를 함께 알리는 리듬이 된다
+    const TIME_GAP = 90;        // 타이핑 한 글자 간격 ms(변형의 기준값)
+    const CMD = 'npm run build';
+    const RESULT = ['vite v5 building…', '✓ 42 modules', 'built in 1.2s'];
+    const T0 = 150;             // 타이핑 시작
+    const PAUSE = 240;          // 명령 끝 → 결과 사이 멈춤
+    const OUT_GAP = 120;        // 결과 한 줄 간격
+    // 전체 사이클이 2000ms 안에 들어나야 렌더 창(2초)에서 타이핑→결과가 전부 보인다
+    //   150 + 13×90(타이핑 1170) + 240 + 3×120 = 1920ms
+    let term09: HTMLElement | null = null;
+    let body09: HTMLElement | null = null;
+    let prm09: HTMLElement | null = null;
+    let cmd09: HTMLElement | null = null;
+    let out09: HTMLElement | null = null;
+    let cur09: HTMLElement | null = null;
+    let caret09: HTMLElement | null = null;
+    let typed09 = 0;
+    function frame(t: number): string {
+        if (!term09 || !cmd09 || !out09 || !cur09 || !caret09) { return ''; }
+        // 타이핑 재생 — typed = floor((t-T0)/TIME_GAP) 글자(결정적)
+        typed09 = clamp(Math.floor((t - T0) / TIME_GAP), 0, CMD.length);
+        cmd09.textContent = CMD.slice(0, typed09);
+        const typing = typed09 < CMD.length && t >= T0;
+        // 커서는 마지막 글자 뒤 — caret x = 프롬프트 폭 + 글자 폭
+        const cx = 24 + typed09 * 5.4;
+        caret09.style.left = f1(cx) + 'px';
+        caret09.style.opacity = typing ? '1' : '0';
+        // 결과 — 명령 완료 + PAUSE 뒤 한 줄씩
+        const r0 = T0 + CMD.length * TIME_GAP + PAUSE;
+        let shown = 0;
+        for (let k = 0; k < RESULT.length; k += 1) {
+            if (t >= r0 + k * OUT_GAP) { shown = k + 1; }
+        }
+        out09.textContent = RESULT.slice(0, shown).join('\n');
+        // 결과 진행에 따라 결과 블록 전체가 은은히 밝아진다 — 완료 순간 잠깐 더 밝게
+        const glow = shown / RESULT.length;
+        term09.style.boxShadow = 'inset 0 0 ' + f0(6 + 26 * glow) + 'px rgba(255, 247, 230, ' + f2(0.04 + 0.12 * glow) + ')';
+        // 결과가 늘어나면 내용 전체가 위로 스크롤된다(터미널 스크롤) — 커서는 항상 보이는 칸에
+        const scrollY = t >= r0 ? Math.min(shown * 14, 42) : 0;
+        if (body09) { body09.style.transform = 'translateY(-' + f0(scrollY) + 'px)'; }
+        // 커서는 결과가 다 뜬 뒤 다음 프롬프트 줄로 내려간다 — 입력 재개 리듬
+        if (cur09) { cur09.style.top = f0(shown >= RESULT.length ? 98 : 8) + 'px'; }
+        const phase = t < T0 ? '대기' : (typing ? '입력 중' : (shown < RESULT.length ? '명령 실행' : '완료'));
+        return fill('{a} · {b}/{c} 글자 · 결과 {d}/3줄 · 간격 {e}ms',
+            phase, f0(typed09), f0(CMD.length), f0(shown), f0(TIME_GAP));
+    }
+    function build(i: number): number {
+        term09 = make('div', 'term', scWrap);
+        put(term09, 24, 10, 400, 140);
+        // 내용 래퍼 — 결과가 늘어나면 위로 스크롤되는 터미널 본체
+        body09 = make('div', 'tbody09', term09);
+        body09.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;will-change:transform;';
+        prm09 = make('b', 'tprm', body09);
+        put(prm09, 8, 8, 16, 12);
+        prm09.textContent = '$';
+        cmd09 = make('span', 'tcmd', body09);
+        cmd09.style.cssText = 'position:absolute;left:26px;top:8px;white-space:pre;';
+        out09 = make('span', 'tout', body09);
+        out09.style.cssText = 'position:absolute;left:8px;top:26px;white-space:pre;line-height:14px;';
+        cur09 = make('i', 'tcur', body09);
+        cur09.style.cssText = 'position:absolute;left:0;top:8px;';
+        caret09 = make('i', 'tcaret', body09);
+        put(caret09, 24, 9, 1, 10);
+        drawRows([{ s: T0, e: T0 + CMD.length * TIME_GAP, k: 0 }, { s: T0 + CMD.length * TIME_GAP + PAUSE, e: T0 + CMD.length * TIME_GAP + PAUSE + 3 * OUT_GAP, k: 1 }], 2000);
+        axis(2000);
+        setReads(
+            fill('TIME_GAP {a}ms × {b}글자 = 타이핑 {c}ms · 커서 깜빡임 1060ms 주기(cursorBlink) — typingReplay 는 결정적', f0(TIME_GAP), f0(CMD.length), f0(TIME_GAP * CMD.length)),
+            '명령이 글자 하나씩 차고, 멈춤 뒤 결과가 이어진다 — 커서가 리듬을 알린다'
+        );
+        doneP.textContent = '';
+        return 2000; // 2초 주기 안에 타이핑→결과 전체가 들어간다(렌더 창과 맞춤)
+    }
+    return run({ count: 1, build: build, frame: frame });
+
+}
+
+export default function CbTerminalCursorMix() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'명령이 90ms 간격의 타이핑 재생으로 한 글자씩 차고 멈춤 뒤 결과가 이어지며 커서의 깜빡임이 멈춤과 재개를 알리는 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}

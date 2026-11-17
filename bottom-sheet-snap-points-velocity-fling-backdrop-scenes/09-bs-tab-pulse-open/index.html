@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>탭 한 번의 펄스로 열리는 터치 밖 경로 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="하단 탭의 펄스가 번지고 드래그 없는 경로에서도 같은 도착 계산으로 시트가 반 단계까지 올라오는 장면"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">장면 준비</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // ── 527 바텀 시트 공통 — 무대 좌표·문구 틀·요소 조립·스냅/던짐/보간 엔진 (526 core.ts 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — getAnimations() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur) { return { s: d, e: d + dur, k: 0 }; }
+    // ── 아래 차트 상자 그리기 — 드래그(k0)·스냅 이동(k1)·닫힘(k2)
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── 바텀 시트 엔진 — 이 편의 주역 계산을 9종이 공유한다
+    // 스냅 지점(px) — 닫힘 0 · 반 196 · 전체 392. 시트 높이 h(px) 는 가상 뷰포트 좌표다
+    const snapPoints = [0, 196, 392]; // 스냅 지점 배열(닫힘·반·전체)
+    const SNAP_POINTS_PX = snapPoints;
+    // nearestSnap — 손 뗀 높이에서 각 지점까지 거리(distance)를 재 최근젝 단계를 판정한다.
+    //   타이(294px 지점의 98 대 98)는 위 단계가 이긴다 — 거리 판정의 동점 규칙
+    function nearestSnap(h, pts) {
+        let best = pts[0];
+        let bestD = Infinity;
+        for (let i = 0; i < pts.length; i += 1) {
+            const distance = Math.abs(h - pts[i]); // 각 지점까지의 거리
+            if (distance < bestD) {
+                bestD = distance;
+                best = pts[i];
+            } // 등호 없음 = 타이면 먼 저 온(더 위의) 지점이 유지된다
+        }
+        return best;
+    }
+    // flingSnap — 놓기 속도(vMs, px/ms)가 임계를 넘으면 던진 방향의 다음 단계로 통과,
+    //   아니면 최근젝. 위로 던짐(vMs>0)=더 높은 단계, 아래 던짐=더 낮은 단계 — 우선순위 계산
+    function flingSnap(h, vMs, pts, thr) {
+        if (Math.abs(vMs) >= thr) {
+            const up = vMs > 0;
+            const hi = pts.filter(function (p) { return p > h; });
+            const lo = pts.filter(function (p) { return p < h; });
+            if (up && hi.length) {
+                return hi[0];
+            }
+            if (!up && lo.length) {
+                return lo[lo.length - 1];
+            }
+        }
+        return nearestSnap(h, pts);
+    }
+    // travel — 놓기 뒤 스냅 이동(순수 t 함수, ease-out cubic). from→to 를 dur ms 에 걸쳐
+    function travel(t, from, to, t0, dur) {
+        const k = clamp((t - t0) / dur, 0, 1);
+        const e = 1 - Math.pow(1 - k, 3);
+        return from + (to - from) * e;
+    }
+    // vOf — 주입 경로의 놓기 속도(px/ms): (route(t) - route(t-dt)) / dt. 02 의 주인공
+    function vOf(route, t, dt) {
+        return (route(t) - route(Math.max(0, t - dt))) / dt;
+    }
+    // ── 시트 요소 조립 — .sheet(.sh-head(.sh-handle)+.sh-body) 를 만든다
+    // 화면 배치: 시트는 장면(bottom:0)에 붙어 있고 높이 h(가상 px) 를 SHEET_SCALE 0.5 로 그린다
+    //   h=0(닫힘) → translateY(200px)(장면 밖) · h=196(반) → translateY(102px) · h=392(전체) → translateY(0)
+    const SHEET_SCALE = 0.5;
+    const SHEET_MAX_SCR = 200; // 392px × 0.5 반올림 — 시트의 최대 화면 높이
+    function mkSheet() {
+        const el = make('div', 'sheet', scWrap);
+        const head = make('div', 'sh-head', el);
+        make('i', 'sh-handle', head);
+        const body = make('div', 'sh-body', el);
+        return { el: el, head: head, body: body };
+    }
+    // putSheet — 높이 h(가상 px) 를 화면 배치로. translateY 로만 움직인다(will-change: transform)
+    function putSheet(sh, h) {
+        const hh = clamp(h * SHEET_SCALE, 0, SHEET_MAX_SCR);
+        sh.el.style.height = f1(SHEET_MAX_SCR) + 'px';
+        sh.el.style.transform = 'translateY(' + f1(SHEET_MAX_SCR - hh) + 'px)';
+    }
+    // setDim — 백드랍 보간: ratio = h/392 를 DIM_CURVE 지수로 구부려 알파에 곱한다(04 주인공)
+    function setDim(bd, h, curve, maxA) {
+        if (!bd) {
+            return;
+        }
+        const ratio = clamp(h / 392, 0, 1);
+        const interp = Math.pow(ratio, curve); // 보간값 — ratio^DIM_CURVE
+        const alpha = interp * maxA;
+        bd.style.opacity = f2(alpha);
+    }
+    // ── 포인터 이벤트 좌표를 무대(480x300) 좌표로 — 실제 손 조작 경로 공용
+    function stagePoint(e) {
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
+    }
+    // ── 실행 퀄: 프리셋 하나가 한 주기. 시계 애니메이션이 끝나면 다음 프리셋으로 다시 시작한다
+    let piNow = 0; // 현재 프리셋 번호 — frame 안에서도 읽는다(run 의 pi 를 노출)
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 루프를 돌리지 않고 완료 상태 한 장(frame(1e9) 1회) + 문구(393 규칙)
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 09 탭 펄스로 열기 — 하단 탭을 누르면 펄스(pulse09)가 번지고 시트가 같은 스냅 도착 계산
+    //    (travelTo 재사용 — reuse)으로 반 단계(196px)까지 올라온다. 드래그가 없는 경로
+    //    (noDragPath)에서도 단계 도착 계산이 그대로 쓰이는 것이 핵심이다
+    const PULSE_MS = 260;
+    let pulse = 0; // pulse — 펄스 진행(0~1)
+    const reuse = true; // reuse — travelTo 도착 계산 재사용 플래그
+    const RISE_MS = 460;
+    const HOLD_MS = 520;
+    const CLOSE_MS = 420;
+    const TAP_AT = 500;
+    let sh09 = null;
+    let bd09 = null;
+    let tab09 = null;
+    let ring09 = null;
+    function frame(t) {
+        if (!sh09) {
+            return '';
+        }
+        let h = 0;
+        let ph = '펄스';
+        const riseAt = TAP_AT + PULSE_MS;
+        if (t < TAP_AT) {
+            h = 0;
+            ph = '펄스';
+        }
+        else if (t < riseAt) {
+            h = 0;
+            ph = '펄스';
+        }
+        else if (t < riseAt + RISE_MS) {
+            h = travel(t, 0, 196, riseAt, RISE_MS);
+            ph = '반 단계 상승';
+        }
+        else if (t < riseAt + RISE_MS + HOLD_MS) {
+            h = 196;
+            ph = '머묾';
+        }
+        else {
+            h = travel(t, 196, 0, riseAt + RISE_MS + HOLD_MS, CLOSE_MS);
+            ph = t < riseAt + RISE_MS + HOLD_MS + CLOSE_MS ? '닫힘' : '닫힘';
+        }
+        putSheet(sh09, h);
+        setDim(bd09, h, 1.0, 0.44);
+        // 펄스 — 탭에서 번지는 링(스케일+오퍼시티)
+        if (ring09) {
+            const pk = clamp((t - TAP_AT) / PULSE_MS, 0, 1);
+            pulse = pk;
+            ring09.style.opacity = t >= TAP_AT && t < TAP_AT + PULSE_MS ? f2(1 - pk) : '0';
+            ring09.style.transform = 'scale(' + f2(0.4 + pk * 1.6) + ')';
+        }
+        if (tab09) {
+            tab09.setAttribute('aria-pressed', t >= TAP_AT && t < riseAt ? 'true' : 'false');
+        }
+        if (t >= riseAt + RISE_MS + HOLD_MS + CLOSE_MS - 20) {
+            doneP.textContent = '탭 펄스 — 반 단계 도착';
+        }
+        return fill('지금 {a} · 높이 {b}px', ph, f0(h));
+    }
+    function build(_i) {
+        bd09 = make('i', 'bkdrop', scWrap);
+        put(bd09, 0, 0, 448, 156);
+        sh09 = mkSheet();
+        for (let k = 0; k < 3; k += 1) {
+            const row = make('i', 'row row--mini', sh09.body);
+            put(row, 10, 10 + k * 14, 300, 10);
+        }
+        // 하단 탭 + 펄스 링 — 드래그 없는 여는 경로
+        ring09 = make('i', 'pulsering', scWrap);
+        ring09.style.opacity = '0';
+        tab09 = make('b', 'tabbar', scWrap);
+        tab09.textContent = '탭';
+        tab09.setAttribute('role', 'button');
+        tab09.setAttribute('aria-pressed', 'false');
+        put(tab09, 196, 136, 48, 18);
+        drawRows([spanOf(TAP_AT, PULSE_MS), { s: TAP_AT + PULSE_MS, e: TAP_AT + PULSE_MS + RISE_MS, k: 1 }, { s: TAP_AT + PULSE_MS + RISE_MS + HOLD_MS, e: TAP_AT + PULSE_MS + RISE_MS + HOLD_MS + CLOSE_MS, k: 2 }], 2000);
+        axis(2000);
+        setReads('탭 펄스 → 같은 travelTo 계산 재사용 — 드래그 없는 경로(noDragPath)에서도 같은 도착', '펄스가 번지고 시트가 같은 스냅 계산으로 반 단계(196px)까지 올라온다');
+        doneP.textContent = '';
+        return 2000;
+    }
+    // 실제 입력 경로 — 탭 click(Enter·Space 포함)이 같은 상승 계산을 탄다. 펄스도 같이 번진다
+    let tabT09 = 0;
+    sceneEl.addEventListener('click', function (ev) {
+        const tgt = ev.target;
+        if (tab09 && (tgt === tab09 || tab09.contains(tgt)) && sh09 && bd09) {
+            tabT09 = performance.now();
+            const step = function (now) {
+                if (!sh09) {
+                    return;
+                }
+                const k = clamp((now - tabT09) / RISE_MS, 0, 1);
+                putSheet(sh09, 196 * (1 - Math.pow(1 - k, 3)));
+                setDim(bd09, 196 * (1 - Math.pow(1 - k, 3)), 1.0, 0.44);
+                if (ring09) {
+                    const pk = clamp((now - tabT09) / PULSE_MS, 0, 1);
+                    ring09.style.opacity = pk < 1 ? f2(1 - pk) : '0';
+                    ring09.style.transform = 'scale(' + f2(0.4 + pk * 1.6) + ')';
+                }
+                if (k < 1) {
+                    requestAnimationFrame(step);
+                }
+            };
+            requestAnimationFrame(step);
+        }
+    });
+    return run({ count: 1, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>

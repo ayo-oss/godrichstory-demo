@@ -1,0 +1,400 @@
+// CbRowHoverTrack - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./CbRowHoverTrack.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+// ── 528 코드 블록 공통 — 무대 좌표·문구 틀·요소 조립·토크나이저 엔진 (527 core.ts 계승)
+const W = 480;
+const CX0 = 8;
+const CW = 432;
+function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+// 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+function fill(s: string, ...v: string[]): string {
+    const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+    let o = s;
+    for (let i = 0; i < keys.length; i += 1) {
+        o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+    }
+    return o;
+}
+function f0(v: number): string { return String(Math.round(v)); }
+function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+// ── 무대 요소
+const rootEl = root;
+const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+    return function (): void { /* 무대가 없으면 할 일이 없다 */ };
+}
+const innerEl: HTMLElement = innerQ;
+const sceneEl: HTMLElement = sceneQ;
+const chartEl: HTMLElement = chartQ;
+const probeEl: HTMLElement = probeQ;
+const padEl: HTMLElement = padQ;
+const pauseBtn: HTMLButtonElement = pauseQ;
+const statusP: HTMLElement = statusQ;
+const readA: HTMLElement = readAQ;
+const readB: HTMLElement = readBQ;
+const doneP: HTMLElement = doneQ;
+const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+    const e = document.createElement(tag);
+    if (cls) { e.className = cx(cls); }
+    parent.appendChild(e);
+    return e;
+}
+function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+    e.style.left = x + 'px';
+    e.style.top = y + 'px';
+    if (w > 0) { e.style.width = w + 'px'; }
+    if (h > 0) { e.style.height = h + 'px'; }
+}
+const scWrap = make('div', 'scwrap', sceneEl);
+const clkEl = make('i', 'clk', sceneEl);
+function clearAll(): void {
+    // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+    scWrap.textContent = '';
+    chartEl.textContent = '';
+    probeEl.textContent = '';
+}
+// 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+function seedHash(i: number, seed: number): number {
+    const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+    return x - Math.floor(x);
+}
+// ── 엔진이 푼 시간 읽기 — getAnimations() 값
+function animsIn(host: HTMLElement): Animation[] {
+    return host.getAnimations({ subtree: true });
+}
+interface Seg { s: number; e: number; k: number; }
+function spanOf(d: number, dur: number): Seg { return { s: d, e: d + dur, k: 0 }; }
+// ── 아래 차트 상자 그리기 — 시연 구간을 막대로
+function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+    const e = make('i', cls, chartEl);
+    put(e, x, y, w, h);
+    return e;
+}
+function drawRows(segs: Seg[], max: number): HTMLElement[] {
+    const n = segs.length;
+    const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+    const out: HTMLElement[] = [];
+    for (let i = 0; i < n; i += 1) {
+        const sg = segs[i];
+        const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+        const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+        out.push(bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h));
+    }
+    return out;
+}
+function axis(max: number): void {
+    const a = make('b', 'ax', chartEl);
+    a.textContent = '0';
+    put(a, CX0, 40, 0, 0);
+    const b = make('b', 'ax ax--r', chartEl);
+    b.textContent = f0(max) + 'ms';
+    put(b, CX0 + CW - 60, 40, 60, 0);
+}
+let headEl: HTMLElement | null = null;
+function setReads(a: string, b: string): void {
+    readA.textContent = a;
+    readB.textContent = b;
+}
+// ── 코드 블록 엔진 — 이 편의 주역 계산을 9종이 공유한다
+// digitCount — 줄 번호 거터의 폭을 정하는 자릿수 산술. 98줄 → 2자리, 100줄 → 3자리.
+//   9줄에서 99줄로 넘어가도 코드 시작 열이 한 픽셀 안 움직이려면 폭을 '최대 자릿수'로 미리 고정한다
+function digitCount(n: number): number {
+    let d = 1;
+    let v = n;
+    while (v >= 10) { v = Math.floor(v / 10); d += 1; }
+    return d;
+}
+// fmt2 — 줄 번호를 오른쪽 정렬(rightAlign)로 채운다(2 → ' 2'). 거터 안에서 모든 번호의 끝열이 같아진다.
+//   실코드 식별자 fmt2 가 곧 rightAlign 동작이다 — 별도 플래그 없이 fmt2(n, ch) 사용
+function fmt2(n: number, ch: number): string {
+    let s = String(n);
+    while (s.length < ch) { s = ' ' + s; }
+    return s;
+}
+const rightAlign = fmt2; // rightAlign 별명 — 줄 번호 정렬 계산의 이름 (BK9 칩)
+// ── 토크나이저 — 데모 안 문자열 상수만 하이라이트한다(외부 fetch·CDN 하이라이터 금지)
+// TOKEN_KIND 4종: 0 keyword · 1 string · 2 number · 3 comment. 정규식 순서가 곧 우선순위다 —
+//   주석 안의 '문자열' 이 문자열 색으로 칠해지지 않으려면 comment 규칙이 먼저 범위를 잡아야 한다
+const TOKEN_KIND = 4; // 토큰 종류 수(변형: 7 — 함수·속성·연산자까지 각각 색을 준다)
+// spanMap — 토큰 범위(span)에 종류(k)를 대응시키는 맵. tokenize 결과의 각 Tok 이 곧 spanMap
+//   의 한 항목이고 TOKEN_KIND 색이 이 대읩을 따라 칠해진다
+interface Tok { s: number; e: number; k: number; }
+function spanMap(tok: Tok): { span: [number, number]; kind: number; } {
+    return { span: [tok.s, tok.e], kind: tok.k };
+}
+const RE_COMMENT = /(^|\s)\/\/[^\n]*/y;
+const RE_STR = /'[^'\n]*'|"[^"\n]*"/y;
+const RE_NUM = /\b\d+(\.\d+)?\b/y;
+const RE_KW = /\b(const|let|function|return|if|else|for|while|import|from|export|var|new|class)\b/y;
+// tokenize — 소스 한 줄을 토큰 범위(Tok[])로 쪼갠다. 문장 부호 하나가 어느 토큰에 속하는지
+//   경계(boundary)를 정하는 이 계산이 하이라이트의 정확함을 결정한다
+function tokenize(line: string): Tok[] {
+    const out: Tok[] = [];
+    const rules: Array<[RegExp, number]> = [[RE_COMMENT, 3], [RE_STR, 1], [RE_KW, 0], [RE_NUM, 2]];
+    let i = 0;
+    while (i < line.length) {
+        let hit = false;
+        for (const r of rules) {
+            r[0].lastIndex = i;
+            const m = r[0].exec(line);
+            if (m && m.index === i && m[0].length > 0) {
+                out.push({ s: i, e: i + m[0].length, k: r[1] });
+                i += m[0].length;
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) { i += 1; }
+    }
+    return out;
+}
+// ── 코드 창 조립 — .win(.bar(.lights 3점 + .fname) + .code(.gutter + .lines))
+interface Win { el: HTMLElement; bar: HTMLElement; fname: HTMLElement; lights: HTMLElement; code: HTMLElement; gutter: HTMLElement; lines: HTMLElement; }
+function mkWin(): Win {
+    const el = make('div', 'win', scWrap);
+    const b = make('div', 'cb-bar', el);
+    const lights = make('i', 'cb-lights', b);
+    for (let k = 0; k < 3; k += 1) { make('i', 'cb-dot', lights); }
+    const fname = make('b', 'cb-fname', b);
+    fname.textContent = 'main.scss';
+    const code = make('div', 'cb-code', el);
+    const gutter = make('div', 'cb-gutter', code);
+    const lines = make('div', 'cb-lines', code);
+    return { el: el, bar: b, fname: fname, lights: lights, code: code, gutter: gutter, lines: lines };
+}
+// addLine — 줄 하나를 code(토큰 하이라이트 포함)와 gutter(번호)에 같이 넣는다.
+//   gEl 을 돌려주는 이유는 07(행 호버)이 번호까지 같이 밝히기 때문(gutterSync)
+function addLine(win: Win, no: number, ch: number, text: string): { line: HTMLElement; gEl: HTMLElement; } {
+    const gEl = make('b', 'cb-no', win.gutter);
+    gEl.textContent = rightAlign(no, ch);
+    const line = make('div', 'cb-ln', win.lines);
+    const toks = tokenize(text);
+    let pos = 0;
+    for (let i = 0; i < toks.length; i += 1) {
+        const tk = spanMap(toks[i]);
+        if (tk.span[0] > pos) { line.appendChild(document.createTextNode(text.slice(pos, tk.span[0]))); }
+        const sp = make('span', 'tk tk' + tk.kind, line);
+        sp.textContent = text.slice(tk.span[0], tk.span[1]);
+        pos = tk.span[1];
+    }
+    if (pos < text.length) { line.appendChild(document.createTextNode(text.slice(pos))); }
+    return { line: line, gEl: gEl };
+}
+// ── 실행 퀄: 프리셋 하나가 한 주기. 시계 애니메이션이 끝나면 다음 프리셋으로 다시 시작한다
+let piNow = 0; // 현재 프리셋 번호 — frame 안에서도 읽는다(run 의 pi 를 노출)
+interface Cfg {
+    count: number;
+    build: (i: number) => number;
+    frame: (t: number) => string;
+    head?: boolean;
+}
+function run(cfg: Cfg): () => void {
+    const off = new AbortController();
+    let pi = 0;
+    let cycle = 2000;
+    let paused = false;
+    let raf = 0;
+    let clock: Animation | null = null;
+    let lastStatus = '';
+    function fit(): void {
+        const k = rootEl.clientWidth / W;
+        innerEl.style.transform = 'scale(' + k + ')';
+    }
+    function rebuild(): void {
+        clearAll();
+        piNow = pi;
+        cycle = Math.max(2000, cfg.build(pi));
+        headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+        clkEl.style.animationDuration = f0(cycle) + 'ms';
+        const all = animsIn(sceneEl);
+        clock = null;
+        for (let i = 0; i < all.length; i += 1) {
+            const an = all[i] as CSSAnimation;
+            if (an.animationName && an.effect && (an.effect as KeyframeEffect).target === clkEl) { clock = an; }
+        }
+    }
+    function restart(): void {
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            all[i].currentTime = 0;
+            if (paused) { all[i].pause(); } else { all[i].play(); }
+        }
+    }
+    function tick(): void {
+        const ct = clock ? Number(clock.currentTime) : 0;
+        const t = isFinite(ct) ? ct : 0;
+        if (headEl) { headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)'; }
+        const s = cfg.frame(t);
+        if (s !== lastStatus) { statusP.textContent = s; lastStatus = s; }
+        if (!paused && clock && t >= cycle - 1) {
+            pi = (pi + 1) % cfg.count;
+            rebuild();
+            restart();
+        }
+        raf = requestAnimationFrame(tick);
+    }
+    function setPaused(p: boolean): void {
+        paused = p;
+        pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            if (p) { all[i].pause(); } else { all[i].play(); }
+        }
+        doneP.textContent = readB.textContent;
+    }
+    function shift(d: number): void {
+        pi = (pi + d + cfg.count) % cfg.count;
+        rebuild();
+        restart();
+        doneP.textContent = readB.textContent;
+    }
+    pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+    padEl.addEventListener('keydown', function (ev: KeyboardEvent) {
+        if (ev.target === pauseBtn) { return; }
+        if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); setPaused(!paused); }
+        else if (ev.key === 'r' || ev.key === 'R') { shift(-pi); }
+        else if (ev.key === 'ArrowRight') { ev.preventDefault(); shift(1); }
+        else if (ev.key === 'ArrowLeft') { ev.preventDefault(); shift(-1); }
+    }, { signal: off.signal });
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) { setPaused(true); }
+    }, { signal: off.signal });
+    window.addEventListener('resize', fit, { signal: off.signal });
+    fit();
+    rebuild();
+    if (reduced) {
+        // 움직임 줄이기 — 루프를 돌리지 않고 완료 상태 한 장(frame(1e9) 1회) + 문구(393 규칙)
+        cfg.frame(1e9);
+        statusP.textContent = readB.textContent;
+        doneP.textContent = readB.textContent;
+    } else {
+        restart();
+        raf = requestAnimationFrame(tick);
+    }
+    return function (): void {
+        cancelAnimationFrame(raf);
+        off.abort();
+    };
+}
+    // 07 행 호버 — 포인터 y 를 행 높이(24px)로 나눈 몫(indexMath)으로 몇 번째 줄인지 계산해
+    //    배경을 그 줄로 옮긴다. 거터의 번호까지 같이 밝아져(gutterSync) 짚는 줄이 번호와
+    //    코드에서 동시에 읽힌다. 마우스는 결정적 시퀀스로 주입한다(주입 시연)
+    const ROW_H = 24;      // 행 높이(px) — indexMath 의 제수(산술)
+    const N07 = 6;         // 보이는 행 수
+    let w07: Win | null = null;
+    let hi07: HTMLElement | null = null;
+    let ptr07: HTMLElement | null = null;
+    let nos07: HTMLElement[] = [];
+    let idx07 = 0;
+    let y07 = 0;
+    function frame(t: number): string {
+        if (!w07 || !hi07 || !ptr07) { return ''; }
+        // 주입 경로 — 포인터 y 가 사인파로 오르내린다(결정적)
+        y07 = 40 + (1 - Math.cos(Math.PI * 2 * clamp((t - 200) / 1600, 0, 1))) * 0.5 * (N07 - 1) * ROW_H;
+        // indexMath — floor(y / ROW_H) 로 행 인덱스를 계산한다(0 기반)
+        idx07 = Math.floor(y07 / ROW_H);
+        const top = idx07 * ROW_H;
+        hi07.style.transform = 'translateY(' + f0(top) + 'px)';
+        ptr07.style.transform = 'translateY(' + f0(y07 - 5) + 'px)';
+        for (let k = 0; k < nos07.length; k += 1) {
+            nos07[k].style.color = k === idx07 ? '#17141a' : '';
+            nos07[k].style.fontWeight = k === idx07 ? '700' : '';
+        }
+        return fill('y {a}px ÷ {b}px = 행 {c} · 배경 top {d}px',
+            f0(y07), f0(ROW_H), f0(idx07 + 1), f0(top));
+    }
+    function build(i: number): number {
+        w07 = mkWin();
+        put(w07.el, 24, 14, 400, 158);
+        w07.fname.textContent = 'hover-read.ts';
+        nos07 = [];
+        const src = [
+            'const rowHeight = 24; // divisor',
+            'let index = 0;',
+            'const y = event.offsetY;',
+            'index = Math.floor(y / rowHeight);',
+            "highlight(index); // gutter sync",
+            'return index;'
+        ];
+        const ch = digitCount(src.length);
+        for (let k = 0; k < src.length; k += 1) {
+            const r = addLine(w07, k + 1, ch, src[k]);
+            nos07.push(r.gEl);
+        }
+        hi07 = make('i', 'rowhi', w07.lines);
+        hi07.style.top = '0';
+        hi07.style.height = ROW_H + 'px';
+        ptr07 = make('i', 'vptr', scWrap);
+        put(ptr07, 400, 30, 10, 10);
+        drawRows([spanOf(200, 1600)], 2000);
+        axis(2000);
+        setReads(
+            fill('rowHeight {a}px · indexMath = floor(y ÷ {a}) · gutterSync — 번호와 코드가 같이 밝아진다', f0(ROW_H)),
+            '24px 산술 — 포인터가 줄 사이 어디에 있어도 몫이 줄 번호를 정한다'
+        );
+        doneP.textContent = '';
+        return 2000;
+    }
+    // 실제 포인터 경로 — 사람의 mousemove 도 같은 indexMath 를 탄다
+    sceneEl.addEventListener('pointermove', function (ev: PointerEvent) {
+        if (!w07 || !hi07 || !ptr07) { return; }
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        const y = (ev.clientY - r.top) / k - 40; // 무대 좌표 → 코드 영역 상대
+        if (y < 0 || y > N07 * ROW_H) { return; }
+        idx07 = Math.floor(y / ROW_H);
+        hi07.style.transform = 'translateY(' + f0(idx07 * ROW_H) + 'px)';
+        for (let j = 0; j < nos07.length; j += 1) {
+            nos07[j].style.color = j === idx07 ? '#17141a' : '';
+            nos07[j].style.fontWeight = j === idx07 ? '700' : '';
+        }
+    });
+    return run({ count: 1, build: build, frame: frame });
+
+}
+
+export default function CbRowHoverTrack() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'포인터의 세로 좌표를 행 높이로 나눈 몫으로 줄을 계산해 배경이 그 줄로 옮겨가고 거터의 번호까지 같이 밝아지는 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}

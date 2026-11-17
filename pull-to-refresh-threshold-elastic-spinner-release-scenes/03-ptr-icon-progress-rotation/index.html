@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>당김 거리를 회전 각도에 매핑하고 임계에서 스냅하는 진행 아이콘 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="당김 거리가 0 부터 360 도 회전각으로 정규화되어 링을 채우다가 임계 틱에 각도와 색이 한 번에 고정되는 장면"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">장면 준비</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">일시정지</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    // ── 526 당겨서 새로고침 공통 — 무대 좌표·문구 틀·요소 조립·ptr 드래그 엔진 (524 core.ts 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    // 문구 틀의 {a}·{b}·{c} 자리에 값을 끼운다 — 화면 문구는 늘 틀 한 줄이고 로케일 사전이 통째로 바꾼다
+    function fill(s, ...v) {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    // ── 무대 요소
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 장면 안 요소를 만든다. 클래스는 cx 를 거쳐 CSS 모듈 이름으로 바뀐다
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        // clkEl(시계)은 sceneEl 에 직접 붙어 있으므로 래퍼만 비운다 — 시계를 지우면 렌더 시계가 죽는다
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    // 정점 오프셋 — 시드 해시(재생해도 같은 값). Math.random 을 쓰지 않는다
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    // ── 엔진이 푼 시간 읽기 — getAnimations() 값
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur) { return { s: d, e: d + dur, k: 0 }; }
+    // ── 아래 차트 상자 그리기 — 당김(파랑 k0)·실행(k1)·여파/스프링(k2)·자동닫힘(k0)
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            out.push(bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h));
+        }
+        return out;
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    // ── ptr 드래그 엔진 — 이 편의 주역 계산을 9종이 공유한다
+    // ptrRoute(t) — 주입 시연용 결정적 당김 원시(raw) 좌표 시퀀스. 프리셋:
+    //   base   진폭 130 — 잠자리(0~250) → 당김(250~1250, sin 반파) → armed 유지(1250~1750) → 놓기(1750) → 여파
+    //   under  진폭 55  — 임계(70) 밑에서 놓아 미달 복귀 스프링이 주인공 (04)
+    //   over   진폭 170 — 깊은 당김. 포화 곡선 대비가 크게 보인다 (02)
+    // 좌표는 매 틱 연속 이동(424 규칙) · 첫 변화 t>=200ms(418 규칙)
+    function ptrRoute(t, amp) {
+        if (t < 250) {
+            return 0;
+        }
+        if (t < 1250) {
+            return amp * Math.sin(Math.PI * (t - 250) / 1000);
+        }
+        if (t < 1750) {
+            return amp;
+        }
+        return 0;
+    }
+    // 변환 — raw(px) 를 표시 오프셋(px) 으로. 저항 = 발거리^k 감쇠:
+    //   RESIST_START 아래는 1:1, 위에서는 진행비의 0.35 제곱에 ELASTIC_SATURATE 를 곱해 포화시킨다
+    function elasticMap(raw, resPx, sat, k) {
+        if (raw <= resPx) {
+            return raw;
+        }
+        const prog = 1 - resPx / Math.max(raw, 1);
+        return resPx + (raw - resPx) * sat * Math.pow(clamp(prog, 0.05, 1), k);
+    }
+    function springStep(sp, stiff, damp, dtms) {
+        const dt = dtms / 1000;
+        sp.v += (-stiff * sp.x - damp * sp.v) * dt;
+        sp.x += sp.v * dt;
+    }
+    // 스프링 시뮬레이션(프로브 표기용 — 실제 화면은 rAF 적분): 바운스 = |v| 가 방향을 바꾼 횟수
+    function springSim(x0, stiff, damp) {
+        const sp = { x: x0, v: 0 };
+        let t = 0;
+        let bounces = 0;
+        let lastV = 0;
+        let settledAt = -1;
+        while (t < 2000) {
+            springStep(sp, stiff, damp, 1000 / 60);
+            t += 1000 / 60;
+            if (lastV !== 0 && sp.v * lastV < 0) {
+                bounces += 1;
+            }
+            if (sp.v !== 0) {
+                lastV = sp.v;
+            }
+            if (settledAt < 0 && Math.abs(sp.x) < 0.5 && Math.abs(sp.v) < 4) {
+                settledAt = t;
+                break;
+            }
+        }
+        return { settleMs: settledAt < 0 ? t : settledAt, bounces: bounces };
+    }
+    // ── 포인터 이벤트 좌표를 무대(480x300) 좌표로 — 실제 손 조작 경로 공용
+    function stagePoint(e) {
+        const r = sceneEl.getBoundingClientRect();
+        const k = (rootEl.clientWidth / W) || 1;
+        return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 움직임 줄이기 — 루프를 돌리지 않고 완료 상태 한 장(frame(1e9) 1회) + 문구(393 규칙)
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    // 03 진행 아이콘 회전 — 당김 거리를 0~360 도로 정귨화해 회전각에 대입하고, 임계를 넘는 틱에
+    //    각도·색을 고정 상태로 스냅한다(ARM_SNAP_MS 트랜지션). normalize: raw/임계 를 0~1 로
+    const FIRE_THRESHOLD_PX = 70;
+    const ROT_MAP_MAX_DEG = 360; // 정귨화 상한 각도
+    const ARM_SNAP_MS = 160; // armed 스냅 트랜지션(scss AUTOCLOSE_EASE 와 같은 축)
+    const AMP03 = 130;
+    const p03 = { raw: 0, rot: 0, armed: false, run: false };
+    let ring03 = null;
+    let ndl03 = null;
+    let ringT03 = null;
+    let arm03 = null;
+    let armT03 = null;
+    let bar03 = null;
+    let barT03 = null;
+    let ringW03 = 0;
+    function build(_i) {
+        for (let k = 1; k <= 3; k += 1) {
+            const tk = make('i', 'tck tck--h', scWrap);
+            put(tk, 0, FIRE_THRESHOLD_PX * k / 3 - 1, 448, 2);
+        }
+        ring03 = make('i', 'ring3', scWrap);
+        put(ring03, 188, 78, 78, 78);
+        ringW03 = 78;
+        ringT03 = make('b', 'ov ovs', sceneEl);
+        put(ringT03, 276, 92, 130, 12);
+        ndl03 = make('i', 'ring3__fill', ring03);
+        ndl03.style.height = '100%';
+        ndl03.style.width = '100%';
+        arm03 = make('i', 'armed', scWrap);
+        put(arm03, 26, 50, 110, 20);
+        armT03 = make('b', 'ov ovs', sceneEl);
+        put(armT03, 26, 30, 120, 12);
+        for (let k = 0; k < 2; k += 1) {
+            const row = make('i', 'row row--mini', scWrap);
+            put(row, 12, 128 + k * 14, 170, 10);
+        }
+        // 원시 당김 추적 막대 — 각도와 같은 normalize 값으로 채워진다(넓은 면 전파)
+        bar03 = make('i', 'fillbar', scWrap);
+        put(bar03, 300, 24, 0, 12);
+        barT03 = make('b', 'ov ovs', sceneEl);
+        put(barT03, 300, 8, 130, 12);
+        drawRows([spanOf(250, 1000), spanOf(1250, 500), spanOf(1750, 250)], 2000);
+        axis(2000);
+        setReads(fill('ROT_MAP_MAX_DEG {a} · ARM_SNAP_MS {b}ms · 각도 = normalize(raw/{c})·{a}도', f0(ROT_MAP_MAX_DEG), f0(ARM_SNAP_MS), f0(FIRE_THRESHOLD_PX)), 'normalize 함수가 거리를 0~1 로 묶고 임계 틱에 각도·색이 한 번에 고정된다');
+        return 2000;
+    }
+    function apply03(raw) {
+        p03.raw = Math.max(0, raw);
+        const n = clamp(p03.raw / FIRE_THRESHOLD_PX, 0, 1); // normalize — 0~1 정귨화
+        p03.rot = n * ROT_MAP_MAX_DEG;
+        p03.armed = n >= 1;
+        if (ndl03) {
+            ndl03.style.background = 'conic-gradient(' + f0(p03.rot) + 'deg, ' + f0(p03.rot) + 'deg, rgba(255,255,255,0) 0deg)';
+        }
+        void ringW03;
+        if (arm03) {
+            arm03.className = cx(p03.armed ? 'armed is-on' : 'armed');
+            arm03.style.transition = 'transform ' + ARM_SNAP_MS + 'ms, background-color ' + ARM_SNAP_MS + 'ms';
+            arm03.style.transform = p03.armed ? 'translateX(4px)' : 'translateX(0)';
+        }
+        if (armT03) {
+            armT03.textContent = fill('임계 통과 {a}', p03.armed ? '스냅' : '대기');
+        }
+        if (ringT03) {
+            ringT03.textContent = fill('각도 {a}도', f0(p03.rot));
+        }
+        if (bar03) {
+            bar03.style.width = f1(120 * n) + 'px';
+        }
+        if (barT03) {
+            barT03.textContent = fill('진행 {a}%', f0(n * 100));
+        }
+    }
+    function frame(t) {
+        const raw = wave03(t);
+        apply03(raw);
+        if (t >= 1750 && !p03.run) {
+            p03.run = true;
+        }
+        if (t < 1750) {
+            p03.run = false;
+        }
+        return fill('지금 {a} · {b}도 · {c}', p03.armed ? '발사 준비' : '회전 중', f0(p03.rot), p03.armed ? '스냅 고정' : '정규화 진행');
+    }
+    // 시연 파형 — 임계 70 을 오르고 내려 armed 스냅이 2회 관측되게 한다(면적·프레임 확보)
+    function wave03(t) {
+        if (t < 250) {
+            return 0;
+        }
+        if (t < 700) {
+            return 110 * Math.sin(Math.PI * (t - 250) / 450);
+        } // 1차 상승 — 70 통과
+        if (t < 900) {
+            return 110;
+        }
+        if (t < 1150) {
+            return 110 * Math.cos(Math.PI * (t - 900) / 500);
+        } // 하강 — 스냅 해제
+        if (t < 1450) {
+            return 110 * Math.sin(Math.PI * (t - 1150) / 600);
+        } // 2차 상승 — 재통과
+        return 110;
+    }
+    // 실제 입력 경로 — pointerdown/move/up 이 같은 apply03 을 탄다
+    let down03 = false;
+    let base03 = 0;
+    sceneEl.addEventListener('pointerdown', function (ev) {
+        down03 = true;
+        base03 = stagePoint(ev).y - 40;
+        ev.preventDefault();
+    });
+    sceneEl.addEventListener('pointermove', function (ev) {
+        if (down03) {
+            apply03(stagePoint(ev).y - 40 - base03);
+        }
+    });
+    sceneEl.addEventListener('pointerup', function () { down03 = false; });
+    sceneEl.addEventListener('pointercancel', function () { down03 = false; });
+    return run({ count: 1, build: build, frame: frame });
+}
+})();
+</script>
+</body>
+</html>
