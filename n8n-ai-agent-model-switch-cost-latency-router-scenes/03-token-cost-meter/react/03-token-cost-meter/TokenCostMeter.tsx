@@ -1,0 +1,314 @@
+// TokenCostMeter - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./TokenCostMeter.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => (styles as Record<string, string>)[n] ?? n).join(" ");
+
+function main(root: HTMLElement): (() => void) | undefined {
+// ── 534 공통 엔진 — 533 run() 시계 계승 (WAAPI 시계읽기·pause·rebuild·reduced 분기)
+const W = 480;
+const CX0 = 8;
+const CW = 432;
+function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+function fill(s: string, ...rest: any[]): string {
+    const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+    const v = [];
+    for (let i = 1; i < arguments.length; i += 1) { v.push(String(arguments[i])); }
+    let o = s;
+    for (let i = 0; i < keys.length; i += 1) {
+        o = o.split(keys[i]).join(i < v.length ? v[i] : '');
+    }
+    return o;
+}
+function f0(v: number): string { return String(Math.round(v)); }
+function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+const rootEl: HTMLElement = root;
+const innerEl = rootEl.querySelector('[data-role="inner"]') as HTMLElement;
+const sceneEl = rootEl.querySelector('[data-role="scene"]') as HTMLElement;
+const chartEl = rootEl.querySelector('[data-role="chart"]') as HTMLElement;
+const probeEl = rootEl.querySelector('[data-role="probe"]') as HTMLElement;
+const padEl = rootEl.querySelector('[data-role="pad"]') as HTMLElement;
+const statusP = rootEl.querySelector('[data-role="status"]') as HTMLElement;
+const readA = rootEl.querySelector('[data-role="reada"]') as HTMLElement;
+const readB = rootEl.querySelector('[data-role="readb"]') as HTMLElement;
+const doneP = rootEl.querySelector('[data-role="done"]') as HTMLElement;
+const pauseBtn = rootEl.querySelector('[data-role="pause"]') as HTMLElement;
+const reduced: boolean = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+    const e = document.createElement(tag);
+    if (cls) { e.className = cx(cls); }
+    parent.appendChild(e);
+    return e;
+}
+function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+    e.style.left = x + 'px';
+    e.style.top = y + 'px';
+    if (w > 0) { e.style.width = w + 'px'; }
+    if (h > 0) { e.style.height = h + 'px'; }
+}
+const sweepEl = make('i', 'sweep', sceneEl);
+const scWrap = make('div', 'scwrap', sceneEl);
+const clkEl = make('i', 'clk', sceneEl);
+function clearAll(): void {
+    scWrap.textContent = '';
+    chartEl.textContent = '';
+    probeEl.textContent = '';
+}
+function seedHash(i: number, seed: number): number {
+    const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+    return x - Math.floor(x);
+}
+function animsIn(host: HTMLElement): any[] { return host.getAnimations({ subtree: true }) as any[]; }
+function spanOf(d: number, dur: number): { s: number; e: number; k: number } { return { s: d, e: d + dur, k: 0 }; }
+function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+    const e = make('i', cls, chartEl);
+    put(e, x, y, w, h);
+    return e;
+}
+function drawRows(segs: any[], max: number): void {
+    const n = segs.length;
+    const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+    for (let i = 0; i < n; i += 1) {
+        const sg = segs[i];
+        const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+        const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+        bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+    }
+}
+function axis(max: number): void {
+    const a = make('b', 'ax', chartEl);
+    a.textContent = '0';
+    put(a, CX0, 40, 0, 0);
+    const b = make('b', 'ax ax--r', chartEl);
+    b.textContent = f0(max) + 'ms';
+    put(b, CX0 + CW - 60, 40, 60, 0);
+}
+let headEl: any = null;
+function setReads(a: string, ...bs: (string | number)[]): void {
+    readA.textContent = a;
+    readB.textContent = bs.join(' ');
+}
+function demoT(t: number): number { return t % 2000; }
+let piNow: any = 0;
+function run(cfg: any): () => void {
+    const off = new AbortController();
+    let pi = 0;
+    let cycle = 2000;
+    let paused = false;
+    let raf = 0;
+    let clock: any = null;
+    let lastStatus = '';
+    function fit() {
+        const k = rootEl.clientWidth / W;
+        innerEl.style.transform = 'scale(' + k + ')';
+    }
+    function rebuild() {
+        clearAll();
+        piNow = pi;
+        cycle = Math.max(2000, cfg.build(pi));
+        headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+        clkEl.style.animationDuration = f0(cycle) + 'ms';
+        const all = animsIn(sceneEl);
+        clock = null;
+        for (let i = 0; i < all.length; i += 1) {
+            const an = all[i];
+            if (an.animationName && an.effect && an.effect.target === clkEl) {
+                clock = an;
+            }
+        }
+    }
+    function restart() {
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            all[i].currentTime = 0;
+            if (paused) { all[i].pause(); }
+            else { all[i].play(); }
+        }
+    }
+    function tick() {
+        const ct = clock ? Number(clock.currentTime) : 0;
+        const t = isFinite(ct) ? ct : 0;
+        if (headEl) {
+            headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+        }
+        sweepEl.style.setProperty('--sw', String(Math.round(t / cycle * 100)));
+        const s = cfg.frame(t);
+        if (s !== lastStatus) {
+            statusP.textContent = s;
+            lastStatus = s;
+        }
+        if (!paused && clock && t >= cycle - 1) {
+            pi = (pi + 1) % cfg.count;
+            rebuild();
+            restart();
+        }
+        raf = requestAnimationFrame(tick);
+    }
+    function setPaused(p: boolean): void {
+        paused = p;
+        pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+        const all = animsIn(sceneEl);
+        for (let i = 0; i < all.length; i += 1) {
+            if (p) { all[i].pause(); }
+            else { all[i].play(); }
+        }
+        doneP.textContent = readB.textContent;
+    }
+    function shift(d: number): void {
+        pi = (pi + d + cfg.count) % cfg.count;
+        rebuild();
+        restart();
+        doneP.textContent = readB.textContent;
+    }
+    pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+    padEl.addEventListener('keydown', function (ev) {
+        if (ev.target === pauseBtn) { return; }
+        if (ev.key === ' ' || ev.key === 'Enter') {
+            ev.preventDefault();
+            setPaused(!paused);
+        }
+        else if (ev.key === 'r' || ev.key === 'R') { shift(-pi); }
+        else if (ev.key === 'ArrowRight') { ev.preventDefault(); shift(1); }
+        else if (ev.key === 'ArrowLeft') { ev.preventDefault(); shift(-1); }
+    }, { signal: off.signal });
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) { setPaused(true); }
+    }, { signal: off.signal });
+    window.addEventListener('resize', fit, { signal: off.signal });
+    fit();
+    rebuild();
+    if (reduced) {
+        cfg.frame(1e9);
+        statusP.textContent = readB.textContent;
+        doneP.textContent = readB.textContent;
+    }
+    else {
+        restart();
+        raf = requestAnimationFrame(tick);
+    }
+    return function () {
+        cancelAnimationFrame(raf);
+        off.abort();
+    };
+}
+// 534-03 token-cost-meter — 호출마다 in/out 토큰이 차오르고 costSum = inTok*in단가 + outTok*out단가 가 갱신된다.
+// 월 예산 게이지 = 누적 costSum / MONTH_BUDGET — 80% 도달 시 눈금 색이 바뀐다(budgetLine).
+const IN_PRICE = 0.000003;   // 입력 토큰당 단가 ($/tok) = $3.00/M
+const OUT_PRICE = 0.000015;  // 출력 토큰당 단가 ($/tok) = $15.00/M
+const MONTH_BUDGET = 12.0;   // 월 예산 ($)
+const CALLS03: any[] = [
+    { inTok: 2400, outTok: 700 },
+    { inTok: 1300, outTok: 420 },
+    { inTok: 3600, outTok: 1050 },
+    { inTok: 900,  outTok: 300 }
+];
+const CALL_MS03 = 500;
+let inBar03: any = null;
+let outBar03: any = null;
+let costSum03: any = null;
+let gauge03: any = null;
+let gaugeFill03: any = null;
+let pctTxt03: any = null;
+let rows03: any = null;
+function callCost(c: any) {
+    // costSum — 호출 한 번의 비용 = 입력 토큰×입력 단가 + 출력 토큰×출력 단가
+    return c.inTok * IN_PRICE + c.outTok * OUT_PRICE;
+}
+function build(i: any) {
+    rows03 = [];
+    const mk = function (label: string): { row: HTMLElement; fill: HTMLElement } {
+        const r = make('div', 'trow', scWrap);
+        const b = make('b', 'trow__t', r);
+        b.textContent = label;
+        const bg = make('i', 'tbar tbar--bg', r);
+        const fl = make('i', 'tbar tbar--in', r);
+        return { row: r, fill: fl };
+    };
+    const r1 = mk('input tok');
+    put(r1.row, 12, 10, 180, 20);
+    const r2 = mk('output tok');
+    put(r2.row, 12, 36, 180, 20);
+    inBar03 = r1.fill;
+    outBar03 = r2.fill;
+    const cs = make('div', 'costbox', scWrap);
+    put(cs, 204, 10, 224, 46);
+    const cst = make('b', 'costbox__t', cs);
+    cst.textContent = 'costSum';
+    const csv = make('b', 'costbox__v', cs);
+    put(csv, 4, 20, 216, 0);
+    costSum03 = csv;
+    const eq = make('b', 'eq', scWrap);
+    eq.textContent = 'costSum = in*3.0 + out*15.0  ($/M)';
+    put(eq, 204, 58, 224, 0);
+    // 월 예산 게이지 (budgetLine)
+    const gw = make('div', 'bgauge', scWrap);
+    put(gw, 12, 78, 416, 30);
+    const gt = make('b', 'bgauge__t', gw);
+    gt.textContent = 'month budget $' + f1(MONTH_BUDGET);
+    const gf = make('i', 'bgauge__fill', gw);
+    put(gf, 4, 16, 0, 10);
+    const gticks = make('i', 'bgauge__ticks', gw);
+    put(gticks, 4, 16, 408, 10);
+    gaugeFill03 = gf;
+    const pt = make('b', 'bgauge__pct', gw);
+    put(pt, 4, 0, 60, 14);
+    pctTxt03 = pt;
+    const ov = make('b', 'ov ovs', sceneEl);
+    put(ov, 12, 140, 300, 12);
+    ov.textContent = '80% 도달 시 눈금이 경고 톤으로 — 게이지 % = 누적 costSum/예산';
+    const segs = [];
+    for (let k = 0; k < CALLS03.length; k += 1) { segs.push(spanOf(k * CALL_MS03, CALL_MS03 - 60)); }
+    drawRows(segs, 2000);
+    axis(2000);
+    setReads('costSum(inTok*in단가 + outTok*out단가) — 2초에 호출 4회 · 예산 {a}달러', f1(MONTH_BUDGET));
+    doneP.textContent = '';
+    return 2000;
+}
+function frame(t: any) {
+    const ci = Math.min(CALLS03.length - 1, Math.floor(demoT(t) / CALL_MS03));
+    const c = CALLS03[ci];
+    const ph = clamp((demoT(t) - ci * CALL_MS03) / (CALL_MS03 * 0.6), 0, 1);
+    inBar03.style.width = f0(clamp(c.inTok * ph / 4000, 0, 1) * 160) + 'px';
+    outBar03.style.width = f0(clamp(c.outTok * ph / 1200, 0, 1) * 160) + 'px';
+    // 누적 — 이번 호출까지의 costSum 합(부분 진행 ph 반영)
+    let sum = 0;
+    for (let k = 0; k < ci; k += 1) { sum += callCost(CALLS03[k]); }
+    sum += callCost(c) * ph;
+    costSum03.textContent = '$' + f2(sum);
+    const pct = clamp(sum / MONTH_BUDGET, 0, 1);
+    gaugeFill03.style.width = f0(pct * 408) + 'px';
+    gaugeFill03.className = cx('bgauge__fill' + (pct >= 0.8 ? ' bgauge__fill--warn' : ''));
+    pctTxt03.textContent = f0(pct * 100) + '%';
+    return 'call ' + f0(ci + 1) + ' — in ' + f0(c.inTok * ph) + ' · out ' + f0(c.outTok * ph) + ' tok · costSum $' + f2(sum);
+}
+
+    return run({ count: 1, build: build, frame: frame, head: true });
+}
+
+export default function TokenCostMeter() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!rootRef.current) return;
+    return main(rootRef.current) as () => void;
+  }, []);
+  return (
+    <div className={cx("ez is-demo")} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다음 호출로'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={''}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed={"false"}>{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}
