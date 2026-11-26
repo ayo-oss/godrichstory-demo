@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>複数行のバッチ — 単位と呼び出し回数 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="デモの舞台 — SpaceかEnterで一時停止、Rで最初から、左右の矢印キーで別の値へ">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="届いた行の束がバッチ単位に切られ、順にシートへ付くにつれバッチ番号と累積行数が一緒に増える場面"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">場面の準備</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+
+    // ── 539 공통 — n8n 구글 시트 적재 변형 엔진 (535 core 계승, 시트 줄·배치 뭉치 대신 아티클 골격)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function fill(s) {
+        const v = [];
+        for (let _i = 1; _i < arguments.length; _i += 1) {
+            v[_i - 1] = arguments[_i];
+        }
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur, k) { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function ema(prev, x, k) {
+        return prev + (x - prev) * k;
+    }
+    // cdfInvert — 역누적분포 샘플링. r^expo: expo>1 이면 짧은 쪽(마지막 줄)으로 몰린다
+    function cdfInvert(r, expo, lo, hi) {
+        return lo + (hi - lo) * Math.pow(r, expo);
+    }
+    function gammaSample(shape, scale, seed, i) {
+        const d = shape - 1 / 3;
+        const c = 1 / Math.sqrt(9 * d);
+        let guard = 0;
+        while (guard < 64) {
+            guard += 1;
+            const u1 = seedHash(i * 7 + guard, seed);
+            const u2 = seedHash(i * 13 + guard * 5, seed);
+            const rr = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-9))) * Math.cos(6.28318 * u2);
+            const v = Math.pow(1 + c * rr, 3);
+            if (v <= 0) { continue; }
+            const u3 = seedHash(i * 29 + guard * 11, seed);
+            if (Math.log(Math.max(u3, 1e-9)) < 0.5 * rr * rr + d - d * v + d * Math.log(v)) {
+                return d * v * scale;
+            }
+        }
+        return shape * scale;
+    }
+    // 스켈레톤 막대 — CSS 클래스 .skel 이 자리를 잡는다 (폭은 계산이 정한다)
+    function skelBar(parent, x, y, w, h, delay) {
+        const e = make('i', 'skel', parent);
+        put(e, x, y, Math.max(12, w), h);
+        e.style.animationDelay = (delay || 0) + 'ms';
+        return e;
+    }
+    function mkShim(host) {
+        return make('i', 'shim', host);
+    }
+    function shimAt(s, hostW, t, period) {
+        const k = (((t % period) + period) % period) / period;
+        s.style.transform = 'translateX(' + ((k * 1.6 - 0.3) * hostW) + 'px)';
+        s.style.opacity = k > 0.94 ? '0' : '1';
+    }
+    let piNow = 0;
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+
+
+    // ── 539-02 여러 줄 배치 — splitCalls 가 들어온 줄 수를 BATCH_N 으로 잘라 호출 수를 정하고,
+    //    각 배치가 차례로 시트에 붙는다. callCount = ceil(rows / BATCH_N),
+    //    누적 줄 = Σ 배치 크기, 마지막 배치 크기 = rows - (callCount-1)*BATCH_N
+    //    변형 1: BATCH_N 25 → 5
+    const BATCH_N = 25;       // 변형 1: 25 → 5
+    const ROWS_IN = [60, 74, 53];
+    const T_CUT0 = 200;       // 첫 변화는 150ms 뒤
+    const T_CUT = 160;        // 자르기 한 번
+    const T_CALL = 180;       // 배치 하나가 시트에 붙는 시간
+    const T_GAP = 40;
+    const T_LAST = 260;       // 마지막 배치 착지 뒤 시트가 눌렸다 복원되는 시간
+    const RH = 5;             // 시트 한 줄 두께
+    const IN_X = 12;
+    const IN_Y = 4;
+    const IN_W = 156;
+    const SH_X = 200;
+    const SH_Y = 4;
+    const SH_W = 240;
+    const GAP_H = 4;
+    let pileEls = [];         // 배치 뭉치 { el, size, b, start }
+    let sheetEl = null;
+    let bands = [];           // 시트 안 배치 경계 띠
+    let ovs02 = [];
+    let plan02 = { n: 0, calls: 0, sizes: [] };
+    let grainEl = null;
+    function splitCalls(n) {
+        const calls = Math.ceil(n / BATCH_N);
+        const sizes = [];
+        for (let b = 0; b < calls; b += 1) {
+            sizes.push(Math.min(BATCH_N, n - b * BATCH_N));
+        }
+        return { n: n, calls: calls, sizes: sizes };
+    }
+    function easeOut3(k) { return 1 - Math.pow(1 - clamp(k, 0, 1), 3); }
+    function build(i) {
+        const seeds = [3.1, 5.9, 8.3];
+        const n = ROWS_IN[i];
+        plan02 = splitCalls(n);
+        pileEls = [];
+        bands = [];
+        grainEl = make('i', 'grain', scWrap);
+        put(grainEl, 0, 0, 480, 156);
+        grainEl.style.backgroundPosition = f0(seedHash(3, seeds[i]) * 24) + 'px ' + f0(seedHash(5, seeds[i]) * 24) + 'px';
+        let cum = 0;
+        for (let b = 0; b < plan02.calls; b += 1) {
+            const size = plan02.sizes[b];
+            // 뭉치 하나 = 배치. 자르기 전에는 한 덩어리로 붙어 있고 frame 이 틈을 벌린다
+            const pile = make('div', 'pile', scWrap);
+            pile.setAttribute('data-b', f0(b));
+            put(pile, IN_X, IN_Y + cum * RH, IN_W, size * RH - 1);
+            for (let r = 0; r < size; r += 1) {
+                const line = make('i', 'line', pile);
+                put(line, 0, r * RH, 120 + seedHash(b * 31 + r, seeds[i]) * 36, RH - 1);
+            }
+            pileEls.push({ el: pile, size: size, b: b, start: cum });
+            cum += size;
+        }
+        // 시트 — 오른쪽 종이. 배치마다 '복제된 줄' 묶음(clip 으로 위에서부터 드러난다) 과 경계 띠를 미리 만든다
+        sheetEl = make('div', 'sheet', scWrap);
+        put(sheetEl, SH_X, SH_Y, SH_W, 0);
+        for (let b = 0; b < plan02.calls; b += 1) {
+            const p = pileEls[b];
+            const pack = make('div', 'pack', sheetEl);
+            put(pack, 0, p.start * RH, SH_W, p.size * RH);
+            for (let r = 0; r < p.size; r += 1) {
+                const line = make('i', 'line', pack);
+                put(line, 0, r * RH, 200 + seedHash(b * 31 + r, seeds[i]) * 36, RH - 1);
+            }
+            p.pack = pack;
+            const bd = make('i', 'band', sheetEl);
+            put(bd, 0, p.start * RH, SH_W, p.size * RH);
+            p.band = bd;
+            bands.push(bd);
+        }
+        ovs02 = [];
+        const o1 = make('b', 'ov ovs', sceneEl);
+        put(o1, SH_X, 136, 0, 0);
+        const o2 = make('b', 'ov ovs', sceneEl);
+        put(o2, SH_X, 136, 0, 0);
+        const o3 = make('b', 'ov ovs', sceneEl);
+        put(o3, SH_X, 136, 0, 0);
+        ovs02 = [o1, o2, o3];
+        const segs = [spanOf(0, T_CUT0, 0)];
+        const rawEnd = T_CUT0 + T_CUT + plan02.calls * (T_CALL + T_GAP) + T_LAST;
+        for (let b = 0; b < plan02.calls; b += 1) {
+            segs.push(spanOf((T_CUT0 + T_CUT + b * (T_CALL + T_GAP)) * 2000 / rawEnd, T_CALL * 2000 / rawEnd, b % 2 === 0 ? 1 : 2));
+        }
+        drawRows(segs, 2000);
+        axis(2000);
+        setReads(fill('複数行のバッチ(splitCalls) — BATCH_N {a} · batchIdx {b} · callCount', f0(BATCH_N), '0'),
+            'each batch sticks in turn and the cumulative rows rise with the batch index');
+        doneP.textContent = '';
+        return 2000;
+    }
+    function frame(t) {
+        if (pileEls.length === 0) {
+            return '';
+        }
+        // 시간 축소 — 전 서사(자르기+호출+착지)가 2000ms 안에 끝나도록 tEnd 로 정규화한다
+        const rawEnd = T_CUT0 + T_CUT + plan02.calls * (T_CALL + T_GAP) + T_LAST;
+        const tt = t * rawEnd / 2000;
+        // 자르기 — 컷이 줄 단위로 내려가며 뭉치가 배치 단위로 갈라진다.
+        // 컷이 지나간 배치 사이 틈만큼 아래 뭉치들이 내려간다 (계산: 지나간 배치 수 × GAP_H)
+        const cutRow = clamp(Math.floor((tt - T_CUT0) / T_CUT * plan02.n), 0, plan02.n);
+        const t0 = T_CUT0 + T_CUT;
+        let batchIdx = 0;
+        let cumRows = 0;
+        let sheetH = 0;
+        const calls = plan02.calls;
+        for (let b = 0; b < calls; b += 1) {
+            const p = pileEls[b];
+            const gapK = clamp((cutRow - p.start) / 2, 0, 1);
+            const dy = b * GAP_H * gapK;
+            const ts = t0 + b * (T_CALL + T_GAP);
+            const kk = clamp((tt - ts) / T_CALL, 0, 1);
+            const fly = easeOut3(kk);
+            // 출발(왼쪽 뭉치) → 도착(시트의 자기 구간). x 는 sin(fly·π)·24 로 돔형을 그려 굽고 폭(scaleX) 은 선형 확대 — 계산
+            const sx = IN_X;
+            const sy = IN_Y + p.start * RH + dy;
+            const ex = SH_X;
+            const ey = SH_Y + p.start * RH;
+            const px = sx + (ex - sx) * fly + Math.sin(fly * Math.PI) * 24;
+            p.el.style.transform = 'translate(' + f1(px - sx) + 'px,' + f1(ey + (sy - ey) * (1 - fly) - sy) + 'px) scaleX(' + f2(1 + (SH_W / IN_W - 1) * fly) + ')';
+            p.el.style.opacity = kk >= 1 ? '0' : '1';
+            // 시트 높이 — 부착이 끝난 배치는 전체, 붙는 중인 배치는 fly 만큼 (계산)
+            sheetH += p.size * RH * fly;
+            if (kk > 0) {
+                batchIdx = b;
+                cumRows = p.start + Math.round(p.size * fly);
+            }
+            // 시트 안 복제 줄 — 위에서부터 fly 만큼 드러난다 (clip-path inset 아래쪽이 줄어든다)
+            p.pack.style.clipPath = 'inset(0 0 ' + f1(p.size * RH * (1 - fly)) + 'px 0)';
+            // 경계 띠 — 부착 중 하이라이트(민트), 끝나면 옅은 라일락. 띠 높이도 fly 만큼
+            p.band.style.transform = 'scaleY(' + f2(fly) + ')';
+            p.band.setAttribute('data-on', kk >= 1 ? '1' : '0');
+        }
+        // 마지막 배치 착지 뒤 — 시트 전체가 살짝 늘어났다 복원 (스프링 감쇠: sin(ksπ)·(1-ks))
+        const tLast = t0 + (calls - 1) * (T_CALL + T_GAP) + T_CALL;
+        const ks = (tt - tLast) / T_LAST;
+        let stretch = 1;
+        if (ks > 0 && ks < 1) {
+            stretch = 1 + Math.sin(ks * Math.PI) * 0.06 * (1 - ks);
+        }
+        sheetEl.style.transform = 'scaleY(' + f2(stretch) + ')';
+        sheetEl.style.height = f1(sheetH) + 'px';
+        // 칩 가로 배치 — 읽기 쉬우라고 시트 아래 한 줄
+        const chips = ['BATCH_N ' + f0(BATCH_N), 'batchIdx ' + f0(batchIdx), 'callCount ' + f0(plan02.calls)];
+        const xs = [SH_X, SH_X + 88, SH_X + 184];
+        for (let c = 0; c < 3; c += 1) {
+            ovs02[c].textContent = chips[c];
+            ovs02[c].style.transform = 'translateX(' + f0(xs[c] - SH_X) + 'px)';
+        }
+        return fill('行{a}件 · バッチ{b}/{c} · 累積{d}行 · 最終バッチ{e}行',
+            f0(plan02.n), f0(batchIdx + 1), f0(calls), f0(cumRows), f0(plan02.sizes[calls - 1]));
+    }
+
+    return run({ count: 3, build: build, frame: frame });
+}
+})()
+
+</script>
+</body>
+</html>
