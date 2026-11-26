@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>送信キュー — 速度制限と再試行 — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="デモの舞台 — SpaceかEnterで一時停止、Rで最初から、左右の矢印キーで別のシードへ">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="ゼリーの粒がキューの管から一束ずつ出て送信の皿に着地し、失敗した粒は管の上へ跳ね上がってまた並ぶ場面"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">場面の準備</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">一時停止</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+
+    // ── 538 공통 — n8n 이메일 자동화 변형 엔진 (539 base 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function fill(s) {
+        const v = [];
+        for (let _i = 1; _i < arguments.length; _i += 1) {
+            v[_i - 1] = arguments[_i];
+        }
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur, k) { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl = null;
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function ema(prev, x, k) {
+        return prev + (x - prev) * k;
+    }
+    // cdfInvert — 역누적분포 샘플링. r^expo: expo>1 이면 짧은 쪽(마지막 줄)으로 몰린다
+    let piNow = 0;
+    function run(cfg) {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    function easeOut(k) { return 1 - Math.pow(1 - clamp(k, 0, 1), 3); }
+    function easeIn(k) { k = clamp(k, 0, 1); return k * k; }
+
+    // ── 538-03 발송 キュー — 큐 앞 PER_BATCH 개를 한 묶음으로 꺼내 보낸다. 실패 = seedHash(i, seed) < FAIL_P.
+    //    실패한 줄은 retry+1 로 큐 끝에 돌아가고, retry >= MAX_RETRY 이면 옆 접시로 굴러 떨어진다(dropped).
+    //    착지·튕김은 스프링 적분(변위·속도·감쇠 — rAF, CSS 트윈 아님) 이다. (변형 3: MAX_RETRY 1 → 3)
+    const MAX_RETRY = 1;      // 변형 3: 1 → 3 — 넘으면 끝내 버린다(dropped)
+    const PER_BATCH = 4;      // 한 묶음 크기 (데모 상수)
+    const FAIL_P = 0.3;       // 실패율 (데모 상수) — seedHash(i * 31 + retry, seed) < FAIL_P 이면 실패
+    const N3 = 8;             // 처음 큐에 선 줄 수 (데모 상수)
+    const T3_IN0 = 200;       // 첫 변화는 150ms 뒤
+    const T3_BATCH = 420;     // 한 묶음이 관을 빠져 나가 착지하기까지의 시간
+    const T3_GAP = 60;        // 묶음 사이 쉼
+    const T3_BOUNCE = 480;    // 실패한 알갱이가 관 위로 튀어 올라 다시 붙는 시간
+    const PIPE_X = 196;       // 세로 관 (알갱이들이 쌓여 있다)
+    const PIPE_W = 72;
+    const PIPE_TOP = 4;
+    const PIPE_BOT = 96;      // 관 아래구
+    const BALL = 22;
+    // simulate(seed) — 큐 전체를 끝까지 돌린다. 돌려주기 { rounds: [{ batch:[i], sent:[i], retried:[{i, retry}], dropped:[i] }], sent: n, dropped: n, retries: n }
+    //    실패 판정은 줄 번호·지금 재시도 수·시드로 정한다: seedHash(i * 31 + retry, seed) < FAIL_P — 같은 줄이라도
+    //    다음 시도에는 다른 주사위를 던진다. 그래서 MAX_RETRY 가 커지면 결국 통과하는 수가 늘고 끝내 버리는 수가 줄어든다.
+    //    브리프 의 「실패 = seedHash(i, seed)」 에서 retry 항을 더한 것 — 빼면 한 번 실패한 줄이 영영 실패해 변형 효과가 0 이 된다.
+    function simulate(seed) {
+        let queue = [];
+        for (let i = 0; i < N3; i += 1) {
+            queue.push({ i: i, retry: 0 });
+        }
+        const rounds = [];
+        let sent = 0;
+        let dropped = 0;
+        let retries = 0;
+        let guard = 0;
+        while (queue.length > 0 && guard < 40) {
+            guard += 1;
+            const batch = queue.splice(0, PER_BATCH);
+            const rd = { batch: [], sent: [], retried: [], dropped: [] };
+            const back = [];
+            for (let k = 0; k < batch.length; k += 1) {
+                const it = batch[k];
+                rd.batch.push(it.i);
+                const fail = seedHash(it.i * 31 + it.retry, seed) < FAIL_P;
+                if (!fail) {
+                    rd.sent.push(it.i);
+                    sent += 1;
+                }
+                else if (it.retry + 1 > MAX_RETRY) {
+                    // retry 는 지금까지의 재시도 수. 다시 시도했는데 또 실패하면 retry 가 MAX_RETRY 를 넘는다 → 끝내 버린다
+                    rd.dropped.push(it.i);
+                    dropped += 1;
+                }
+                else {
+                    // 큐 끝으로 돌아간다 — 큐가 이미 비어 있으면 이번 묶음 뒤에 다시 선다
+                    back.push({ i: it.i, retry: it.retry + 1 });
+                    rd.retried.push({ i: it.i, retry: it.retry + 1 });
+                    retries += 1;
+                }
+            }
+            // 돌아간 줄은 남아 있던 큐 뒤에 붙는다 (남은 줄이 먼저, 그 뒤에 재시도 줄)
+            for (let k = 0; k < back.length; k += 1) {
+                queue.push(back[k]);
+            }
+            rounds.push(rd);
+        }
+        return { rounds: rounds, sent: sent, dropped: dropped, retries: retries };
+    }
+    let sim3 = null;
+    let pipeEl = null;
+    let plateEl = null;
+    let sideEl = null;
+    let ballEls = [];
+    let wave3Els = [];
+    let chip3Els = [];
+    let pulse3El = null;
+    let haloEl = null;
+    // 각 줄의 화면 상태 — 스프링 적분으로만 움직인다 (rAF tick 마다 frame(t) 가 불리고, t 는 .clk 시계)
+    let balls3 = [];
+    // spring state: { x, y, vx, vy, tx, ty } — tx/ty = 목표 좌표, 스프링 상수 K·감쇠 C 로 매 틱 적분
+    const K3 = 300;
+    const C3 = 19;
+    function stepSpring(b, dt) {
+        const ax = (b.tx - b.x) * K3 - b.vx * C3;
+        const ay = (b.ty - b.y) * K3 - b.vy * C3;
+        b.vx += ax * dt;
+        b.vy += ay * dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        return Math.abs(b.vx) + Math.abs(b.vy) + Math.abs(b.tx - b.x) + Math.abs(b.ty - b.y);
+    }
+    // 큐 자리 — 관 안에서 위로 쌓인다 (큐 앞이 아래)
+    function queueSeat(pos, depth) {
+        const room = PIPE_BOT - BALL - PIPE_TOP - 4;
+        const step = depth > 1 ? Math.min(BALL + 2, room / (depth - 1)) : 0;
+        return { x: PIPE_X + PIPE_W / 2, y: PIPE_BOT - BALL / 2 - pos * step };
+    }
+    function plateSeat(k) {
+        return { x: PIPE_X + PIPE_W + 24 + 16 + k * 22, y: 112 + 20 };
+    }
+    function sideSeat(k) {
+        return { x: 52 + 20 + k * 24, y: 112 + 20 };
+    }
+    // 시각 t 까지 큐의 상태를 simulate(seed) 결과에서 다시 만든다 — 상태는 계산으로, 화면은 스프링으로.
+    //    phase(t) = { round: r, batchStart: t0, inFlight: [{i, kind:'sent'|'retried'|'dropped', retry}] }
+    function phase(t) {
+        const step = T3_BATCH + T3_GAP;
+        const r = Math.floor((t - T3_IN0) / step);
+        const t0 = T3_IN0 + r * step;
+        return { round: r, batchStart: t0 };
+    }
+    function draw3(pi) {
+        const seeds = [3.1, 5.9, 14.2];
+        sim3 = simulate(seeds[pi % seeds.length]);
+        // 관 — 반투명 파이프. 안에 큐 알갱이들이 쌓여 있다
+        haloEl = make('i', 'halo3', scWrap);
+        put(haloEl, PIPE_X + PIPE_W / 2 - 84, 56 - 84, 168, 168);
+        pipeEl = make('div', 'pipe', scWrap);
+        put(pipeEl, PIPE_X, PIPE_TOP, PIPE_W, PIPE_BOT - PIPE_TOP + BALL);
+        const glass = make('i', 'pipe__glass', pipeEl);
+        pulse3El = make('i', 'pipe__pulse', pipeEl);
+        // 접시 — 送信済み(오른쪽)·打ち切り(왼쪽). 착지한 알갱이가 스프링으로 통통 튄다
+        plateEl = make('div', 'plate plate--sent', scWrap);
+        put(plateEl, PIPE_X + PIPE_W + 24, 112, 132, 40);
+        const pl = make('b', 'lab', plateEl);
+        pl.textContent = '送信済み';
+        put(pl, 96, 6, 60, 12);
+        sideEl = make('div', 'plate plate--drop', scWrap);
+        put(sideEl, 52, 112, 120, 40);
+        const sdl = make('b', 'lab', sideEl);
+        sdl.textContent = '打ち切り';
+        put(sdl, 8, 6, 64, 12);
+        // 알갱이 — 줄마다 ハナ. 처음엔 큐 자리에, 스프링이 목표를 바꿀 때마다 통통 움직인다
+        wave3Els = [];
+        balls3 = [];
+        ballEls = [];
+        for (let i = 0; i < N3; i += 1) {
+            const b = make('i', 'jelly', scWrap);
+            put(b, 0, 0, BALL, BALL);
+            b.setAttribute('data-hue', String(i % 4));
+            const eye = make('i', 'jelly__eye', b);
+            const mouth = make('i', 'jelly__mouth', b);
+            const gloss = make('i', 'jelly__gloss', b);
+            ballEls.push(b);
+            const wv = make('i', 'wave3', scWrap);
+            put(wv, 0, 0, 60, 28);
+            wv.style.opacity = '0';
+            wave3Els.push(wv);
+            const q = queueSeat(i, N3);
+            balls3.push({ i: i, x: q.x, y: q.y, vx: 0, vy: 0, tx: q.x, ty: q.y, sq: 1, state: 'queue', retry: 0 });
+        }
+        // 라벨 — 관 위 「キュー」·관 아래 「한 묶음 PER_BATCH」
+        const lq = make('b', 'lab', scWrap);
+        lq.textContent = 'キュー';
+        put(lq, PIPE_X - 44, 6, 40, 12);
+        const lb = make('b', 'lab', scWrap);
+        lb.textContent = fill('{a} 通ずつ', f0(PER_BATCH));
+        put(lb, PIPE_X - 4, 142, 100, 12);
+        // 칩 — 계산 결과
+        chip3Els = [];
+        const defs = [
+            ['MAX_RETRY {a}', 8, 8],
+            ['PER_BATCH {a}', 8, 36],
+            ['retry {a}', 8, 64],
+            ['sent {a} · dropped {a}', 8, 92]
+        ];
+        for (let i = 0; i < defs.length; i += 1) {
+            const o = make('b', 'ov ovs', sceneEl);
+            put(o, defs[i][1], defs[i][2], 0, 0);
+            chip3Els.push(o);
+        }
+    }
+    // frame(t) — 시각 t 의 묶음 단계를 읽어 각 알갱이의 목표 자리를 정하고 스프링을 적분한다.
+    //    목표 자리는 phase(t) 와 sim3 로부터 계산된다. 화면의 움직임은 CSS 트윈이 아니라 이 적분의 결과다.
+    let lastT3 = -1;
+    function frame3(t) {
+        if (!sim3 || balls3.length === 0) {
+            return '';
+        }
+        const dt = lastT3 < 0 ? 1 / 60 : clamp((t - lastT3) / 1000, 0, 0.05);
+        lastT3 = t;
+        const ph = phase(t);
+        const rounds = sim3.rounds;
+        // 각 줄의 현재 상태 — 지나간 묶음을 차례로 적용한다
+        const st = {};
+        for (let i = 0; i < N3; i += 1) {
+            st[i] = { state: 'queue', retry: 0, seatDone: -1 };
+        }
+        let queuePos = 0;
+        let sentCount = 0;
+        let droppedCount = 0;
+        let retryCount = 0;
+        for (let r = 0; r < Math.min(rounds.length, ph.round); r += 1) {
+            const rd = rounds[r];
+            for (let k = 0; k < rd.sent.length; k += 1) {
+                st[rd.sent[k]].state = 'sent';
+                st[rd.sent[k]].seatDone = sentCount;
+                sentCount += 1;
+            }
+            for (let k = 0; k < rd.dropped.length; k += 1) {
+                st[rd.dropped[k]].state = 'dropped';
+                st[rd.dropped[k]].seatDone = droppedCount;
+                droppedCount += 1;
+            }
+            for (let k = 0; k < rd.retried.length; k += 1) {
+                st[rd.retried[k].i].retry = rd.retried[k].retry;
+                retryCount += 1;
+            }
+        }
+        // 현재 묶음 — 진행 중 (0~1). 묶음 안 줄은 관 아래구로 내려갔다가 결과에 따라 갈린다
+        const cur = rounds[Math.min(ph.round, rounds.length - 1)];
+        const kp = clamp((t - ph.batchStart) / T3_BATCH, 0, 1);
+        const inBatch = cur && t >= ph.batchStart ? cur.batch : [];
+        const inSet = {};
+        for (let k = 0; k < inBatch.length; k += 1) {
+            inSet[inBatch[k]] = k;
+        }
+        // 큐에 남은 줄의 자리 — 아직 묶음에 든 적 없는 줄(또는 돌아온 줄) 순서대로
+        // 현재 큐 순서를 다시 만든다: simulate 와 같은 규칙 — 처리된 묶음을 거듭 적용
+        let qq = [];
+        for (let i = 0; i < N3; i += 1) {
+            qq.push({ i: i, retry: 0 });
+        }
+        for (let r = 0; r < Math.min(rounds.length, ph.round); r += 1) {
+            const batch = qq.splice(0, PER_BATCH);
+            const back = [];
+            for (let k = 0; k < batch.length; k += 1) {
+                const it = batch[k];
+                const fail = seedHash(it.i * 31 + it.retry, seeds3) < FAIL_P;
+                if (fail && it.retry + 1 <= MAX_RETRY) {
+                    back.push({ i: it.i, retry: it.retry + 1 });
+                }
+            }
+            for (let k = 0; k < back.length; k += 1) {
+                qq.push(back[k]);
+            }
+        }
+        // 현재 묶음에 든 줄은 qq 앞에서 뺀다
+        const curQueue = qq.slice(inBatch.length);
+        // 목표 자리를 정한다
+        for (let b = 0; b < balls3.length; b += 1) {
+            const B = balls3[b];
+            const s = st[B.i];
+            if (s.state === 'sent') {
+                B.state = 'sent';
+                B.tx = plateSeat(s.seatDone).x;
+                B.ty = plateSeat(s.seatDone).y;
+            }
+            else if (s.state === 'dropped') {
+                B.state = 'dropped';
+                B.tx = sideSeat(s.seatDone).x;
+                B.ty = sideSeat(s.seatDone).y;
+            }
+            else if (inSet[B.i] !== undefined) {
+                // 이번 묶음 — 관 아래구로 내려가고(k1), 결과에 따라 접시(送信済み)·관 위(재시도)·옆 접시(打ち切り) 로 갈린다
+                const k = inSet[B.i];
+                B.state = 'flight';
+                const fail = cur.retried.some(function (x) { return x.i === B.i; }) || cur.dropped.indexOf(B.i) >= 0;
+                const willDrop = cur.dropped.indexOf(B.i) >= 0;
+                const willRetry = cur.retried.some(function (x) { return x.i === B.i; });
+                if (kp < 0.45) {
+                    B.tx = PIPE_X + PIPE_W / 2 + (k - (inBatch.length - 1) / 2) * 2;
+                    B.ty = PIPE_BOT + 8 + k * 0;
+                }
+                else if (willRetry) {
+                    // 관 위로 튀어 올라 다시 줄선다 — 목표는 관 위 (큐 끝은 관 위에서 다시 쌓인다)
+                    B.tx = PIPE_X + PIPE_W / 2;
+                    B.ty = PIPE_TOP - BALL;
+                }
+                else if (willDrop) {
+                    B.tx = sideSeat(0).x + 8;
+                    B.ty = sideSeat(0).y;
+                }
+                else {
+                    B.tx = plateSeat(sentCount + k).x;
+                    B.ty = plateSeat(sentCount).y;
+                }
+            }
+            else {
+                // 큐에 남은 줄 — 관 안 자리
+                B.state = 'queue';
+                const pos = curQueue.findIndex(function (x) { return x.i === B.i; });
+                if (pos >= 0) {
+                    const q = queueSeat(pos, curQueue.length);
+                    B.tx = q.x;
+                    B.ty = q.y;
+                }
+            }
+        }
+        // 재시도 줄은 관 위에 도달한 뒤 다시 관 안으로 들어와 큐 끝에 붙는다 — 묶음이 끝나기 전 20% 구간
+        const backIn = clamp((kp - 0.7) / 0.3, 0, 1);
+        for (let b = 0; b < balls3.length; b += 1) {
+            const B = balls3[b];
+            if (B.state === 'flight' && inSet[B.i] !== undefined && cur.retried.some(function (x) { return x.i === B.i; })) {
+                if (backIn > 0) {
+                    // 큐 끝 자리 = 현재 남은 큐의 마지막
+                    const pos = curQueue.length + cur.retried.filter(function (x) { return inSet[x.i] !== undefined && x.i <= B.i; }).length - 1;
+                    const q = queueSeat(Math.max(0, pos), curQueue.length + 2);
+                    B.tx = lerp(B.tx, q.x, backIn);
+                    B.ty = lerp(B.ty, q.y, backIn);
+                }
+            }
+        }
+        // 스프링 적분 — 모든 알갱이를 dt 만큼 전진시킨다
+        let energy = 0;
+        for (let b = 0; b < balls3.length; b += 1) {
+            energy += stepSpring(balls3[b], dt);
+        }
+        // 착지 파문 — 접시에 닿은 알갱이(목표 근처·세로 속도가 큼) 자리에서 동심원이 퍼진다. 파문 크기 = 착지 속도
+        for (let b = 0; b < balls3.length; b += 1) {
+            const B = balls3[b];
+            const w = wave3Els[b];
+            if (!w) {
+                continue;
+            }
+            const near = Math.abs(B.ty - B.y) < 10 && Math.abs(B.tx - B.x) < 16;
+            const land = near && Math.abs(B.vy) > 60 && (B.state === 'sent' || B.state === 'dropped');
+            if (land) {
+                w.style.opacity = '1';
+                w.dataset.k = '0';
+                w.dataset.px = f1(B.tx - 30);
+                w.dataset.py = f1(B.ty - 14);
+                w.dataset.v = f0(clamp(Math.abs(B.vy) / 8, 20, 60));
+            }
+            const kk = parseFloat(w.dataset.k || '1');
+            if (kk < 1) {
+                const nk = kk + dt * 3;
+                w.dataset.k = String(nk);
+                w.style.opacity = String(0.7 * (1 - nk));
+                w.style.transform = 'translate(' + w.dataset.px + 'px,' + w.dataset.py + 'px) scale(' + f2(0.3 + easeOut(nk) * 1.6) + ')';
+            }
+            else {
+                w.style.opacity = '0';
+            }
+        }
+        // 알갱이 그리기 — 속도에서 눌림(squash): 세로 속도가 클수록 납작해진다 (젤리)
+        for (let b = 0; b < balls3.length; b += 1) {
+            const B = balls3[b];
+            const el = ballEls[b];
+            const speed = Math.sqrt(B.vx * B.vx + B.vy * B.vy);
+            const sq = clamp(1 - speed * 0.06, 0.72, 1);
+            const ang = Math.atan2(B.vy, B.vx) * 180 / Math.PI;
+            el.style.transform = 'translate(' + f1(B.x - BALL / 2) + 'px, ' + f1(B.y - BALL / 2) + 'px) rotate(' + f0(ang) + 'deg) scale(' + f2(1 + (1 - sq) * 0.6) + ',' + f2(sq) + ')';
+            el.setAttribute('data-state', B.state);
+            el.setAttribute('data-retry', String(B.retry || 0));
+        }
+        // 관 진동 — 묶음이 빠져 나갈 때 관이 숨을 쉰다 (남은 큐 길이로부터 계산한 굵기)
+        const breathe = clamp(curQueue.length / N3, 0, 1);
+        pipeEl.style.transform = 'scaleX(' + f2(1 + 0.08 * Math.sin(kp * Math.PI) * (1 - breathe)) + ')';
+        pulse3El.style.opacity = String(kp < 0.45 ? 0.5 * (1 - kp / 0.45) : 0);
+        // 명도 전파 — 묶음이 관을 빠져 나가는 동안(kp 0~1 의 sin) 관 속 면과 두 접시 면이 밝아졌다 식는다.
+        //    큐가 짧아질수록(breathe 가 작을수록) 관은 더 밝게 — 남은 줄 수가 면의 농도로 보인다
+        const pg = Math.sin(kp * Math.PI);
+        pipeEl.style.setProperty('--glow', f2(clamp(pg * 0.8 + (1 - breathe) * 0.35, 0, 1)));
+        haloEl.style.setProperty('--glow', f2(clamp(pg * 0.9 + (1 - breathe) * 0.3, 0, 1)));
+        plateEl.style.setProperty('--glow', f2(clamp(pg * 0.9 + sentCount * 0.04, 0, 1)));
+        sideEl.style.setProperty('--glow', f2(clamp(pg * 0.6 + droppedCount * 0.12, 0, 1)));
+        // 칩
+        if (chip3Els.length === 4) {
+            chip3Els[0].textContent = fill('MAX_RETRY {a}', f0(MAX_RETRY));
+            chip3Els[1].textContent = fill('PER_BATCH {a}', f0(PER_BATCH));
+            chip3Els[2].textContent = fill('retry {a}', f0(retryCount));
+            chip3Els[3].textContent = fill('sent {a} · dropped {b}', f0(sentCount), f0(droppedCount));
+        }
+        return fill('束 {a} · キュー {b} · 送信 {c} · 再試行 {d} · 打ち切り {e}', f0(ph.round + 1), f0(curQueue.length), f0(sentCount), f0(retryCount), f0(droppedCount));
+    }
+    let seeds3 = 3.1;
+    function build3(i) {
+        const seeds = [3.1, 5.9, 14.2];
+        seeds3 = seeds[i % seeds.length];
+        lastT3 = -1;
+        draw3(i);
+        const spans = [];
+        for (let k = 0; k < 3; k += 1) {
+            spans.push(spanOf(T3_IN0 + k * (T3_BATCH + T3_GAP), T3_BATCH, k % 3));
+        }
+        drawRows(spans, 2000);
+        axis(2000);
+        const r = sim3;
+        setReads(fill('MAX_RETRY {a} · PER_BATCH {b} · FAIL_P {c}', f0(MAX_RETRY), f0(PER_BATCH), f2(FAIL_P)),
+            fill('八通のうち {a} 通を送り、{b} 通を打ち切り、{c} 回並び直した', f0(r.sent), f0(r.dropped), f0(r.retries)));
+        doneP.textContent = '';
+        return 2000;
+    }
+    return run({ count: 3, build: build3, frame: frame3, head: false });
+}
+})()
+
+</script>
+</body>
+</html>

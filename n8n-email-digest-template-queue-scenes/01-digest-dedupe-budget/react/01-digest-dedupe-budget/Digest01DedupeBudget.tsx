@@ -1,0 +1,582 @@
+// Digest01DedupeBudget — 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./Digest01DedupeBudget.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function fill(s: string, ...v: any[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v: number): string { return String(Math.round(v)); }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+    const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+    const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+    const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+    const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLElement | null;
+    const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+    const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+    const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+        const e = document.createElement(tag) as HTMLElement;
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll(): void {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i: number, seed: number): number {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host: HTMLElement): Animation[] {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d: number, dur: number, k?: number): { s: number; e: number; k: number } { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs: { s: number; e: number; k: number }[], max: number): void {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max: number): void {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl: HTMLElement | null = null;
+    function setReads(a: string, b: string): void {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function ema(prev: number, x: number, k: number): number {
+        return prev + (x - prev) * k;
+    }
+    // cdfInvert — 역누적분포 샘플링. r^expo: expo>1 이면 짧은 쪽(마지막 줄)으로 몰린다
+    function cdfInvert(r: number, expo: number, lo: number, hi: number): number {
+        return lo + (hi - lo) * Math.pow(r, expo);
+    }
+    function gammaSample(shape: number, scale: number, seed: number, i: number): number {
+        const d = shape - 1 / 3;
+        const c = 1 / Math.sqrt(9 * d);
+        let guard = 0;
+        while (guard < 64) {
+            guard += 1;
+            const u1 = seedHash(i * 7 + guard, seed);
+            const u2 = seedHash(i * 13 + guard * 5, seed);
+            const rr = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-9))) * Math.cos(6.28318 * u2);
+            const v = Math.pow(1 + c * rr, 3);
+            if (v <= 0) { continue; }
+            const u3 = seedHash(i * 29 + guard * 11, seed);
+            if (Math.log(Math.max(u3, 1e-9)) < 0.5 * rr * rr + d - d * v + d * Math.log(v)) {
+                return d * v * scale;
+            }
+        }
+        return shape * scale;
+    }
+    // 스켈레톤 막대 — CSS 클래스 .skel 이 자리를 잡는다 (폭은 계산이 정한다)
+    function skelBar(parent: HTMLElement, x: number, y: number, w: number, h: number, delay?: number): HTMLElement {
+        const e = make('i', 'skel', parent);
+        put(e, x, y, Math.max(12, w), h);
+        e.style.animationDelay = (delay || 0) + 'ms';
+        return e;
+    }
+    function mkShim(host: HTMLElement): HTMLElement {
+        return make('i', 'shim', host);
+    }
+    function shimAt(s: HTMLElement, hostW: number, t: number, period: number): void {
+        const k = (((t % period) + period) % period) / period;
+        s.style.transform = 'translateX(' + ((k * 1.6 - 0.3) * hostW) + 'px)';
+        s.style.opacity = k > 0.94 ? '0' : '1';
+    }
+    let piNow: number = 0;
+    function run(cfg: { count: number; build: (i: number) => number; frame: (t: number) => string; head?: boolean }): () => void {
+        const off = new AbortController();
+        let pi: number = 0;
+        let cycle: number = 2000;
+        let paused: boolean = false;
+        let raf: number = 0;
+        let clock: Animation | null = null;
+        let lastStatus: string = '';
+        function fit(): void {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild(): void {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i] as CSSAnimation & { effect?: (AnimationEffect & { target?: EventTarget | null }) };
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart(): void {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick(): void {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p: boolean): void {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d: number): void {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    function easeOut(k: number): number { return 1 - Math.pow(1 - clamp(k, 0, 1), 3); }
+    function easeIn(k: number): number { k = clamp(k, 0, 1); return k * k; }
+
+    // ── 538-01 다이제스트 — 이번 회차에 들어온 글 중 seen 에 없는 것이 새 글이다.
+    //    새 글은 봉투 안 예산 자리(DIGEST_BUDGET 칸) 를 순서대로 채우고, 자리가 없으면 「다음 회차」 서랍으로 밀린다.
+    //    picked = 새 글 중 예산 안까지 · deferred = 새 글 수 − picked 수 (변형 1: DIGEST_BUDGET 8 → 3)
+    const DIGEST_BUDGET = 8;   // 변형 1: 8 → 3
+    const SLOT_W = 44;
+    const SLOT_H = 12;
+    const ENV_X = 132;
+    const ENV_Y = 30;
+    const ENV_W = 200;
+    const ENV_H = 92;
+    const T_IN0 = 200;         // 첫 변화는 150ms 뒤
+    const T_STEP = 96;         // 글 한 장이 처리되는 간격 (12 장 × 96ms = 1152ms)
+    const T_FOLD = 420;        // 새 글이 봉투에 접혀 들어가는 시간
+    const T_BOUNCE = 300;      // 이미 본 글이 가장자리에서 튕겨 나가는 시간
+    // mkDigest(seed) — 이번 회차에 들어온 글 열두 장. 일곱 장은 이미 본 id, 다섯 장은 새 id 다.
+    //    새 id 는 회차 씨드로 정한다(같은 회차 안에서 서로 겹치지 않는다). 들어오는 순서는 ORDER 다.
+    const SEEN_IDS: number[] = [3, 7, 12, 18, 21, 26, 31];
+    const ORDER: number[] = [0, 7, 1, 8, 2, 9, 3, 10, 11, 4, 12, 5];
+    function mkDigest(seed: number): { id: number; seen: boolean; titleW: number; el: HTMLElement | null }[] {
+        const newIds = [];
+        for (let k = 0; k < 5; k += 1) {
+            let id = 34 + Math.floor(seedHash(k * 17 + 3, seed) * 60);
+            let guard = 0;
+            while (newIds.indexOf(id) >= 0 && guard < 40) {
+                guard += 1;
+                id = 34 + (id - 33) % 60;
+            }
+            newIds.push(id);
+        }
+        const list = [];
+        for (let i = 0; i < ORDER.length; i += 1) {
+            const o = ORDER[i];
+            // ORDER 의 7~11 은 새 글 다섯 장, 12 는 이미 본 여섯째 장(id 38) — newIds 인덱스를 넘지 않는다
+            const fresh = o >= 7 && o <= 11;
+            const id = fresh ? newIds[o - 7] : (o === 12 ? 38 : SEEN_IDS[o]);
+            list.push({
+                id: id,
+                seen: !fresh,
+                titleW: 40 + Math.floor(seedHash(id * 13 + 1, seed) * 44),
+                el: null
+            });
+        }
+        return list;
+    }
+    // digest(t) — 시각 t 까지 봉투에 든 새 글(picked)·튕긴 seen(bounced)·밀린 수(deferred) 와
+    //    각 글의 자리(0 = 아직, -1 = seen, -2 = 예산 초과, 1 부터 = 봉투 안 칸 번호). 들어온 순서대로 세고
+    //    각 글이 자기 차례에 도달했는가(t >= T_IN0 + i*T_STEP) 만 본다. 화면은 이 결과를 그린다.
+    function digest(t: number): { picked: number; bounced: number; deferred: number; seats: number[] } {
+        const r: { picked: number; bounced: number; deferred: number; seats: number[] } = { picked: 0, bounced: 0, deferred: 0, seats: [] };
+        for (let i = 0; i < posts01.length; i += 1) {
+            const p = posts01[i];
+            if (t < T_IN0 + i * T_STEP) {
+                r.seats.push(0);
+                continue;
+            }
+            if (p.seen) {
+                r.bounced += 1;
+                r.seats.push(-1);
+            }
+            else if (r.picked < DIGEST_BUDGET) {
+                r.picked += 1;
+                r.seats.push(r.picked);
+            }
+            else {
+                r.deferred += 1;
+                r.seats.push(-2);
+            }
+        }
+        return r;
+    }
+    let posts01: { id: number; seen: boolean; titleW: number; el: HTMLElement | null }[] = [];
+    let envEl: HTMLElement | null = null;
+    let slotsEl: HTMLElement[] = [];
+    let glossEl: HTMLElement | null = null;
+    let flapEl: HTMLElement | null = null;
+    let lipEl: HTMLElement | null = null;
+    let cardEls: HTMLElement[] = [];
+    let ovs01: HTMLElement[] = [];
+    let drawerTickEls: HTMLElement[] = [];
+    let drawerEl: HTMLElement | null = null;
+    // 예산 칸 k 번째(1 부터) 의 중심 좌표 — 봉투 안 4열 격자
+    function slotAt(k: number): { x: number; y: number } {
+        const s = k - 1;
+        return {
+            x: ENV_X + 36 + (s % 4) * (SLOT_W + 4) + SLOT_W / 2,
+            y: ENV_Y + 40 + Math.floor(s / 4) * (SLOT_H + 4) + SLOT_H / 2
+        };
+    }
+    function drawerSlot(k: number): { x: number; y: number } {
+        return { x: 352 + (k % 2) * 20, y: 56 + Math.floor(k / 2) * 8 };
+    }
+    function drawDigest(): void {
+        // 유리 봉투 — 뒷면(반투명 밝은 면)·예산 칸・앞면(글라스 플랩) 순으로 겹는다
+        envEl = make('div', 'env', scWrap);
+        put(envEl, ENV_X, ENV_Y, ENV_W, ENV_H);
+        const back = make('i', 'env__back', envEl);
+        const inner = make('i', 'env__inner', envEl);
+        make('i', 'env__floor', envEl);
+        slotsEl = [];
+        for (let s = 0; s < DIGEST_BUDGET; s += 1) {
+            const sl = make('i', 'slot', inner);
+            put(sl, 36 + (s % 4) * (SLOT_W + 4), 40 + Math.floor(s / 4) * (SLOT_H + 4), SLOT_W, SLOT_H);
+            slotsEl.push(sl);
+        }
+        flapEl = make('i', 'env__flap', envEl);
+        const lip = make('i', 'env__lip', envEl);
+        lipEl = lip;
+        glossEl = make('i', 'env__gloss', envEl);
+        // 다음 회차 서랍 — 예산을 넘은 새 글이 여기로 미끄러진다 (밀린 수 계산 그림)
+        drawerEl = make('div', 'drawer', scWrap);
+        put(drawerEl, 340, 44, 100, 60);
+        const dl = make('b', 'drawer__lab', drawerEl);
+        dl.textContent = '다음 회차';
+        const dt = make('i', 'drawer__ticks', drawerEl);
+        put(dt, 8, 24, 84, 24);
+        drawerTickEls = [];
+        for (let k = 0; k < 5; k += 1) {
+            const tk = make('i', 'dtick', dt);
+            put(tk, (k % 2) * 20, Math.floor(k / 2) * 8, 16, 6);
+            tk.style.opacity = '0';
+            drawerTickEls.push(tk);
+        }
+        // 들어오는 글 카드 열두 장 — 왼쪽 두 줄로 겹쳐 쌓여 있다가 차례에 봉투로 흘러 간다
+        cardEls = [];
+        for (let i = 0; i < posts01.length; i += 1) {
+            const p = posts01[i];
+            const c = make('div', 'card', scWrap);
+            const n = make('b', 'card__id', c);
+            n.textContent = '#' + f0(p.id);
+            const t = make('i', 'card__ttl', c);
+            t.style.width = f0(p.titleW) + 'px';
+            c.setAttribute('data-kind', p.seen ? 'seen' : 'new');
+            put(c, 0, 0, 100, 28);
+            c.style.zIndex = String(3 + i);
+            p.el = c;
+            cardEls.push(c);
+        }
+        // 칩 — 계산 결과를 그림 옆에 붙인다
+        ovs01 = [];
+        const chips = [
+            ['DIGEST_BUDGET {a}', 340, 128],
+            ['seen {a}', 8, 128],
+            ['picked {a}', 120, 128],
+            ['deferred {a}', 232, 128]
+        ];
+        for (let i = 0; i < chips.length; i += 1) {
+            const o = make('b', 'ov ovs', sceneEl);
+            put(o, Number(chips[i][1]), Number(chips[i][2]), 0, 0);
+            ovs01.push(o);
+        }
+    }
+    // 카드의 대기 위치 — 왼쪽 두 기둥, 아래에서 위로 차례를 기다린다 (뒤에 온 카드가 위에 쌓인다)
+    function cardHome(i: number): { x: number; y: number } {
+        return { x: 8, y: 112 - i * 10 };
+    }
+    // frame(t) — digest(t) 의 결과를 화면에 그린다. seen 은 봉투 가장자리에서 튕겨 나가고(-1),
+    //    새 글은 자기 칸으로 접혀 들어가고(1 부터), 예산을 넘은 새 글은 서랍으로 미끄러진다(-2).
+    function frame(t: number): string {
+        if (cardEls.length === 0) {
+            return '';
+        }
+        const r = digest(t);
+        let drawerN = 0;
+        // 유리 광택 — 처리가 시작되면 빛 띠가 봉투 가장자리를 한 번 훑고 지나간다 (리퀴드 글래스)
+        const kgl = (t - T_IN0) / 520;
+        glossEl!.style.transform = 'translateX(' + f1(kgl > 0 ? (easeOut(clamp(kgl, 0, 1)) * (ENV_W + 120) - 60) : -60) + 'px)';
+        glossEl!.style.opacity = kgl > 0 && kgl < 1 ? '1' : '0';
+        for (let i = 0; i < cardEls.length; i += 1) {
+            const c = cardEls[i];
+            const p = posts01[i];
+            const seat = r.seats[i];
+            const home = cardHome(i);
+            const d = t - (T_IN0 + i * T_STEP);
+            if (d < 0) {
+                c.style.opacity = '1';
+                c.style.transform = 'translate(' + f1(home.x) + 'px, ' + f1(home.y) + 'px)';
+                c.style.zIndex = '3';
+                continue;
+            }
+            if (seat === -1) {
+                // 이미 본 글 — 봉투 왼쪽 가장자리까지 흘러갔다가(가속) 튕겨 나간다(감속·회전)
+                const kb = clamp(d / T_BOUNCE, 0, 1);
+                const x = lerp(home.x, ENV_X + 40, kb * kb);
+                const y = lerp(home.y, ENV_Y - 14, kb);
+                const kOut = easeOut(clamp((kb - 0.5) / 0.5, 0, 1));
+                c.style.opacity = kb >= 1 ? '0' : String(1 - kOut * 0.85);
+                c.style.transform = 'translate(' + f1(x) + 'px, ' + f1(y - kOut * 44) + 'px) rotate(' + f1(kOut * -38) + 'deg) scale(' + f2(1 - kOut * 0.45) + ')';
+                c.setAttribute('data-state', 'seen');
+                c.style.zIndex = '3';
+            }
+            else if (seat >= 1) {
+                // 새 글 — 봉투 위 가장자리로 흘러 내렸다가(위에서 아래로) 자기 칸으로 접혀 들어간다.
+                //    접힘 = 세로 축소(scaleY) 와 회전. 칸에 닿으면 칸이 채워진다.
+                const to = slotAt(seat);
+                const kf = clamp(d / T_FOLD, 0, 1);
+                // 1 단계: 대기 스택 → 봉투 왼쪽 입구(가속) · 2 단계: 입구 → 자기 칸(감속) · 3 단계: 칸 위에서 납작하게 눌리며 사라진다
+                const k1 = easeIn(clamp(kf / 0.45, 0, 1));
+                const k2 = easeOut(clamp((kf - 0.45) / 0.35, 0, 1));
+                const k3 = easeOut(clamp((kf - 0.8) / 0.2, 0, 1));
+                const mx = ENV_X + 4;
+                const my = ENV_Y + ENV_H / 2 - 14;
+                const x = kf < 0.45 ? lerp(home.x, mx, k1) : lerp(mx, to.x - 50, k2);
+                const y = kf < 0.45 ? lerp(home.y, my, k1) : lerp(my, to.y - 14, k2);
+                const squash = 1 - 0.55 * k3;
+                const wide = 1 + 0.5 * k3;
+                c.style.opacity = kf >= 1 ? '0' : String(1 - k3 * 0.9);
+                c.style.transform = 'translate(' + f1(x) + 'px, ' + f1(y) + 'px) scaleX(' + f2(wide) + ') scaleY(' + f2(squash) + ')';
+                if (kf >= 0.45) {
+                    c.style.filter = 'saturate(0.6)';
+                }
+                c.setAttribute('data-state', 'new');
+                c.style.zIndex = kf < 0.45 ? '6' : '1';
+                if (kf >= 0.8 && slotsEl[seat - 1]) {
+                    slotsEl[seat - 1].setAttribute('data-filled', '1');
+                }
+            }
+            else {
+                // 예산 초과 — 봉투를 스치고 오른쪽 아래 「다음 회차」 서랍으로 미끄러진다
+                const to = drawerSlot(drawerN);
+                drawerN += 1;
+                const kf = easeOut(clamp(d / T_FOLD, 0, 1));
+                const x = lerp(home.x, to.x, kf);
+                const y = lerp(home.y, to.y, kf);
+                c.style.opacity = kf >= 1 ? '0' : '1';
+                c.style.transform = 'translate(' + f1(x) + 'px, ' + f1(y) + 'px) rotate(' + f1(kf * 10) + 'deg) scale(' + f2(1 - kf * 0.7) + ')';
+                c.setAttribute('data-state', 'defer');
+                c.style.zIndex = '6';
+                if (d >= T_FOLD && drawerTickEls[drawerN - 1]) {
+                    drawerTickEls[drawerN - 1].style.opacity = '1';
+                }
+            }
+        }
+        // 봉투 앞면 — 글이 접힐 때마다 살짝 눌렸다 복원한다 (들어간 글 수로부터 계산한 굽힘)
+        const kk = clamp((t - T_IN0) / (12 * T_STEP), 0, 1);
+        // 글이 들어갈 때마다 입구(lip) 가 잠깐 열렸다 닫힌다 — 열림 각도는 직전에 들어온 글의 진행률에서 계산한다
+        let open = 0;
+        for (let i = 0; i < r.seats.length; i += 1) {
+            if (r.seats[i] >= 1) {
+                const dd = t - (T_IN0 + i * T_STEP);
+                const kf = clamp(dd / T_FOLD, 0, 1);
+                open = Math.max(open, kf < 0.45 ? Math.sin(kf / 0.45 * Math.PI) : 0);
+            }
+        }
+        // 명도 전파 — 접히는 글의 진행률(open) 과 서랍으로 미끄러지는 글의 진행률로 봉투 속·서랍 면의 밝기를 계산한다.
+        //    넓은 면(봉투 속 200×100, 서랍 100×60) 이 실제로 밝아졌다 식으므로 누적면적이 작은 카드만 움직일 때보다 커진다.
+        let slide = 0;
+        for (let i = 0; i < r.seats.length; i += 1) {
+            if (r.seats[i] === -2) {
+                const dd = t - (T_IN0 + i * T_STEP);
+                slide = Math.max(slide, Math.sin(clamp(dd / T_FOLD, 0, 1) * Math.PI));
+            }
+        }
+        const glow = clamp(r.picked * 0.11 + open * 0.7, 0, 1);
+        envEl!.style.setProperty('--glow', f2(glow));
+        drawerEl!.style.setProperty('--glow', f2(clamp(r.deferred * 0.3 + slide * 0.6, 0, 1)));
+        flapEl!.style.transform = 'rotateY(' + f1(-38 * open) + 'deg)';
+        lipEl!.style.transform = 'rotateY(' + f1(34 * open) + 'deg)';
+        envEl!.style.transform = 'translateY(' + f1(Math.sin(kk * Math.PI) * 2) + 'px)';
+        if (ovs01.length === 4) {
+            ovs01[0].textContent = fill('DIGEST_BUDGET {a}', f0(DIGEST_BUDGET));
+            ovs01[1].textContent = fill('seen {a}', f0(r.bounced));
+            ovs01[2].textContent = fill('picked {a}', f0(r.picked));
+            ovs01[3].textContent = fill('deferred {a}', f0(r.deferred));
+        }
+        return fill('새 글 {a} 편 · 예산 {b} 칸 · 뽑힘 {c} · 밀림 {d} · 걸러짐 {e}',
+            f0(r.picked + r.deferred), f0(DIGEST_BUDGET), f0(r.picked), f0(r.deferred), f0(r.bounced));
+    }
+    function build(i: number): number {
+        const seeds = [3.1, 5.9, 8.3];
+        posts01 = mkDigest(seeds[i]);
+        drawDigest();
+        drawRows([spanOf(T_IN0, T_BOUNCE, 1), spanOf(T_IN0 + T_STEP, T_FOLD, 0), spanOf(T_IN0 + 2 * T_STEP, T_FOLD, 2), spanOf(T_IN0 + 11 * T_STEP, T_FOLD, 1)], 2000);
+        axis(2000);
+        setReads(fill('digest(seen, items) — DIGEST_BUDGET {a} · 새 글 5', f0(DIGEST_BUDGET)),
+            '새 글 다섯 중 예산 안까지 봉투에 접어 넣고 나머지는 다음 회차로 민다');
+        doneP.textContent = '';
+        return 2000;
+    }
+    return run({ count: 3, build: build, frame: frame, head: false });
+}
+
+export default function Digest01DedupeBudget() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 회차'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'글 카드들이 유리 봉투로 흘러 들어가 이미 본 글은 튕겨 나가고 새 글은 예산 칸을 채우다 넘치면 다음 회차 서랍으로 미끄러지는 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}

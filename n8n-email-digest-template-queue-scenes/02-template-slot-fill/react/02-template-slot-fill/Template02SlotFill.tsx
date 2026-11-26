@@ -1,0 +1,621 @@
+// Template02SlotFill — 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./Template02SlotFill.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function fill(s: string, ...v: any[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v: number): string { return String(Math.round(v)); }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+    const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+    const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+    const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+    const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLElement | null;
+    const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+    const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+    const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+        const e = document.createElement(tag) as HTMLElement;
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll(): void {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i: number, seed: number): number {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host: HTMLElement): Animation[] {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d: number, dur: number, k?: number): { s: number; e: number; k: number } { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs: { s: number; e: number; k: number }[], max: number): void {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max: number): void {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl: HTMLElement | null = null;
+    function setReads(a: string, b: string): void {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function ema(prev: number, x: number, k: number): number {
+        return prev + (x - prev) * k;
+    }
+    // cdfInvert — 역누적분포 샘플링. r^expo: expo>1 이면 짧은 쪽(마지막 줄)으로 몰린다
+    function cdfInvert(r: number, expo: number, lo: number, hi: number): number {
+        return lo + (hi - lo) * Math.pow(r, expo);
+    }
+    function gammaSample(shape: number, scale: number, seed: number, i: number): number {
+        const d = shape - 1 / 3;
+        const c = 1 / Math.sqrt(9 * d);
+        let guard = 0;
+        while (guard < 64) {
+            guard += 1;
+            const u1 = seedHash(i * 7 + guard, seed);
+            const u2 = seedHash(i * 13 + guard * 5, seed);
+            const rr = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-9))) * Math.cos(6.28318 * u2);
+            const v = Math.pow(1 + c * rr, 3);
+            if (v <= 0) { continue; }
+            const u3 = seedHash(i * 29 + guard * 11, seed);
+            if (Math.log(Math.max(u3, 1e-9)) < 0.5 * rr * rr + d - d * v + d * Math.log(v)) {
+                return d * v * scale;
+            }
+        }
+        return shape * scale;
+    }
+    // 스켈레톤 막대 — CSS 클래스 .skel 이 자리를 잡는다 (폭은 계산이 정한다)
+    function skelBar(parent: HTMLElement, x: number, y: number, w: number, h: number, delay?: number): HTMLElement {
+        const e = make('i', 'skel', parent);
+        put(e, x, y, Math.max(12, w), h);
+        e.style.animationDelay = (delay || 0) + 'ms';
+        return e;
+    }
+    function mkShim(host: HTMLElement): HTMLElement {
+        return make('i', 'shim', host);
+    }
+    function shimAt(s: HTMLElement, hostW: number, t: number, period: number): void {
+        const k = (((t % period) + period) % period) / period;
+        s.style.transform = 'translateX(' + ((k * 1.6 - 0.3) * hostW) + 'px)';
+        s.style.opacity = k > 0.94 ? '0' : '1';
+    }
+    let piNow: number = 0;
+    function run(cfg: { count: number; build: (i: number) => number; frame: (t: number) => string; head?: boolean }): () => void {
+        const off = new AbortController();
+        let pi: number = 0;
+        let cycle: number = 2000;
+        let paused: boolean = false;
+        let raf: number = 0;
+        let clock: Animation | null = null;
+        let lastStatus: string = '';
+        function fit(): void {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild(): void {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i] as CSSAnimation & { effect?: (AnimationEffect & { target?: EventTarget | null }) };
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart(): void {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick(): void {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p: boolean): void {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d: number): void {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+    function easeOut(k: number): number { return 1 - Math.pow(1 - clamp(k, 0, 1), 3); }
+    function easeIn(k: number): number { k = clamp(k, 0, 1); return k * k; }
+
+    // ── 538-02 템플릿 치환 — 본문의 빈칸 표식 쌍(SLOT_DELIM) 을 indexOf 로 찾아 이름을 꺼내 values[name] 으로 바꾼다.
+    //    값이 없는 빈칸은 표식 그대로 두고 unfilled 에 센다 (변형 2: SLOT_DELIM "{{ }}" → "<< >>").
+    const SLOT_DELIM = ['{{', '}}'];   // 변형 2: ['{{', '}}'] → ['<<', '>>'] — 바꾸면 같은 본문에서 빈칸 0 개가 발견된다
+    const SHEET_X = 112;
+    const SHEET_Y = 8;
+    const SHEET_W = 328;
+    const SHEET_H = 140;
+    const T2_IN0 = 200;       // 첫 변화는 150ms 뒤
+    const T2_SLOT = 180;      // 빈칸 하나가 차오르는 시간
+    const T2_GAP = 60;        // 빈칸 사이 쉼
+    const T2_SWITCH = 980;    // 받는 사람이 바뀌는 시각 (세 빈칸 × 240ms = 720ms 뒤)
+    const T2_WASH = 140;      // 받는 사람이 바뀔 때 편지지가 밝아졌다 돌아오는 시간
+    // fillSlots(body, values) — 계산 한 겹. 열림 표식을 indexOf 로 찾고, 닫힘 표식을 그 다음부터 찾아
+    //    이름(공백 trim) 을 꺼낸다. values[name] 이 있으면 그 값으로, 없으면 표식을 그대로 두고 unfilled++ 한다.
+    //    돌려주기 { parts: [{ text, name, value, from, to }], filled: n, unfilled: n }
+    function fillSlots(body: string, values: { [k: string]: string }): { parts: { text: string; name: string; value: string; from: number; to: number }[]; filled: number; unfilled: number } {
+        const parts: { text: string; name: string; value: string; from: number; to: number }[] = [];
+        let filled = 0;
+        let unfilled = 0;
+        let cur = 0;
+        let guard = 0;
+        while (cur <= body.length && guard < 64) {
+            guard += 1;
+            const o = body.indexOf(SLOT_DELIM[0], cur);
+            if (o < 0) {
+                if (cur < body.length) {
+                    parts.push({ text: body.slice(cur), name: '', value: '', from: cur, to: body.length });
+                }
+                break;
+            }
+            const c = body.indexOf(SLOT_DELIM[1], o + SLOT_DELIM[0].length);
+            if (c < 0) {
+                parts.push({ text: body.slice(cur), name: '', value: '', from: cur, to: body.length });
+                break;
+            }
+            if (o > cur) {
+                parts.push({ text: body.slice(cur, o), name: '', value: '', from: cur, to: o });
+            }
+            const name = body.slice(o + SLOT_DELIM[0].length, c).trim();
+            const has = Object.prototype.hasOwnProperty.call(values, name) && values[name] !== '';
+            const val = has ? String(values[name]) : '';
+            parts.push({ text: '', name: name, value: val, from: o, to: c + SLOT_DELIM[1].length });
+            if (has) {
+                filled += 1;
+            }
+            else {
+                unfilled += 1;
+            }
+            cur = c + SLOT_DELIM[1].length;
+        }
+        return { parts: parts, filled: filled, unfilled: unfilled };
+    }
+    // 본문은 받는 사람마다 같다 — values 만 바뀐다. 가짜 주소는 example.com 꼴만 쓴다.
+    //    parts 순서(글자 조각·빈칸·글자 조각) 로 [글0, 칸0, 글1, 칸1, 글2, 칸2, 글3] 의 일곱 조각이 된다.
+    const BODY2 = '안녕하세요 {{name}} 님, 이번 주 새 글이 {{count}} 건 올라왔어요. 취소는 {{cancel_link}} 에서.';
+    const PEOPLE: { to: string; values: { [k: string]: string } }[] = [
+        { to: 'jiwoo@example.com', values: { name: '지우', count: '12', cancel_link: '구독 설정' } },
+        { to: 'hana@example.com', values: { name: '하나', count: '7', cancel_link: '구독 설정' } },
+        { to: 'minho@example.com', values: { name: '민호', count: '3', cancel_link: '' } }
+    ];
+    let sheetEl: HTMLElement | null = null;
+    let rowsEl: HTMLElement[] = [];
+    let slotEls: HTMLElement[] = [];
+    let faceEls: HTMLElement[] = [];
+    let valEls: HTMLElement[] = [];
+    let chip2Els: HTMLElement[] = [];
+    let stampEl: HTMLElement | null = null;
+    let line2El: HTMLElement | null = null;
+    let washEl: HTMLElement | null = null;
+    let tintEl: HTMLElement | null = null;
+    let toEl: HTMLElement | null = null;
+    let parsedA: { person: { to: string; values: { [k: string]: string } }; r: { parts: { text: string; name: string; value: string; from: number; to: number }[]; filled: number; unfilled: number } } | null = null;
+    let parsedB: { person: { to: string; values: { [k: string]: string } }; r: { parts: { text: string; name: string; value: string; from: number; to: number }[]; filled: number; unfilled: number } } | null = null;
+    let waveEls: HTMLElement[] = [];
+    // 줄 배열 — 일곱 조각을 세 줄에 나눈다 (1 줄: 인사·이름·인사말, 2 줄: 소식·수·소식말, 3 줄: 취소·링크·마무리)
+    const LAYOUT2: number[][] = [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6]
+    ];
+    // 회차 pi 의 두 받는 사람 — 한 사이클 안에 pi 번 사람 → (pi+2) 번 사람(값이 하나 비어 있다) 이 같은 문서를 다시 채운다
+    function compute2(pi: number): { a: { person: { to: string; values: { [k: string]: string } }; r: { parts: { text: string; name: string; value: string; from: number; to: number }[]; filled: number; unfilled: number } }; b: { person: { to: string; values: { [k: string]: string } }; r: { parts: { text: string; name: string; value: string; from: number; to: number }[]; filled: number; unfilled: number } } } {
+        const a = PEOPLE[pi % PEOPLE.length];
+        const b = PEOPLE[(pi + 2) % PEOPLE.length];
+        return { a: { person: a, r: fillSlots(BODY2, a.values) }, b: { person: b, r: fillSlots(BODY2, b.values) } };
+    }
+    function drawSheet(pi: number): void {
+        const c = compute2(pi);
+        parsedA = c.a;
+        parsedB = c.b;
+        // 편지지 — 종이 면 + 얇은 줄무늬 + 왼쪽 여백 선
+        sheetEl = make('div', 'sheet2', scWrap);
+        put(sheetEl, SHEET_X, SHEET_Y, SHEET_W, SHEET_H);
+        // 명도 전파 층 — 빈칸이 차오르는 동안 편지지 면 전체(328×140) 가 라일락·하늘색으로 물들었다 식는다
+        const tint = make('i', 'sheet2__tint', sheetEl);
+        tintEl = tint;
+        for (let l = 0; l < 3; l += 1) {
+            const ln = make('i', 'sheet2__rule', sheetEl);
+            put(ln, 16, 58 + l * 28, SHEET_W - 32, 1);
+        }
+        const margin = make('i', 'sheet2__margin', sheetEl);
+        put(margin, 28, 0, 1, SHEET_H);
+        // 받는 사람 — 편지지 윗줄 주소(가짜)
+        toEl = make('b', 'sheet2__to', sheetEl);
+        put(toEl, 16, 8, SHEET_W - 48, 16);
+        stampEl = make('i', 'stamp', sheetEl);
+        const stampTxt = make('b', 'stamp__txt', stampEl);
+        stampTxt.textContent = '우표';
+        put(stampEl, SHEET_W - 40, 8, 24, 20);
+        // 문장 — 글자 조각은 span, 빈칸은 외곽선 알약. 줄마다 flex 로 흐른다.
+        rowsEl = [];
+        slotEls = [];
+        faceEls = [];
+        valEls = [];
+        const parts = parsedA!.r.parts;
+        for (let l = 0; l < LAYOUT2.length; l += 1) {
+            const row = make('div', 'row2', sheetEl);
+            put(row, 16, 34 + l * 28, SHEET_W - 32, 24);
+            rowsEl.push(row);
+            for (let k = 0; k < LAYOUT2[l].length; k += 1) {
+                const idx = LAYOUT2[l][k];
+                if (idx >= parts.length) {
+                    continue;
+                }
+                const part = parts[idx];
+                if (part.name === '' && part.text !== '') {
+                    const sp = make('span', 'w2', row);
+                    sp.textContent = part.text;
+                }
+                else if (part.name !== '') {
+                    const sl = make('span', 'slot2', row);
+                    sl.setAttribute('data-filled', '0');
+                    sl.setAttribute('data-name', part.name);
+                    const face = make('i', 'slot2__face', sl);
+                    const val = make('b', 'slot2__val', sl);
+                    const ring = make('i', 'slot2__ring', sl);
+                    slotEls.push(sl);
+                    faceEls.push(face);
+                    valEls.push(val);
+                }
+            }
+        }
+        // 파문 — 빈칸이 다 차면 그 자리에서 동심원이 퍼진다 (채움 완료의 계산 그림)
+        waveEls = [];
+        for (let k = 0; k < 3; k += 1) {
+            const w = make('i', 'wave2', sheetEl);
+            put(w, 0, 0, 56, 20);
+            w.style.opacity = '0';
+            waveEls.push(w);
+        }
+        line2El = make('i', 'scan2', sheetEl);
+        put(line2El, 16, 36, SHEET_W - 32, 0);
+        washEl = make('i', 'sheet2__wash', sheetEl);
+        put(washEl, 0, 0, SHEET_W, SHEET_H);
+        // 왼쪽 칩 — 계산 결과
+        chip2Els = [];
+        const defs = [
+            ['SLOT_DELIM "{a} {b}"', 8, 8],
+            ['filled {a}', 8, 40],
+            ['unfilled {a}', 8, 68],
+            ['빈칸 · {a}개', 8, 96]
+        ];
+        for (let i = 0; i < defs.length; i += 1) {
+            const o = make('b', 'ov ovs', sceneEl);
+            put(o, Number(defs[i][1]), Number(defs[i][2]), 0, 0);
+            chip2Els.push(o);
+        }
+    }
+    // frame(t) — 시각 t 의 받는 사람(앞 절반 A, 뒤 절반 B) 과 각 빈칸의 진행률을 계산해 면을 scaleX 로 그린다.
+    //    빈칸 k 의 진행률 = clamp((t − t0 − k·(T2_SLOT+T2_GAP)) / T2_SLOT). 값이 없는 빈칸은 면이 차지 않고 외곽선만 남는다.
+    function frame2(t: number): string {
+        if (!parsedA || slotEls.length === 0) {
+            return '';
+        }
+        const second = t >= T2_SWITCH;
+        const cur = second ? parsedB : parsedA;
+        const t0 = second ? T2_SWITCH + T2_WASH : T2_IN0;
+        const person = cur!.person;
+        const slots = cur!.r.parts.filter(function (p: { text: string; name: string; value: string; from: number; to: number }) { return p.name !== ''; });
+        let filledNow = 0;
+        let unfilledNow = 0;
+        toEl!.textContent = 'to: ' + person.to;
+        let missShake = 0;
+        for (let k = 0; k < slotEls.length; k += 1) {
+            const sl = slotEls[k];
+            const face = faceEls[k];
+            const val = valEls[k];
+            const missing = slots[k] && slots[k].value === '';
+            const d = t - (t0 + k * (T2_SLOT + T2_GAP));
+            const kp = clamp(d / T2_SLOT, 0, 1);
+            const pop = d > T2_SLOT ? 1 + 0.1 * Math.sin(clamp((d - T2_SLOT) / 180, 0, 1) * Math.PI) : 1;
+            if (d < 0) {
+                if (second) {
+                    // 두 번째 받는 사람 — 아직 차례가 오지 않은 빈칸은 앞 사람의 채움을 그대로 덮어 쓴다 (같은 문서를 다시 채운다).
+                    //    값이 없는 빈칸만 그때 비워진다 — 빈 칸이 따로 세어지는 이유다.
+                    const prev = parsedA!.r.parts.filter(function (p) { return p.name !== ''; })[k];
+                    if (prev && prev.value !== '') {
+                        face.style.transform = 'scaleX(1)';
+                        val.style.opacity = '1';
+                        val.textContent = prev.value;
+                        sl.setAttribute('data-filled', '1');
+                        sl.setAttribute('data-missing', '0');
+                        sl.style.transform = 'scale(1)';
+                        filledNow += 1;
+                    }
+                    else {
+                        face.style.transform = 'scaleX(0)';
+                        val.style.opacity = '0';
+                        sl.setAttribute('data-filled', '0');
+                        sl.setAttribute('data-missing', '0');
+                        sl.style.transform = 'scale(1)';
+                    }
+                }
+                else {
+                    face.style.transform = 'scaleX(0)';
+                    val.style.opacity = '0';
+                    sl.setAttribute('data-filled', '0');
+                    sl.setAttribute('data-missing', missing ? '1' : '0');
+                    val.textContent = missing ? slots[k].name : slots[k].value;
+                    sl.style.transform = 'scale(1)';
+                }
+                continue;
+            }
+            if (missing) {
+                // 값이 없는 빈칸 — 차례에 외곽선이 두드려지고(flash) 빈 채로 남는다. 이름이 외곽선 안에 흐리게 보인다
+                const flash = 1 - easeOut(kp);
+                sl.setAttribute('data-filled', '0');
+                sl.setAttribute('data-missing', '1');
+                sl.style.transform = 'scale(' + f2(1 + 0.1 * flash) + ')';
+                val.style.opacity = String(0.9 * easeOut(kp));
+                val.textContent = slots[k].name;
+                // 빈 파문 — 값이 없어 그대로 남는 자리에서 붉은 동심원이 크게 퍼진다 (채움 파문과 색이 다르다)
+                const wm = waveEls[k];
+                if (wm) {
+                    wm.setAttribute('data-miss', '1');
+                    const r = sl.getBoundingClientRect();
+                    const sh = sheetEl!.getBoundingClientRect();
+                    wm.style.opacity = String(1 - easeOut(kp));
+                    wm.style.transform = 'translate(' + f1(r.left - sh.left + r.width / 2 - 28) + 'px,' + f1(r.top - sh.top + r.height / 2 - 10) + 'px) scale(' + f2(0.5 + easeOut(kp) * 3.2) + ')';
+                }
+                // 편지지가 살짝 흔들린다 — 빈 칸이 있다는 신호 (받는 사람마다 한 번)
+                missShake = Math.sin(kp * Math.PI * 3) * (1 - kp);
+                if (kp >= 1) {
+                    unfilledNow += 1;
+                }
+                continue;
+            }
+            // 두 번째 받는 사람은 면을 비우지 않는다 — 앞 사람의 채움 위에 글자만 바뀐다(같은 문서를 다시 채운다).
+            //    첫 번째 사람은 빈 외곽선에서 면이 좌에서 우로 차오른다.
+            face.style.transform = second ? 'scaleX(1)' : 'scaleX(' + f2(easeOut(kp)) + ')';
+            val.style.opacity = second ? '1' : (kp >= 0.5 ? '1' : '0');
+            val.textContent = slots[k].value;
+            sl.setAttribute('data-missing', '0');
+            sl.setAttribute('data-filled', kp >= 1 ? '1' : '0');
+            sl.style.transform = 'scale(' + f2(pop) + ')';
+            if (kp >= 1) {
+                filledNow += 1;
+            }
+            // 파문 — 채움이 끝난 순간부터 동심원이 퍼지며 옅어진다
+            const w = waveEls[k];
+            const dw = (d - T2_SLOT) / 360;
+            if (dw > 0 && dw < 1 && w) {
+                w.setAttribute('data-miss', '0');
+                const r = sl.getBoundingClientRect();
+                const s = sheetEl!.getBoundingClientRect();
+                w.style.opacity = String(1 - easeOut(dw));
+                w.style.transform = 'translate(' + f1(r.left - s.left + r.width / 2 - 28) + 'px,' + f1(r.top - s.top + r.height / 2 - 10) + 'px) scale(' + f2(0.4 + easeOut(dw) * 2.8) + ')';
+            }
+            else if (w) {
+                w.style.opacity = '0';
+            }
+        }
+        // 종이 세척 — 받는 사람이 바뀌는 동안 편지지가 밝아졌다가 돌아온다 (넓은 면 — 전환 표시)
+        const kw = (t - T2_SWITCH) / T2_WASH;
+        washEl!.style.opacity = String(kw > 0 && kw < 1 ? 0.45 * Math.sin(kw * Math.PI) : 0);
+        // 명도 전파 — 지금 차오르는 빈칸의 진행률로 편지지 면의 농도를 계산한다. 세 빈칸 각각의 sin(π·k) 합(0~1)
+        let fillGlow = 0;
+        for (let k = 0; k < slotEls.length; k += 1) {
+            const dk = clamp((t - (t0 + k * (T2_SLOT + T2_GAP))) / T2_SLOT, 0, 1);
+            fillGlow += dk > 0 && dk < 1 ? Math.sin(dk * Math.PI) : 0;
+        }
+        tintEl!.style.setProperty('--glow', f2(clamp(fillGlow / 1.4 + (filledNow > 0 ? 0.12 : 0), 0, 1)));
+        sheetEl!.style.transform = 'translateX(' + f1(missShake * 3) + 'px) translateY(' + f1((kw > 0 && kw < 1 ? -4 * Math.sin(kw * Math.PI) : 0) + missShake * 2) + 'px) rotate(' + f1((kw > 0 && kw < 1 ? -1.2 * Math.sin(kw * Math.PI) : 0) + missShake * 1.5) + 'deg)';
+        // 스캔선 — 열림 표식을 indexOf 로 찾아 내려가는 커서
+        const ks = clamp((t - t0) / (3 * (T2_SLOT + T2_GAP)), 0, 1);
+        const rowOf = Math.min(2, Math.floor(ks * 3));
+        line2El!.style.transform = 'translateY(' + f0(rowOf * 28) + 'px)';
+        line2El!.style.opacity = ks >= 1 ? '0' : '1';
+        // 우표 — 받는 사람이 바뀔 때마다 도장이 다시 찍힌다 (살짝 눌렸다 복원)
+        const kst = second ? clamp((t - T2_SWITCH - T2_WASH) / 240, 0, 1) : clamp((t - T2_IN0) / 240, 0, 1);
+        stampEl!.style.transform = 'scale(' + f2(1 + 0.35 * (1 - easeOut(kst))) + ') rotate(' + f1(-8 * (1 - easeOut(kst))) + 'deg)';
+        stampEl!.setAttribute('data-who', String(second ? 2 : 0));
+        if (chip2Els.length === 4) {
+            chip2Els[0].textContent = fill('SLOT_DELIM "{a} {b}"', SLOT_DELIM[0], SLOT_DELIM[1]);
+            chip2Els[1].textContent = fill('filled {a}', f0(filledNow));
+            chip2Els[2].textContent = fill('unfilled {a}', f0(unfilledNow));
+            chip2Els[3].textContent = fill('빈칸 · {a}개', f0(slotEls.length));
+        }
+        return fill('받는 사람 {a} · 채움 {b} · 빈칸 {c}', person.values.name, f0(filledNow), f0(unfilledNow));
+    }
+    function build2(i: number): number {
+        drawSheet(i);
+        const spans = [];
+        for (let k = 0; k < 3; k += 1) {
+            spans.push(spanOf(T2_IN0 + k * (T2_SLOT + T2_GAP), T2_SLOT, k));
+        }
+        spans.push(spanOf(T2_SWITCH, T2_WASH, 1));
+        for (let k = 0; k < 3; k += 1) {
+            spans.push(spanOf(T2_SWITCH + T2_WASH + k * (T2_SLOT + T2_GAP), T2_SLOT, (k + 1) % 3));
+        }
+        drawRows(spans, 2000);
+        axis(2000);
+        setReads(fill('fillSlots(body, values) — SLOT_DELIM "{a} {b}"', SLOT_DELIM[0], SLOT_DELIM[1]),
+            fill('{a} 님에게는 세 칸 중 {b} 칸을 채우고 {c} 칸은 빈 채로 보낸다', parsedB!.person.values.name, f0(parsedB!.r.filled), f0(parsedB!.r.unfilled)));
+        doneP.textContent = '';
+        return 2000;
+    }
+    return run({ count: 3, build: build2, frame: frame2, head: false });
+}
+
+export default function Template02SlotFill() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 받는 사람'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'편지지의 빈칸들이 받는 사람의 값으로 차오르고 값이 없는 빈칸은 외곽선만 남는 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}
