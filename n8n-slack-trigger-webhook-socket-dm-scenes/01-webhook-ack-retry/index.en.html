@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" sizes="32x32" href="https://godrichstory.com/static/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="https://godrichstory.com/static/favicon.png"><link rel="apple-touch-icon" href="https://godrichstory.com/static/apple-touch-icon.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webhook trigger: the 3-second ack and retries — demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="stage">
+<div class="ez is-demo" id="ez">
+  <div class="ez__in" data-role="inner">
+    <div class="ez__pad" data-role="pad" tabindex="0" role="application" aria-label="Demo stage: Space or Enter pauses, R restarts, left and right arrows pick another value">
+      <div class="ez__scene" data-role="scene" role="img" aria-label="A scene where an event makes a round gauge count down from the ack window, a 200 inside the window ends it in one delivery, and a miss makes the same event arrive again and stack retry bars"></div>
+      <div class="ez__probe" data-role="probe" aria-hidden="true"></div>
+      <div class="ez__chart" data-role="chart" aria-hidden="true"></div>
+      <p class="ez__status" data-role="status" aria-live="off">Scene ready</p>
+      <p class="ez__reada" data-role="reada" aria-hidden="true"></p>
+      <p class="ez__readb" data-role="readb" aria-hidden="true"></p>
+      <div class="ez__ctrl">
+        <button class="ez__pause" data-role="pause" type="button" aria-pressed="false">Pause</button>
+      </div>
+      <p class="ez__done" data-role="done" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+</main>
+<script>
+(function () {
+    const rootEl = document.getElementById("ez");
+    if (!rootEl) return;
+    main(rootEl);
+function cx(s) { return s; }
+function main(root) {
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function fill(s) {
+        const v = [];
+        for (let i = 1; i < arguments.length; i += 1) { v.push(arguments[i]); }
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v) { return String(Math.round(v)); }
+    function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]');
+    const sceneQ = rootEl.querySelector('[data-role="scene"]');
+    const chartQ = rootEl.querySelector('[data-role="chart"]');
+    const probeQ = rootEl.querySelector('[data-role="probe"]');
+    const padQ = rootEl.querySelector('[data-role="pad"]');
+    const pauseQ = rootEl.querySelector('[data-role="pause"]');
+    const statusQ = rootEl.querySelector('[data-role="status"]');
+    const readAQ = rootEl.querySelector('[data-role="reada"]');
+    const readBQ = rootEl.querySelector('[data-role="readb"]');
+    const doneQ = rootEl.querySelector('[data-role="done"]');
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag, cls, parent) {
+        const e = document.createElement(tag);
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e, x, y, w, h) {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host) {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d, dur, k) { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls, x, y, w, h) {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs, max) {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < segs.length; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar(sg.k === 2 ? 'bar k2' : (sg.k === 1 ? 'bar k1' : 'bar'), x, 4 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max) {
+        const a = make('b', 'ax', chartEl);
+        put(a, CX0, 40, 0, 0);
+        a.textContent = '0ms';
+        const b = make('b', 'ax ax--r', chartEl);
+        put(b, CX0, 40, CW, 0);
+        b.textContent = f0(max) + 'ms';
+    }
+    function setReads(a, b) {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function run(cfg) {
+        const off = new AbortController();
+        if (cfg.bind) { cfg.bind(off); }
+        let pi = 0;
+        let cycle = 2000;
+        let paused = false;
+        let raf = 0;
+        let clock = null;
+        let lastStatus = '';
+        let headEl = null;
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p) {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d) {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+
+    // ── 537-01 웹훅 트리거 — 이벤트가 도착하면 확인 시한 ACK_MS 부터 거꾸로 줄어드는 원형 게이지.
+    //    시한 안에 HTTP 200 확인이 나가면 1회 배달로 끝나고, 넘기면 슬랙이 같은 이벤트를 재전송한다
+    //    (공식 문서: 3초 안 응답 실패 → 최대 3회 재시도, 지수 백오프). 계산 두 줄이 이 씬의 핵심이다.
+    //      남은 시간 remaining = ACK_MS - elapsed
+    //      재시도 수 retries = floor(elapsed / ACK_MS)
+    //    원판의 고도(altitude)는 남은 비율을 따라 내려앉고, 딥 스페이스 그림자 두 겹(가까운 겹·먼 겹)의
+    //    오프셋·흐림·불투명도는 고도에서 같은 함수 spaceShadow 로 계산된다 — 속성 트윈이 아니라 계산 한 겹.
+    //    실제 슬랙 재시도 간격(거의 즉시 · 1분 뒤 · 5분 뒤)은 2초 무대에 그대로 못 넣으므로
+    //    한 칸 = ACK_MS 로 압축해 컷으로 넘긴다 — 압축 사실은 주석과 글에 밝힌다.
+    const ACK_MS = 3000;    // 변형 s01: 3000 → 800 (확인 시한 ms)
+    const ACK_RETRIES = 3;  // 슬랙이 재전송하는 횟수 — 공식 문서 "retry three times"
+    const SLOT_MS = 432;    // 한 번의 시도가 무대에서 차지하는 무대 시간 (ACK_MS 를 이 길이로 압축) — 4 칸이 2000ms 안에 든다
+    const FIRST_MS = 160;   // 첫 시각 변화는 150ms 뒤 (렌더 하네스 결정론 모드 회피)
+    const BOUNCE_MS = 260;  // 200 확인 뒤 원판이 떴다 앉는 시간
+    const RING_X = 8;
+    const RING_Y = 4;
+    const RING_D = 148;
+    const RING_T = 16;     // 링 띠 안쪽에 원판이 들어온다 — 원판 지름 116 (반지름 58 < 구멍 62)
+    let ringEl = null;
+    let discEl = null;
+    let numEl = null;
+    let lblEl = null;
+    let evEls = [];
+    let retryEls = [];
+    let tallyEl = null;
+    let rateEl = null;
+    let faceLo = [0, 0, 0];   // 원판 면 색 — 고도 0 끝 (scss --face-lo 를 build 에서 읽는다)
+    let faceHi = [0, 0, 0];   // 원판 면 색 — 고도 1 끝 (scss --face-hi)
+    // 고도 → 그림자 문자열. 가까운 겹은 작고 짙게, 먼 겹은 고도에 비례해 크고 옅어진다
+    function spaceShadow(alt) {
+        const a = clamp(alt, 0, 1);
+        const y1 = 4 + a * 4;
+        const b1 = 8 + a * 6;
+        const a1 = 0.20 - a * 0.08;
+        const y2 = 14 + a * 22;
+        const b2 = 28 + a * 36;
+        const a2 = 0.06 + a * 0.04;
+        return '0 ' + f0(y1) + 'px ' + f0(b1) + 'px rgba(23, 20, 26, ' + f2(a1) + ')' +
+            ', 0 ' + f0(y2) + 'px ' + f0(b2) + 'px rgba(23, 20, 26, ' + f2(a2) + ')';
+    }
+    // 고도 → 원판 면 색. CSS 변수 --face-lo/--face-hi (scss 토큰 mix) 사이를 고도값으로 보간한다.
+    // 딥 스페이스 라이팅 — 떠 있는 면이 빛을 받아 밝아지는 것을 같은 고도값으로 계산한다 (속성 트윈이 아니다)
+    function faceTone(alt, lo, hi) {
+        const a = clamp(alt, 0, 1);
+        return 'rgb(' + f0(lerp(lo[0], hi[0], a)) + ',' + f0(lerp(lo[1], hi[1], a)) + ',' + f0(lerp(lo[2], hi[2], a)) + ')';
+    }
+    // CSS 색 하나를 0~255 rgb 세 쌍으로 읽는다 — sass 가 rgb(94.4%, 93%, 90.7%) 처럼 백분율로 내보낼 수 있어
+    // 정규식으로 숫자만 뽑으면 스케일을 틀리게 읽는다. 임시 요소에 대입해 브라우저가 정규화한 값을 받는다
+    function readRgb(v) {
+        const p = document.createElement('i');
+        p.style.color = v;
+        scWrap.appendChild(p);
+        const c = getComputedStyle(p).color;
+        scWrap.removeChild(p);
+        const m = c.match(/-?[0-9.]+/g) || ['0', '0', '0'];
+        return [Number(m[0]), Number(m[1]), Number(m[2])];
+    }
+    // 한 번의 시도 상태 — elapsed(시도 시작부터 흐른 시간) 와 ackAt(확인이 나가는 시각, null 이면 안 나감)
+    function attemptState(slotMs, ackAt) {
+        // 한 칸(SLOT_MS 무대 시간) 이 시한 ACK_MS 실제 시간에 해당하도록 환산한다
+        const elapsed = slotMs / SLOT_MS * ACK_MS;
+        const remaining = clamp(ACK_MS - elapsed, 0, ACK_MS);      // 남은 시간 = ACK_MS - elapsed
+        const acked = ackAt !== null && elapsed >= ackAt;
+        return { remaining: acked ? 0 : remaining, k: clamp(remaining / ACK_MS, 0, 1), acked: acked, elapsed: elapsed };
+    }
+    function build(i) {
+        ringEl = make('i', 'wk-ring', scWrap);
+        put(ringEl, RING_X, RING_Y, RING_D, RING_D);
+        discEl = make('i', 'wk', scWrap);
+        put(discEl, RING_X + RING_T, RING_Y + RING_T, RING_D - RING_T * 2, RING_D - RING_T * 2);
+        // 고도 색 두 끝을 한 번만 읽는다 — 토큰값이라 프레임마다 다시 읽지 않는다
+        const cs = getComputedStyle(discEl);
+        faceLo = readRgb(cs.getPropertyValue('--face-lo'));
+        faceHi = readRgb(cs.getPropertyValue('--face-hi'));
+        numEl = make('p', 'wk__num', scWrap);
+        lblEl = make('p', 'wk__lbl', scWrap);
+        lblEl.textContent = 'ACK_MS ' + f0(ACK_MS) + 'ms';
+        evEls = [];
+        retryEls = [];
+        tallyEl = make('b', 'ov ovs', sceneEl);
+        put(tallyEl, 172, 16, 0, 0);
+        rateEl = make('b', 'ov ovs ovs--m', sceneEl);
+        put(rateEl, 172, 40, 0, 0);
+        const ov1 = make('b', 'ov', sceneEl);
+        put(ov1, 172, 64, 0, 0);
+        ov1.textContent = 'remaining = ACK_MS - elapsed';
+        const ov2 = make('b', 'ov', sceneEl);
+        put(ov2, 172, 80, 0, 0);
+        ov2.textContent = 'retries = floor(elapsed / ACK_MS)';
+        const ov3 = make('b', 'ov', sceneEl);
+        put(ov3, 172, 96, 0, 0);
+        ov3.textContent = 'webhook · HTTP 200 within 3s';
+        // 재시도 막대 — 시한을 넘긴 횟수만큼 차오른다. 재시도 3번까지 (문서 값)
+        for (let r = 0; r < ACK_RETRIES; r += 1) {
+            const e = make('i', 'rt', sceneEl);
+            put(e, 172, 116 + r * 8, 124, 4);
+            retryEls.push(e);
+        }
+        // 이벤트 꾸러미 — 같은 이벤트가 재전송될수록 더 많이 켜진다 (1 + 재시도 수)
+        for (let k = 0; k <= ACK_RETRIES; k += 1) {
+            const e = make('i', 'wk-ev', sceneEl);
+            put(e, 172 + k * 32, 4, 24, 8);
+            evEls.push(e);
+        }
+        drawRows([spanOf(0, SLOT_MS, 0), spanOf(SLOT_MS, SLOT_MS, 0), spanOf(SLOT_MS * 2, SLOT_MS, 0), spanOf(SLOT_MS * 3, SLOT_MS, 1)], SLOT_MS * 4);
+        axis(SLOT_MS * 4);
+        setReads(fill('webhook · ACK_MS {a} · retry ≤ {b} · remaining = ACK_MS - elapsed', f0(ACK_MS), f0(ACK_RETRIES)),
+            i === 0 ? 'the webhook answers inside the window' : 'a late ack makes slack resend the same event');
+        doneP.textContent = '';
+        return 2000;
+    }
+    function frame(t) {
+        // build() 가 요소를 전부 만든 뒤에만 그린다 — build 전 프레임은 건너뛴다 (null 안전)
+        if (!ringEl || !discEl || !numEl || !lblEl || !tallyEl || !rateEl) {
+            return '';
+        }
+        // 시연 스케줄 — 4 칸(각 SLOT_MS). 앞 3 칸은 시한을 넘겨 재전송, 마지막 칸은 안에서 200 확인
+        const el = Math.max(0, t - FIRST_MS);
+        const slot = Math.min(ACK_RETRIES, Math.floor(el / SLOT_MS));       // 0~3 번째 배달 시도
+        const inSlot = el - slot * SLOT_MS;
+        const ackAt = slot === ACK_RETRIES ? ACK_MS * 0.55 : null;             // 마지막 칸만 시한 안에 200
+        const st = attemptState(inSlot, ackAt);
+        // 재시도 수 = floor(총 경과 / ACK_MS) — 시한을 몇 번 지나쳤는가. 재시도는 문서값 3회까지만 센다
+        const retries = Math.min(ACK_RETRIES, Math.floor(el / SLOT_MS));
+        ringEl.style.setProperty('--deg', f0(st.k * 360) + 'deg');
+        // 원판 고도 — 남은 시간이 적을수록 낮게 가라앉는다 (시한 압박). 확인이 나가면 다시 뜬다.
+        // 200 확인 뒤 BOUNCE_MS 동안 감쇠 사인으로 한 번 출렁이며 1 에 안착한다 (계산 — 속성 트윈이 아니다)
+        let alt = st.k;
+        if (st.acked) {
+            // 바운스 시간은 무대 시간(ms) 으로 잰다 — ackAt 이후 흐른 무대 시간
+            const since = clamp(inSlot - SLOT_MS * 0.55, 0, BOUNCE_MS) / BOUNCE_MS;
+            alt = 1 + Math.sin(since * Math.PI * 2) * Math.exp(-since * 3) * 0.35 * (1 - since);
+        }
+        const lift = alt * 8;
+        discEl.style.transform = 'translateY(' + f1(-lift) + 'px)';
+        discEl.style.boxShadow = spaceShadow(alt);
+        discEl.style.background = faceTone(alt, faceLo, faceHi);
+        numEl.style.transform = 'translateY(' + f1(-lift) + 'px)';
+        numEl.textContent = st.acked ? '200' : f0(st.remaining);
+        numEl.style.left = (RING_X + 8) + 'px';
+        numEl.style.top = (RING_Y + RING_D / 2 - 20) + 'px';
+        numEl.style.width = (RING_D - 16) + 'px';
+        lblEl.style.left = (RING_X + 8) + 'px';
+        lblEl.style.top = (RING_Y + RING_D / 2 + 8) + 'px';
+        lblEl.style.width = (RING_D - 16) + 'px';
+        lblEl.style.textAlign = 'center';
+        for (let r = 0; r < ACK_RETRIES; r += 1) {
+            const e = retryEls[r];
+            if (!e) {
+                continue;
+            }
+            const on = r < retries;
+            e.style.transform = on ? 'scaleX(1)' : 'scaleX(0)';
+            e.style.opacity = on ? '1' : '0.3';
+        }
+        tallyEl.textContent = 'retry ' + f0(retries);
+        rateEl.textContent = st.acked ? fill('200 acked · done · {a} attempts', f0(retries + 1)) : fill('redelivered {a} times', f0(retries));
+        evEls.forEach(function (e, idx) {
+            e.style.opacity = idx <= retries ? '1' : '0.2';
+        });
+        return fill('webhook · remaining {a}ms · retry {b} · ACK_MS {c}',
+            f0(st.remaining), f0(retries), f0(ACK_MS));
+    }
+
+    return run({ count: 3, build: build, frame: frame });
+}
+})();
+
+</script>
+</body>
+</html>
