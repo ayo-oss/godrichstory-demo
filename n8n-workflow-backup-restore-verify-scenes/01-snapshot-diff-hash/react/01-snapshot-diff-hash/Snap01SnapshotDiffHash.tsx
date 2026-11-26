@@ -1,0 +1,488 @@
+// Snap01SnapshotDiffHash - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./Snap01SnapshotDiffHash.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+    // ── 540 공통 — n8n 워크플로 백업 3종 엔진 (539 base 계승)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function fill(s: string, ...v: any[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v: number): string { return String(Math.round(v)); }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+    const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+    const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+    const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+    const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLElement | null;
+    const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+    const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+    const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag: string, cls: string, parent: HTMLElement): HTMLElement {
+        const e = document.createElement(tag) as HTMLElement;
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll(): void {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+        // 씬 바로 아래 두는 집계 오버레이(.ov) 도 다시 만든다 — 지우지 않으면 묶음을 바꿀 때 옛 칩이 쌓인다
+        const ovs = sceneEl.querySelectorAll('.ov');
+        for (let i = 0; i < ovs.length; i += 1) {
+            sceneEl.removeChild(ovs[i]);
+        }
+    }
+    function seedHash(i: number, seed: number): number {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host: HTMLElement): Animation[] {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d: number, dur: number, k?: number): { s: number; e: number; k: number } { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    function bar(cls: string, x: number, y: number, w: number, h: number): HTMLElement {
+        const e = make('i', cls, chartEl);
+        put(e, x, y, w, h);
+        return e;
+    }
+    function drawRows(segs: { s: number; e: number; k: number }[], max: number): void {
+        const n = segs.length;
+        const h = clamp(Math.floor((34 - (n - 1)) / n), 2, 7);
+        for (let i = 0; i < n; i += 1) {
+            const sg = segs[i];
+            const x = CX0 + clamp(sg.s, 0, max) / max * CW;
+            const w = Math.max(2, (clamp(sg.e, 0, max) - clamp(sg.s, 0, max)) / max * CW);
+            bar('bar k' + sg.k, x, 5 + i * (h + 1), w, h);
+        }
+    }
+    function axis(max: number): void {
+        const a = make('b', 'ax', chartEl);
+        a.textContent = '0';
+        put(a, CX0, 40, 0, 0);
+        const b = make('b', 'ax ax--r', chartEl);
+        b.textContent = f0(max) + 'ms';
+        put(b, CX0 + CW - 60, 40, 60, 0);
+    }
+    let headEl: HTMLElement | null = null;
+    function setReads(a: string, b: string): void {
+        readA.textContent = a;
+        readB.textContent = b;
+    }
+    function ema(prev: number, x: number, k: number): number {
+        return prev + (x - prev) * k;
+    }
+    let piNow: number = 0;
+    function run(cfg: { count: number; build: (i: number) => number; frame: (t: number) => string; head?: boolean }): () => void {
+        const off = new AbortController();
+        let pi: number = 0;
+        let cycle: number = 2000;
+        let paused: boolean = false;
+        let raf: number = 0;
+        let clock: Animation | null = null;
+        let lastStatus: string = '';
+        function fit(): void {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild(): void {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i] as CSSAnimation & { effect?: (AnimationEffect & { target?: EventTarget | null }) };
+                if (an.animationName && an.effect && an.effect.target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart(): void {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick(): void {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p: boolean): void {
+            paused = p;
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d: number): void {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            // 움직임 줄이기에서는 애니메이션이 꺼져 있어 tick 이 상태를 다시 그리지 않는다 — 입력(다른 묶음) 을 바로 그린다
+            if (reduced) {
+                statusP.textContent = cfg.frame(1e9);
+            }
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // 마지막 상태를 보여 준다 — 상태 줄은 계산 최종값, 낭독 문장(done) 은 요약 문장
+            statusP.textContent = cfg.frame(1e9);
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+
+    // ── 540-01 스냅샷 — 워크플로 타일 8 개(4×2) 가 격자로 늘어서고, 주기마다 스냅샷이 찍힌다.
+    //    워크플로마다 foldHash 로 접힌 해시를 계산해 한 문자열로 합치고, 이전 스냅샷과 해시가
+    //    다른 워크플로만 changed 로 표시된다. 스냅샷 수 snapshots 와 변경 수 changed 는 따로 오른다.
+    //    아웃라인드 플레이 — 면 없이 굵은 외곽선만. 접힌 타일은 외곽선 안이 채워진다.
+    //    2초 안에 스냅샷 3 장 — 1 장째는 기준(비교 대상 없음 → changed 0), 2·3장째는 직전 판과 견준다
+    const CADENCE_MIN = 60;   // 변형 1: 60 → 6 (분. 데모 상수 — n8n 의 기본값이 아니다)
+    const MOD = 9973;         // 접은 해시의 나머지 기수
+    const BASE = 31;          // 글자 가중치 밑 (31^i)
+    const WF_N = 8;           // 워크플로 타일 수 (4×2 격자)
+    const COLS = 4;
+    const CW1 = 60;           // 타일 폭
+    const CH1 = 64;           // 타일 높이
+    const GAP1 = 4;
+    const EDIT_N = 3;         // 스냅샷 사이에 바뀌는 워크플로 수 (시드가 고른 EDIT_N 개 — 데모 상수)
+    const SNAP_N = 3;         // 2초 안에 찍는 스냅샷 수
+    const T_SNAP = [200, 820, 1400];   // 스냅샷 시작 순간. 첫 변화는 150ms 뒤
+    const T_STEP = 56;        // 타일 하나를 접는 시간
+    const T_FOLD = WF_N * T_STEP;  // 한 스냅샷이 8 타일을 도는 길이 = 448ms
+    type Tile = { el: HTMLElement; codes: string[]; hashEl: HTMLElement; markEl: HTMLElement };
+    type Snap = { h: number[]; changed: number };
+    let tiles: Tile[] = [];   // codes = [1장째, 2장째, 3장째 문자열]
+    let snapNoEl: HTMLElement | null = null;
+    let changedNoEl: HTMLElement | null = null;
+    let sumEl: HTMLElement | null = null;
+    let sweepEl: HTMLElement | null = null;
+    let snaps: Snap[] = [];   // snaps[g] = { h: 워크플로별 해시, changed: 직전 판과 다른 수 (1장째는 0) }
+    // 워크플로 하나의 "내용" = 노드 이름들을 | 로 이은 문자열. 1장째는 기본, 2·3장째는 editedSet 이 고른 EDIT_N 개만 바뀐다
+    function wfCode(k: number, seed: number, gen: number): string {
+        const names = ['webhook', 'set', 'if', 'http', 'merge', 'code', 'split', 'sheets', 'slack', 'gmail'];
+        const n = 3 + Math.floor(seedHash(k * 3 + 1, seed) * 3); // 3 에서 5 개 노드
+        const parts: string[] = [];
+        for (let j = 0; j < n; j += 1) {
+            parts.push(names[Math.floor(seedHash(k * 11 + j * 7 + 2, seed) * names.length)]);
+        }
+        if (gen > 0 && editedSet(seed, gen).indexOf(k) >= 0) {
+            // 편집 — 마지막 노드가 다른 노드로 바뀐다 (해시가 달라지는 원인).
+            // 바꿀 이름이 원래 이름과 같으면 한 칸 민다 — 편집된 워크플로는 반드시 해시가 달라진다 (changed 는 정확히 EDIT_N)
+            const last = parts[parts.length - 1];
+            let id = Math.floor(seedHash(k * 17 + 9, seed + gen) * names.length);
+            if (names[id] === last) {
+                id = (id + 1) % names.length;
+            }
+            parts[parts.length - 1] = names[id];
+        }
+        return parts.join('|');
+    }
+    // foldHash — 문자열을 31 진 가중합으로 접어 MOD 로 나머지를 취한다.
+    // 31^i 는 매 글자마다 (p × 31) mod 9973 로 누적한다 — 거듭제곱을 그대로 쌓으면 배정밀도 범위를 넘어 정확도가 사라진다.
+    function foldHash(s: string): number {
+        let h = 0;
+        let p = 1;
+        for (let i = 0; i < s.length; i += 1) {
+            h = (h + s.charCodeAt(i) * p) % MOD;
+            p = (p * BASE) % MOD;
+        }
+        return h;
+    }
+    // editedSet — 이 시드의 gen 번째 스냅샷에서 편집되는 워크플로 번호 EDIT_N 개 (중복 없이, 앞 스냅샷이 편집한 번호와도 겹치지 않게)
+    function editedSet(seed: number, gen: number): number[] {
+        const set: number[] = [];
+        const used: number[] = gen > 1 ? editedSet(seed, gen - 1) : [];
+        let g = 0;
+        while (set.length < EDIT_N && g < 200) {
+            const k = Math.floor(seedHash(31 + g, seed + gen * 5) * WF_N);
+            if (set.indexOf(k) < 0 && used.indexOf(k) < 0) {
+                set.push(k);
+            }
+            g += 1;
+        }
+        return set;
+    }
+    // combine — 워크플로별 해시를 쉼표로 이어 다시 접는다 (스냅샷 전체의 지문)
+    function combine(hs: number[]): number {
+        return foldHash(hs.join(','));
+    }
+    // snapshotOf — g 번째 스냅샷의 워크플로별 해시와, 직전 판(g-1) 과 해시가 다른 워크플로 수 changed
+    function snapshotOf(g: number): Snap {
+        const h = [];
+        for (let k = 0; k < WF_N; k += 1) {
+            h.push(foldHash(tiles[k].codes[g]));
+        }
+        let changed = 0;
+        if (g > 0) {
+            for (let k = 0; k < WF_N; k += 1) {
+                if (h[k] !== snaps[g - 1].h[k]) {
+                    changed += 1;
+                }
+            }
+        }
+        return { h: h, changed: changed };
+    }
+    function build(i: number): number {
+        const seeds = [3.1, 5.9, 8.3];
+        const seed = seeds[i];
+        tiles = [];
+        for (let k = 0; k < WF_N; k += 1) {
+            const el = make('div', 'wf', scWrap);
+            put(el, 4 + (k % COLS) * (CW1 + GAP1), 4 + Math.floor(k / COLS) * (CH1 + GAP1), CW1, CH1);
+            const nm = make('b', 'wf__nm', el);
+            nm.textContent = 'wf-' + f0(k + 1);
+            for (let d = 0; d < 3; d += 1) {
+                const dot = make('i', 'wf__dot', el);
+                put(dot, 8 + d * 12, 34, 8, 8);
+            }
+            const hEl = make('b', 'wf__h', el);
+            hEl.textContent = '----';
+            const mEl = make('b', 'wf__mark', el);
+            mEl.textContent = 'changed';
+            const codes: string[] = [];
+            for (let g = 0; g < SNAP_N; g += 1) {
+                codes.push(wfCode(k, seed, g));
+            }
+            tiles.push({ el: el, codes: codes, hashEl: hEl, markEl: mEl });
+        }
+        // 스냅샷 세 장을 미리 계산한다 (순수 함수 — frame 은 이 값을 시간으로 보여 주기만 한다)
+        snaps = [];
+        for (let g = 0; g < SNAP_N; g += 1) {
+            snaps.push(snapshotOf(g));
+        }
+        // 촬영 띠 — 지금 접히는 타일 자리를 감싸는 외곽선 테두리
+        sweepEl = make('i', 'sweep', scWrap);
+        put(sweepEl, 4, 4, CW1, CH1);
+        // 우측 집계 — 스냅샷 수와 변경 수가 따로 오른다 (격자 4열 = 252 폭, 집계는 264 부터)
+        snapNoEl = make('b', 'ov ovs', sceneEl);
+        put(snapNoEl, 264, 8, 0, 0);
+        changedNoEl = make('b', 'ov ovs', sceneEl);
+        put(changedNoEl, 264, 32, 0, 0);
+        sumEl = make('b', 'ov ovs', sceneEl);
+        put(sumEl, 264, 56, 0, 0);
+        const f1e = make('b', 'ov ov--s', sceneEl);
+        put(f1e, 264, 84, 0, 0);
+        f1e.textContent = 'foldHash = Σ code×31^i mod 9973';
+        const f3e = make('b', 'ov ov--s', sceneEl);
+        put(f3e, 264, 100, 0, 0);
+        f3e.textContent = 'changed = Σ (h_i ≠ h′_i)';
+        const f4e = make('b', 'ov ov--s', sceneEl);
+        put(f4e, 264, 116, 0, 0);
+        f4e.textContent = 'CADENCE_MIN ' + f0(CADENCE_MIN) + ' → ' + f0(1440 / CADENCE_MIN) + ' / day';
+        setReads('snapshot(foldHash) — CADENCE_MIN ' + f0(CADENCE_MIN) + ' · WF_N ' + f0(WF_N),
+            'each workflow folds to a hash and only the ones that differ are marked changed');
+        const segs: { s: number; e: number; k: number }[] = [spanOf(0, T_SNAP[0], 0)];
+        for (let g = 0; g < SNAP_N; g += 1) {
+            segs.push(spanOf(T_SNAP[g], T_FOLD, (g % 2) + 1));
+            const next = g + 1 < SNAP_N ? T_SNAP[g + 1] : 2000;
+            segs.push(spanOf(T_SNAP[g] + T_FOLD, next - T_SNAP[g] - T_FOLD, 0));
+        }
+        drawRows(segs, 2000);
+        axis(2000);
+        doneP.textContent = '';
+        return 2000;
+    }
+    function frame(t: number): string {
+        if (tiles.length === 0 || !snapNoEl || !changedNoEl || !sumEl || !sweepEl) {
+            return '';
+        }
+        // 어느 스냅샷이 진행 중인가 — cur = 시작 순간이 지난 스냅샷 중 마지막. tt = 그 스냅샷이 시작한 뒤 흐른 시간
+        let cur = -1;
+        let tt = 0;
+        for (let g = 0; g < SNAP_N; g += 1) {
+            if (t >= T_SNAP[g]) {
+                cur = g;
+                tt = t - T_SNAP[g];
+            }
+        }
+        // 확정 — 8 타일을 다 접은 스냅샷만 센다. 변경 수는 "확정된 마지막 스냅샷" 의 changed (스냅샷 수와 따로 오른다)
+        let snapCount = 0;
+        for (let g = 0; g < SNAP_N; g += 1) {
+            if (t >= T_SNAP[g] + T_FOLD) {
+                snapCount += 1;
+            }
+        }
+        const doneG = snapCount - 1;
+        const changedCount = doneG >= 1 ? snaps[doneG].changed : 0;
+        // reach = 이번 스냅샷에서 완전히 접힌 타일 수, partK = 지금 접히는 타일의 진행 0~1
+        const reach = cur >= 0 ? clamp(Math.floor(tt / T_STEP), 0, WF_N) : 0;
+        const partK = cur >= 0 ? clamp((tt - reach * T_STEP) / T_STEP, 0, 1) : 0;
+        const hs = cur >= 0 ? snaps[cur].h : snaps[0].h;
+        for (let k = 0; k < WF_N; k += 1) {
+            const tl = tiles[k];
+            const isReach = cur >= 0 && k < reach;
+            const isPart = cur >= 0 && k === reach && partK > 0;
+            const hv = hs[k];
+            tl.el.setAttribute('data-folded', isReach ? '1' : '0');
+            tl.el.setAttribute('data-part', isPart ? '1' : '0');
+            // 접히는 중에는 해시 자릿수가 0 부터 목푯값까지 차오른다 (계산: hv × partK)
+            tl.hashEl.textContent = isReach ? f0(hv) : (isPart ? f0(Math.floor(hv * partK)) : '----');
+            // changed 표시 — 이번 스냅샷(cur 이 1 이상) 에서 직전 판과 해시가 다른, 이미 접힌 타일만
+            const isCh = cur >= 1 && isReach && snaps[cur].h[k] !== snaps[cur - 1].h[k];
+            tl.el.setAttribute('data-changed', isCh ? '1' : '0');
+            tl.markEl.style.opacity = isCh ? '1' : '0';
+            tl.markEl.style.transform = 'translateY(' + f1((1 - (isCh ? 1 : 0)) * 4) + 'px)';
+            // 접히는 순간 타일이 튀어오른다 (계산: sin 으로 만든 한 번 짜리 과잉 진동)
+            const bump = isPart ? Math.sin(partK * Math.PI) * 0.08 : 0;
+            tl.el.style.transform = 'scale(' + f2(1 + bump) + ')';
+        }
+        // 촬영 띠 — 접히는 타일 위치를 따라간다 (계산: reach + partK → 열·행 좌표)
+        if (cur >= 0 && reach < WF_N) {
+            const kk = reach + partK;
+            sweepEl.style.opacity = '1';
+            sweepEl.style.transform = 'translate(' + f1((kk % COLS) * (CW1 + GAP1)) + 'px, ' + f1(Math.floor(kk / COLS) * (CH1 + GAP1)) + 'px)';
+        }
+        else {
+            sweepEl.style.opacity = '0';
+        }
+        // 집계 — 합친 지문은 확정된 마지막 스냅샷의 것
+        const sumTxt = snapCount === 0 ? '----' : f0(combine(snaps[doneG].h));
+        snapNoEl.textContent = 'snapshots ' + f0(snapCount);
+        changedNoEl.textContent = 'changed ' + f0(changedCount);
+        sumEl.textContent = 'combined ' + sumTxt;
+        return fill('스냅샷 {a} · 변경 {b} · 합친 해시 {c}', f0(snapCount), f0(changedCount), snapCount === 0 ? '-' : sumTxt);
+    }
+
+
+    return run({ count: 3, build: build, frame: frame, head: false });
+}
+
+export default function Snap01SnapshotDiffHash() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("ez") + " is-demo"} ref={rootRef}>
+      <div className={cx("ez__in")} data-role="inner">
+        <div className={cx("ez__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 워크플로 묶음으로'}>
+          <div className={cx("ez__scene")} data-role="scene" role="img" aria-label={'주기마다 워크플로마다 접힌 해시가 계산돼 합쳐지고 이전 스냅샷과 해시가 다른 워크플로만 변경으로 표시되어 스냅샷 수와 변경 수가 따로 오르는 장면'}></div>
+          <div className={cx("ez__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("ez__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("ez__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("ez__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("ez__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("ez__ctrl")}>
+            <button className={cx("ez__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("ez__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}
