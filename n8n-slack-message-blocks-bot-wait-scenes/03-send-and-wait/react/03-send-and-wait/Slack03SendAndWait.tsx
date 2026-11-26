@@ -1,0 +1,379 @@
+// Slack03SendAndWait - 같은 항목 vanilla index.html 의 React 판. 같은 계산을 useEffect 안에서 돌린다
+import { useEffect, useRef } from "react";
+import styles from "./Slack03SendAndWait.module.scss";
+
+const cx = (s: string): string => s.split(" ").map((n) => styles[n] ?? n).join(" ");
+
+function main(root: HTMLElement): () => void {
+
+    // ── 536 공통 — n8n slack 메시지 포맷 엔진 (535 core 계승, JSON 블록 스택·발송 검증·대기 시간표 판)
+    const W = 480;
+    const CX0 = 8;
+    const CW = 432;
+    function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : (v > hi ? hi : v); }
+    function lerp(a: number, b: number, k: number): number { return a + (b - a) * k; }
+    function fill(s: string, ...v: any[]): string {
+        const keys = ['{a}', '{b}', '{c}', '{d}', '{e}', '{f}', '{g}', '{h}'];
+        let o = s;
+        for (let i = 0; i < keys.length; i += 1) {
+            o = o.split(keys[i]).join(i < v.length ? String(v[i]) : '');
+        }
+        return o;
+    }
+    function f0(v: number): string { return String(Math.round(v)); }
+    function f1(v: number): string { return (Math.round(v * 10) / 10).toFixed(1); }
+    function f2(v: number): string { return (Math.round(v * 100) / 100).toFixed(2); }
+    function f3(v: number): string { return (Math.round(v * 1000) / 1000).toFixed(3); }
+    const rootEl = root;
+    const innerQ = rootEl.querySelector('[data-role="inner"]') as HTMLElement | null;
+    const sceneQ = rootEl.querySelector('[data-role="scene"]') as HTMLElement | null;
+    const chartQ = rootEl.querySelector('[data-role="chart"]') as HTMLElement | null;
+    const probeQ = rootEl.querySelector('[data-role="probe"]') as HTMLElement | null;
+    const padQ = rootEl.querySelector('[data-role="pad"]') as HTMLElement | null;
+    const pauseQ = rootEl.querySelector('[data-role="pause"]') as HTMLButtonElement | null;
+    const statusQ = rootEl.querySelector('[data-role="status"]') as HTMLElement | null;
+    const readAQ = rootEl.querySelector('[data-role="reada"]') as HTMLElement | null;
+    const readBQ = rootEl.querySelector('[data-role="readb"]') as HTMLElement | null;
+    const doneQ = rootEl.querySelector('[data-role="done"]') as HTMLElement | null;
+    if (!innerQ || !sceneQ || !chartQ || !probeQ || !padQ || !pauseQ || !statusQ || !readAQ || !readBQ || !doneQ) {
+        return function () { };
+    }
+    const innerEl = innerQ;
+    const sceneEl = sceneQ;
+    const chartEl = chartQ;
+    const probeEl = probeQ;
+    const padEl = padQ;
+    const pauseBtn = pauseQ;
+    const statusP = statusQ;
+    const readA = readAQ;
+    const readB = readBQ;
+    const doneP = doneQ;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function make(tag: string, cls: string | null, parent: HTMLElement): HTMLElement {
+        const e = document.createElement(tag) as HTMLElement;
+        if (cls) {
+            e.className = cx(cls);
+        }
+        parent.appendChild(e);
+        return e;
+    }
+    function put(e: HTMLElement, x: number, y: number, w: number, h: number): void {
+        e.style.left = x + 'px';
+        e.style.top = y + 'px';
+        if (w > 0) {
+            e.style.width = w + 'px';
+        }
+        if (h > 0) {
+            e.style.height = h + 'px';
+        }
+    }
+    const scWrap = make('div', 'scwrap', sceneEl);
+    const clkEl = make('i', 'clk', sceneEl);
+    function clearAll() {
+        scWrap.textContent = '';
+        chartEl.textContent = '';
+        probeEl.textContent = '';
+    }
+    function seedHash(i: number, seed: number): number {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+        return x - Math.floor(x);
+    }
+    function animsIn(host: HTMLElement): Animation[] {
+        return host.getAnimations({ subtree: true });
+    }
+    function spanOf(d: number, dur: number, k?: number) { return { s: d, e: d + dur, k: k === undefined ? 0 : k }; }
+    let headEl: HTMLElement | null = null;
+    let piNow = 0;
+    let cycleNow = 2000;
+    let restoreClock = null as unknown as HTMLElement;
+    function run(cfg: { count: number; build: (i: number) => number; frame: (t: number) => string; head?: boolean }): () => void {
+        const off = new AbortController();
+        let pi = 0;
+        let cycle = 2000;
+        let paused: boolean = false;
+        let raf: number = 0;
+        let clock: Animation | null = null;
+        let lastStatus = '';
+        function fit() {
+            const k = rootEl.clientWidth / W;
+            innerEl.style.transform = 'scale(' + k + ')';
+        }
+        function rebuild() {
+            clearAll();
+            piNow = pi;
+            cycle = Math.max(2000, cfg.build(pi));
+            cycleNow = cycle;
+            headEl = cfg.head === false ? null : make('i', 'ph', chartEl);
+            clkEl.style.animationDuration = f0(cycle) + 'ms';
+            const all = animsIn(sceneEl);
+            clock = null;
+            for (let i = 0; i < all.length; i += 1) {
+                const an = all[i];
+                const css = an as CSSAnimation;
+                if (css.animationName && css.effect && (css.effect as KeyframeEffect).target === clkEl) {
+                    clock = an;
+                }
+            }
+        }
+        function restart() {
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                all[i].currentTime = 0;
+                if (paused) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+        }
+        function tick() {
+            const ct = clock ? Number(clock.currentTime) : 0;
+            const t = isFinite(ct) ? ct : 0;
+            if (headEl) {
+                headEl.style.transform = 'translateX(' + (CX0 + clamp(t / cycle, 0, 1) * CW) + 'px)';
+            }
+            const s = cfg.frame(t);
+            if (s !== lastStatus) {
+                statusP.textContent = s;
+                lastStatus = s;
+            }
+            if (!paused && clock && t >= cycle - 1) {
+                pi = (pi + 1) % cfg.count;
+                rebuild();
+                restart();
+            }
+            raf = requestAnimationFrame(tick);
+        }
+        function setPaused(p: boolean): void {
+            paused = p;
+            const all = animsIn(sceneEl);
+            for (let i = 0; i < all.length; i += 1) {
+                if (p) {
+                    all[i].pause();
+                }
+                else {
+                    all[i].play();
+                }
+            }
+            pauseBtn.setAttribute('aria-pressed', p ? 'true' : 'false');
+            doneP.textContent = readB.textContent;
+        }
+        function shift(d: number): void {
+            pi = (pi + d + cfg.count) % cfg.count;
+            rebuild();
+            restart();
+            doneP.textContent = readB.textContent;
+        }
+        pauseBtn.addEventListener('click', function () { setPaused(!paused); }, { signal: off.signal });
+        padEl.addEventListener('keydown', function (ev) {
+            if (ev.target === pauseBtn) {
+                return;
+            }
+            if (ev.key === ' ' || ev.key === 'Enter') {
+                ev.preventDefault();
+                setPaused(!paused);
+            }
+            else if (ev.key === 'r' || ev.key === 'R') {
+                shift(-pi);
+            }
+            else if (ev.key === 'ArrowRight') {
+                ev.preventDefault();
+                shift(1);
+            }
+            else if (ev.key === 'ArrowLeft') {
+                ev.preventDefault();
+                shift(-1);
+            }
+        }, { signal: off.signal });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                setPaused(true);
+            }
+        }, { signal: off.signal });
+        window.addEventListener('resize', fit, { signal: off.signal });
+        fit();
+        rebuild();
+        if (reduced) {
+            // reduce — 보간 없이 목표 상태 한 장. 입력(키·버튼)은 rebuild 로 바로 화면에 반영된다
+            cfg.frame(1e9);
+            statusP.textContent = readB.textContent;
+            doneP.textContent = readB.textContent;
+        }
+        else {
+            restart();
+            raf = requestAnimationFrame(tick);
+        }
+        return function () {
+            cancelAnimationFrame(raf);
+            off.abort();
+        };
+    }
+
+    // ── 03 보내고 응답 기다리기 — 메시지가 나간 뒤 가로 대기 막대가 timeout 까지 차오르는 시간표.
+    //    waitForResponse 구간 안에 approval 버튼 응답이 오면 '승인' 경로, 시간이 다 되면 '미응답' 경로로 갈린다.
+    //    계산: elapsed = k × WAIT_S × 1000 ms (k = (t - T0) / SPAN) · remainMs = WAIT_S × 1000 - elapsed ·
+    //    판정 respondAt × 1000 <= WAIT_S × 1000. 변형 3: WAIT_S 60 → 8
+    const WAIT_S = 60;          // 변형 3: 60 → 8 (대기 상한, 초)
+    const T0 = 200;             // 발송 시각(첫 변화는 150ms 뒤)
+    const SPAN = 1600;          // 2초 주기 안에서 WAIT_S 초를 압축해 보여주는 구간
+    const TL_X = 8;
+    const TL_W = 456;
+    const TL_Y = 70;
+    const TL_H = 36;
+    const ROW_H = 56;         // 위 행 — 요청 카드·waitForResponse 상자 높이
+    const TICKS = 6;            // 시간표 눈금 — WAIT_S 를 6 등분
+    let fillEl = null as unknown as HTMLElement;
+    let knobEl = null as unknown as HTMLElement;
+    let reqEl = null as unknown as HTMLElement;
+    let waitBox = null as unknown as HTMLElement;
+    let routeEls = [] as any[];
+    let remainEl = null as unknown as HTMLElement;
+    let markEl = null as unknown as HTMLElement;
+    let tickEls = [] as any[];
+    let cRemain = null as unknown as HTMLElement;
+    let cBudget = null as unknown as HTMLElement;
+    let chartNote = null as unknown as HTMLElement;
+
+    // 회차별 시나리오 — 응답이 오는 시각(초, null 이면 미응답)과 응답 종류
+    const RUNS = [
+        { respondAt: 23, kind: 'approve' },
+        { respondAt: null, kind: null },
+        { respondAt: 41, kind: 'reject' }
+    ];
+    function build(i: number): number {
+        tickEls = []; routeEls = [];
+        const run = RUNS[Math.min(i, 2)];
+        // 승인 요청 카드 — n8n 이 보낸 메시지(승인·거절 버튼)
+        reqEl = make('div', 'req', scWrap);
+        put(reqEl, TL_X, 0, 176, ROW_H);
+        const rt = make('b', 'rt', reqEl);
+        rt.textContent = '승인 요청';
+        const ra = make('div', 'ra', reqEl);
+        const ba = make('b', 'btn btn--ok', ra);
+        ba.textContent = '승인';
+        const bb = make('b', 'btn btn--no', ra);
+        bb.textContent = '거절';
+        // waitForResponse 상자 — 대기 상태와 남은 시간
+        waitBox = make('div', 'rs', scWrap);
+        put(waitBox, 192, 0, 272, ROW_H);
+        // 시간표 — 눈금·채움·손잡이
+        const tl = make('div', 'tl', scWrap);
+        put(tl, TL_X, TL_Y, TL_W, TL_H);
+        for (let k = 0; k <= TICKS; k += 1) {
+            const tk = make('i', 'tk', tl);
+            tk.style.left = (k * TL_W / TICKS) + 'px';
+            const lb = make('b', 'tkl', scWrap);
+            put(lb, TL_X + k * TL_W / TICKS - 16, TL_Y + TL_H + 2, 32, 14);
+            lb.textContent = f0(WAIT_S * k / TICKS) + 's';
+            tickEls.push(lb);
+        }
+        fillEl = make('i', 'tfill', scWrap);
+        put(fillEl, TL_X, TL_Y + 4, 0, TL_H - 8);
+        knobEl = make('i', 'tknob', scWrap);
+        put(knobEl, TL_X - 3, TL_Y + 1, 6, TL_H - 2);
+        // 응답 마크 — 응답이 온 시각(초)을 시간표 위에 적는다
+        markEl = make('b', 'tmark', scWrap);
+        put(markEl, TL_X, TL_Y + 8, 88, 20);
+        markEl.style.opacity = '0';
+        // 두 갈래 경로
+        const r1 = make('div', 'route route--ok', scWrap);
+        put(r1, TL_X, 128, 224, 0);
+        const r2 = make('div', 'route route--no', scWrap);
+        put(r2, TL_X + 240, 128, 224, 0);
+        routeEls.push(r1, r2);
+        remainEl = make('b', 'remain', waitBox);
+        put(remainEl, 0, 30, 272, 14);
+        // chart — 남은 시간 비율 막대(remainMs / budget)와 판정 메모
+        cBudget = make('i', 'cbar cbar--bud', chartEl);
+        put(cBudget, 8, 26, 432, 10);
+        cRemain = make('i', 'cbar cbar--rem', chartEl);
+        put(cRemain, 8, 26, 432, 10);
+        chartNote = make('b', 'cnote', chartEl);
+        put(chartNote, 8, 4, 432, 14);
+        readA.textContent = fill('waitForResponse · timeout = WAIT_S × 1000 = {a} ms · approval', f0(WAIT_S * 1000));
+        readB.textContent = i === 0 ? 'a button press inside the window routes to approved' : (i === 1 ? 'time runs out and the request takes the no-response path' : 'a rejection is still a response inside the window');
+        doneP.textContent = '';
+        return 2000;
+    }
+    function frame(t: number): string {
+        const i = Math.min(piNow, 2);
+        const run = RUNS[i];
+        const budget = WAIT_S * 1000;
+        const k = clamp((t - T0) / SPAN, 0, 1);
+        const elapsed = k * budget;
+        const remainMs = budget - elapsed;
+        // 응답 도착 — 응답 초가 흐른 시간 안에 들어오면 그 시점에 막대가 멈춘다
+        const responded = run.respondAt !== null && elapsed >= run.respondAt * 1000;
+        const timeout = !responded && k >= 1;
+        const done = responded || timeout;
+        const shown = responded ? run.respondAt * 1000 / budget : k;
+        fillEl.style.width = f1(shown * TL_W) + 'px';
+        fillEl.classList.toggle('tfill--ok', responded && run.kind === 'approve');
+        fillEl.classList.toggle('tfill--no', responded && run.kind === 'reject');
+        knobEl.style.transform = 'translateX(' + f1(shown * TL_W) + 'px)';
+        knobEl.classList.toggle('tknob--ok', responded);
+        // 두 갈래 — 승인(또는 거절도 응답이므로 응답 경로)과 미응답. 결과가 정해지면 경로 상자가 열린다
+        const okOn = responded && run.kind === 'approve';
+        const noOn = timeout;
+        const rejOn = responded && run.kind === 'reject';
+        const open = clamp((t - T0 - (responded ? run.respondAt * 1000 / budget * SPAN : SPAN)) / 240, 0, 1);
+        routeEls[0].style.height = f1((okOn || rejOn ? 28 : 0) * open) + 'px';
+        routeEls[1].style.height = f1((noOn ? 28 : 0) * open) + 'px';
+        routeEls[0].textContent = rejOn ? '거절 응답 경로' : '승인 경로';
+        routeEls[1].textContent = '미응답 경로';
+        routeEls[0].classList.toggle('route--on', okOn);
+        routeEls[0].classList.toggle('route--rej', rejOn);
+        routeEls[1].classList.toggle('route--on', noOn);
+        if (responded) {
+            markEl.textContent = fill('{a}초 응답', f0(run.respondAt));
+            markEl.style.left = f1(Math.min(shown * TL_W + 8, TL_W - 88)) + 'px';
+            markEl.style.opacity = '1';
+            markEl.classList.toggle('tmark--no', run.kind === 'reject');
+        }
+        else {
+            markEl.style.opacity = '0';
+        }
+        const state = responded ? (run.kind === 'approve' ? '승인' : '거절') : (timeout ? '미응답' : '대기 중');
+        waitBox.textContent = fill('waitForResponse · {a}', state);
+        remainEl.textContent = fill('remainMs = {a} − {b} = {c} ms', f0(budget), f0(elapsed), f0(Math.max(remainMs, 0)));
+        // chart 갱신 — 남은 비율(라일락)은 줄고 응답 뒤에는 그 시각에서 멈춘다
+        const remK = Math.max(remainMs, 0) / budget;
+        cRemain.style.transform = 'scaleX(' + f3(remK) + ')';
+        chartNote.textContent = fill('remain/budget = {a} · respondAt {b} ≤ timeout {c}ms → {d}',
+            f3(remK), run.respondAt === null ? '없음' : f0(run.respondAt * 1000), f0(budget),
+            responded ? 'approval 응답' : (timeout ? 'timeout' : '대기'));
+        return fill('waitForResponse {a}회 · 경과 {b}s / {c}s · 남은 {d}ms · {e}',
+            f0(i + 1), f1(elapsed / 1000), f0(WAIT_S), f0(Math.max(remainMs, 0)), state);
+    }
+    return run({ count: 3, build: build, frame: frame });
+}
+
+export default function Slack03SendAndWait() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+    return main(rootEl);
+  }, []);
+
+  return (
+    <div className={cx("wb") + " is-demo"} ref={rootRef}>
+      <div className={cx("wb__in")} data-role="inner">
+        <div className={cx("wb__pad")} data-role="pad" tabIndex={0} role="application" aria-label={'시연 무대 — Space 또는 Enter 로 일시정지, R 로 처음부터, 왼쪽·오른쪽 방향키로 다른 값으로'}>
+          <div className={cx("wb__scene")} data-role="scene" role="img" aria-label={'승인 요청 메시지가 나간 뒤 대기 막대가 타임아웃까지 차오르고 그 안에 오는 승인·거절 응답에 따라 경로가 갈리는 시간표 장면'}></div>
+          <div className={cx("wb__probe")} data-role="probe" aria-hidden="true"></div>
+          <div className={cx("wb__chart")} data-role="chart" aria-hidden="true"></div>
+          <p className={cx("wb__status")} data-role="status" aria-live="off">{'장면 준비'}</p>
+          <p className={cx("wb__reada")} data-role="reada" aria-hidden="true"></p>
+          <p className={cx("wb__readb")} data-role="readb" aria-hidden="true"></p>
+          <div className={cx("wb__ctrl")}>
+            <button className={cx("wb__pause")} data-role="pause" type="button" aria-pressed="false">{'일시정지'}</button>
+          </div>
+          <p className={cx("wb__done")} data-role="done" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </div>
+  );
+}
